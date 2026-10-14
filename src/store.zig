@@ -11,6 +11,7 @@ pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 21;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
+pub const ModelAdmissionKind = enum { message, tool_continuation };
 const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
@@ -52,9 +53,7 @@ const runnable_eligibility_sql =
     "))";
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
-    runnable_eligibility_sql ++ " UNION ALL SELECT 1 FROM turn active " ++
-    "JOIN model_operation current ON current.operation_id=active.operation_id " ++
-    "WHERE active.outcome_code IS NULL AND " ++ complete_tool_results_sql ++ " LIMIT 1";
+    runnable_eligibility_sql ++ " LIMIT 1";
 const runnable_selection_sql =
     "WITH candidate AS (" ++
     "SELECT m.session_ref FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
@@ -71,7 +70,9 @@ const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
-    complete_tool_results_sql ++ " ORDER BY current.operation_id LIMIT 1";
+    complete_tool_results_sql ++ " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
+    "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
+    ") ORDER BY current.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
 const pending_message_count_sql =
@@ -4279,11 +4280,17 @@ pub const Store = struct {
     }
 
     pub fn admitNextModelAttempt(self: *Store, faults: Faults) !?AttemptAdmission {
+        if (!@import("builtin").is_test) @compileError("Production admission must select an explicit work kind");
+        return try self.admitModelAttempt(.message, faults) orelse
+            self.admitModelAttempt(.tool_continuation, faults);
+    }
+
+    pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.admitNextModelAttemptLocked(faults) catch |err| {
+        return self.admitNextModelAttemptLocked(kind, faults) catch |err| {
             return self.finishTransactionError(
                 err,
                 faults,
@@ -4610,18 +4617,16 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
     }
 
-    fn admitNextModelAttemptLocked(self: *Store, faults: Faults) !?AttemptAdmission {
-        if (!try self.hasRunnableWorkLocked()) return null;
+    fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+        if (!try self.hasRunnableWorkLocked(kind)) return null;
         try exec(self.database, "BEGIN IMMEDIATE");
 
-        var select = try prepare(self.database, runnable_selection_sql);
-        var step_result = c.sqlite3_step(select);
-        if (step_result == c.SQLITE_DONE) {
-            if (c.sqlite3_finalize(select) != c.SQLITE_OK) return error.RunnableSelectionFailed;
-            select = try prepare(self.database, tool_continuation_selection_sql);
-            step_result = c.sqlite3_step(select);
-        }
+        const select = try prepare(self.database, switch (kind) {
+            .message => runnable_selection_sql,
+            .tool_continuation => tool_continuation_selection_sql,
+        });
         defer _ = c.sqlite3_finalize(select);
+        const step_result = c.sqlite3_step(select);
         if (step_result == c.SQLITE_DONE) return error.RunnableSelectionFailed;
         if (step_result != c.SQLITE_ROW) return error.RunnableSelectionFailed;
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -4861,8 +4866,11 @@ pub const Store = struct {
         } } };
     }
 
-    fn hasRunnableWorkLocked(self: *Store) !bool {
-        const statement = try prepare(self.database, runnable_probe_sql);
+    fn hasRunnableWorkLocked(self: *Store, kind: ModelAdmissionKind) !bool {
+        const statement = try prepare(self.database, switch (kind) {
+            .message => runnable_probe_sql,
+            .tool_continuation => tool_continuation_selection_sql,
+        });
         defer _ = c.sqlite3_finalize(statement);
         return switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => true,
@@ -8960,6 +8968,229 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expectEqual(HistoricalEntryKind.user, pending.kind);
     try std.testing.expect((try view.nextEntry(pending.position)) == null);
     try std.testing.expectEqual(HistoricalEntryKind.user, (try view.nextEntry(0)).?.kind);
+}
+
+test "kind-specific admission selects a tool continuation despite fresh input and rolls back atomically" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSessionAsk(&storage, "peer-config", "peer", false);
+    try configureTestSessionAsk(&storage, "fresh-config", "fresh", false);
+    try submitTestMessage(&storage, &tmp, "peer-input", "peer-input", "peer", "start");
+    const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, first, "peer-output", &calls);
+    try submitTestMessage(&storage, &tmp, "fresh-input", "fresh-input", "fresh", "competing input");
+
+    try std.testing.expectError(error.InjectedAttemptCommitFailure, storage.admitModelAttempt(.tool_continuation, .{ .attempt_before_commit = true }));
+    const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+    try std.testing.expectEqual(first.turn_id, continued.turn_id);
+    try std.testing.expectEqual(first.operation_id + 1, continued.operation_id);
+    try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
+    const fresh = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    try std.testing.expect(fresh.turn_id != first.turn_id);
+    try std.testing.expect((try storage.admitModelAttempt(.message, .{})) == null);
+}
+
+test "production turn preserves skipped continuation preference through actual Store admissions" {
+    const turn = @import("execution_turn.zig");
+    // Real canonical admissions and outcomes; no native effect is launched.
+    // The test controls only available preparation and execution capacity.
+    const Context = struct {
+        storage: *Store,
+        preparation_open: bool = true,
+        model: ?AttemptBinding = null,
+        action: ?ActionAttemptBinding = null,
+        failure: ?anyerror = null,
+        faults: Faults = .{},
+
+        pub fn now(_: *@This()) std.Io.Clock.Timestamp {
+            return .now(std.testing.io, .awake);
+        }
+        pub fn noteLifecycleOpportunity(_: *@This()) void {}
+        pub fn consumeControlHint(_: *@This()) bool {
+            return false;
+        }
+        pub fn reconcileControls(_: *@This()) void {}
+        pub fn advanceBashPreparation(_: *@This()) bool {
+            return false;
+        }
+        pub fn advanceLiveBash(_: *@This()) bool {
+            return false;
+        }
+        pub fn advanceOrdinaryCleanup(_: *@This(), _: std.Io.Clock.Timestamp) bool {
+            return false;
+        }
+        pub fn advanceRetainedCleanup(_: *@This(), _: std.Io.Clock.Timestamp, _: *std.Io.Clock.Timestamp) bool {
+            return false;
+        }
+        pub fn dispatchFenced(self: *@This()) bool {
+            return self.storage.isFenced();
+        }
+        pub fn freeSlots(_: *@This()) usize {
+            return 1;
+        }
+        pub fn providerConfigured(_: *@This()) bool {
+            return true;
+        }
+        pub fn bashPreparationOpen(_: *@This()) bool {
+            return true;
+        }
+        pub fn modelPreparationOpen(self: *@This()) bool {
+            return self.preparation_open;
+        }
+        pub fn recoverUncertainAction(_: *@This()) error{Fence}!bool {
+            return false;
+        }
+        pub fn recoverExhaustedRetry(_: *@This()) error{Fence}!bool {
+            return false;
+        }
+        pub fn admitBash(self: *@This()) turn.Admission {
+            var admission = (self.storage.admitNextActionAttempt(1000, self.faults) catch |err| {
+                self.failure = err;
+                return .retry_later;
+            }) orelse return .no_work;
+            self.action = admission.permit.consume() catch unreachable;
+            return .admitted;
+        }
+        pub fn admitRetry(self: *@This()) turn.Admission {
+            var admission = (self.storage.tryAdmitNextModelRetry(.empty(), self.faults) catch |err| {
+                self.failure = err;
+                return .retry_later;
+            }) orelse return .no_work;
+            self.model = admission.permit.consume() catch unreachable;
+            return .admitted;
+        }
+        fn admit(self: *@This(), kind: ModelAdmissionKind) turn.Admission {
+            var admission = (self.storage.admitModelAttempt(kind, self.faults) catch |err| {
+                self.failure = err;
+                return .retry_later;
+            }) orelse return .no_work;
+            self.model = admission.permit.consume() catch unreachable;
+            return .admitted;
+        }
+        pub fn admitNewModel(self: *@This()) turn.Admission {
+            return self.admit(.message);
+        }
+        pub fn admitToolContinuation(self: *@This()) turn.Admission {
+            return self.admit(.tool_continuation);
+        }
+        pub fn hasTransport(_: *@This()) bool {
+            return false;
+        }
+        pub fn hasBash(_: *@This()) bool {
+            return false;
+        }
+        pub fn driveTransport(_: *@This()) error{Fence}!void {}
+        pub fn serviceOneCompletion(_: *@This()) bool {
+            return false;
+        }
+        pub fn modelPreparationAllowance(_: *@This()) turn.Allowance {
+            return .{ .bytes = 1, .items = 1 };
+        }
+        pub fn advanceModelPreparation(_: *@This(), _: usize, _: usize) bool {
+            return false;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "peer-config", "peer");
+    try configureTestSession(&storage, "sender-config", "sender");
+    try configureTestSession(&storage, "fresh-config", "fresh");
+    try submitTestMessage(&storage, &tmp, "peer-message", "peer-message", "peer", "start");
+    const peer = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+    const unknown = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+    try settleCallsForTesting(&storage, &tmp, peer, "peer-result", &unknown);
+    try submitTestMessage(&storage, &tmp, "sender-message", "sender-message", "sender", "send");
+    try submitTestMessage(&storage, &tmp, "fresh-message", "fresh-message", "fresh", "compete");
+    var state: turn.State = .{};
+    var context = Context{ .storage = &storage, .faults = .{ .attempt_before_commit = true } };
+    _ = turn.run(&state, &context);
+    try std.testing.expectEqual(error.InjectedAttemptCommitFailure, context.failure.?);
+    try std.testing.expect(context.model == null and context.action == null);
+    context.faults = .{};
+    context.failure = null;
+    _ = turn.run(&state, &context);
+    try std.testing.expectEqual(@as(?anyerror, null), context.failure);
+    const sender = context.model.?;
+    try std.testing.expect(sender.turn_id != peer.turn_id);
+    const bash_calls = [_]TestingCall{.{ .item_id = "bash-item", .name = "bash", .encoded_call_id = "bash-call", .decoded_call_id = "bash-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
+    try settleCallsForTesting(&storage, &tmp, sender, "sender-result", &bash_calls);
+    context.model = null;
+    context.preparation_open = false;
+    _ = turn.run(&state, &context);
+    try std.testing.expectEqual(@as(?anyerror, null), context.failure);
+    try std.testing.expectEqual(sender.operation_id, context.action.?.parent_operation_id);
+    _ = try storage.settleActionAttempt(context.action.?, .succeeded, "sent", .{});
+    context.preparation_open = true;
+    _ = turn.run(&state, &context);
+    try std.testing.expectEqual(@as(?anyerror, null), context.failure);
+    // A circular cursor reset by the Bash winner, or the old combined
+    // fresh-input-first Store selector, admits fresh work here instead.
+    try std.testing.expectEqual(peer.turn_id, context.model.?.turn_id);
+    try std.testing.expect((try storage.observeCommand("fresh-message")).message.?.queue.?.state == .queued);
+
+    // Keep fresh Messages available while actual retries, Bash and tool-only
+    // continuations repeatedly commit. The fixture makes retry clocks due;
+    // the production turn and Store still own eligibility and admission.
+    var sustained_tmp = std.testing.tmpDir(.{});
+    defer sustained_tmp.cleanup();
+    var sustained = try testingStore(&sustained_tmp, std.testing.io);
+    defer sustained.close() catch unreachable;
+    var bindings: [3]AttemptBinding = undefined;
+    for ([_][]const u8{ "continuing", "retrying", "sending" }, 0..) |reference, index| {
+        var config_key_buffer: [64]u8 = undefined;
+        const config_key = try std.fmt.bufPrint(&config_key_buffer, "{s}-config", .{reference});
+        try configureTestSession(&sustained, config_key, reference);
+        try submitTestMessage(&sustained, &sustained_tmp, reference, reference, reference, "start");
+        bindings[index] = (try sustained.admitModelAttempt(.message, .{})).?.permit.binding;
+    }
+    try settleCallsForTesting(&sustained, &sustained_tmp, bindings[0], "continued-result", &unknown);
+    try sustained.settleModelAttemptFailure(bindings[1], "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try settleCallsForTesting(&sustained, &sustained_tmp, bindings[2], "sending-result", &bash_calls);
+    try configureTestSession(&sustained, "fresh-loop-config", "fresh-loop");
+    var progress = [_]usize{ 0, 0, 0, 0 }; // Bash, retry, fresh Message, continuation.
+    var sustained_state: turn.State = .{};
+    var sustained_context = Context{ .storage = &sustained };
+    var fresh_number: usize = 0;
+    for (0..32) |iteration| {
+        // Replenish independently before every selection, never only after
+        // the competing candidate has won.
+        var key_buffer: [64]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buffer, "fresh-loop-{d}", .{fresh_number});
+        fresh_number += 1;
+        try submitTestMessage(&sustained, &sustained_tmp, key, key, "fresh-loop", "more input");
+        try exec(sustained.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms>0 AND resolution_code IS NULL");
+        sustained_context.model = null;
+        sustained_context.action = null;
+        // The timer edge is fixture-owned; it grants no Attempt authority.
+        sustained_state.last_retry_poll = null;
+        _ = turn.run(&sustained_state, &sustained_context);
+        try std.testing.expectEqual(@as(?anyerror, null), sustained_context.failure);
+        if (sustained_context.action) |action| {
+            progress[0] += 1;
+            _ = try sustained.settleActionAttempt(action, .succeeded, "sent", .{});
+        } else if (sustained_context.model) |model| {
+            if (model.operation_id == bindings[1].operation_id) {
+                progress[1] += 1;
+                try std.testing.expect(model.attempt_ordinal > 1);
+                try sustained.settleModelAttemptFailure(model, "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+            } else if (model.turn_id == bindings[0].turn_id or model.turn_id == bindings[2].turn_id) {
+                progress[3] += 1;
+                var name_buffer: [64]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "continuation-{d}", .{iteration});
+                try settleCallsForTesting(&sustained, &sustained_tmp, model, name, if (model.turn_id == bindings[0].turn_id) &unknown else &bash_calls);
+            } else {
+                progress[2] += 1;
+                try sustained.settleModelAttemptFailure(model, "completed-fixture", .terminal, .{});
+            }
+        } else return error.NoProgressUnderSustainedInput;
+    }
+    try std.testing.expect(progress[0] >= 2 and progress[2] >= 2 and progress[3] >= 2);
+    try std.testing.expectEqual(@as(usize, 3), progress[1]);
 }
 
 test "terminal call-result import and read failures preserve canonical authority" {

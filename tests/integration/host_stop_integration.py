@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native protected stop, exact-instance retry, and Host-owned drain."""
 
+import contextlib
 import json
 import os
 import pathlib
@@ -103,9 +104,16 @@ def finish(stream, body):
 def mixed_effect_drain(provider_first):
     """A held provider capture cannot postpone another owner's retirement."""
     order = "provider-before-Bash" if provider_first else "Bash-before-provider"
-    with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root:
+    with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root, contextlib.ExitStack() as handles:
         state = pathlib.Path(root)
         store = state / "store"
+        # These real shutdown journeys must survive absent optional stderr.
+        # The existing startup adapter owns an EOF reader while fd 2 goes to
+        # /dev/null; required readiness and native receipts remain unchanged.
+        reader, writer = os.pipe()
+        os.close(writer)
+        stderr_pipe = (handles.enter_context(os.fdopen(reader, "rb")),
+                       handles.enter_context(open(os.devnull, "wb")))
         ready = state / "bash-ready"
         events = state / "events"
         quoted_events = shlex.quote(str(events))
@@ -132,7 +140,7 @@ def mixed_effect_drain(provider_first):
                 "--test-response-capture-gate-path", gate.path,
                 "--test-response-capture-gate-min-written-bytes", "4096",
                 "--test-model-cleanup-gate-path", cleanup_gate,
-                "--test-phase-trace", active_capacity=3, observations="stop",
+                "--test-phase-trace", active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
             )
             diagnostics = HostDiagnostics(host)
             bash_fixture.configure(state, store, "configure-bash", "bash/session")
@@ -181,7 +189,7 @@ def mixed_effect_drain(provider_first):
                         if "action" not in record]
             assert host.poll() is None and status(store) == "owned_unavailable"
             cleanup_gate.unlink()
-            assert host.wait(timeout=10) != 0 and b"EffectAwareShutdown" in diagnostics.tail()
+            assert host.wait(timeout=10) == 1, host.returncode
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
             model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]

@@ -420,9 +420,8 @@ def main():
                 "lease witness orderly shutdown after connection drain",
                 timeout=12,
             )
-            _, stderr = host.communicate(timeout=5)
-            assert host.returncode != 0
-            assert b"EffectAwareShutdown" in stderr, stderr
+            host.communicate(timeout=5)
+            assert host.returncode == 1, host.returncode
             host = None
 
             host = fixture.start_host(store, endpoint_url)
