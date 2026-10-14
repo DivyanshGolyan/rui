@@ -229,8 +229,9 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
+    try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("\n? Run Bash:");
+    try sink.feed("? Run Bash:");
     try sink.feed(Style.normal.code(colour));
     try sink.feed("\n  ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };

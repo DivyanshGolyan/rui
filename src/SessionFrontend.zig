@@ -243,7 +243,7 @@ fn driveActive(self: *Self) !void {
             if (bytes.len != 0) {
                 // A notice can end the group while a read is still silent.
                 // Restore its separator before the first compact heading.
-                if (!self.reader_output_started and self.read_phase == .activity and !self.opening and !self.compact_tools and bytes[0] != '\n')
+                if (!self.reader_output_started and (self.read_phase == .activity or self.read_phase == .permission) and !self.opening and !self.compact_tools and bytes[0] != '\n')
                     try self.terminal.permanent("\n");
                 self.reader_output_started = true;
                 try self.terminal.permanent(bytes);
@@ -274,7 +274,7 @@ fn driveActive(self: *Self) !void {
                 self.read_phase = .permission;
                 self.prepared_action = null;
                 self.reader_output_started = false;
-                self.next_compact_tools = false;
+                self.next_compact_tools = self.compact_tools;
                 try self.reader.start(self.init.io, self, permission);
             }
         }

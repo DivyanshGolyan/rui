@@ -1190,7 +1190,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         os.write(master, b"a\n\x1b[200~" if fragmented_paste else b"a\n")
         arguments_release.set()
         styled_transcript = read_terminal(master, json.loads(arguments)["cmd"], preserve_colour=True)
-        assert "\x1b[33m\n? Run Bash:\x1b[39m" in styled_transcript, styled_transcript
+        assert "\n\x1b[33m? Run Bash:\x1b[39m" in styled_transcript, styled_transcript
         transcript = re.sub(r"\x1b\[(?:33|39|90|91|94)m", "", styled_transcript)
         if fragmented_paste:
             assert not select.select([ready_read], [], [], 1)[0], "unfinished chat paste opened consent scope"
@@ -1514,6 +1514,85 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     compact_release.touch()
                     notice_release.touch()
                     notice_reply_release.set()
+                # A permission reader may refresh a stale Action that another
+                # client has already allowed. It must not invent an approval
+                # block or end the preceding success group merely by starting.
+                for with_notice in (False, True):
+                    index = int(with_notice)
+                    prior_label = f"Prepare external approval {index}"
+                    label = f"External approval {index}"
+                    prior_release = state / f"external-release-{index}"
+                    pending_held, pending_release = threading.Event(), threading.Event()
+                    refreshed_held, refreshed_release = threading.Event(), threading.Event()
+                    answer_release = threading.Event()
+                    selected = []
+                    answer = f"external approval complete {index}"
+                    endpoint.responses.extend([
+                        fixture.sse_tool_calls(f"external-prior-{index}", [("bash", f"external-prior-id-{index}", json.dumps({
+                            "cmd": f"while [ ! -e external-release-{index} ]; do sleep 0.05; done",
+                            "description": prior_label, "timeout_ms": 30000}))]),
+                        fixture.sse_tool_calls(f"external-call-{index}", [("bash", f"external-id-{index}", json.dumps({
+                            "cmd": "exit 0", "description": label, "timeout_ms": 30000}))]),
+                        (fixture.sse_answer(f"external-answer-{index}", f"external-reason-{index}",
+                            f"external-message-{index}", answer)[0], answer_release),
+                    ])
+                    def hold_pending_page(response):
+                        pending_held.set()
+                        assert pending_release.wait(15), "stale Action page was not released"
+                        return response
+                    def observe_action(response):
+                        report = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                        if report["actionable_permissions"]:
+                            selected.append(report["actionable_permissions"][0]["action"])
+                            proxy.route = "/v1/activity-page"
+                            proxy.rewrite = hold_pending_page
+                        return response
+                    def hold_refreshed_current(response):
+                        report = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                        assert not report["actionable_permissions"], report
+                        refreshed_held.set()
+                        assert refreshed_release.wait(15), "permission refresh was not released"
+                        return response
+                    try:
+                        run(home, "configure", "--store", store, "--session", reference, "--permission-mode", "bypass")
+                        proxy.rewrite = observe_action
+                        proxy.route = "/v1/inspect-session"
+                        os.write(master, f"external approval race {index}\n".encode())
+                        read_terminal(master, f"• {prior_label}", composer=True)
+                        run(home, "configure", "--store", store, "--session", reference, "--permission-mode", "ask")
+                        prior_release.touch()
+                        prefix = terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
+                        assert len(selected) == 1, selected
+                        requests_before = len(endpoint.requests)
+                        run(home, "allow-action", "--store", store, "--session", reference, "--action", selected[0])
+                        fixture.wait_for(lambda: len(endpoint.requests) == requests_before + 1, "successful external approval continuation")
+                        proxy.rewrite = hold_refreshed_current
+                        proxy.route = "/v1/inspect-session"
+                        pending_release.set()
+                        prefix += terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
+                        if with_notice:
+                            os.write(master, b"\x00\n")
+                            before_notice = read_terminal(master, "! Input rejected; nothing sent.", composer=True, initial=prefix)
+                            assert f"✓ {prior_label}\n" in before_notice, before_notice
+                            prefix = b""
+                        refreshed_release.set()
+                        shown = read_terminal(master, f"✓ {label}", composer=True, initial=prefix)
+                        start = shown.index(f"✓ {label}\n")
+                        if with_notice:
+                            assert shown[start - 1] == "\n", ("permission scan crossed a visible notice", shown)
+                        else:
+                            assert f"✓ {prior_label}\n" in shown, shown
+                            assert shown[start - 2:start] not in ("\n\n", "\r\n"), ("stale permission scan separated successes", shown)
+                        assert "Run Bash:" not in shown, shown
+                        answer_release.set()
+                        read_terminal(master, answer, composer=True)
+                    finally:
+                        prior_release.touch()
+                        pending_release.set()
+                        refreshed_release.set()
+                        answer_release.set()
+                    proxy.route = "/v1/message"
+                    proxy.rewrite = lambda response: response
             finally:
                 for release in bypass_releases:
                     release.touch()
@@ -1548,7 +1627,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "Process retirement confirmed" not in reopened and "macOS group signaling returned EPERM" not in reopened, (
             "routine retirement diagnostics leaked on reopening", reopened)
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
-            assert "✓ Wait for compact tail\n✓ Check after notice\n" in reopened, ("reopening lost compact successes", reopened)
+            assert "✓ Prepare external approval 1\n✓ External approval 1\n" in reopened, ("reopening lost compact successes", reopened)
         if signal_failure:
             assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
         assert not hidden_reads, ("label-only opening read undisplayed proposal bytes", hidden_reads)
