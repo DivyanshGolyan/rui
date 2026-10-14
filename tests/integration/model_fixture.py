@@ -705,17 +705,19 @@ def wait_for_result_release(store, key, session, deadline, *, inspect=None):
     return observation, answer, execution
 
 
-def wait_model_cleanup(diagnostics, store, session, observation, deadline):
+def wait_model_cleanup(diagnostics, store, session, observation, deadline, *, peers=None):
     # A saved result is semantic authority, not physical release. Match the
     # admitted owner before checking its final accounting, with no fresh budget.
     diagnostics.wait_model_cleanup(observation["processing"], deadline)
 
     def inspect(remaining):
         diagnostics.claim_inspection(limit=49)
-        return command(
-            "inspect-session", "--store", store, "--session", session,
-            timeout=remaining,
-        )["execution"]
+        def invoke():
+            return command(
+                "inspect-session", "--store", store, "--session", session,
+                timeout=remaining,
+            )["execution"]
+        return invoke() if peers is None else peers.call("inspect", invoke, deadline=deadline)
 
     return wait_for_execution_release(inspect, deadline)
 

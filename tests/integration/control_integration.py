@@ -833,27 +833,29 @@ def prove_pre_handoff_stop(state):
             "--test-before-launch-delay-ms",
             "3000",
             "--test-suppress-first-control-hint",
+            observations="control_peers",
         )
         milestones = HostDiagnostics(process)
-        configure(state, store, "pre-handoff-config", "phase/pre-handoff")
-        message(
+        peers = PeerCensus(milestones)
+        peers.call("configure", lambda: configure(state, store, "pre-handoff-config", "phase/pre-handoff"))
+        peers.call("message", lambda: message(
             state,
             store,
             "pre-handoff-message",
             "phase/pre-handoff",
             "must never launch",
-        )
+        ))
         prepared = milestones.wait("prepared_before_handoff")[0]
-        stopped = stop_session(
+        stopped = peers.call("session_stop", lambda: stop_session(
             state, store, "pre-handoff-stop", "phase/pre-handoff"
-        )
+        ))
         assert stopped["answer"]["status"] == "accepted", stopped
         milestones.wait(
             "control_hint_suppressed", subject="pre-handoff-stop"
         )
-        semantic = observe(store, "pre-handoff-message")
+        semantic = peers.call("observe", lambda: observe(store, "pre-handoff-message"))
         assert semantic["result"]["status"] == "cancelled", semantic
-        replayed = retry(state, store, "pre-handoff-stop", "session-stop")
+        replayed = peers.call("session_stop", lambda: retry(state, store, "pre-handoff-stop", "session-stop"))
         assert replayed["answer"]["status"] == "accepted", replayed
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="pre-handoff-stop")
@@ -889,7 +891,9 @@ def prove_pre_handoff_stop(state):
         while True:
             remaining = release_deadline - time.monotonic()
             assert remaining > 0, ("superseded custody did not release within 8s", execution, boundary)
-            execution = inspect_execution(store, "phase/pre-handoff", timeout=remaining)
+            execution = peers.call("inspect", lambda: inspect_execution(
+                store, "phase/pre-handoff", timeout=remaining,
+            ), deadline=release_deadline)
             assert execution["dispatch_fenced"] is False, execution
             assert execution["scratch_used_bytes"] == "0", execution
             if execution["custody_occupied"] == "0":
@@ -908,6 +912,7 @@ def prove_pre_handoff_stop(state):
         }), flush=True)
     finally:
         stop_control_case(process, milestones, endpoint, endpoint_thread)
+    peers.finish(time.monotonic() + 5)
 
 
 def prove_sealed_interruption_and_cleanup(state):
