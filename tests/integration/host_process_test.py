@@ -347,6 +347,30 @@ def prove_peer_census():
         pass
     else:
         raise AssertionError("unissued peer population accepted")
+    # One Host owns four eight-second polls at 25ms intervals, fifty total
+    # inspections, and six setup/control exchanges. Include a boundary probe
+    # per poll; a cumulative census must not shorten any existing wait.
+    observations.records.clear()
+    peers = PeerCensus(diagnostics)
+    deadline = time.monotonic() + 10
+    routes = ["configure"] * 4 + ["session_stop"] * 2 + ["inspect"] * 50 + ["observe"] * (4 * 321)
+    for request, route in enumerate(routes):
+        def reply():
+            observations.records.extend([
+                record("connection_request_" + route, 2 * request + 1, str(request)),
+                record("connection_resources_released", 2 * request + 2, str(request)),
+            ])
+            return b"complete reply"
+        assert peers.call(route, reply, deadline=deadline) == b"complete reply"
+    peers.finish(deadline)
+    def unexpected_call():
+        raise RuntimeError("overflow issued an uncounted exchange")
+    try:
+        peers.call("observe", unexpected_call, deadline=deadline)
+    except AssertionError as error:
+        assert "exhausted numbered exchange population" in str(error), error
+    else:
+        raise AssertionError("unbounded peer population accepted")
     print("Peer census: reply waits for exact retirement; missing, wrong, duplicate, late and extra owners refuse")
 
 

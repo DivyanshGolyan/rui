@@ -1035,7 +1035,7 @@ The fixture starts the sole reader before readiness and retains it through reap.
 | Host status | 12 simultaneous connections, 40 repeated probes and 20 setup/guard probes, at most three phases each, two boundaries and two Bash admissions | 220 |
 | Host stop | 321 Action probes within eight seconds at 25-ms intervals and twenty other numbered exchanges, each with release; five stop issuers, twelve observe classifications, six cleanup endpoints, capture entry and Bash handoff | 366 |
 | Control | Fifty inspection attempts with capture/gate phases, four model owners with ten selected phases each, three controls with hint/timing phases, two lifecycle boundaries | 148 |
-| Control peers | 100 issued exchanges with start/release and at most two inspection/control phases each, four model owners with ten phases each, two lifecycle boundaries, eight unnumbered place releases | 450 |
+| Control peers | Four eight-second observation polls at 25-ms intervals, conservatively 321 probes each, fifty total inspections and six setup/control exchanges: 1,340 issued exchanges with at most four phases each; four model owners with ten phases each, two lifecycle boundaries, eight unnumbered place releases | 5,410 |
 | Dispatch | Seven controls with queued/acquired/released endpoints, plus the first rollback or preparation advance in each separately observed Host | 22 |
 | Capture | One writer gate, one exact cancellation and one injected resume failure; no cleanup history | 3 |
 | Bash recovery | Two Bash Attempts with handoff and three crash cuts each, plus two model-proposal handoffs | 10 |
