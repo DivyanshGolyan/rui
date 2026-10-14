@@ -106,7 +106,7 @@ test "new Session refresh owns bindings and selects shorter and longer saved des
         try std.testing.expect(after.saved);
         try std.testing.expectEqualStrings(paths[1], after.path);
         const selected = (try snapshot.resolve(.renewal_due)).?;
-        snapshot.defaults = .{};
+        try snapshot.defaults.model.set("overwritten-snapshot-model");
         try std.testing.expectEqualStrings("codex", selected.provider.slice());
         try std.testing.expectEqualStrings("after", selected.model.slice());
         try std.testing.expectEqualStrings("before-choice-model", retained.model.slice());
