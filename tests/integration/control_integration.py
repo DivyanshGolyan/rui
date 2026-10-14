@@ -1534,27 +1534,14 @@ def prove_real_settlement_contention(
             peers.finish(time.monotonic())
 
 
-def prove_queued_stop_reuse_after_newer_work(state):
-    endpoint = StreamingEndpoint()
-    endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    endpoint_thread.start()
+def prove_idle_stop_wire_recovery(state):
     store = state / "queued-stop-reuse-store"
-    blocker_session = "direct/queued-stop-blocker"
     target_session = "direct/queued-stop-target"
     process = None
     try:
-        url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
-        process, _ = start_host(store, url, active_capacity=1)
-        configure(state, store, "queued-stop-blocker-config", blocker_session)
-        message(
-            state,
-            store,
-            "queued-stop-blocker-message",
-            blocker_session,
-            "occupy capacity",
-        )
-        wait_for(lambda: endpoint.counts()[0] == 1, "queued-stop blocker request")
-
+        # Store tests own replay after newer work. This native witness owns the
+        # lost-reply record and nullable idle selection across a Host restart.
+        process, _ = start_host(store)
         configure(state, store, "queued-stop-target-config", target_session)
         message(
             state,
@@ -1593,34 +1580,7 @@ def prove_queued_stop_reuse_after_newer_work(state):
             "status": "cancelled",
             "code": "session_stopped",
         }, excluded
-
-        blocker_stop = stop_session(
-            state,
-            store,
-            "queued-stop-blocker-stop",
-            blocker_session,
-        )
-        assert blocker_stop["answer"]["status"] == "accepted", blocker_stop
-        wait_for(lambda: endpoint.counts()[1] == 1, "queued-stop blocker disconnect")
-        wait_for(
-            lambda: inspect_execution(store, blocker_session)["custody_occupied"]
-            == "0",
-            "queued-stop blocker cleanup",
-        )
-        assert endpoint.counts()[0] == 1
-
-        message(
-            state,
-            store,
-            "queued-stop-newer-message",
-            target_session,
-            "newer work",
-        )
-        newer = wait_for(
-            lambda: observe(store, "queued-stop-newer-message").get("processing"),
-            "newer work after queued stop",
-        )
-        wait_for(lambda: endpoint.counts()[0] == 2, "newer provider request")
+        assert "processing" not in excluded, excluded
 
         replayed = command(
             "retry",
@@ -1637,26 +1597,7 @@ def prove_queued_stop_reuse_after_newer_work(state):
             "turn": None,
             "admission_cutoff": excluded["queue"]["admission"],
         }, replayed
-        still_newer = observe(store, "queued-stop-newer-message")
-        assert still_newer["processing"] == newer, still_newer
-        assert "result" not in still_newer, still_newer
         assert observe(store, "queued-stop-excluded-message") == excluded
-
-        fresh_stop = stop_session(
-            state,
-            store,
-            "queued-stop-newer-stop",
-            target_session,
-        )
-        assert fresh_stop["answer"]["status"] == "accepted", fresh_stop
-        assert fresh_stop["answer"]["selection"]["turn"] == newer["turn"], fresh_stop
-        wait_for(
-            lambda: observe(store, "queued-stop-newer-message").get("result", {}).get(
-                "status"
-            )
-            == "cancelled",
-            "fresh stop of newer work",
-        )
 
         stop_process(process)
         process = None
@@ -1675,10 +1616,6 @@ def prove_queued_stop_reuse_after_newer_work(state):
     finally:
         if process is not None:
             stop_process(process)
-        endpoint.release.set()
-        endpoint.shutdown()
-        endpoint.server_close()
-        endpoint_thread.join(timeout=5)
 
 
 def prove_retry_wait_control(state, kind):
@@ -1805,35 +1742,6 @@ def prove_retry_wait_control(state, kind):
             time.sleep(remaining)
         assert endpoint.count() == 1, endpoint.count()
         assert observe(store, f"retry-wait-{kind}-message") == cancelled
-
-        newer_key = f"retry-wait-{kind}-newer"
-        message(state, store, newer_key, session, "newer work after recovered control")
-        wait_for(lambda: endpoint.count() == 2, f"{kind} newer provider request")
-        newer = wait_for(
-            lambda: (
-                value
-                if (value := observe(store, newer_key)).get("result", {}).get(
-                    "status"
-                )
-                == "completed"
-                else None
-            ),
-            f"{kind} newer result",
-        )
-        replayed_after_newer = command(
-            "retry",
-            "--store",
-            store,
-            "--record",
-            record,
-            "--kind",
-            retry_kind,
-        )
-        assert replayed_after_newer["answer"] == replayed["answer"], (
-            replayed_after_newer,
-            replayed,
-        )
-        assert observe(store, newer_key) == newer
 
         stop_process(process)
         process = None
@@ -2157,7 +2065,7 @@ def main():
 
         prove_pre_handoff_stop(state)
         prove_sealed_interruption_and_cleanup(state)
-        prove_queued_stop_reuse_after_newer_work(state)
+        prove_idle_stop_wire_recovery(state)
         prove_retry_wait_control(state, "stop")
         prove_retry_wait_control(state, "interruption")
         control_first = prove_delivery_and_settlement_contention(state)

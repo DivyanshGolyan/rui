@@ -413,14 +413,10 @@ contains "$rejected" '"status":"rejected"'
 contains "$rejected" '"replayed":true'
 contains "$rejected" '"code":"incomplete_initial_configuration"'
 
-# Each required initial binding field is diagnosed independently by a fresh
-# client, and a closed provider value is validated before Session creation.
+# Store tests own all eight initial-field combinations. Keep a partially filled
+# wire request and closed-provider rejection with real request-scratch cleanup.
 missing_provider=$($rui configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model model-a)
 contains "$missing_provider" '"code":"incomplete_initial_configuration"'
-missing_model=$($rui configure --store "$store" --record "$records/missing-model.json" --key missing-model --session direct/missing-model --workspace "$root" --provider codex)
-contains "$missing_model" '"code":"incomplete_initial_configuration"'
-missing_workspace=$($rui configure --store "$store" --record "$records/missing-workspace.json" --key missing-workspace --session direct/missing-workspace --provider codex --model model-a)
-contains "$missing_workspace" '"code":"incomplete_initial_configuration"'
 printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_provider=$($rui configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model model-a --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
