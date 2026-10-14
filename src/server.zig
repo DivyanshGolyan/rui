@@ -647,14 +647,17 @@ const Intake = struct {
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             // Accept a bounded batch, then return to existing exchanges.
             for (0..16) |_| {
-                const fd = std.c.accept(listener.socket.handle, null, null);
-                if (fd < 0) switch (std.posix.errno(fd)) {
-                    .AGAIN, .INTR, .CONNABORTED => break,
-                    .MFILE, .NFILE, .NOBUFS, .NOMEM => {
+                const fd = self.acceptSocket(listener.socket.handle) catch |err| switch (err) {
+                    error.NoClient => break,
+                    error.AcceptCapacity => {
                         accept_retry_at = @as(i128, nowNs(self.host)) + 100 * std.time.ns_per_ms;
                         break;
                     },
-                    else => return error.IntakeAcceptFailed,
+                    error.SocketFlagsFailed => {
+                        stderr.print("rui: intake unavailable: SocketFlagsFailed; recover original request\n", .{});
+                        continue;
+                    },
+                    else => return err,
                 };
                 self.accept(fd) catch |err| {
                     _ = std.c.close(fd);
@@ -672,8 +675,24 @@ const Intake = struct {
         }
     }
 
-    fn accept(self: *Intake, fd: std.posix.fd_t) !void {
+    fn acceptSocket(self: *Intake, listener: std.posix.fd_t) !std.posix.fd_t {
+        // A child must never copy a socket before CLOEXEC is installed. Keep
+        // only native acquisition/flagging (and failure-close) under the same
+        // gate as Prepared.launch, not exchange allocation or peer service.
+        self.host.launch_mutex.lockUncancelable(self.host.io);
+        defer self.host.launch_mutex.unlock(self.host.io);
+        const fd = std.c.accept(listener, null, null);
+        if (fd < 0) return switch (std.posix.errno(fd)) {
+            .AGAIN, .INTR, .CONNABORTED => error.NoClient,
+            .MFILE, .NFILE, .NOBUFS, .NOMEM => error.AcceptCapacity,
+            else => error.IntakeAcceptFailed,
+        };
+        errdefer _ = std.c.close(fd);
         try setNonblocking(fd);
+        return fd;
+    }
+
+    fn accept(self: *Intake, fd: std.posix.fd_t) !void {
         if (self.host.faults.client_send_buffer_bytes) |bytes| {
             var value: c_int = @intCast(bytes);
             try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&value));
@@ -6464,11 +6483,12 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     }
     for (&sockets) |*pair| {
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair));
-        intake.accept(pair[0]) catch |err| {
+        errdefer {
             _ = std.c.close(pair[0]);
             _ = std.c.close(pair[1]);
-            return err;
-        };
+        }
+        try setNonblocking(pair[0]);
+        try intake.accept(pair[0]);
         count += 1;
     }
     try std.testing.expectEqual(@as(usize, 100), intake.exchanges.items.len);
@@ -6605,8 +6625,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 1024\r\n\r\n{",
         }, [_]Intake.Exchange.State{ .header, .body }) |peer, bytes, state| {
             try writeAll(std.testing.io, peer, bytes);
-            const accepted = std.c.accept(listener.socket.handle, null, null);
-            try std.testing.expect(accepted >= 0);
+            const accepted = try intake.acceptSocket(listener.socket.handle);
             intake.accept(accepted) catch |err| {
                 _ = std.c.close(accepted);
                 return err;

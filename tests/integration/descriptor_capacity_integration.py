@@ -37,6 +37,7 @@ ACCEPT_PROBE = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 static int log_fd;
@@ -66,6 +67,24 @@ static int probe_accept(int fd, struct sockaddr *address, socklen_t *length) {
         int count = snprintf(record, sizeof(record), "%d %lld\n", result >= 0 ? 0 : saved,
             (long long)now.tv_sec * 1000000000LL + now.tv_nsec);
         if (count <= 0 || count >= sizeof(record) || write(log_fd, record, count) != count) _exit(94);
+    }
+    const char *hold = getenv("RUI_ACCEPT_HOLD");
+    if (result >= 0 && hold && !access(hold, F_OK)) {
+        if (unlink(hold)) _exit(95); // One selected acquisition, before caller flagging.
+        struct stat identity;
+        if (fstat(result, &identity)) _exit(96);
+        int ready = open(getenv("RUI_ACCEPT_READY"), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (ready < 0) _exit(97);
+        char record[128];
+        int count = snprintf(record, sizeof(record), "%d %llu %llu\n", result,
+            (unsigned long long)identity.st_dev, (unsigned long long)identity.st_ino);
+        if (count <= 0 || count >= sizeof(record) || write(ready, record, count) != count || close(ready)) _exit(98);
+        struct timespec pause = { .tv_nsec = 1000000 };
+        unsigned waits = 0;
+        while (access(getenv("RUI_ACCEPT_RELEASE"), F_OK)) {
+            if (++waits > 10000) _exit(99);
+            nanosleep(&pause, NULL);
+        }
     }
     errno = saved;
     return result;
@@ -489,6 +508,7 @@ def prove_accept_pressure(state):
     source.write_text(ACCEPT_PROBE)
     subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC",
                     str(source), *(["-ldl"] if sys.platform == "linux" else []), "-o", str(library)], check=True)
+    prove_accept_inheritance(state, library)
     for label, injected in (("mfile", errno.EMFILE), ("nfile", errno.ENFILE),
                             ("nobufs", errno.ENOBUFS), ("nomem", errno.ENOMEM),
                             ("real-mfile", None), ("shutdown-mfile", errno.EMFILE)):
@@ -595,6 +615,70 @@ def prove_accept_pressure(state):
             dispose_all(*(peer.close for peer in connections),
                         lambda: stop_process(host) if host is not None else None,
                         endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
+
+
+def prove_accept_inheritance(state, library):
+    root = state / "accept-inheritance"
+    root.mkdir(mode=0o700)
+    store, hold, ready, release = (root / name for name in ("store", "hold", "ready", "release"))
+    report, child_release = root / "child-report", root / "child-release"
+    gate = root / "launch-gate"
+    keeper = open_gate(gate)
+    wrapper = root / "bash"
+    wrapper.write_text(f"#!{sys.executable}\n" + f"""
+import json, os, pathlib, sys, time
+fd, device, inode = map(int, pathlib.Path({str(ready)!r}).read_text().split())
+try:
+    actual = os.fstat(fd)
+    inherited = (actual.st_dev, actual.st_ino) == (device, inode)
+except OSError:
+    inherited = False
+pathlib.Path({str(report)!r}).write_text(json.dumps({{"inherited": inherited}}))
+deadline = time.monotonic() + 10
+while not pathlib.Path({str(child_release)!r}).exists():
+    if time.monotonic() >= deadline: sys.exit(91)
+    time.sleep(0.001)
+os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
+""")
+    wrapper.chmod(0o700)
+    response = fixture.sse_tool_calls("inheritance", [("bash", "inheritance-call", json.dumps(
+        {"cmd": "printf done", "timeout_ms": None, "description": "Check child descriptor isolation"}))])
+    endpoint = fixture.SuccessEndpoint([response, fixture.sse_answer("inheritance-answer", "reason", "message", "done")[0]])
+    worker = threading.Thread(target=endpoint.serve_forever)
+    worker.start()
+    host = peer = timer = None
+    try:
+        env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
+               "RUI_ACCEPT_LOG": str(root / "accept.log"), "RUI_ACCEPT_ARM": str(root / "unused"),
+               "RUI_ACCEPT_HOLD": str(hold), "RUI_ACCEPT_READY": str(ready), "RUI_ACCEPT_RELEASE": str(release)}
+        host, fields = start_ready_process([str(RUI), "serve", "--store", str(store), "--active-capacity", "2",
+            "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-path", str(wrapper),
+            "--test-transition", "prepared-before-handoff", "--test-transition-gate-path", str(gate)], env=env)
+        diagnostics = HostDiagnostics(host)
+        session = "direct/accept-inheritance"
+        bash.configure(root, store, "configure", session, permission="bypass")
+        fixture.message(root, store, "message", session, "check inheritance")
+        diagnostics.wait("prepared_before_handoff", timeout=10)
+        hold.touch()
+        peer = socket.socket(socket.AF_UNIX)
+        peer.connect(fields["socket"])
+        wait_for(lambda: ready.exists() and len(ready.read_text().split()) == 3, "accepted socket before flags")
+        # Open a competing launch window, not a timing acceptance assertion.
+        # The child reports exact socket identity whether it spawns during or
+        # after acquisition. The unfixed-path control must witness inheritance.
+        timer = threading.Timer(2, release.touch)
+        timer.start()
+        os.write(keeper, b"x")
+        wait_for(lambda: report.exists() and report.read_text(), "real Bash launch descriptor report")
+        assert json.loads(report.read_text()) == {"inherited": False}, report.read_text()
+        print("accept inheritance: real Bash child did not retain the selected exchange socket", flush=True)
+    finally:
+        release.touch(exist_ok=True)
+        child_release.touch(exist_ok=True)
+        dispose_all(lambda: timer.join() if timer is not None else None,
+                    lambda: peer.close() if peer is not None else None,
+                    lambda: stop_process(host) if host is not None else None,
+                    lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
 
 
 def main():
