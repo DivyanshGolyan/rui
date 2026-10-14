@@ -672,6 +672,8 @@ pub const ReplayValidationCursor = struct {
         duplicate: bool = false,
         failure: ?anyerror = null,
         output_failure: ?anyerror = null,
+        reasoning_failure: ?anyerror = null,
+        summary_failure: ?anyerror = null,
         // A block can be checked after the enclosing item's type arrives.
         output: bool = true,
         reasoning: bool = true,
@@ -707,24 +709,19 @@ pub const ReplayValidationCursor = struct {
         fn validateFields(self: *const Frame, comptime field_names: []const []const u8) !void {
             inline for (field_names) |name| {
                 const value = try self.get(name);
-                var applicable = true;
+                if (value.failure) |err| if (err == error.DuplicateJsonField) return err;
                 if (self.kind == .item and value.shape == .array and
                     (comptime std.mem.eql(u8, name, "content") or std.mem.eql(u8, name, "summary")))
                 {
                     const kind = try self.get("type");
-                    // Unsupported block kinds do not consume their fields.
-                    applicable = if (kind.is("reasoning"))
-                        (if (comptime std.mem.eql(u8, name, "summary")) value.summary else value.reasoning)
+                    // Each supported child retains its consumed ambiguity,
+                    // independently of incompatible siblings. Other block
+                    // interpretations and reasoning annotations stay opaque.
+                    const failure = if (kind.is("reasoning"))
+                        (if (comptime std.mem.eql(u8, name, "summary")) value.summary_failure else value.reasoning_failure)
                     else
-                        value.output;
-                }
-                if (applicable) {
-                    if (value.failure) |err| if (err == error.DuplicateJsonField) return err;
-                    // Only message output consumes annotation meaning.
-                    // Reasoning/summary annotations remain opaque fields.
-                    if (self.kind == .item and (try self.get("type")).is("message")) {
-                        if (value.output_failure) |err| if (err == error.DuplicateJsonField) return err;
-                    }
+                        value.output_failure;
+                    if (failure) |err| if (err == error.DuplicateJsonField) return err;
                 }
             }
         }
@@ -762,11 +759,11 @@ pub const ReplayValidationCursor = struct {
             frame.key = null;
         } else {
             frame.aggregate.length += 1;
-            if (value.failure) |err| {
-                if (frame.aggregate.failure == null or frame.aggregate.failure.? != error.DuplicateJsonField) frame.aggregate.failure = err;
-            }
-            if (value.output_failure) |err| {
-                if (frame.aggregate.output_failure == null or frame.aggregate.output_failure.? != error.DuplicateJsonField) frame.aggregate.output_failure = err;
+            inline for (.{ "failure", "output_failure", "reasoning_failure", "summary_failure" }) |name| {
+                if (@field(value, name)) |err| {
+                    const prior = &@field(frame.aggregate, name);
+                    if (prior.* == null or prior.*.? != error.DuplicateJsonField) prior.* = err;
+                }
             }
             frame.aggregate.output = frame.aggregate.output and value.shape == .object and value.output;
             frame.aggregate.reasoning = frame.aggregate.reasoning and value.shape == .object and value.reasoning;
@@ -874,7 +871,7 @@ pub const ReplayValidationCursor = struct {
                 result.summary = kind.is("summary_text");
                 if (!result.output and !result.reasoning and !result.summary) return result;
                 frame.validateFields(&.{"text"}) catch |err| {
-                    result.failure = err;
+                    if (result.output) result.output_failure = err else if (result.reasoning) result.reasoning_failure = err else result.summary_failure = err;
                     return result;
                 };
                 if (result.output) frame.validateFields(&.{"annotations"}) catch |err| {
@@ -886,6 +883,7 @@ pub const ReplayValidationCursor = struct {
                     return result;
                 };
                 // Reasoning blocks retain annotations without interpreting them.
+                if (!result.output) return result;
                 const annotations = frame.get("annotations") catch |err| {
                     result.output_failure = err;
                     return result;
@@ -1077,6 +1075,12 @@ test "replay compatibility distinguishes consumed duplicates and syntax from uns
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"future_text\"},{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"future\",\"id\":\"r\",\"open\":[true,]}", .failure = error.SyntaxError },
     };

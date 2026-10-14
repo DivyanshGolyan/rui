@@ -1078,7 +1078,7 @@ const ComposedCall = struct {
     call_id: []const u8,
 };
 
-/// Settle one reasoning item plus valid Bash calls in a single model
+/// Settle one private item plus valid Bash calls in a single model
 /// success, so the successor's historical view holds replay input and a
 /// complete Tool Result group from ordinary Store transitions. Call items
 /// are stored as complete item JSON exactly like provider validation
@@ -1087,15 +1087,16 @@ fn settleComposedForTesting(
     setup: *PreparationTestSetup,
     binding: store.AttemptBinding,
     file_prefix: []const u8,
-    reasoning_json: []const u8,
-    reasoning_id: []const u8,
+    item_kind: store.OutputItemKind,
+    item_json: []const u8,
+    item_id: []const u8,
     calls: []const ComposedCall,
 ) !void {
     const decoded_arguments = "{\"cmd\":\"true\",\"description\":\"Run no-op command\",\"timeout_ms\":null}";
     const encoded_arguments = "{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}";
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
-    try source_writer.writeAll(reasoning_json);
+    try source_writer.writeAll(item_json);
     var metadata_used: std.atomic.Value(u64) = .init(0);
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try store.OutputMetadataWriter.init(
@@ -1109,14 +1110,14 @@ fn settleComposedForTesting(
     defer metadata.deinit();
     try metadata.append(.{
         .tag = .item,
-        .kind = .reasoning,
+        .kind = item_kind,
         .ordinal = 0,
         .start = 0,
-        .length = reasoning_json.len,
-        .id_digest = protocol.contentDigest(reasoning_id),
-        .content_digest = protocol.contentDigest(reasoning_json),
+        .length = item_json.len,
+        .id_digest = protocol.contentDigest(item_id),
+        .content_digest = protocol.contentDigest(item_json),
     });
-    var offset: u64 = reasoning_json.len;
+    var offset: u64 = item_json.len;
     for (calls, 0..) |call, index| {
         const ordinal = index + 1;
         const item_start: usize = @intCast(offset);
@@ -1251,7 +1252,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
         .{ .item_id = "order-item-a", .call_id = "order-call-a" },
         .{ .item_id = "order-item-b", .call_id = "order-call-b" },
     };
-    try settleComposedForTesting(setup, source_binding, "composed-metadata", reasoning_json, "r1", &calls);
+    try settleComposedForTesting(setup, source_binding, "composed-metadata", .reasoning, reasoning_json, "r1", &calls);
     var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
     try second_deny.key.set("composed-deny-second");
     try second_deny.session.set(session);
@@ -1854,8 +1855,8 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
     }
 }
 
-test "request preparation rejects unsupported saved reasoning and fences malformed canonical items" {
-    for ([_]struct { item: []const u8, failure: anyerror }{
+test "request preparation rejects unsupported saved meaning and fences malformed canonical items" {
+    for ([_]struct { item: []const u8, kind: store.OutputItemKind = .reasoning, failure: anyerror }{
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"\"}", .failure = error.ContinuationUnavailable },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"future\"}", .failure = error.ContinuationUnavailable },
@@ -1863,6 +1864,23 @@ test "request preparation rejects unsupported saved reasoning and fences malform
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"future\":\"\xff\"}", .failure = error.CorruptStore },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"encrypted_content\":\"opaque\"}", .failure = error.CorruptStore },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"status\":\"future\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"a\"},{\"type\":\"reasoning_text\",\"text\":true}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"future_text\"},{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[],\"annotations\":false}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"},{\"type\":\"future\"}]}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\",\"annotations\":[{\"type\":\"future\"},{\"type\":\"url_citation\"}]}]}", .kind = .message, .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"output_text\",\"\\u0074ype\":\"output_text\",\"text\":\"a\"}]}", .kind = .message, .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"future_text\"},{\"type\":\"reasoning_text\",\"type\":\"reasoning_text\",\"text\":\"a\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"type\":\"summary_text\",\"text\":\"a\"},{\"type\":\"future_text\"}]}", .failure = error.CorruptStore },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"output_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"a\",\"text\":\"b\"}]}", .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
+        .{ .item = "{\"type\":\"message\",\"id\":\"r\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"a\",\"text\":\"b\"}]}", .kind = .message, .failure = error.ContinuationUnavailable },
     }) |case| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
@@ -1872,7 +1890,7 @@ test "request preparation rejects unsupported saved reasoning and fences malform
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
         const first = try admitted.permit.consume();
         try setup.submit("saved-next", "saved-next-key", "direct/saved", "next");
-        try settleComposedForTesting(&setup, first, "saved-metadata", case.item, "r", &.{});
+        try settleComposedForTesting(&setup, first, "saved-metadata", case.kind, case.item, "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         const view = try setup.storage.openHistoricalView(binding);
@@ -1918,7 +1936,7 @@ test "request preparation resumes large private replay validation before emissio
             "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
         else
             "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
-        try settleComposedForTesting(&setup, first, "large-metadata", item.buffered(), "r", &.{});
+        try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
         const view = try setup.storage.openHistoricalView(binding);
@@ -1974,7 +1992,7 @@ test "request preparation authenticates the historical requested model binding" 
     try setup.submit("binding-one", "binding-one", session, "original");
     const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     try setup.submit("binding-two", "binding-two", session, "next");
-    try settleComposedForTesting(&setup, source, "binding-output", "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
+    try settleComposedForTesting(&setup, source, "binding-output", .reasoning, "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}", "r", &.{});
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     try revision.session.set(session);
