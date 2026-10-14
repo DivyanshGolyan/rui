@@ -628,12 +628,16 @@ def prove_accept_inheritance(state, library):
     wrapper.write_text(f"#!{sys.executable}\n" + f"""
 import json, os, pathlib, sys, time
 fd, device, inode = map(int, pathlib.Path({str(ready)!r}).read_text().split())
+evidence = {{"fd": fd, "expected": [device, inode], "raw": None, "normalized": None, "stat_error": None, "inherited": False}}
 try:
     actual = os.fstat(fd)
-    inherited = (actual.st_dev, actual.st_ino) == (device, inode)
-except OSError:
-    inherited = False
-pathlib.Path({str(report)!r}).write_text(json.dumps({{"inherited": inherited}}))
+    evidence["raw"] = [actual.st_dev, actual.st_ino]
+    # Match the probe's unsigned long long casts, including Darwin dev_t -1.
+    evidence["normalized"] = [value & ((1 << 64) - 1) for value in evidence["raw"]]
+    evidence["inherited"] = evidence["normalized"] == evidence["expected"]
+except OSError as error:
+    evidence["stat_error"] = error.errno
+pathlib.Path({str(report)!r}).write_text(json.dumps(evidence))
 deadline = time.monotonic() + 10
 while not pathlib.Path({str(child_release)!r}).exists():
     if time.monotonic() >= deadline: sys.exit(91)
@@ -670,7 +674,10 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         timer.start()
         os.write(keeper, b"x")
         wait_for(lambda: report.exists() and report.read_text(), "real Bash launch descriptor report")
-        assert json.loads(report.read_text()) == {"inherited": False}, report.read_text()
+        evidence = json.loads(report.read_text())
+        print("accept inheritance child:", json.dumps(evidence), flush=True)
+        assert evidence["stat_error"] in (None, errno.EBADF), json.dumps(evidence)
+        assert evidence["inherited"] is False, json.dumps(evidence)
         print("accept inheritance: real Bash child did not retain the selected exchange socket", flush=True)
     finally:
         release.touch(exist_ok=True)
