@@ -351,6 +351,9 @@ try:
     # Prove the usable-looking partial key reached ingress after retirement;
     # absence after restart alone would also pass if this request were refused.
     body = json.dumps({"version":"1","kind":"configure","store":str(store),"key":"partial-key"}, separators=(",", ":")).encode()
+    # A closed object is already invalid without the required Session fields.
+    # Leave the next field unfinished so the streaming parser must await input.
+    body = body[:-1] + b","
     def partial():
         client = socket.socket(socket.AF_UNIX)
         try:
