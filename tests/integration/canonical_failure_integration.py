@@ -483,8 +483,12 @@ def interactive_cases(state, binding=False, null_code=False):
                         assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                         assert record.read_bytes() == original
                         if route == "/v1/message":
-                            if "a: Allow once / d: Deny (Enter)" not in output:
-                                output += human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                            # Recovery does not close the selected diagnostic.
+                            # Return to the exact Action before fresh readiness;
+                            # an earlier prompt in output confers no authority.
+                            os.write(master, b"\x07")
+                            output += human.read_terminal(master, "a: Allow once / d: Deny (Enter)",
+                                timeout=deadline - time.monotonic())
                             output += human.action_ready(ready_read, master)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
