@@ -90,7 +90,7 @@ Enter sends; Shift-Enter or Alt-J adds a line. You can edit and paste multiline 
 
 Rui asks the terminal whether it measures joined Unicode characters, such as emoji, as one cluster. This terminal feature is called mode 2027. Rui uses the answer to choose matching character widths; if the feature is disabled or the terminal does not answer, it uses conventional character widths. Rui does not change the setting, and you do not need to choose a Rui option. Some terminal emulators remain unqualified. Characters that cannot fit safely are rejected rather than assigned invented widths. Drawing errors end the client after terminal restoration; Rui does not retry a partial frame. Normal CLI and script output and exact saved-content exports do not use this display bound.
 
-The alternate-screen renderer is work in progress: there is no final native Linux candidate qualification or macOS renderer run yet. Earlier conversation and recovery checks do not qualify its physical display behavior.
+The alternate-screen renderer is work in progress. Native PTY checks have run on Linux and macOS, but final cross-platform qualification remains incomplete. These checks do not qualify physical terminal display behavior.
 
 ## Return to your work
 

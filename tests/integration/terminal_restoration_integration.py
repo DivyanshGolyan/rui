@@ -758,7 +758,8 @@ def check_forwarding(state, library):
         dispose_all(
             lambda: stop_process(caller, timeout=5) if caller is not None else None,
             lambda: termios.tcflush(slave, termios.TCOFLUSH),
-            lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+            lambda: termios.tcflush(slave, termios.TCIFLUSH),
+            lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
             lambda: os.close(master), lambda: os.close(slave),
         )
 
@@ -1044,7 +1045,10 @@ def persistent_cases(state, library, home, store, host):
                 lambda: proxy.close() if proxy is not None else None,
                 lambda: termios.tcflow(output_slave, termios.TCOON),
                 lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                # Input discard and restoration must not drain this separate
+                # PTY's unread canonical echo or suppress each other's errors.
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
             )
 
@@ -1166,7 +1170,8 @@ def consent_boundary_cases(state, library):
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
                 lambda: termios.tcflush(slave, termios.TCOFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
             )
 
@@ -1996,6 +2001,10 @@ os.execv(sys.argv[4], sys.argv[4:])
             if completion:
                 arm.unlink()
                 human.read_terminal(master, "VISIBLE-END", composer=True)
+                # The final visible window may precede the reader's join.
+                # Complete an in-app inspection before this success-only
+                # command handoff; interruption controls keep the owned cut.
+                human.terminal_step(master, "/status", "Inspection ready · PgUp/PgDn · Ctrl-G returns", composer=True)
                 os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
                 configured = bytearray()
                 deadline = time.monotonic() + 15

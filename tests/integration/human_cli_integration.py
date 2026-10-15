@@ -1516,10 +1516,13 @@ def persistent_input_cases():
         assert recovered["key"] == reserved and recovered["text"]["value"] == "original before capture failure", recovered
         assert len(set(records.glob("*.json")) - before_failure) == 1
         os.write(master, b"Y\n")
-        # Visible answer bytes are not joined-reader readiness for a command.
         read_terminal(master, "next after capture retry", composer=True)
         assert json.loads(proxy.exchanges[-1][0])["text"]["value"] == "next cafXYé!"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7
+        # A rendered answer and composer do not prove the reader joined.
+        # Inspection completion follows that join without cancelling its
+        # visible prefix. No further work is submitted before the handoff.
+        terminal_step(master, "/status", "Inspection ready · PgUp/PgDn · Ctrl-G returns", composer=True)
         # A command selects a handoff, not another input/submission window.
         before_command = set(records.glob("*.json"))
         os.write(master, b"/configure --permission-mode ask\nUNREAD suffix\n")
@@ -4299,7 +4302,10 @@ def main(selected="all"):
             assert json.loads(run(home, "recover", decision_record.stem, "--json"))["answer"]["replayed"] is True
             # The pasted chat suffix remains a draft, not approval or another
             # submission. Clear only that unsent draft before diagnostics.
-            result = terminal_step(master, "\x15/result " + interactive_key, "result: completed", composer=True)
+            # Inspection completion also establishes the preceding answer's
+            # joined reader; its rendered composer alone does not.
+            terminal_step(master, "\x15/status", "Inspection ready · PgUp/PgDn · Ctrl-G returns", composer=True)
+            result = terminal_step(master, "/result " + interactive_key, "result: completed", composer=True)
             assert "result: completed\ninteractive complete" in result, result
             terminal_step(master, "/status", "Recent messages", composer=True)
             assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
