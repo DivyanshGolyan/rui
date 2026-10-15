@@ -1859,13 +1859,31 @@ def startup_reporting_cases(state, library):
             )
 
 
-def visible_stream_handoff_cases(state, library):
+def visible_stream_handoff_cases(state, library, *, only=None):
     """A cancelled visible stream retires, rather than replaying its prefix."""
     # No earlier cell in these scenarios contains Z. A differential redraw
     # must emit the complete token rather than reuse cells inside the marker.
     marker = "ZZZZZZZZZZZZZZZZZZZZ"
     for phase in ("opening", "activity", "permission", "history", "details", "completion", "completion-nonblocking", "completion-interrupt", "completion-eof", "completion-read-interrupt", "completion-read-enable-mutated", "completion-read-reset"):
+        if only is not None and phase != only:
+            continue
+        if phase == "completion-read-interrupt" and only is None:
+            # Darwin revokes a controlling terminal when its session leader
+            # exits, even with the original slave retained. Keep this phase's
+            # observer, not Rui, alive as session leader through the assertions.
+            observer = subprocess.Popen([sys.executable, __file__, str(fixture.RUI),
+                "visible-stream-read-interrupt"], start_new_session=True)
+            try:
+                assert observer.wait(timeout=90) == 0, "isolated terminal observer failed"
+            finally:
+                dispose_all(
+                    lambda: observer.terminate() if observer.poll() is None else None,
+                    lambda: observer.wait(timeout=20),
+                    lambda: stop_process(observer, timeout=5),
+                )
+            continue
         completion = phase.startswith("completion")
+        controlling = phase == "completion-read-interrupt"
         # Live panes follow the tail; frozen inspections begin at the top.
         # Keep the selected marker visible in the appropriate pane without
         # requiring unlimited scrollback or an exact browsing anchor.
@@ -1893,7 +1911,15 @@ def visible_stream_handoff_cases(state, library):
             fcntl.fcntl(slave, fcntl.F_SETFL, flags)
         arm, log = root / "arm", root / "probe.log"
         return_arm, return_release = root / "return-arm", root / "return-release"
+        launch_read = launch_write = None
         try:
+            if controlling:
+                assert os.getsid(0) == os.getpid(), "observer must own the terminal session"
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+                # An asymmetric user setting also catches accidental default
+                # replacement rather than restoration of this original slave.
+                original[6][termios.VERASE] = b"\x12"
+                termios.tcsetattr(slave, termios.TCSANOW, original)
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "configure", "--store", store, "--session", "visible/stream",
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
@@ -1902,15 +1928,44 @@ def visible_stream_handoff_cases(state, library):
                     admission = human.admit(home, "message", "--store", store, "--session", "visible/stream", f"saved input {i}")
                     fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
             if phase == "opening": arm.touch()
-            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "visible/stream"],
-                env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
-                    "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm),
-                    "RUI_TERMINAL_RETURN_ARM": str(return_arm), "RUI_TERMINAL_RETURN_RELEASE": str(return_release),
-                    "RUI_TERMINAL_RETURN_FAULT": phase if phase in ("completion-read-enable-mutated", "completion-read-reset") else ""},
+            command = [str(fixture.RUI), "resume", "--store", str(store), "visible/stream"]
+            loader = "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD"
+            environment = {**os.environ, "HOME": str(home), "NO_COLOR": "1",
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm),
+                "RUI_TERMINAL_RETURN_ARM": str(return_arm), "RUI_TERMINAL_RETURN_RELEASE": str(return_release),
+                "RUI_TERMINAL_RETURN_FAULT": phase if phase in ("completion-read-enable-mutated", "completion-read-reset") else ""}
+            if controlling:
+                launch_read, launch_write = os.pipe()
+                # Exec in place only after the observer assigns foreground
+                # custody. Blocking in preexec_fn would deadlock Popen itself.
+                command = [sys.executable, "-c", """
+import os, signal, sys
+fd = int(sys.argv[1])
+assert os.read(fd, 1) == b"r"
+os.close(fd)
+# Undo Python's ignored dispositions, as Popen(restore_signals=True) would
+# for a direct native child. Job-control dispositions/masks stay inherited.
+for name in ("SIGPIPE", "SIGXFZ", "SIGXFSZ"):
+    if hasattr(signal, name): signal.signal(getattr(signal, name), signal.SIG_DFL)
+os.environ[sys.argv[2]] = sys.argv[3]
+os.execv(sys.argv[4], sys.argv[4:])
+""", str(launch_read), loader, str(library), *command]
+            else:
+                environment[loader] = str(library)
+            caller = subprocess.Popen(command, env=environment,
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE,
-                start_new_session=phase == "completion-read-interrupt",
-                preexec_fn=(lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0)) if phase == "completion-read-interrupt" else None)
+                process_group=0 if controlling else None,
+                pass_fds=(launch_read,) if controlling else ())
+            if controlling:
+                os.close(launch_read)
+                launch_read = None
+                assert os.getsid(caller.pid) == os.getpid()
+                assert os.getpgid(caller.pid) == caller.pid
+                os.tcsetpgrp(slave, caller.pid)
+                assert os.tcgetpgrp(master) == caller.pid
+                assert os.write(launch_write, b"r") == 1
+                os.close(launch_write)
+                launch_write = None
             if phase != "opening":
                 ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
                 human.read_terminal(master, ready, composer=True)
@@ -2034,11 +2089,37 @@ def visible_stream_handoff_cases(state, library):
                 thread.join(timeout=5)
                 assert not thread.is_alive()
 
+            def restore_slave():
+                if controlling:
+                    # Only disposal reclaims foreground, after actual Rui exit
+                    # and the unchanged post-exit assertions above. A background
+                    # session owner must block SIGTTOU for this ioctl.
+                    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+                    try:
+                        dispose_all(
+                            lambda: os.tcsetpgrp(slave, os.getpgrp()),
+                            lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                        )
+                    finally:
+                        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+                else:
+                    termios.tcsetattr(slave, termios.TCSANOW, original)
+
+            def close_terminal():
+                # Closing our controlling master can hang up the observer.
+                # Change this policy only after the target has been retired.
+                previous = signal.signal(signal.SIGHUP, signal.SIG_IGN) if controlling else None
+                try:
+                    dispose_all(lambda: os.close(master), lambda: os.close(slave))
+                finally:
+                    if controlling:
+                        signal.signal(signal.SIGHUP, previous)
+
             dispose_all(
                 return_release.touch,
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                lambda: os.close(master), lambda: os.close(slave),
+                *(lambda fd=fd: os.close(fd) for fd in (launch_read, launch_write) if fd is not None),
+                restore_slave, close_terminal,
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, join_endpoint,
             )
@@ -2661,6 +2742,15 @@ def native_notice_cases(state):
 
 
 def main(selected=None):
+    if selected == "visible-stream-read-interrupt":
+        assert os.getsid(0) == os.getpid(), "launch the isolated observer in its own session"
+
+        def interrupted(number, frame):
+            raise InterruptedError("isolated terminal observer interrupted")
+
+        # The outer fixture's timeout requests normal failure-preserving
+        # disposal before its bounded last-resort kill/reap.
+        signal.signal(signal.SIGTERM, interrupted)
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
     home.mkdir()
@@ -2726,9 +2816,10 @@ def main(selected=None):
         if selected == "startup":
             completed = True
             return
-        if selected in (None, "visible-stream"):
-            visible_stream_handoff_cases(state, library)
-        if selected == "visible-stream":
+        if selected in (None, "visible-stream", "visible-stream-read-interrupt"):
+            visible_stream_handoff_cases(state, library,
+                only="completion-read-interrupt" if selected == "visible-stream-read-interrupt" else None)
+        if selected in ("visible-stream", "visible-stream-read-interrupt"):
             completed = True
             return
         host = fixture.start_host(store, None)
