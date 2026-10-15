@@ -242,11 +242,6 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try reader.seekTo(0);
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("? ");
-    var label: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .line } };
-    try label.feed(arguments.description.slice());
-    try label.finish();
-    try sink.feed("\n");
     try sink.feed("? Run Bash:");
     try sink.feed(Style.normal.code(colour));
     try sink.feed("\n  ");

@@ -27,6 +27,16 @@ import model_fixture as fixture
 import codex_integration as codex_fixture
 
 
+def assert_terminal_restored(slave, original):
+    actual = termios.tcgetattr(slave)
+    expected, compared = list(original), list(actual)
+    if sys.platform == "darwin":
+        mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+        expected[3] &= ~mask
+        compared[3] &= ~mask
+    assert compared == expected, f"terminal restoration: original={original!r}, actual={actual!r}"
+
+
 def run(home, *args, success=True, environment=None):
     env = {**os.environ, "HOME": str(home), **(environment or {})}
     result = subprocess.run([str(fixture.RUI), *map(str, args)], env=env, capture_output=True, text=True, timeout=20)
@@ -370,6 +380,31 @@ def legacy_inline_terminal_wait_oracles():
 
 def terminal_wait_oracles():
     """Check complete synchronized screens, including differential updates."""
+    from copy import deepcopy
+    from unittest import TestCase
+    from unittest.mock import patch
+
+    # Darwin's kernel-owned bits are not saved user configuration. Every
+    # other flag, control character and speed must still match exactly.
+    original = [1, 2, 3, termios.ECHO, 9600, 9600, [b"\x03", b"\x04"]]
+    for kernel_bit in (termios.PENDIN, termios.FLUSHO):
+        actual = deepcopy(original)
+        actual[3] |= kernel_bit
+        with patch.object(sys, "platform", "darwin"), patch.object(termios, "tcgetattr", return_value=actual):
+            assert_terminal_restored(-1, original)
+        with patch.object(sys, "platform", "linux"), patch.object(termios, "tcgetattr", return_value=actual):
+            with TestCase().assertRaises(AssertionError):
+                assert_terminal_restored(-1, original)
+    for field in range(7):
+        actual = deepcopy(original)
+        if field == 6:
+            actual[6][0] = b"\x05"
+        else:
+            actual[field] ^= termios.ECHO if field == 3 else 1
+        with patch.object(sys, "platform", "darwin"), patch.object(termios, "tcgetattr", return_value=actual):
+            with TestCase().assertRaises(AssertionError):
+                assert_terminal_restored(-1, original)
+
     import pyte
     start, end = b"\x1b[?2026h", b"\x1b[?2026l"
     # Batched combining normalization must retain stock pyte's cell, cursor
@@ -1691,7 +1726,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             if "a: Allow once / d: Deny (Enter)" not in shown:
                 shown += read_terminal(master, "a: Allow once / d: Deny (Enter)")
             assert f"\n? Run Bash:\n  {second_command}\n" in shown, shown
-            assert "? Write sibling effect" in shown, ("sibling identity reused the first label", shown)
+            assert json.loads(arguments)["cmd"] not in capture_for(master).completed, ("sibling reused the first command", shown)
             os.write(master, b"/details\n")
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
@@ -1898,11 +1933,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 outcome_deadline = time.monotonic() + 15
                 outcome = read_terminal(master, "bypass complete", composer=True,
                     timeout=outcome_deadline - time.monotonic())
-                if not capture_for(master).completed.startswith("Rui ·"):
-                    # Delivered answer bytes can precede joined snapshot
-                    # retirement. Count permanent rows only after live calls
-                    # yield to the ordinary heading, under the original budget.
-                    outcome = read_terminal(master, "Rui · PgUp browse · /help", composer=True,
+                # Delivered answer bytes can precede joined retirement. Wait
+                # for completed working status, not appearance-only chrome.
+                while "Working…" in capture_for(master).completed or "Sending…" in capture_for(master).completed:
+                    outcome = read_terminal(master, "bypass complete", composer=True, redraw=True,
                         timeout=outcome_deadline - time.monotonic())
                 assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
                 assert "! Inspect application settings" in outcome and "— Failed" in outcome and "Exit code: 7." in outcome, outcome
@@ -2261,7 +2295,8 @@ def screen_consent_case(case):
             # unsent draft loss on detachment is the ordinary exit contract.
             os.write(master, b"\x03")
             _, errors = terminal_exit(caller, master)
-            assert caller.wait(timeout=5) == 0 and termios.tcgetattr(slave) == original, errors
+            assert caller.wait(timeout=5) == 0, errors
+            assert_terminal_restored(slave, original)
             run(home, *commands["deny-action"][1:])
             message = current["selected_message"]
             fixture.wait_for(lambda: fixture.completed_observation(store, message), "export-only shell denial")
@@ -2272,7 +2307,8 @@ def screen_consent_case(case):
             assert "› next cafXé!" not in settled and not (state / "effect").exists(), settled
             os.write(master, b"\x03")
             _, errors = terminal_exit(caller, master)
-            assert caller.wait(timeout=5) == 0 and termios.tcgetattr(slave) == original, errors
+            assert caller.wait(timeout=5) == 0, errors
+            assert_terminal_restored(slave, original)
             assert len(endpoint.requests) == 2, "preview recovery repeated provider work"
             completed = True
             print("screen consent oversized: disabled approval, exact quoted shell exports, shell denial and reopen passed", flush=True)
@@ -2336,7 +2372,7 @@ def screen_consent_case(case):
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.wait(timeout=5) == 0, errors
-        assert termios.tcgetattr(slave) == original, "screen departure failed terminal restoration"
+        assert_terminal_restored(slave, original)
         completed = True
         print(f"screen consent {case}: exact target, no stale authority, retained Unicode caret and restoration passed", flush=True)
     finally:
@@ -2346,6 +2382,7 @@ def screen_consent_case(case):
                 "cursor": [capture_for(master).screen.cursor.x, capture_for(master).screen.cursor.y],
                 "geometry": [capture_for(master).screen.lines, capture_for(master).screen.columns],
                 "returncode": caller.poll() if caller is not None else None,
+                "original_termios": repr(original), "actual_termios": repr(termios.tcgetattr(slave)),
             })
         def retire():
             if caller is not None:
@@ -2804,7 +2841,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         binding = terminal_step(master, "/status", "Session: ", composer=True)
         assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
         os.write(master, b"\x07")
-        read_terminal(master, "Rui ·", composer=True)
+        read_terminal(master, "Bash runs without approval.", composer=True)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
         long_text = "X" * 5000
@@ -2832,7 +2869,7 @@ def long_input_case(home, store, workspace, endpoint, host):
                 drawn, submit=False)
             screen = capture_for(master).screen
             assert drawn in output, output
-            assert (screen.cursor.x, screen.cursor.y) == (caret, 23), (
+            assert screen.cursor.x == caret and screen.display[screen.cursor.y].rstrip() == drawn, (
                 screen.cursor.x, screen.cursor.y, output)
             assert entered.poll() is None and len(endpoint.requests) == before_draft
             assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
@@ -2842,7 +2879,7 @@ def long_input_case(home, store, workspace, endpoint, host):
             # not repeated semantic content. Bound both cells and raw suffix.
             deadline = time.monotonic() + 15
             read_terminal(master, marker, timeout=deadline - time.monotonic(), composer=True, redraw=True)
-            # Answer bytes and the ordinary heading can both precede joined
+            # Answer bytes and the composer can both precede joined
             # completion. Drain the working frame in the same budget before
             # testing clean departure rather than interruption of a repaint.
             while "Working…" in capture_for(master).completed or "Sending…" in capture_for(master).completed:
@@ -2866,13 +2903,13 @@ def long_input_case(home, store, workspace, endpoint, host):
                 drawn, submit=False)
             assert drawn in output, output
             screen = capture_for(master).screen
-            assert (screen.cursor.x, screen.cursor.y) == (caret, 23), (
+            assert screen.cursor.x == caret, (
                 screen.cursor.x, screen.cursor.y, output)
             if columns == 8:
                 # Six composer cells per row; the tab fills its own row.
-                assert screen.display[21] == "› abcd  ", screen.display
-                assert screen.display[22] == ">       ", screen.display
-                assert screen.display[23] == "> Q     ", screen.display
+                assert screen.display[screen.cursor.y - 2:screen.cursor.y + 1] == ["› abcd  ", ">       ", "> Q     "], screen.display
+            else:
+                assert screen.display[screen.cursor.y].rstrip() == drawn, screen.display
             assert entered.poll() is None and len(endpoint.requests) == before_draft
             assert len(proxy.mutations) == before_messages, "unsent draft transmitted a Message"
             assert set((home / ".config/rui/requests").glob("*.json")) == before_records, "unsent draft published a capture"
@@ -2887,7 +2924,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         terminal_bulk(master, "\x1b[200~" + long_cluster + "\x1b[201~",
             "› " + unicodedata.normalize("NFC", long_cluster), submit=False)
         screen = capture_for(master).screen
-        assert (screen.cursor.x, screen.cursor.y) == (3, 23), (
+        assert screen.cursor.x == 3 and screen.display[screen.cursor.y].rstrip() == "› " + unicodedata.normalize("NFC", long_cluster), (
             screen.cursor.x, screen.cursor.y, screen.display)
         terminal_step(master, "\x7fZ", "encoded deletion intact", composer=True)
         body = json.loads(endpoint.requests[-1])
@@ -2900,8 +2937,8 @@ def long_input_case(home, store, workspace, endpoint, host):
         if not capture_for(master).reached("› ", composer=True):
             rejected += read_terminal(master, "› ")
         screen = capture_for(master).screen
-        assert screen.display[23] == "› " + " " * 78, screen.display
-        assert (screen.cursor.x, screen.cursor.y) == (2, 23), (
+        assert screen.display[screen.cursor.y] == "› " + " " * 78, screen.display
+        assert screen.cursor.x == 2, (
             screen.cursor.x, screen.cursor.y, rejected[-1000:])
         assert len(endpoint.requests) == accepted_count, "oversized input reached Host"
         endpoint.responses.append(fixture.sse_answer("shorter-answer", "shorter-reason",

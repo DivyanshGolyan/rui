@@ -136,12 +136,12 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         try status_text.append("a Allow / d Deny\nEnter");
         try status_text.layout(size.col);
     }
-    const status_height: u16 = @intCast(status_text.displayRows());
+    const status_height: u16 = if (status.len == 0) 0 else @intCast(status_text.displayRows());
     if (status_height > size.row - reserve) return error.TerminalTooSmall;
     const draft_height = @min(@min(self.composer.row_count, 5), (size.row - status_height) -| 2);
     const visible_draft_height = @max(@as(usize, 1), draft_height);
     const draft_first = caret_row -| (visible_draft_height - 1);
-    const status_row: u16 = @intCast(size.row - visible_draft_height - status_height);
+    const status_limit: u16 = @intCast(size.row - visible_draft_height - status_height);
     // Calls are current facts, never appended outcomes. Short layouts disclose
     // the omitted population instead of clipping an outcome's explanation.
     var calls: [3]Viewport.Sized(View.Live.line_bytes, false) = .{ .{}, .{}, .{} };
@@ -167,25 +167,26 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
                 try heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
                 try heading.layout(size.col);
                 heading_height = @intCast(heading.displayRows());
-            } else heading_height = if (status_row -| call_rows > 1) 1 else 0;
+            } else heading_height = if ((if (self.selected) !self.actionVisible() or !self.preview_complete else self.live.origin != 0) and status_limit -| call_rows > 1) 1 else 0;
             // Complete oldest call previews yield before status, input and
             // the exact undisplayed population. Conversation space and
             // optional wording yield before a complete fitting call preview.
-            if (@as(u32, call_rows) + heading_height <= status_row) break;
+            if (@as(u32, call_rows) + heading_height <= status_limit) break;
             if (omitted != 0 and !compact) {
                 compact = true;
                 continue;
             }
             break;
         }
-        if (@as(u32, call_rows) + heading_height <= status_row) break;
+        if (@as(u32, call_rows) + heading_height <= status_limit) break;
         if (used == 0) return error.TerminalTooSmall;
         used -= 1;
     }
     if (heading.length == 0 and heading_height != 0) {
-        try heading.append(if (self.actionVisible()) (if (self.preview_complete) "Action · PgUp/PgDn review command" else "Action preview · too large to approve here") else if (self.selected)
+        try heading.append(if (self.actionVisible()) "Action preview · too large to approve here" else if (self.selected)
             (if (self.action_view != null) "Browsing · Ctrl-G returns to Action" else "Browsing · PgUp/PgDn · Ctrl-G latest")
-        else if (self.live.origin != 0) "Latest · PgUp browse · /history older" else "Rui · PgUp browse · /help");
+        else
+            "Latest · PgUp browse · /history older");
         try heading.layout(size.col);
         if (heading.displayRows() > heading_height) {
             // A one-row hint must retain its next action, not a clipped prefix.
@@ -196,21 +197,30 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
             try heading.layout(size.col);
         }
     }
-    self.height = status_row - heading_height - call_rows;
+    self.height = status_limit - heading_height - call_rows;
     const document = if (self.selected) &self.browsing else &self.live;
     try document.layout(size.col);
     const first = document.first(self.height);
-    for (0..heading_height) |row| try drawRow(window, &heading, row, @intCast(row), 0, self.colour, self.style(.quiet));
-    for (first..@min(first + self.height, document.row_count), heading_height..) |row, screen_row|
+    const document_rows = if (document.text().len == 0) 0 else @min(self.height, document.displayRows() -| first);
+    const overflow_height = if (!self.selected and live.total > used) heading_height else 0;
+    const navigation_height = heading_height - overflow_height;
+    // Match the inline frontend's compact flow inside the alternate screen.
+    // Only actual content consumes rows; spare space stays below the composer.
+    const content_end = navigation_height + document_rows;
+    const spacer: u16 = @intFromBool(document_rows != 0 and content_end + status_height + call_rows + overflow_height + visible_draft_height < size.row);
+    const status_row: u16 = @intCast(content_end + spacer);
+    for (0..navigation_height) |row| try drawRow(window, &heading, row, @intCast(row), 0, self.colour, self.style(.quiet));
+    for (first..first + document_rows, navigation_height..) |row, screen_row|
         try drawRow(window, document, row, @intCast(screen_row), 0, self.colour, .{});
-    var call_row = status_row - call_rows;
+    const status_style = self.style(if (approval) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected")) .failure else .quiet);
+    for (0..status_height) |row| try drawRow(window, &status_text, row, status_row + @as(u16, @intCast(row)), 0, self.colour, status_style);
+    var call_row = status_row + status_height;
     for (0..used) |index| {
         for (0..calls[index].displayRows()) |row| try drawRow(window, &calls[index], row, call_row + @as(u16, @intCast(row)), 0, self.colour, self.style(live.style(index)));
         call_row += @intCast(calls[index].displayRows());
     }
-    const status_style = self.style(if (approval) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected")) .failure else .quiet);
-    for (0..status_height) |row| try drawRow(window, &status_text, row, status_row + @as(u16, @intCast(row)), 0, self.colour, status_style);
-    const draft_top = status_row + status_height;
+    for (0..overflow_height) |row| try drawRow(window, &heading, row, call_row + @as(u16, @intCast(row)), 0, self.colour, self.style(.quiet));
+    const draft_top = call_row + overflow_height;
     for (draft_first..@min(draft_first + visible_draft_height, self.composer.row_count), 0..) |row, line| {
         const screen_row = draft_top + @as(u16, @intCast(line));
         _ = window.child(.{ .y_off = screen_row, .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "> ", .style = self.style(if (approval) .attention else .user) }, .{});
@@ -250,10 +260,10 @@ fn style(self: *const Self, value: View.Style) vaxis.Style {
     return .{
         .fg = switch (value) {
             .user => .{ .index = 12 },
+            .quiet => .{ .index = 8 },
             .attention => .{ .index = 3 },
             .failure => .{ .index = 9 },
-            // Navigation and state must remain readable in the user's palette.
-            .normal, .quiet => .default,
+            .normal => .default,
         },
     };
 }
@@ -290,6 +300,72 @@ const Memory = struct {
     }
 };
 
+test "compact conversation keeps the composer beside content without persistent chrome" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, true);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+    const window = screen.vx.window();
+    try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
+    try screen.append("› inspect\n  Done.\n");
+    try screen.render(&out.writer, size, "next\nline", 9, "", "› ", &.{});
+    try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 3).?.char.grapheme);
+    try std.testing.expectEqualStrings(">", window.readCell(0, 4).?.char.grapheme);
+    try screen.render(&out.writer, size, "next", 4, "Working…", "› ", &.{});
+    try std.testing.expectEqualStrings("W", window.readCell(0, 3).?.char.grapheme);
+    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 3).?.style.fg);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 4).?.char.grapheme);
+}
+
+test "optional spacing yields before exact-fit transcript rows" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    for ([_]usize{ 22, 23, 24 }) |rows| {
+        for ([_]bool{ false, true }) |trailing_newline| {
+            screen.live.clear();
+            for (0..rows) |row| {
+                var bytes: [16]u8 = undefined;
+                const text = try std.fmt.bufPrint(&bytes, "row{d:0>2}{s}", .{ row, if (row + 1 < rows or trailing_newline) "\n" else "" });
+                try screen.append(text);
+            }
+            try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            const window = screen.vx.window();
+            const first = if (rows == 24) 1 else @as(usize, 0);
+            for (first..rows, 0..) |row, y| {
+                var bytes: [16]u8 = undefined;
+                const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
+                for (expected, 0..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+            }
+            try std.testing.expectEqualStrings("›", window.readCell(0, 23).?.char.grapheme);
+            try screen.browse(false);
+            try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            try screen.browse(true);
+            try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            for (rows - 22..rows, 1..) |row, y| {
+                var bytes: [16]u8 = undefined;
+                const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
+                for (expected, 0..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+            }
+            try screen.latest();
+        }
+    }
+}
+
 test "mandatory status and calls wrap wide clusters before the edge" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -303,16 +379,16 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     var live: View.Live = .{};
     try screen.render(&out.writer, size, "", 0, "1234567中Z", "› ", &live);
     const window = screen.vx.window();
-    try std.testing.expectEqualStrings("7", window.readCell(6, 9).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(0, 10).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(2, 10).?.char.grapheme);
+    try std.testing.expectEqualStrings("7", window.readCell(6, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(0, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(2, 1).?.char.grapheme);
     live.count = 1;
     live.total = 1;
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try live.entries[0].presentation.description.?.set("12345中Z");
     try screen.render(&out.writer, size, "", 0, "Idle", "› ", &live);
-    try std.testing.expectEqualStrings("中", window.readCell(0, 9).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(2, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(0, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(2, 2).?.char.grapheme);
     try std.testing.expectError(error.UnrepresentableTerminalGrapheme, screen.render(&out.writer, size, "", 0, "́Z", "› ", &live));
 }
 
@@ -328,9 +404,9 @@ test "actual overflow yields wording before clipping required status" {
     const live: View.Live = .{ .total = 100 };
     try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, "Idle", "› ", &live);
     const window = screen.vx.window();
-    try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("/", window.readCell(7, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("I", window.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("+", window.readCell(0, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("/", window.readCell(7, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 2).?.char.grapheme);
     try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, "Idle", "› ", &live));
     try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 3, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, "a: Allow once / d: Deny (Enter)\n! Original retained", "> ", &.{}));
@@ -410,6 +486,13 @@ test "prepared Action preserves selected inspection until explicit return" {
         try std.testing.expect(screen.actionVisible());
         try std.testing.expectEqual(!oversized, screen.preview_complete);
         try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text(), "Run Bash: exact command\n"));
+        if (!oversized) {
+            try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, "a: Allow once / d: Deny (Enter)", "> ", &.{});
+            const window = screen.vx.window();
+            try std.testing.expectEqualStrings("R", window.readCell(0, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("a", window.readCell(0, 2).?.char.grapheme);
+            try std.testing.expectEqualStrings(">", window.readCell(0, 3).?.char.grapheme);
+        }
         screen.releaseAction();
         try screen.prepareAction(io, action);
         try std.testing.expect(screen.actionVisible());

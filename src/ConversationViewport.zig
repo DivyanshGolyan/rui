@@ -171,7 +171,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn first(self: *const Self, height: usize) usize {
-            return @min(self.top orelse self.row_count -| height, self.row_count -| 1);
+            const rows = self.displayRows();
+            return @min(self.top orelse rows -| height, rows -| 1);
         }
 
         pub fn rowAt(self: *const Self, position: usize) usize {
@@ -182,7 +183,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub fn browse(self: *Self, down: bool, height: usize) void {
             const current = self.first(height);
-            const row = if (down) @min(current + height, self.row_count -| height) else current -| height;
+            const row = if (down) @min(current + height, self.displayRows() -| height) else current -| height;
             self.top = row;
         }
     };
