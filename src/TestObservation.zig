@@ -8,7 +8,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, control_peers, status, stop, list, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes };
+pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, capture, recovery, managed, bash_cleanup, bash_pipes };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -168,7 +168,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
     }
     const connection = std.mem.startsWith(u8, phase, "connection_request_") or
         std.mem.eql(u8, phase, "connection_resources_released");
-    if (self.plan == .list) return connection;
+    if (self.plan == .list or self.plan == .transport) return connection;
     if (self.plan == .control_peers and (connection or
         std.mem.eql(u8, phase, "connection_place_released"))) return true;
     if (std.mem.eql(u8, phase, "lifecycle_boundary"))
@@ -331,7 +331,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
-            .list, .status, .stop => "connection_resources_released",
+            .list, .transport, .status, .stop => "connection_resources_released",
         };
         for ([_]bool{ false, true }) |selected_kill| {
             var descriptors: [2]c_int = undefined;
@@ -399,7 +399,7 @@ test "private owner observations seal admission without forgiving held or late p
             .capture => "capture_write_gate_entered",
             .recovery => "action_attempt_admitted",
             .managed => "codex_transfer",
-            .list, .status, .stop => "connection_resources_released",
+            .list, .transport, .status, .stop => "connection_resources_released",
         };
         for (0..3) |kind| {
             var descriptors: [2]c_int = undefined;

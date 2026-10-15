@@ -41,6 +41,11 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # four model owners have ten phases, plus two lifecycle boundaries and eight
 # separately issued unnumbered releases. These are test-only retained records.
 # PeerCensus enforces issuance bounds before traffic, not on received records.
+# transport: at most 100 configurations and twenty waves of 100 Messages,
+# 100 result reads, 100 initial result probes plus 1,801 failed probes within
+# the shared 45s/25ms budget, and 801 drain inspections within 20s/25ms.
+# The smaller two-wave H1 case has a shared 40s result/drain budget.
+# HostRequests enforces issuance before traffic; retain both native endpoints.
 # dispatch: seven routed controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
 # capture: one gate, one exact cancellation and one injected resume failure.
@@ -52,10 +57,12 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # emergency drain (25ms intervals, including final probes), six fixed reads.
 # bash_pipes: one held leader observation, one permission and one Session stop.
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
+TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
                       "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
+                      "transport": 2 * TRANSPORT_EXCHANGE_LIMIT,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2}
