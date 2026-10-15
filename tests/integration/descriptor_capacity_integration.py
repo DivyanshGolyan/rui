@@ -503,7 +503,60 @@ def prove_bash_spawn_with_full_client_population(state, required):
             incoming_error.add_note("Descriptor cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def accept_records(log, *, final=False):
+    contents = log.read_bytes()
+    end = contents.rfind(b"\n") + 1
+    if final:
+        assert end == len(contents), ("incomplete final accept record", contents[end:])
+    records = []
+    for line in contents[:end].split(b"\n")[:-1]:
+        code, at = map(int, line.split())
+        records.append((code, at))
+    return records
+
+
+def finish_accept_records(host, log):
+    if host is not None:
+        assert host.poll() is not None, "accept log writer has not retired"
+        accept_records(log, final=True)
+
+
+def prove_accept_record_oracle(state):
+    log = state / "accept-record-oracle"
+    golden = b"0 123456789\n24 987654321\n"
+    expected = [(0, 123456789), (24, 987654321)]
+    try:
+        for cut in range(len(golden) + 1):
+            prefix = golden[:cut]
+            log.write_bytes(prefix)
+            # Expected framing is derived from the producer's literal LF,
+            # independently of the reader and integer-token availability.
+            count = prefix.count(b"\n")
+            assert accept_records(log) == expected[:count], (cut, prefix)
+            if not prefix or prefix.endswith(b"\n"):
+                assert accept_records(log, final=True) == expected[:count]
+            else:
+                try:
+                    accept_records(log, final=True)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(("final incomplete record accepted", prefix))
+        for malformed in (b"\n", b"24\n", b"24 1 2\n", b"no 1\n"):
+            log.write_bytes(golden + malformed + b"0")
+            try:
+                accept_records(log)
+            except (AssertionError, ValueError):
+                pass
+            else:
+                raise AssertionError(("complete malformed record accepted", malformed))
+    finally:
+        log.unlink()
+    print("accept log oracle: every publication cut, complete corruption and final incomplete refusal passed", flush=True)
+
+
 def prove_accept_pressure(state):
+    prove_accept_record_oracle(state)
     source, library = state / "accept.c", state / "accept.so"
     source.write_text(ACCEPT_PROBE)
     subprocess.run(["cc", "-dynamiclib" if sys.platform == "darwin" else "-shared", "-fPIC",
@@ -520,9 +573,6 @@ def prove_accept_pressure(state):
         worker.start()
         host = None
         connections = []
-
-        def records():
-            return [tuple(map(int, line.split())) for line in log.read_text().splitlines()]
 
         def connect(path):
             peer = socket.socket(socket.AF_UNIX)
@@ -545,15 +595,15 @@ def prove_accept_pressure(state):
             if label != "shutdown-mfile":
                 message(root, store, session, 0)
                 endpoint.wait_for("requests", 1)
-            baseline = sum(code == 0 for code, _ in records())
+            baseline = sum(code == 0 for code, _ in accept_records(log))
             held = connect(ready["socket"])
             held.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
-            wait_for(lambda: sum(code == 0 for code, _ in records()) > baseline, "preexisting accepted peer")
+            wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting accepted peer")
             if label == "shutdown-mfile":
-                baseline = sum(code == 0 for code, _ in records())
+                baseline = sum(code == 0 for code, _ in accept_records(log))
                 stopping = connect(ready["socket"])
                 stopping.sendall(b"POST /v1/control/host-stop HTTP/1.1\r\n")
-                wait_for(lambda: sum(code == 0 for code, _ in records()) > baseline, "preexisting stop peer")
+                wait_for(lambda: sum(code == 0 for code, _ in accept_records(log)) > baseline, "preexisting stop peer")
             if injected is not None:
                 arm.touch()
                 pending = connect(ready["socket"])
@@ -565,10 +615,10 @@ def prove_accept_pressure(state):
                         pending = connect(ready["socket"])
                     except (TimeoutError, BlockingIOError):
                         break
-                    if any(code == errno.EMFILE for code, _ in records()):
+                    if any(code == errno.EMFILE for code, _ in accept_records(log)):
                         break
             expected = injected or errno.EMFILE
-            wait_for(lambda: any(code == expected for code, _ in records()), "accept resource exhaustion")
+            wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion")
             # Existing accepted peers still progress during pressure.
             body = json.dumps({"version": "1", "kind": "host_info", "store": str(store)}).encode()
             held.sendall(f"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
@@ -576,8 +626,8 @@ def prove_accept_pressure(state):
             assert head.startswith(b"HTTP/1.1 200 "), (label, head, diagnostics.tail())
             identity = json.loads(response)["instance"]
             if injected is not None:
-                wait_for(lambda: len([at for code, at in records() if code == expected]) >= 4, "bounded retry samples")
-                attempts = [at for code, at in records() if code == expected]
+                wait_for(lambda: len([at for code, at in accept_records(log) if code == expected]) >= 4, "bounded retry samples")
+                attempts = [at for code, at in accept_records(log) if code == expected]
                 assert all(b - a >= 50_000_000 for a, b in zip(attempts, attempts[1:])), (label, attempts)
                 if label == "shutdown-mfile":
                     stop_body = json.dumps({"version": "1", "kind": "host_stop", "store": str(store)}).encode()
@@ -614,6 +664,7 @@ def prove_accept_pressure(state):
             endpoint.release.set()
             dispose_all(*(peer.close for peer in connections),
                         lambda: stop_process(host) if host is not None else None,
+                        lambda: finish_accept_records(host, log),
                         endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
 
 
@@ -637,7 +688,7 @@ try:
     evidence["inherited"] = evidence["normalized"] == evidence["expected"]
 except OSError as error:
     evidence["stat_error"] = error.errno
-pathlib.Path({str(report)!r}).write_text(json.dumps(evidence))
+pathlib.Path({str(report)!r}).write_text(json.dumps(evidence) + '\\n')
 deadline = time.monotonic() + 10
 while not pathlib.Path({str(child_release)!r}).exists():
     if time.monotonic() >= deadline: sys.exit(91)
@@ -666,14 +717,14 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         hold.touch()
         peer = socket.socket(socket.AF_UNIX)
         peer.connect(fields["socket"])
-        wait_for(lambda: ready.exists() and len(ready.read_text().split()) == 3, "accepted socket before flags")
+        wait_for(lambda: ready.exists() and ready.read_bytes().endswith(b"\n"), "accepted socket before flags")
         # Open a competing launch window, not a timing acceptance assertion.
         # The child reports exact socket identity whether it spawns during or
         # after acquisition. The unfixed-path control must witness inheritance.
         timer = threading.Timer(2, release.touch)
         timer.start()
         os.write(keeper, b"x")
-        wait_for(lambda: report.exists() and report.read_text(), "real Bash launch descriptor report")
+        wait_for(lambda: report.exists() and report.read_bytes().endswith(b"\n"), "real Bash launch descriptor report")
         evidence = json.loads(report.read_text())
         print("accept inheritance child:", json.dumps(evidence), flush=True)
         assert evidence["stat_error"] in (None, errno.EBADF), json.dumps(evidence)
@@ -685,6 +736,7 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         dispose_all(lambda: timer.join() if timer is not None else None,
                     lambda: peer.close() if peer is not None else None,
                     lambda: stop_process(host) if host is not None else None,
+                    lambda: finish_accept_records(host, root / "accept.log"),
                     lambda: os.close(keeper), endpoint.shutdown, endpoint.server_close, lambda: worker.join(timeout=3))
 
 
