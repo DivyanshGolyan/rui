@@ -68,7 +68,7 @@ type fixtureStartup struct {
 	PID         int    `json:"pid"`
 }
 
-func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir string) (*childFixture, error) {
+func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace string) (*childFixture, error) {
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -87,6 +87,7 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 		"--provider-duration", duration.String(),
 		"--provider-rounds", strconv.Itoa(rounds),
 		"--provider-artifacts", artifactDir,
+		"--provider-workspace", workspace,
 	)
 	if historyAware {
 		cmd.Args = append(cmd.Args, "--provider-history-aware")
@@ -873,7 +874,7 @@ func spillComparisonStatus(on, off any) string {
 	return reduceStatuses(normalized)
 }
 
-func expectedCapacityRequests(keys []string) (int, string) {
+func expectedCapacityRequests(keys []string, workspace string) (int, string) {
 	type keyedDigest struct {
 		key    string
 		digest string
@@ -881,7 +882,7 @@ func expectedCapacityRequests(keys []string) (int, string) {
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
 	for _, key := range keys {
-		body := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","input":[{"role":"user","content":[{"type":"input_text","text":` + strconv.Quote(key) + `}]}],"tools":[]}`)
+		body := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace)) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)
@@ -1201,7 +1202,7 @@ func sustainedCPUQualificationStatus(offerQualified, windowValid bool, averageCo
 	return "passed"
 }
 
-func measureCapacityRound(binary, directory, store string, round, capacity, eventsPerSecond int, duration time.Duration, sameSessions bool, deadline measurement.Deadline, host *measurement.Host, fixture *childFixture, facts *measurement.FactLog) (map[string]any, error) {
+func measureCapacityRound(binary, directory, store, workspace string, round, capacity, eventsPerSecond int, duration time.Duration, sameSessions bool, deadline measurement.Deadline, host *measurement.Host, fixture *childFixture, facts *measurement.FactLog) (map[string]any, error) {
 	roundDirectory := filepath.Join(directory, fmt.Sprintf("round-%d", round))
 	if err := os.Mkdir(roundDirectory, 0o700); err != nil {
 		return nil, err
@@ -1412,7 +1413,7 @@ func measureCapacityRound(binary, directory, store string, round, capacity, even
 	if err != nil {
 		return nil, err
 	}
-	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(keys)
+	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(keys, workspace)
 	requestComplete := offer.RequestBytes == expectedRequestBytes && offer.RequestSetSHA256 == expectedRequestDigest
 	requestOracle := "independent exact-byte set"
 	if sameSessions {
@@ -1550,7 +1551,11 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	defer func() {
 		measurement.JoinCleanup(&resultError, facts.Close)
 	}()
-	fixture, err := startChildFixture(measurement.NewDeadline(time.Minute), capacity, scenario.EventsPerSecond, duration, roundCount, sameSessions, filepath.Join(directory, "provider"))
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
+		return nil, err
+	}
+	fixture, err := startChildFixture(measurement.NewDeadline(time.Minute), capacity, scenario.EventsPerSecond, duration, roundCount, sameSessions, filepath.Join(directory, "provider"), workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -1590,7 +1595,7 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 			return result, statError
 		}
 		diagnosticOffset := info.Size()
-		row, err := measureCapacityRound(binary, directory, store, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts)
+		row, err := measureCapacityRound(binary, directory, store, workspace, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts)
 		if err != nil {
 			return result, err
 		}
@@ -1722,8 +1727,8 @@ func finalizeQualification(result map[string]any, runError error, cleanup ...fun
 	return result, runError
 }
 
-func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts string) error {
-	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, ArtifactDir: artifacts, TLS: streams > 1})
+func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts, workspace string) error {
+	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, Workspace: workspace, ArtifactDir: artifacts, TLS: streams > 1})
 	if err != nil {
 		return err
 	}
@@ -1774,13 +1779,14 @@ func main() {
 	providerRounds := flag.Int("provider-rounds", 1, "provider child round count")
 	providerHistoryAware := flag.Bool("provider-history-aware", false, "validate complete repeated-session history")
 	providerArtifacts := flag.String("provider-artifacts", "", "provider child artifact directory")
+	providerWorkspace := flag.String("provider-workspace", "", "configured Session Workspace expected by the provider child")
 	flag.Parse()
 	if *providerChild {
 		if err := measurement.RequireProcessRuntime(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerArtifacts); err != nil {
+		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerArtifacts, *providerWorkspace); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

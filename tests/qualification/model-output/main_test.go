@@ -52,9 +52,18 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 }
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
-	bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"})
-	if bytes != 200 || digest != "3ba8f89953b1f1cbc2a36d18c3dd7cb8f5a4a4bd6860d23bcb24e79c2069c8d8" {
-		t.Fatalf("unexpected independent request oracle: %d %s", bytes, digest)
+	for _, test := range []struct {
+		workspace string
+		bytes     int
+		digest    string
+	}{
+		{"/workspace", 470, "146313e158f7e1a41222b102146bf88cf1fd5c64d28f57be9fca261caafe64e0"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", 501, "cacbc49f297beae7db9419c4f0136f711cf46a9df1c36d23cffeb0e7eb9d09a7"},
+	} {
+		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, test.workspace)
+		if bytes != test.bytes || digest != test.digest {
+			t.Fatalf("unexpected independent request oracle for %q: %d %s", test.workspace, bytes, digest)
+		}
 	}
 }
 
