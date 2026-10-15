@@ -4800,9 +4800,11 @@ pub const Store = struct {
         const trigger = policy.compaction_trigger orelse return .assistant_response;
         if (!try self.contextChangedSinceBase(session_ref, current.next_position)) return .assistant_response;
         var usage_tokens: ?u64 = null;
-        const base = try prepare(self.database, "SELECT coalesce(max(admission_position),0) FROM model_operation WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued'");
+        const base = try prepare(self.database, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
         defer _ = c.sqlite3_finalize(base);
         try bindText(base, 1, session_ref);
+        try bindU64(base, 2, current.next_position);
         if (c.sqlite3_step(base) != c.SQLITE_ROW) return error.CorruptStore;
         const frontier = try readNullableTokens(base, 0, true) orelse return error.CorruptStore;
         // Without a usage anchor, all retained host input still contributes.
@@ -4837,9 +4839,9 @@ pub const Store = struct {
             "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
             "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2) AND e.session_position>?2) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM model_output_item i JOIN content c ON c.content_id=i.content_id " ++
-            "WHERE i.session_ref=?1 AND i.session_position>?2 AND i.session_position>=coalesce((SELECT max(anchor.session_position) " ++
-            "FROM model_operation b JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
-            "WHERE b.session_ref=?1 AND b.purpose=1 AND b.resolution_code='continued' AND anchor.item_kind=4),0)) + " ++
+            "WHERE i.session_ref=?1 AND i.session_position>=max(?2+1,coalesce((SELECT max(anchor.session_position) " ++
+            "FROM model_operation b INDEXED BY model_operation_compaction_bases JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
+            "WHERE b.session_ref=?1 AND b.purpose=1 AND b.resolution_code='continued' AND b.admission_position=?3 AND anchor.item_kind=4),0))) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED BY model_operation_context_history " ++
             "CROSS JOIN model_tool_call call ON call.operation_id=o.operation_id " ++
             "JOIN content c ON c.content_id=call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
@@ -4942,15 +4944,18 @@ pub const Store = struct {
     }
 
     fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
-        const statement = try prepare(self.database, "WITH current(session_ref,admission_position) AS (VALUES(?1,?2)) " ++
-            "SELECT NOT EXISTS(SELECT 1 FROM model_operation base WHERE base.session_ref=current.session_ref " ++
-            "AND base.purpose=1 AND base.resolution_code='continued' AND base.admission_position<current.admission_position " ++
-            "AND NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=current.session_ref " ++
-            "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<current.admission_position) " ++
-            "AND NOT EXISTS(SELECT 1 FROM model_operation suffix JOIN model_output_item item ON item.operation_id=suffix.operation_id " ++
-            "WHERE suffix.session_ref=current.session_ref AND suffix.purpose=0 " ++
-            "AND item.session_position>base.admission_position AND item.session_position<current.admission_position)) " ++
-            "FROM current");
+        // Any changed suffix of the newest base also belongs to every older
+        // base. Older bases cannot change the answer.
+        const statement = try prepare(self.database, "WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 " ++
+            "ORDER BY admission_position DESC LIMIT 1) " ++
+            "SELECT NOT EXISTS(SELECT 1 FROM base " ++
+            "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
+            "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
+            "AND NOT EXISTS(SELECT 1 FROM model_output_item item INDEXED BY model_output_history " ++
+            "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
+            "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
+            "AND item.session_position>base.admission_position AND item.session_position<?2))");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, boundary);
@@ -16101,6 +16106,77 @@ test "model admission work excludes failed historical Operation population" {
         const large = try Measure.run(1024, overflow);
         try std.testing.expect(large <= small + 100);
     }
+}
+
+test "model admission work excludes accepted compaction base history" {
+    const Measure = struct {
+        steps: u64 = 0,
+        const Suffix = enum { unchanged, low, high, missing };
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, suffix: Suffix) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/base-work");
+            try submitTestMessage(&storage, &tmp, "input", "input", "direct/base-work", "retain");
+            var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            for (0..population) |index| {
+                try storage.settleModelAttemptFailure(current, "overflow", .context_overflow, .{});
+                const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+                try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (index + 1 != population) {
+                    // Provider-only suffix allows the next overflow recovery
+                    // without accumulating retained host input.
+                    const call = TestingCall{ .item_id = "old-item", .name = "unknown", .encoded_call_id = "old-call", .decoded_call_id = "old-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                    try settleCallsForTestingWithFaults(&storage, &tmp, current, "old-output", &.{call}, .{}, null);
+                    current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+            }
+            if (suffix == .unchanged) {
+                try storage.settleModelAttemptFailure(current, "network", .terminal, .{});
+            } else {
+                const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
+                    .low => "{\"total_tokens\":1}",
+                    .high => "{\"total_tokens\":1000}",
+                    .missing => null,
+                    .unchanged => unreachable,
+                });
+            }
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("policy");
+            try patch.session.set("direct/base-work");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/base-work", "");
+            var measured: @This() = .{};
+            const admitted = blk: {
+                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            };
+            try std.testing.expectEqual(if (suffix == .high) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+            try std.testing.expectEqual(@as(u64, if (suffix == .high) 1 else 0), (try storage.inspectSession("direct/base-work")).pending_messages);
+            return measured.steps;
+        }
+    };
+    var bounded = true;
+    for ([_]Measure.Suffix{ .unchanged, .low, .high, .missing }) |suffix| {
+        const small = try Measure.run(8, suffix);
+        const large = try Measure.run(128, suffix);
+        bounded = bounded and large <= small + 200;
+    }
+    try std.testing.expect(bounded);
 }
 
 test "model admission work excludes usage-covered accepted tool and instruction history" {
