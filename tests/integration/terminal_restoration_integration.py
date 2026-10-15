@@ -205,6 +205,13 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
                      ((const char *)bytes)[i + sizeof(subject) - 1] == '}')) selected = 1;
             }
         }
+        static atomic_int inspection_dropped = 0;
+        if (selected && getenv("RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION") &&
+            !atomic_exchange(&inspection_dropped, 1)) {
+            record("diagnostic-dropped-inspection\n");
+            errno = EAGAIN;
+            return -1;
+        }
         if (selected && !atomic_exchange(&contention_claimed, 1)) {
             /* Complete fixed fixture identity, before the owned native write.
                The 512-byte buffer exceeds this phase/Session plus u64 metadata. */
@@ -756,6 +763,7 @@ def capture_receipt_case(state, library):
             "--test-response-capture-gate-path", gate.path), env={**os.environ,
             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
+            "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
         fixture.configure(root, store, "capture-config", "diagnostic/session", "model-a")
@@ -764,9 +772,23 @@ def capture_receipt_case(state, library):
         fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
         arm.touch()
-        inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
-        fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(),
-                         "actual optional inspection custody", timeout=3)
+        # A specific optional write may lose custody or output credit. Seek an
+        # actual hold without requiring delivery of any one inspection trace.
+        # The first eligible write deliberately fails to exercise that case.
+        acquisition_deadline = time.monotonic() + 3
+        while True:
+            remaining = acquisition_deadline - time.monotonic()
+            assert remaining > 0, "actual optional inspection custody exhausted original deadline"
+            inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
+            fixture.wait_for(lambda: (log.exists() and "diagnostic-held-inspection\n" in log.read_text())
+                or inspector.poll() is not None, "optional inspection hold or completed caller", timeout=remaining)
+            assert time.monotonic() < acquisition_deadline, "actual optional inspection custody exceeded original deadline"
+            if log.exists() and "diagnostic-held-inspection\n" in log.read_text():
+                break
+            out, err = inspector.communicate(timeout=max(0, acquisition_deadline - time.monotonic()))
+            assert inspector.returncode == 0, (out, err)
+            assert json.loads(out)["session"]["reference"] == "diagnostic/session", out
+        assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == "diagnostic/session", held
         provider_release.set()
@@ -783,7 +805,7 @@ def capture_receipt_case(state, library):
             store, "capture-message", "diagnostic/session", deadline)
         assert observation["result"]["status"] == "completed", observation
         assert saved_answer == answer
-        print("native capture receipt: writer entry under actual optional stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
+        print("native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
     finally:
         incoming_error = sys.exc_info()[1]
         if diagnostics is not None:

@@ -26,6 +26,7 @@ from host_process import (
     ReleaseGate,
     TestHTTPServer,
     _Observations,
+    canonical_fixture_root,
     dispose_all,
     start_ready_process,
     stop_process,
@@ -1169,7 +1170,7 @@ def prove_terminal_capture_budget():
 
             def start_inspector(*args):
                 (root / "capture-receipt" / "probe.log").write_text(
-                    "diagnostic-held-inspection\n" + json.dumps(held) + "\n")
+                    "diagnostic-dropped-inspection\ndiagnostic-held-inspection\n" + json.dumps(held) + "\n")
                 return inspector
 
             def observe(*args, **kwargs):
@@ -1533,7 +1534,7 @@ def prove_one_reply():
         accepted.clear()
         threads = set(threading.enumerate())
         with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
-            path = pathlib.Path(root) / "peer"
+            path = canonical_fixture_root(root) / "peer"
             try:
                 with patch("socket.socket", TrackedSocket):
                     yield path
@@ -1619,7 +1620,7 @@ def prove_one_reply():
 
     # A completed worker failure and failed unlink remain secondary to the client.
     with tempfile.TemporaryDirectory(prefix="rui-reply-failure-") as root:
-        path = pathlib.Path(root) / "peer"
+        path = canonical_fixture_root(root) / "peer"
         primary = RuntimeError("original client failure")
         sockets.clear()
         accepted.clear()
