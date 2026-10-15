@@ -19,6 +19,7 @@ import time
 
 import model_fixture as fixture
 from host_process import canonical_fixture_root, preserve_failure_metadata
+from terminal_screen import release_capture
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -395,6 +396,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                release_capture(master)
                 screen = human.capture_for(master)
                 screen.forbidden = ("admitted:", "Configured.", "You: ")
                 if line is None:
@@ -565,6 +567,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     caller.wait(timeout=5)
                 if caller is not None:
                     caller.stderr.close()
+                release_capture(master)
                 os.close(master)
                 os.close(slave)
                 os.close(ready_read)
@@ -611,6 +614,7 @@ def permission_read_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "permission/read"],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                release_capture(master)
                 human.capture_for(master).forbidden = ("a: Allow once", "Run Bash:")
                 try:
                     output, errors = human.terminal_exit(caller, master, timeout=10)
@@ -650,6 +654,7 @@ def permission_read_cases(state):
                     caller.wait(timeout=5)
                 if caller is not None:
                     caller.stderr.close()
+                release_capture(master)
                 os.close(master)
                 os.close(slave)
         # An ordinary details preparation failure stays live and is delivered
