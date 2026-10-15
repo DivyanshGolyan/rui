@@ -109,6 +109,7 @@ def main():
         stop_process(process)
     prove_private_environment()
     prove_coalesced_phase_records()
+    prove_observation_startup_credit()
     prove_observation_channel()
     prove_observation_disposal()
     prove_intentional_crash_retirement()
@@ -565,6 +566,87 @@ time.sleep(30)
             assert process.returncode is not None and process.stdout.closed and process.stderr.closed
             assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
     print('Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown')
+
+
+def prove_observation_startup_credit():
+    import errno
+    import host_process
+    host_process._observation_atomics()  # Compile setup before intercepting launch.
+    # Independent workload bound: ten held inspections, each with request,
+    # captured and gate-waiting receipts of at most 512 bytes.
+    required = 10 * 3 * 512
+    pipe, write, read = os.pipe, os.write, os.read
+    for case in ("ready", "write-error", "short-write", "read-error", "short-read", "wrong-bytes", "disabled"):
+        descriptors = []
+        supplied = []
+        class LaunchWitness(OSError):
+            pass
+
+        def observation_pipe():
+            descriptors.extend(pipe())
+            return tuple(descriptors)
+
+        def supply(fd, data):
+            if fd == descriptors[1]:
+                if case == "write-error":
+                    raise BlockingIOError(errno.EAGAIN, "injected unavailable startup credit")
+                if case == "short-write":
+                    return write(fd, data[:-1])
+                supplied.append(write(fd, data))
+                return supplied[-1]
+            return write(fd, data)
+
+        def drain(fd, size):
+            if fd == descriptors[0]:
+                if case == "read-error":
+                    raise BlockingIOError(errno.EAGAIN, "injected unavailable startup credit")
+                if case == "short-read":
+                    return read(fd, size - 1)
+                result = read(fd, size)
+                return bytes(value ^ 1 for value in result) if case == "wrong-bytes" else result
+            return read(fd, size)
+
+        def launch(*args, **kwargs):
+            if case == "disabled":
+                assert not descriptors and kwargs["pass_fds"] == (), "disabled observation added pipe credit"
+            else:
+                assert case == "ready", "refused startup credit still launched a child"
+                assert supplied == [required], "startup reached launch without inspection-cohort credit"
+                reader, writer = descriptors
+                assert os.get_blocking(reader) and not os.get_blocking(writer), "wrong inherited observation modes"
+                os.set_blocking(reader, False)
+                try:
+                    leftover = read(reader, required)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError(f"startup left observation bytes before launch: {leftover!r}")
+                finally:
+                    os.set_blocking(reader, True)
+            raise LaunchWitness("launch boundary witnessed")
+
+        with patch.object(host_process.os, "pipe", observation_pipe), \
+             patch.object(host_process.os, "write", supply), \
+             patch.object(host_process.os, "read", drain), \
+             patch.object(host_process.subprocess, "Popen", launch):
+            try:
+                start_ready_process(["unused-rui"], observations=None if case == "disabled" else "control_peers")
+            except LaunchWitness:
+                assert case in ("ready", "disabled"), case
+            except BlockingIOError:
+                assert case in ("write-error", "read-error"), case
+            except AssertionError as error:
+                assert case in ("short-write", "short-read", "wrong-bytes") and "startup credit" in str(error), error
+            else:
+                raise AssertionError(f"{case}: startup did not reach its expected boundary")
+        for fd in descriptors:
+            try:
+                os.fstat(fd)
+            except OSError as error:
+                assert error.errno == errno.EBADF, error
+            else:
+                raise AssertionError(f"{case}: startup retained a pipe descriptor")
+    print("Observation startup: complete cohort credit drained before launch; unavailable/short/corrupt credit refuses and closes; disabled path unchanged")
 
 
 def prove_observation_channel():

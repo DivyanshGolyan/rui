@@ -596,6 +596,11 @@ pub const OptionalText = struct {
     value: []const u8 = "",
 };
 
+pub const OptionalPolicy = struct {
+    present: bool = false,
+    value: ?[]const u8 = null,
+};
+
 pub const OptionalFile = struct {
     state: enum { omitted, value, explicit_null } = .omitted,
     path: []const u8 = "",
@@ -615,6 +620,8 @@ pub const ConfigureInput = struct {
     tools: ?[]const u8 = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
+    compaction_trigger: OptionalPolicy = .{},
+    output_reservation: OptionalPolicy = .{},
 };
 
 pub const MessageInput = struct {
@@ -954,6 +961,10 @@ pub const Current = struct {
         permission_mode: JsonEnum(enum { ask, bypass }),
         instructions: Reference,
         output_schema: ?Reference,
+        compaction_trigger: ?PolicyNumber(false),
+        output_reservation: PolicyNumber(true),
+        compaction_trigger_override: ?PolicyNumber(false),
+        output_reservation_override: ?PolicyNumber(true),
         // Omission is not evidence of provider default on older producers.
         reasoning_effort: OmittableJson(?JsonEnum(enum { none, low, medium, high, xhigh, max })) = .{},
 
@@ -1201,6 +1212,24 @@ pub const Current = struct {
 const NoAttention = struct {
     fn visit(_: @This(), _: Current.Attention) !void {}
 };
+
+fn PolicyNumber(comptime allow_zero: bool) type {
+    return struct {
+        text: JsonString(20),
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.text.slice();
+        }
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const text = try JsonString(20).jsonParse(allocator, source, options);
+            const value = try mutationId(text, allow_zero);
+            if (value > std.math.maxInt(i64)) return error.InvalidObservation;
+            return .{ .text = text };
+        }
+        pub fn jsonStringify(self: @This(), jw: anytype) !void {
+            try jw.write(self.text);
+        }
+    };
+}
 
 fn ReportNumber(comptime allow_zero: bool) type {
     return struct {
@@ -2689,6 +2718,10 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     try capture.writeOptionalText(input.permission_mode);
     try capture.write(",\"output_schema\":");
     try capture.writeOptionalFile(input.output_schema, true);
+    try capture.write(",\"compaction_trigger\":");
+    try capture.writeOptionalPolicy(input.compaction_trigger);
+    try capture.write(",\"output_reservation\":");
+    try capture.writeOptionalPolicy(input.output_reservation);
     try capture.write(if (input.require_model) "},\"require_model\":true}" else "}}");
     return finishCapture(io, &capture, paths.store.slice(), location.key, session, "configure");
 }
@@ -2900,6 +2933,12 @@ const Capture = struct {
             input.action_id,
             @tagName(input.decision),
         }));
+    }
+
+    fn writeOptionalPolicy(self: *Capture, value: OptionalPolicy) !void {
+        if (!value.present) return self.write("{\"state\":\"omitted\"}");
+        const text = value.value orelse return self.write("{\"state\":\"null\"}");
+        try self.writeOptionalText(.{ .present = true, .value = text });
     }
 
     fn writeOptionalText(self: *Capture, value: OptionalText) !void {
@@ -3756,29 +3795,44 @@ test "capture configure derives Session from captured key and retains model admi
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var captured = try captureConfigure(io, .{
-        .store = root,
-        .session = .from_capture_key,
-        .require_model = true,
-    }, .{ .generated = root });
-    const saved = captured.identity().*;
-    var bytes: [2048]u8 = undefined;
-    const count = blk: {
-        defer captured.close(io);
-        break :blk try captured.file.readPositionalAll(io, &bytes, 0);
-    };
-    try std.testing.expect(validRequestHandle(saved.key.slice()));
-    var expected_buffer: ["rui/".len + 36]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "rui/{s}", .{saved.key.slice()});
-    try std.testing.expectEqualStrings(expected, saved.session.slice());
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings(saved.key.slice(), parsed.value.object.get("key").?.string);
-    try std.testing.expectEqualStrings(expected, parsed.value.object.get("session").?.string);
-    try std.testing.expect(parsed.value.object.get("require_model").?.bool);
-    var recovered = try openCaptured(io, root, saved.key.slice());
-    defer recovered.close(io);
-    try std.testing.expectEqualStrings(expected, recovered.identity().session.slice());
+    for ([_]?[]const u8{ "100000", null }) |trigger| {
+        var captured = try captureConfigure(io, .{
+            .store = root,
+            .session = .from_capture_key,
+            .require_model = true,
+            .compaction_trigger = .{ .present = true, .value = trigger },
+            .output_reservation = .{ .present = true, .value = if (trigger != null) "16384" else null },
+        }, .{ .generated = root });
+        const saved = captured.identity().*;
+        var bytes: [2048]u8 = undefined;
+        const count = blk: {
+            defer captured.close(io);
+            break :blk try captured.file.readPositionalAll(io, &bytes, 0);
+        };
+        try std.testing.expect(validRequestHandle(saved.key.slice()));
+        var expected_buffer: ["rui/".len + 36]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buffer, "rui/{s}", .{saved.key.slice()});
+        try std.testing.expectEqualStrings(expected, saved.session.slice());
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(saved.key.slice(), parsed.value.object.get("key").?.string);
+        try std.testing.expectEqualStrings(expected, parsed.value.object.get("session").?.string);
+        try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+        const settings = parsed.value.object.get("configuration").?.object;
+        if (trigger != null) {
+            try std.testing.expectEqualStrings("100000", settings.get("compaction_trigger").?.object.get("value").?.string);
+            try std.testing.expectEqualStrings("16384", settings.get("output_reservation").?.object.get("value").?.string);
+        } else {
+            try std.testing.expectEqualStrings("null", settings.get("compaction_trigger").?.object.get("state").?.string);
+            try std.testing.expectEqualStrings("null", settings.get("output_reservation").?.object.get("state").?.string);
+        }
+        var recovered = try openCaptured(io, root, saved.key.slice());
+        defer recovered.close(io);
+        try std.testing.expectEqualStrings(expected, recovered.identity().session.slice());
+        var recovered_bytes: [2048]u8 = undefined;
+        const recovered_count = try recovered.file.readPositionalAll(io, &recovered_bytes, 0);
+        try std.testing.expectEqualSlices(u8, bytes[0..count], recovered_bytes[0..recovered_count]);
+    }
 }
 
 test "capture mutation binding streams complete escaped input and rejects late ambiguity" {
@@ -4939,6 +4993,57 @@ test "Current facts preserve explicit unconfigured and promised range" {
         try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "unknown", .{ .report = .{ .bytes = length } }));
 }
 
+test "Current settings preserve decimal token heuristics in projections" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
+    defer file.close(io);
+    const wire = "{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
+    const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"status\":\"idle\",\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    try file.writePositionalAll(io, report, 0);
+    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = report.len } });
+    try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
+    try std.testing.expectEqualStrings("16384", reply.current.settings.output_reservation.slice());
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try reply.current.writeJson(io, file, &writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"compaction_trigger\":\"100000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"output_reservation\":\"16384\"") != null);
+    const prefix = wire[0..std.mem.indexOf(u8, wire, ",\"compaction_trigger\"").?];
+    const cases = [_]struct { suffix: []const u8, valid: bool }{
+        .{ .suffix = "}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"42\",\"output_reservation\":\"0\",\"compaction_trigger_override\":\"42\",\"output_reservation_override\":\"0\"}", .valid = true },
+        .{ .suffix = ",\"compaction_trigger\":\"0\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":null,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":\"0\",\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":\"-1\"}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":\"01\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+        .{ .suffix = ",\"compaction_trigger\":null,\"output_reservation\":1,\"compaction_trigger_override\":null,\"output_reservation_override\":null}", .valid = false },
+    };
+    for (cases) |case| {
+        var settings_buffer: [4096]u8 = undefined;
+        const session_start = std.mem.indexOf(u8, report, wire).?;
+        const settings_json = try std.fmt.bufPrint(&settings_buffer, "{s}{s}{s}{s}", .{ report[0..session_start], prefix, case.suffix, report[session_start + wire.len ..] });
+        try file.writePositionalAll(io, settings_json, 0);
+        if (case.valid) {
+            const parsed = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = settings_json.len } });
+            var projection_buffer: [4096]u8 = undefined;
+            var projection = std.Io.Writer.fixed(&projection_buffer);
+            try parsed.current.writeJson(io, file, &projection);
+            if (parsed.current.settings.compaction_trigger == null)
+                try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), "\"compaction_trigger\":null") != null);
+        } else {
+            try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = settings_json.len } }));
+        }
+    }
+}
+
 test "Current facts retain settings selected empty key and ten recent bindings" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -4949,7 +5054,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[\"edit\"],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[\"edit\"],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -4991,7 +5096,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });

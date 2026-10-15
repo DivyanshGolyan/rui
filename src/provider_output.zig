@@ -343,6 +343,69 @@ fn readFields(io: std.Io, file: std.Io.File, object: Range, comptime names: []co
     return collectFields(&source, names);
 }
 
+fn exactOverflowCode(io: std.Io, file: std.Io.File, value: ?Range) !bool {
+    const range = value orelse return false;
+    var code: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = try readString(io, file, range, &code);
+    return code.eql("context_length_exceeded");
+}
+
+fn errorOverflow(io: std.Io, file: std.Io.File, range: Range) !bool {
+    const fields = try readFields(io, file, range, &.{"code"});
+    return exactOverflowCode(io, file, try fields.get("code"));
+}
+
+fn malformedOverflow(err: anyerror) !bool {
+    return switch (err) {
+        error.UnexpectedJsonEnd,
+        error.TrailingJson,
+        error.UnexpectedJsonDelimiter,
+        error.ExpectedJsonString,
+        error.InvalidJsonString,
+        error.InvalidJsonEscape,
+        error.InvalidJsonSurrogate,
+        error.InvalidJsonUtf8,
+        error.InvalidJsonNumber,
+        error.InvalidJsonLiteral,
+        error.InvalidJsonValue,
+        error.JsonTooDeep,
+        error.DuplicateJsonField,
+        error.MissingProviderField,
+        error.ProviderValueTooLong,
+        => false,
+        else => err,
+    };
+}
+
+/// Only a valid provider error envelope grants context-overflow authority.
+/// Syntax failures are negative evidence, never permission to drop context.
+pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
+    if (http_status < 400 or http_status >= 600) return false;
+    const fields = readFields(io, file, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedOverflow(err);
+    const failure = (fields.get("error") catch return false) orelse return false;
+    return errorOverflow(io, file, failure) catch |err| malformedOverflow(err);
+}
+
+fn eventOverflow(io: std.Io, file: std.Io.File, event: Range, kind: []const u8) !bool {
+    if (std.mem.eql(u8, kind, "error")) return errorOverflow(io, file, event);
+    const fields = try readFields(io, file, event, &.{"response"});
+    const response = try readFields(io, file, try fields.required("response"), &.{ "status", "error", "incomplete_details" });
+    var status: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = try readString(io, file, try response.required("status"), &status);
+    const incomplete = std.mem.eql(u8, kind, "response.incomplete");
+    if (!status.eql(if (incomplete) "incomplete" else "failed")) return false;
+    if (try response.get("error")) |failure| {
+        if (!try rangeEquals(io, file, failure, "null") and try errorOverflow(io, file, failure)) return true;
+    }
+    if (incomplete) {
+        if (try response.get("incomplete_details")) |details| {
+            const reason = try readFields(io, file, details, &.{"reason"});
+            return exactOverflowCode(io, file, try reason.get("reason"));
+        }
+    }
+    return false;
+}
+
 fn readString(io: std.Io, file: std.Io.File, value: Range, destination: *protocol.Bounded(max_evidence_bytes)) !ParsedString {
     destination.len = 0;
     var decoded = Decoded{ .bounded = destination };
@@ -520,7 +583,6 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
             }
         }
     }
-    try validateMetadataAuthority(io, file, try fields.get("internal_chat_message_metadata_passthrough"));
 }
 
 fn validateAnnotations(io: std.Io, file: std.Io.File, annotations_range: ?Range) !void {
@@ -547,6 +609,7 @@ fn validateItem(
     ordinal: u64,
     metadata: *store.OutputMetadataWriter,
     answer_hash: *std.crypto.hash.sha2.Sha256,
+    operation: store.ModelOperationKind,
 ) !ItemValidation {
     const fields = try readFields(io, file, item, item_field_names);
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
@@ -557,7 +620,17 @@ fn validateItem(
         try validateReasoning(io, file, fields);
         return .{ .kind = .reasoning, .id_digest = id_digest };
     }
+    if (kind_name.eql("compaction")) {
+        if (operation != .compaction) return error.UnsupportedProviderOutput;
+        try optionalCompleted(io, file, try fields.get("status"));
+        var encrypted = try FileSource.init(io, file, (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable);
+        const value = try parseString(&encrypted, null);
+        try encrypted.expectEnd();
+        if (value.decoded_length == 0) return error.ContinuationUnavailable;
+        return .{ .kind = .compaction, .id_digest = id_digest };
+    }
     if (kind_name.eql("function_call")) {
+        if (operation == .compaction) return error.UnsupportedProviderOutput;
         try optionalCompleted(io, file, try fields.get("status"));
         try validateFunctionCallControls(io, file, fields);
         inline for (.{
@@ -663,7 +736,7 @@ pub const ReplayValidationCursor = struct {
     }
 
     const names = item_field_names.* ++ [_][]const u8{ "annotations", "cell_id", "executed_tool_calls", "tool_calls_complete" };
-    const words = [_][]const u8{ "reasoning", "function_call", "message", "completed", "assistant", "commentary", "final_answer", "direct", "output_text", "reasoning_text", "summary_text", "url_citation" };
+    const words = [_][]const u8{ "reasoning", "compaction", "function_call", "message", "completed", "assistant", "commentary", "final_answer", "direct", "output_text", "reasoning_text", "summary_text", "url_citation" };
     const Shape = enum { absent, string, object, array, null_value, false_value, other };
     const Value = struct {
         shape: Shape = .absent,
@@ -800,6 +873,8 @@ pub const ReplayValidationCursor = struct {
                     try frame.validateFields(&.{ "name", "call_id", "arguments", "caller", "async", "namespace", "encrypted_function_args" });
                 } else if (kind.is("reasoning")) {
                     try frame.validateFields(&.{ "text", "encrypted_content", "summary", "content" });
+                } else if (kind.is("compaction")) {
+                    try frame.validateFields(&.{"encrypted_content"});
                 } else if (kind.is("message")) {
                     try frame.validateFields(&.{ "role", "phase", "content" });
                 }
@@ -817,7 +892,7 @@ pub const ReplayValidationCursor = struct {
                 const kind = try frame.requiredString("type", false);
                 if (kind.length > max_evidence_bytes) return error.ContinuationUnavailable;
                 _ = try frame.requiredString("id", true);
-                if (!kind.is("reasoning") and !kind.is("function_call") and !kind.is("message")) return error.ContinuationUnavailable;
+                if (!kind.is("reasoning") and !kind.is("compaction") and !kind.is("function_call") and !kind.is("message")) return error.ContinuationUnavailable;
                 const status = try frame.get("status");
                 if (status.shape != .absent and !status.is("completed")) return error.ContinuationUnavailable;
                 const metadata = try frame.get("internal_chat_message_metadata_passthrough");
@@ -842,15 +917,17 @@ pub const ReplayValidationCursor = struct {
                     }
                     return result;
                 }
-                if (kind.is("reasoning")) {
+                if (kind.is("reasoning") or kind.is("compaction")) {
                     _ = try frame.requiredString("encrypted_content", true);
-                    if ((try frame.get("text")).shape != .absent) return error.ContinuationUnavailable;
-                    inline for (.{ "summary", "content" }) |name| {
-                        const blocks = try frame.get(name);
-                        if (blocks.shape != .absent) {
-                            if (blocks.shape != .array) return error.ContinuationUnavailable;
-                            if (!(if (comptime std.mem.eql(u8, name, "summary")) blocks.summary else blocks.reasoning)) return error.ContinuationUnavailable;
-                            if (blocks.failure) |err| return err;
+                    if (kind.is("reasoning")) {
+                        if ((try frame.get("text")).shape != .absent) return error.ContinuationUnavailable;
+                        inline for (.{ "summary", "content" }) |name| {
+                            const blocks = try frame.get(name);
+                            if (blocks.shape != .absent) {
+                                if (blocks.shape != .array) return error.ContinuationUnavailable;
+                                if (!(if (comptime std.mem.eql(u8, name, "summary")) blocks.summary else blocks.reasoning)) return error.ContinuationUnavailable;
+                                if (blocks.failure) |err| return err;
+                            }
                         }
                     }
                     return result;
@@ -1037,6 +1114,9 @@ test "replay compatibility rejects unsupported meaning and preserves open fields
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .supported = false },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":null}", .supported = false },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":null}", .supported = false },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical\"}", .supported = true },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .supported = false },
+        .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .supported = false },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = true },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"ok\"}]}", .supported = false },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"caller\":{\"type\":\"future\"}}", .supported = false },
@@ -1050,6 +1130,8 @@ test "replay compatibility rejects unsupported meaning and preserves open fields
         .{ .item = "{\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
         .{ .item = "{\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],\"encrypted_content\":\"opaque\",\"id\":\"r\",\"type\":\"reasoning\"}", .supported = true },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"text\":null}", .supported = false },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"cell_id\":null}}", .supported = false },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"internal_chat_message_metadata_passthrough\":{\"future\":{\"cell_id\":null}}}", .supported = true },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"\",\"caller\":null,\"async\":null,\"namespace\":\"\",\"encrypted_function_args\":null}", .supported = true },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"async\":true}", .supported = false },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\",\"namespace\":\"program\"}", .supported = false },
@@ -1071,6 +1153,7 @@ test "replay compatibility rejects unsupported meaning and preserves open fields
 test "replay compatibility distinguishes consumed duplicates and syntax from unsupported shapes" {
     const cases = [_]struct { item: []const u8, failure: anyerror }{
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"id\":\"s\",\"encrypted_content\":\"opaque\"}", .failure = error.DuplicateJsonField },
+        .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"status\":\"future\",\"encrypted_content\":\"a\",\"encrypted_content\":\"b\"}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"text\":\"other\"}]}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[{\"type\":\"url_citation\",\"type\":\"url_citation\"}]}]}", .failure = error.DuplicateJsonField },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"status\":\"future\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\",\"annotations\":[],\"annotations\":false}]}", .failure = error.DuplicateJsonField },
@@ -1231,6 +1314,8 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
         .message
     else if (kind_name.eql("function_call"))
         .function_call
+    else if (kind_name.eql("compaction"))
+        .compaction
     else
         return error.UnsupportedProviderOutput;
     return .{
@@ -1323,6 +1408,8 @@ fn processEvent(
     answer_length: *u64,
     answer_hash: *std.crypto.hash.sha2.Sha256,
     evidence: *Evidence,
+    operation: store.ModelOperationKind,
+    compaction_count: *u64,
 ) !void {
     if (completed.*) return error.LateProviderOutput;
     var kind: protocol.Bounded(max_evidence_bytes) = .{};
@@ -1340,10 +1427,14 @@ fn processEvent(
         const index = try readIndex(io, file, try fields.required("output_index"));
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
-        const validation = try validateItem(io, file, item, index, metadata, answer_hash);
+        const validation = try validateItem(io, file, item, index, metadata, answer_hash, operation);
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
+        if (validation.kind == .compaction) {
+            compaction_count.* += 1;
+            if (compaction_count.* > 1) return error.UnsupportedProviderOutput;
+        }
         if (validation.kind == .message) {
             if (saw_action.*) return error.UnsupportedProviderOutput;
             message_count.* += 1;
@@ -1366,14 +1457,16 @@ fn processEvent(
         return;
     }
     if (kind.eql("response.completed")) {
-        if (added.active or item_count.* == 0 or message_count.* > 1 or
-            (message_count.* == 0 and call_count.* == 0)) return error.IncompleteProviderOutput;
+        if (added.active or item_count.* == 0 or (operation == .assistant_response and message_count.* > 1) or
+            (operation == .assistant_response and message_count.* == 0 and call_count.* == 0) or
+            (operation == .compaction and compaction_count.* != 1)) return error.IncompleteProviderOutput;
         try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
         completed.* = true;
         return;
     }
     if (kind.eql("error") or kind.eql("response.failed") or kind.eql("response.incomplete")) {
+        if (eventOverflow(io, file, event, kind.slice()) catch |err| try malformedOverflow(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
     }
     if (!knownNonterminal(kind.slice())) return error.UnsupportedProviderOutput;
@@ -1416,6 +1509,7 @@ pub fn validate(
     source_file: std.Io.File,
     source_length: u64,
     metadata: *store.OutputMetadataWriter,
+    operation: store.ModelOperationKind,
     faults: Faults,
 ) !Validated {
     if (faults.metadata) metadata.fail_writes = true;
@@ -1426,6 +1520,7 @@ pub fn validate(
     var item_count: u64 = 0;
     var message_count: u64 = 0;
     var call_count: u64 = 0;
+    var compaction_count: u64 = 0;
     var saw_action = false;
     var answer_length: u64 = 0;
     var answer_hash = protocol.contentHasher();
@@ -1469,6 +1564,8 @@ pub fn validate(
                         &answer_length,
                         &answer_hash,
                         &evidence,
+                        operation,
+                        &compaction_count,
                     );
                 }
                 data = null;
@@ -1499,7 +1596,7 @@ pub fn validate(
     }
     if (data != null) return error.IncompleteSseEvent;
     if (!completed) return error.IncompleteProviderOutput;
-    if (answer_length == 0 and call_count == 0) return error.EmptyProviderAnswer;
+    if (operation == .assistant_response and answer_length == 0 and call_count == 0) return error.EmptyProviderAnswer;
     return .{
         .item_count = item_count,
         .call_count = call_count,
@@ -1511,6 +1608,7 @@ pub fn validate(
 
 pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.ContextOverflow => "provider_context_overflow",
         error.UnsupportedProviderOutput => "unsupported_provider_output",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.MetadataScratchExhausted => "response_metadata_exhausted",
@@ -1529,6 +1627,10 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
 const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: store.OutputMetadataRecord };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
+    return validateTestingOperation(tmp, bytes, metadata_limit, .assistant_response);
+}
+
+fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: store.ModelOperationKind) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1546,13 +1648,117 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
         &retained,
     );
     errdefer metadata.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, .{});
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, operation, .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try store.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
     metadata.deinit();
     source.close(std.testing.io);
     return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item };
+}
+
+test "explicit compaction requires one private anchor and rejects Actions" {
+    const anchor = "{\"type\":\"compaction\",\"id\":\"c1\",\"encrypted_content\":\"opaque\",\"created_by\":\"retained\",\"future\":null}";
+    const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp\",\"status\":\"completed\",\"output\":[]}}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try validateTestingOperation(&tmp, sse, 4096, .compaction);
+    try std.testing.expectEqual(@as(u64, 1), result.output.item_count);
+    try std.testing.expectEqual(@as(u64, 0), result.output.call_count);
+    try std.testing.expectEqual(store.OutputItemKind.compaction, result.first_item.kind);
+    try std.testing.expectEqual(protocol.contentDigest(anchor), result.first_item.content_digest);
+    try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&tmp, sse, 4096));
+}
+
+test "compaction validates opaque windows added identity and complete terminal agreement" {
+    const encrypted_bytes = &@as([8193]u8, @splat('x'));
+    const anchor = try std.testing.allocator.print("{{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"{s}\",\"future\":{{\"nested\":[true,null]}}}}", .{encrypted_bytes});
+    defer std.testing.allocator.free(anchor);
+    const tail = "{\"type\":\"message\",\"id\":\"tail\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"after anchor\"}]}";
+    const sse = try std.testing.allocator.print(
+        "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}}}}\n\n" ++
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{s}}}\n\n" ++
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[{s},{s}]}}}}\n\n",
+        .{ anchor, tail, anchor, tail },
+    );
+    defer std.testing.allocator.free(sse);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try validateTestingOperation(&tmp, sse, 4096, .compaction);
+    try std.testing.expectEqual(@as(u64, 2), result.output.item_count);
+    try std.testing.expectEqual(protocol.contentDigest(anchor), result.first_item.content_digest);
+    try std.testing.expectEqual(@as(u64, "after anchor".len), result.output.answer_length);
+}
+
+test "compaction rejects missing double malformed unknown and Action candidates" {
+    const cases = .{
+        .{ "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", error.ContinuationUnavailable },
+        .{ "{\"type\":\"compaction\",\"id\":\"c\"}", error.ContinuationUnavailable },
+        .{ "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":null}", error.ExpectedJsonString },
+        .{ "{\"type\":\"compaction_summary\",\"id\":\"c\",\"encrypted_content\":\"x\"}", error.UnsupportedProviderOutput },
+        .{ "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\"}", error.UnsupportedProviderOutput },
+        .{ "{\"type\":\"message\",\"id\":\"c\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"not an anchor\"}]}", error.IncompleteProviderOutput },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (cases) |case| {
+        const sse = try std.testing.allocator.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}}}\n\n", .{case[0]});
+        defer std.testing.allocator.free(sse);
+        try std.testing.expectError(case[1], validateTestingOperation(&tmp, sse, 4096, .compaction));
+    }
+    const anchor = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"x\"}";
+    const duplicate = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ anchor ++ "}\n\n";
+    try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingOperation(&tmp, duplicate, 4096, .compaction));
+    const disagreement = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"different\"}]}}\n\n";
+    try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, disagreement, 4096, .compaction));
+}
+
+test "context overflow requires exact valid provider code over HTTP and SSE" {
+    const cases = .{
+        .{ "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}", true },
+        .{ "{\"error\":{\"code\":\"context_length_exceeded_extra\"}}", false },
+        .{ "{\"error\":{\"message\":\"context_length_exceeded\"}}", false },
+        .{ "{\"error\":{\"code\":\"context_length_exceeded\"},\"late\":[1,]}", false },
+        .{ "{\"error\":{\"code\":\"context_length_exceeded\",\"code\":\"other\"}}", false },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    inline for (cases) |case| {
+        const source = try testingObject(&tmp, case[0]);
+        defer source.file.close(std.testing.io);
+        try std.testing.expectEqual(case[1], try contextOverflow(std.testing.io, source.file, case[0].len, 400));
+        try std.testing.expect(!try contextOverflow(std.testing.io, source.file, case[0].len, 200));
+    }
+    // A missing sealed byte is capture failure, not a malformed remote body.
+    const short = try testingObject(&tmp, "{}");
+    defer short.file.close(std.testing.io);
+    try std.testing.expectError(error.ShortSealedRead, contextOverflow(std.testing.io, short.file, 3, 503));
+    const failures = [_][]const u8{
+        "{\"type\":\"error\",\"code\":\"context_length_exceeded\"}",
+        "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"context_length_exceeded\"}}}",
+        "{\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"context_length_exceeded\"}}}",
+    };
+    for (failures) |failure| {
+        const sse = try std.testing.allocator.print("data: {s}\n\n", .{failure});
+        defer std.testing.allocator.free(sse);
+        try std.testing.expectError(error.ContextOverflow, validateTestingSse(&tmp, sse, 4096));
+    }
+    const lookalikes = [_][]const u8{
+        "{\"type\":\"error\",\"code\":\"context_length_exceeded_extra\"}",
+        "{\"type\":\"error\",\"message\":\"context_length_exceeded\"}",
+        "{\"type\":\"error\",\"code\":\"other\",\"error\":{\"code\":\"context_length_exceeded\"}}",
+        "{\"type\":\"response.failed\",\"response\":{\"status\":\"completed\",\"error\":{\"code\":\"context_length_exceeded\"}}}",
+        "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"context_length_exceeded\"}}}",
+        "{\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
+        "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"code\":\"other\"}",
+    };
+    for (lookalikes) |failure| {
+        const sse = try std.testing.allocator.print("data: {s}\n\n", .{failure});
+        defer std.testing.allocator.free(sse);
+        try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, sse, 4096));
+    }
 }
 
 fn testingReasoningSse(reasoning: []const u8, terminal_reasoning: []const u8) ![]u8 {
@@ -1908,6 +2114,7 @@ test "provider authority metadata rejects every supported item on acceptance and
         "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\"",
         "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]",
         "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"",
+        "{\"type\":\"compaction\",\"id\":\"b\",\"encrypted_content\":\"opaque\"",
     };
     inline for (prefixes, 0..) |prefix, index| {
         inline for (.{ "cell_id", "cell_\\u0069d", "executed_tool_calls", "executed_tool_\\u0063alls", "tool_calls_complete", "tool_calls_\\u0063omplete", "future" }) |key| {
@@ -1918,13 +2125,14 @@ test "provider authority metadata rejects every supported item on acceptance and
             defer std.testing.allocator.free(sse);
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
+            const purpose: store.ModelOperationKind = if (index == 3) .compaction else .assistant_response;
             var source = try testingObject(&tmp, item);
             defer source.file.close(std.testing.io);
             if (comptime std.mem.eql(u8, key, "future")) {
-                _ = try validateTestingSse(&tmp, sse, 4096);
+                _ = try validateTestingOperation(&tmp, sse, 4096, purpose);
                 try validateReplay(std.testing.io, source.file, item.len);
             } else {
-                try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&tmp, sse, 4096));
+                try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingOperation(&tmp, sse, 4096, purpose));
                 try std.testing.expectError(error.ContinuationUnavailable, validateReplay(std.testing.io, source.file, item.len));
             }
         }

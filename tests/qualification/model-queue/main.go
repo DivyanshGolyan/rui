@@ -200,8 +200,8 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id)
  SELECT 100+i,'queue/template',100+i,100+i,100+i,'provider_http_422',NULL FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,resolution_code)
- SELECT 100+i,100+i,'queue/template',1,100+i,2*i,1,1,0,NULL,'provider_http_422' FROM n;
+INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,resolution_code,output_reservation)
+ SELECT 100+i,100+i,'queue/template',1,100+i,2*i,1,1,0,NULL,'provider_http_422',0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id)
  SELECT 'queue/template',i,2*i-1,1,100+i,100+i,NULL,NULL,(SELECT v FROM q) FROM n;

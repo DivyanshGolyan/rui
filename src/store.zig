@@ -3,12 +3,13 @@ const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const model_capability = @import("model_capability.zig");
 const tool_catalog = @import("tools.zig");
 
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 22;
+pub const schema_version: u32 = 24;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -49,7 +50,7 @@ const runnable_eligibility_sql =
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    " AND (current.resolution_code IN ('continued','interrupted') OR (" ++ complete_tool_results_sql ++ "))" ++
+    " AND (current.resolution_code IN ('continued','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))" ++
     "))";
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
@@ -61,7 +62,7 @@ const runnable_selection_sql =
     "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
     "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    "AND (current.resolution_code IN ('continued','interrupted') OR (" ++ complete_tool_results_sql ++ "))) " ++
+    "AND (current.resolution_code IN ('continued','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))) " ++
     "FROM candidate chosen JOIN message_admission m INDEXED BY message_admission_session_order " ++
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
@@ -70,7 +71,7 @@ const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
-    complete_tool_results_sql ++ " AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
+    "(current.resolution_code IN ('continued','context_overflow') OR " ++ complete_tool_results_sql ++ ") AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
     "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
     ") ORDER BY current.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
@@ -138,6 +139,8 @@ pub const ConfigurationRejection = enum {
     invalid_model,
     model_capability_unavailable,
     invalid_output_schema,
+    invalid_compaction_trigger,
+    invalid_output_reservation,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -396,6 +399,7 @@ pub const RetryPolicyInput = struct {
 
 pub const ModelFailureDisposition = union(enum) {
     terminal,
+    context_overflow,
     retryable: RetryPolicyInput,
 };
 
@@ -428,7 +432,12 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
     return false;
 }
 
+pub const ModelOperationKind = enum { assistant_response, compaction };
+
 pub const HistoricalSettings = struct {
+    operation: ModelOperationKind = .assistant_response,
+    compaction_trigger: ?u64 = null,
+    output_reservation: u64 = 0,
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
@@ -468,6 +477,7 @@ pub const HistoricalView = struct {
     active_tool_group_after_ordinal: ?u64 = null,
     active_tool_group_count: u64 = 0,
     outputs_validated: bool = false,
+    output_frontier: ?u64 = null,
     output_boundary: u64 = 0,
     output_cursor: u64 = 0,
     output_cursor_id: u64 = 0,
@@ -534,6 +544,13 @@ pub const HistoricalView = struct {
                 .ready => |entry| return entry,
             }
         }
+    }
+
+    /// Validated selected base position. Interpretation belongs to the caller.
+    pub fn contextAnchor(self: *HistoricalView) !?u64 {
+        std.debug.assert(self.active);
+        while (!try self.validateOutputsStep()) {}
+        return self.store.selectedContextAnchor(self.binding);
     }
 
     /// A tool-results entry activates one canonical group. Consume it fully
@@ -659,7 +676,7 @@ pub const HistoricalReader = struct {
     }
 };
 
-pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3 };
+pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
 pub const OutputRecordTag = enum(u8) {
     item = 1,
     text = 2,
@@ -800,6 +817,7 @@ pub const OutputMetadataReader = struct {
                 1 => .reasoning,
                 2 => .message,
                 3 => .function_call,
+                4 => .compaction,
                 else => return error.CorruptOutputMetadata,
             },
             .ordinal = std.mem.readInt(u64, bytes[8..16], .little),
@@ -1051,6 +1069,10 @@ pub const SessionObservation = struct {
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     revision: u64 = 0,
     tools_mask: u8 = 0,
+    compaction_trigger: ?u64 = null,
+    output_reservation: u64 = 0,
+    compaction_trigger_override: ?u64 = null,
+    output_reservation_override: ?u64 = null,
     permission_mode: protocol.Bounded(16) = .{},
     instructions: ContentReference = .{ .length = 0, .digest = @splat(0) },
     output_schema: ?ContentReference = null,
@@ -1341,6 +1363,8 @@ const CurrentConfiguration = struct {
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
     next_position: u64 = 1,
+    compaction_trigger: ?u64 = null,
+    output_reservation: ?u64 = null,
 };
 
 const MessageProjection = struct {
@@ -1379,10 +1403,22 @@ const ConfigurationUpdatePlan = union(enum) {
     },
 };
 
+fn configurationTokens(field: @TypeOf(@as(protocol.Configuration, .{}).compaction_trigger), previous: ?u64, allow_zero: bool) !?u64 {
+    if (field.state == .omitted) return previous;
+    if (field.state == .explicit_null) return null;
+    if (field.state != .value) return error.InvalidTokenHeuristic;
+    const value = std.fmt.parseInt(u64, field.value.slice(), 10) catch return error.InvalidTokenHeuristic;
+    if ((!allow_zero and value == 0) or value > std.math.maxInt(i64)) return error.InvalidTokenHeuristic;
+    for (field.value.slice()) |byte| if (byte < '0' or byte > '9') return error.InvalidTokenHeuristic;
+    return value;
+}
+
 fn configurationBeforeWorkspace(
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
 ) ?ConfigurationRejection {
+    _ = configurationTokens(requested.compaction_trigger, null, false) catch return .invalid_compaction_trigger;
+    _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
     else
@@ -1444,6 +1480,8 @@ fn planConfigurationUpdate(
         next.permission_mode = if (requested.permission_mode.value.eql("ask")) 0 else 1;
     }
     next.revision = if (created) 1 else current.?.revision + 1;
+    next.compaction_trigger = configurationTokens(requested.compaction_trigger, next.compaction_trigger, false) catch unreachable;
+    next.output_reservation = configurationTokens(requested.output_reservation, next.output_reservation, true) catch unreachable;
 
     return .{ .update = .{
         .instructions = switch (requested.instructions.state) {
@@ -2581,7 +2619,7 @@ pub const Store = struct {
             break :blk @intCast(id);
         };
         const status: MessageProgress.Status = if (resolution) |code|
-            if (code.eql("continued") or code.eql("interrupted")) .runnable else if (code.eql("tool_calls") and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (code.eql("tool_calls") and unresolved == 0) .runnable else .in_flight
+            if (code.eql("continued") or code.eql("interrupted") or code.eql("context_overflow")) .runnable else if (code.eql("tool_calls") and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (code.eql("tool_calls") and unresolved == 0) .runnable else .in_flight
         else
             .in_flight;
         return .{ .status = status, .action_id = action_id };
@@ -2622,10 +2660,15 @@ pub const Store = struct {
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         const maybe_current = self.readSession(session_ref) catch |err| return self.fenceReadFailure(err);
         const current = maybe_current orelse return .{};
+        const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         var observation = SessionObservation{
             .found = true,
             .revision = current.revision,
             .tools_mask = current.tools_mask,
+            .compaction_trigger = policy.compaction_trigger,
+            .output_reservation = policy.output_reservation,
+            .compaction_trigger_override = current.compaction_trigger,
+            .output_reservation_override = current.output_reservation,
         };
         try observation.session.set(session_ref);
         observation.workspace = current.workspace;
@@ -3392,6 +3435,13 @@ pub const Store = struct {
         try capture.appendJsonString(@tagName(current.provider));
         try capture.append(",\"model\":");
         try capture.appendJsonString(current.model.slice());
+        const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
+        try capture.append(",\"compaction_trigger\":");
+        if (policy.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.appendFmt(",\"output_reservation\":\"{d}\",\"compaction_trigger_override\":", .{policy.output_reservation});
+        if (current.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.append(",\"output_reservation_override\":");
+        if (current.output_reservation) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
         try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
         try capture.appendTools(current.tools_mask);
         try capture.append(",\"permission_mode\":");
@@ -3788,7 +3838,7 @@ pub const Store = struct {
                 "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
                 "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
                 "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
-                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider " ++
+                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation " ++
                 "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
                 "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
                 "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
@@ -3810,6 +3860,10 @@ pub const Store = struct {
             try capture.appendJsonString(@tagName(try readProvider(statement, 12)));
             try capture.append(",\"model\":");
             try appendColumnString(statement, 3, protocol.max_model_bytes, capture);
+            try capture.append(",\"compaction_trigger\":");
+            try appendNullablePositiveInteger(statement, 13, capture);
+            try capture.append(",\"output_reservation\":");
+            try appendNullableNonnegativeInteger(statement, 14, capture);
             try capture.append(",\"tools\":");
             try capture.appendTools(@intCast(tools));
             try capture.append(",\"permission_mode\":");
@@ -4727,6 +4781,209 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
     }
 
+    fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
+        const last = try prepare(self.database, "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
+            "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
+            "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
+        defer _ = c.sqlite3_finalize(last);
+        try bindText(last, 1, session_ref);
+        const result = c.sqlite3_step(last);
+        if (result == c.SQLITE_DONE) return .assistant_response;
+        if (result != c.SQLITE_ROW) return error.CorruptStore;
+        _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
+        var resolution: protocol.Bounded(96) = .{};
+        try readText(last, 1, &resolution);
+        const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
+        if (active and resolution.eql("context_overflow")) return .compaction;
+        if (c.sqlite3_column_int(last, 0) == 1) {
+            const previous_first = try readNullablePositiveI64(last, 4) orelse return error.CorruptStore;
+            // Apply the same pending prefix after compaction, including failure
+            // before projection. A stop excludes that prefix, not future work.
+            if (active or previous_first == first_admission) return .assistant_response;
+        }
+        const trigger = policy.compaction_trigger orelse return .assistant_response;
+        if (!try self.contextChangedSinceBase(session_ref, current.next_position)) return .assistant_response;
+        var usage_tokens: ?u64 = null;
+        const base = try prepare(self.database, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
+        defer _ = c.sqlite3_finalize(base);
+        try bindText(base, 1, session_ref);
+        try bindU64(base, 2, current.next_position);
+        if (c.sqlite3_step(base) != c.SQLITE_ROW) return error.CorruptStore;
+        const frontier = try readNullableTokens(base, 0, true) orelse return error.CorruptStore;
+        // Without a usage anchor, all retained host input still contributes.
+        // Covered provider/tool material is excluded separately by the base.
+        var usage_position: u64 = 0;
+        var result_admission = frontier;
+        const usage = try prepare(self.database, "SELECT o.usage_content_id,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
+            "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
+            "WHERE o.session_ref=?1 AND o.resolution_code IN ('completed','continued','tool_calls') " ++
+            "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
+        defer _ = c.sqlite3_finalize(usage);
+        try bindText(usage, 1, session_ref);
+        try bindU64(usage, 2, frontier);
+        try bindText(usage, 3, @tagName(current.provider));
+        try bindText(usage, 4, current.model.slice());
+        switch (c.sqlite3_step(usage)) {
+            c.SQLITE_ROW => {
+                if (try readNullablePositiveI64(usage, 0)) |content_id| {
+                    usage_tokens = try self.usagePressure(content_id);
+                    if (usage_tokens != null) {
+                        usage_position = @intCast(try readNullablePositiveI64(usage, 1) orelse return error.CorruptStore);
+                        // Admission follows the preceding complete call/result
+                        // group. Include this producer: its results follow usage.
+                        result_admission = @intCast(try readNullablePositiveI64(usage, 2) orelse return error.CorruptStore);
+                    }
+                }
+            },
+            c.SQLITE_DONE => {},
+            else => return error.CorruptStore,
+        }
+        const estimate = try prepare(self.database, "SELECT " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
+            "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2) AND e.session_position>?2) + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM model_output_item i JOIN content c ON c.content_id=i.content_id " ++
+            "WHERE i.session_ref=?1 AND i.session_position>=max(?2+1,coalesce((SELECT max(anchor.session_position) " ++
+            "FROM model_operation b INDEXED BY model_operation_compaction_bases JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
+            "WHERE b.session_ref=?1 AND b.purpose=1 AND b.resolution_code='continued' AND b.admission_position=?3 AND anchor.item_kind=4),0))) + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED BY model_operation_context_history " ++
+            "CROSS JOIN model_tool_call call ON call.operation_id=o.operation_id " ++
+            "JOIN content c ON c.content_id=call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
+            "AND o.resolution_code IN ('completed','continued','tool_calls') AND call.acceptance_position>max(?2,?3)) + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
+            "WHERE a.session_ref=?1 AND a.acceptance_position>max(?2,?3)) + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
+            "WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql ++ ") + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
+            "WHERE r.session_ref=?1 AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
+            "AND r.instructions_updated=1) + " ++
+            "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
+            "WHERE r.session_ref=?1 AND r.revision=1 AND ?2=0)");
+        defer _ = c.sqlite3_finalize(estimate);
+        try bindText(estimate, 1, session_ref);
+        try bindU64(estimate, 2, usage_position);
+        try bindU64(estimate, 3, frontier);
+        try bindU64(estimate, 4, result_admission);
+        if (c.sqlite3_step(estimate) != c.SQLITE_ROW) return error.CorruptStore;
+        const bytes = c.sqlite3_column_int64(estimate, 0);
+        if (bytes < 0) return error.CorruptStore;
+        const pressure = (usage_tokens orelse 0) +| (@as(u64, @intCast(bytes)) / 4) +| policy.output_reservation;
+        return if (pressure >= trigger) .compaction else .assistant_response;
+    }
+
+    /// The retained usage is authoritative. Only the heuristic number is
+    /// derived here, with one fixed reader window and a bounded key buffer.
+    fn usagePressure(self: *Store, content_id: i64) !?u64 {
+        var source = try ContentSource.init(self, content_id, true);
+        defer source.reader.close();
+        var depth: usize = 0;
+        var total: ?u64 = null;
+        var input: ?u64 = null;
+        var output: ?u64 = null;
+        var input_seen = false;
+        var output_seen = false;
+        var duplicate_split = false;
+        while (try source.next()) |byte| {
+            switch (byte) {
+                '{', '[' => depth += 1,
+                '}', ']' => depth -= 1,
+                '"' => {
+                    var key: [32]u8 = undefined;
+                    var length: usize = 0;
+                    while (try source.peek() != '"') {
+                        var scalar: [4]u8 = undefined;
+                        const count = try decodeOutputScalar(&source, &scalar);
+                        for (scalar[0..count]) |decoded| {
+                            if (length < key.len) key[length] = decoded;
+                            length += 1;
+                        }
+                    }
+                    _ = try source.take();
+                    if (depth != 1 or length > key.len) continue;
+                    while (try source.peek()) |next| {
+                        if (!std.ascii.isWhitespace(next)) break;
+                        _ = try source.take();
+                    }
+                    if (try source.peek() != ':') continue;
+                    _ = try source.take();
+                    const is_input = std.mem.eql(u8, key[0..length], "input_tokens");
+                    const is_output = std.mem.eql(u8, key[0..length], "output_tokens");
+                    // Occurrence is independent of value validity. An invalid
+                    // duplicate cannot repair or preserve a usable split pair.
+                    if (is_input) {
+                        duplicate_split = duplicate_split or input_seen;
+                        input_seen = true;
+                    }
+                    if (is_output) {
+                        duplicate_split = duplicate_split or output_seen;
+                        output_seen = true;
+                    }
+                    while (try source.peek()) |next| {
+                        if (!std.ascii.isWhitespace(next)) break;
+                        _ = try source.take();
+                    }
+                    var number: u64 = 0;
+                    var digits: usize = 0;
+                    const first_digit = try source.peek();
+                    while (try source.peek()) |next| {
+                        if (next < '0' or next > '9') break;
+                        _ = try source.take();
+                        number = number *| 10 +| (next - '0');
+                        digits += 1;
+                    }
+                    if (digits == 0 or (digits > 1 and first_digit == '0') or number > std.math.maxInt(i64)) continue;
+                    // A JSON number with a fraction or exponent is not a token
+                    // integer. Never accept only its leading decimal digits.
+                    while (try source.peek()) |next| {
+                        if (!std.ascii.isWhitespace(next)) break;
+                        _ = try source.take();
+                    }
+                    const delimiter = try source.peek();
+                    if (delimiter != ',' and delimiter != '}') continue;
+                    if (std.mem.eql(u8, key[0..length], "total_tokens")) total = number;
+                    if (is_input) input = number;
+                    if (is_output) output = number;
+                },
+                else => {},
+            }
+        }
+        if (total) |value| return value;
+        if (duplicate_split) return null;
+        return (input orelse return null) +| (output orelse return null);
+    }
+
+    fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
+        if (try self.readModelOperationKind(binding.operation_id) == .compaction) return false;
+        const statement = try prepare(self.database, "SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 0, &session_ref);
+        const boundary = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
+        return self.contextChangedSinceBase(session_ref.slice(), @intCast(boundary));
+    }
+
+    fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
+        // Any changed suffix of the newest base also belongs to every older
+        // base. Older bases cannot change the answer.
+        const statement = try prepare(self.database, "WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 " ++
+            "ORDER BY admission_position DESC LIMIT 1) " ++
+            "SELECT NOT EXISTS(SELECT 1 FROM base " ++
+            "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
+            "AND e.entry_kind IN (1,2) AND e.session_position>base.admission_position AND e.session_position<?2) " ++
+            "AND NOT EXISTS(SELECT 1 FROM model_output_item item INDEXED BY model_output_history " ++
+            "CROSS JOIN model_operation suffix ON suffix.operation_id=item.operation_id " ++
+            "WHERE item.session_ref=?1 AND suffix.session_ref=?1 AND suffix.purpose=0 " ++
+            "AND item.session_position>base.admission_position AND item.session_position<?2))");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session_ref);
+        try bindU64(statement, 2, boundary);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return c.sqlite3_column_int(statement, 0) == 1;
+    }
+
     fn admitNextModelAttemptLocked(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
         if (!try self.hasRunnableWorkLocked(kind)) return null;
         try exec(self.database, "BEGIN IMMEDIATE");
@@ -4743,13 +5000,17 @@ pub const Store = struct {
         try readText(select, 0, &session_ref);
         const first_admission = c.sqlite3_column_int64(select, 1);
         const cutoff = c.sqlite3_column_int64(select, 2);
-        const selected = c.sqlite3_column_int64(select, 3);
+        var selected = c.sqlite3_column_int64(select, 3);
         const revision = c.sqlite3_column_int64(select, 4);
         const initial_position = c.sqlite3_column_int64(select, 5);
         const existing_turn = try readNullablePositiveI64(select, 6);
         if (first_admission <= 0 or cutoff < first_admission or selected < 0 or revision <= 0 or initial_position <= 0) {
             return error.CorruptStore;
         }
+        const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
+        const purpose = try self.nextModelOperationKind(session_ref.slice(), first_admission, &current, policy);
+        if (purpose == .compaction) selected = 0;
 
         const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try nextIdentity(self.database, "turn", "turn_id");
         const operation_id = try nextIdentity(self.database, "model_operation", "operation_id");
@@ -4809,12 +5070,16 @@ pub const Store = struct {
             if (c.sqlite3_changes(self.database) != selected) return error.ProjectionFailed;
         }
         var next_position: u64 = try std.math.add(u64, @intCast(initial_position), @intCast(selected));
+        // Assistant admission atomically projects every instruction update in
+        // its revision prefix. Conversation's unique source_revision index is
+        // therefore the canonical applied frontier, including equal/clear text.
         const instruction_count = blk: {
+            if (purpose == .compaction) break :blk @as(i64, 0);
             const count = try prepare(
                 self.database,
-                "SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND r.revision>1 AND " ++
-                    "r.revision<=?2 AND r.instructions_updated=1 AND NOT EXISTS(" ++
-                    "SELECT 1 FROM conversation_entry e WHERE e.session_ref=r.session_ref AND e.source_revision=r.revision)",
+                "SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND " ++
+                    "r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
+                    "AND r.revision<=?2 AND r.instructions_updated=1",
             );
             defer _ = c.sqlite3_finalize(count);
             try bindText(count, 1, session_ref.slice());
@@ -4830,8 +5095,9 @@ pub const Store = struct {
                 "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id) " ++
                     "SELECT ?1,coalesce((SELECT max(entry_ordinal) FROM conversation_entry WHERE session_ref=?1),0) + " ++
                     "row_number() OVER (ORDER BY revision),?3 + row_number() OVER (ORDER BY revision) - 1,2,?2,NULL,revision,NULL,instructions_content_id " ++
-                    "FROM session_revision r WHERE r.session_ref=?1 AND r.revision>1 AND r.revision<=?4 AND r.instructions_updated=1 AND NOT EXISTS(" ++
-                    "SELECT 1 FROM conversation_entry e WHERE e.session_ref=r.session_ref AND e.source_revision=r.revision) ORDER BY revision",
+                    "FROM session_revision r WHERE r.session_ref=?1 AND " ++
+                    "r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
+                    "AND r.revision<=?4 AND r.instructions_updated=1 ORDER BY revision",
             );
             defer _ = c.sqlite3_finalize(project);
             try bindText(project, 1, session_ref.slice());
@@ -4855,8 +5121,8 @@ pub const Store = struct {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,body_model,openai_model,x_openai_model,request_id,usage_content_id) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,body_model,openai_model,x_openai_model,request_id,usage_content_id) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -4865,6 +5131,9 @@ pub const Store = struct {
             try bindI64(insert, 4, revision);
             try bindI64(insert, 5, cutoff);
             try bindU64(insert, 6, next_position);
+            try bindI64(insert, 7, @as(i64, if (purpose == .compaction) 1 else 0));
+            try bindNullableU64(insert, 8, policy.compaction_trigger);
+            try bindU64(insert, 9, policy.output_reservation);
             try expectDone(insert);
         }
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -5023,6 +5292,62 @@ pub const Store = struct {
         return .{ .store = self, .binding = binding };
     }
 
+    pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        try self.validateCurrentAttempt(binding);
+        return self.readModelOperationKind(binding.operation_id) catch |err| self.fenceReadFailure(err);
+    }
+
+    fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
+        const statement = try prepare(self.database, "SELECT purpose FROM model_operation WHERE operation_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
+        return switch (c.sqlite3_column_int(statement, 0)) {
+            0 => .assistant_response,
+            1 => .compaction,
+            else => error.CorruptStore,
+        };
+    }
+
+    fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        return self.selectedContextAnchorLocked(binding) catch |err| switch (err) {
+            error.StaleAttemptBinding, error.SupersededByControl => err,
+            else => self.fenceReadFailure(err),
+        };
+    }
+
+    fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
+        try self.validateCurrentAttempt(binding);
+        const statement = try prepare(self.database, "SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
+            "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
+            "AND base.resolution_code='continued' AND base.admission_position<current.admission_position " ++
+            "ORDER BY base.admission_position DESC LIMIT 1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.operation_id);
+        const result = c.sqlite3_step(statement);
+        if (result == c.SQLITE_DONE) return null;
+        if (result != c.SQLITE_ROW) return error.CorruptStore;
+        const base_id = c.sqlite3_column_int64(statement, 0);
+        const anchor = try prepare(self.database, "SELECT session_position,content_id FROM model_output_item INDEXED BY model_output_compaction_anchor WHERE operation_id=?1 AND item_kind=4 ORDER BY item_ordinal");
+        defer _ = c.sqlite3_finalize(anchor);
+        try bindI64(anchor, 1, base_id);
+        if (c.sqlite3_step(anchor) != c.SQLITE_ROW) return error.CorruptStore;
+        const position = c.sqlite3_column_int64(anchor, 0);
+        const content_id = c.sqlite3_column_int64(anchor, 1);
+        if (position <= 0 or content_id <= 0) return error.CorruptStore;
+        _ = try self.readContentMetadata(content_id);
+        if (c.sqlite3_step(anchor) != c.SQLITE_DONE) return error.CorruptStore;
+        return @intCast(position);
+    }
+
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
         const statement = try prepare(
             self.database,
@@ -5054,7 +5379,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
@@ -5087,6 +5412,9 @@ pub const Store = struct {
         hash.update(session_ref.slice());
         const digest = hash.finalResult();
         return .{
+            .operation = try self.readModelOperationKind(view.binding.operation_id),
+            .compaction_trigger = try readNullableTokens(statement, 7, false),
+            .output_reservation = try readNullableTokens(statement, 8, true) orelse return error.CorruptStore,
             .model = model,
             .provider = try readProvider(statement, 4),
             .workspace = workspace,
@@ -5122,26 +5450,30 @@ pub const Store = struct {
     fn validateHistoricalOutputsStepLocked(self: *Store, view: *HistoricalView) !bool {
         try self.validateCurrentAttempt(view.binding);
         if (view.outputs_validated) return true;
-        if (view.output_boundary == 0) {
-            const boundary = try prepare(self.database, "SELECT current.admission_position " ++
+        if (view.output_frontier == null) {
+            const boundary = try prepare(self.database, "SELECT current.admission_position,coalesce((SELECT base.admission_position " ++
+                "FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 " ++
+                "AND base.resolution_code='continued' AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1),0) " ++
                 "FROM model_operation current WHERE current.operation_id=?1");
             defer _ = c.sqlite3_finalize(boundary);
             try bindU64(boundary, 1, view.binding.operation_id);
             if (c.sqlite3_step(boundary) != c.SQLITE_ROW) return error.CorruptStore;
             view.output_boundary = try readNullableTokens(boundary, 0, false) orelse return error.CorruptStore;
+            view.output_frontier = try readNullableTokens(boundary, 1, true) orelse return error.CorruptStore;
             return false;
         }
         if (view.output_source == 0) {
-            const source = try prepare(self.database, "SELECT source.operation_id,source.admission_position,source.output_item_count " ++
+            const source = try prepare(self.database, "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose " ++
                 "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
-                "WHERE current.operation_id=?1 AND (source.admission_position,source.operation_id)>(?2,?4) " ++
-                "AND source.admission_position<?3 AND source.resolution_code IN ('completed','continued','tool_calls') " ++
+                "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
+                "AND source.admission_position<?4 AND source.resolution_code IN ('completed','continued','tool_calls') " ++
                 "ORDER BY source.admission_position,source.operation_id LIMIT 1");
             defer _ = c.sqlite3_finalize(source);
             try bindU64(source, 1, view.binding.operation_id);
-            try bindU64(source, 2, view.output_cursor);
-            try bindU64(source, 3, view.output_boundary);
-            try bindU64(source, 4, view.output_cursor_id);
+            try bindU64(source, 2, view.output_frontier.?);
+            try bindU64(source, 3, view.output_cursor);
+            try bindU64(source, 4, view.output_boundary);
+            try bindU64(source, 5, view.output_cursor_id);
             const result = c.sqlite3_step(source);
             if (result == c.SQLITE_DONE) {
                 view.outputs_validated = true;
@@ -5152,6 +5484,7 @@ pub const Store = struct {
             view.output_cursor = try readNullableTokens(source, 1, false) orelse return error.CorruptStore;
             view.output_cursor_id = view.output_source;
             view.output_expected = try readNullableTokens(source, 2, true) orelse return error.CorruptStore;
+            if (c.sqlite3_column_int(source, 3) == 1 and view.output_expected == 0) return error.CorruptStore;
             view.output_count = 0;
             view.output_previous_position = 0;
             return false;
@@ -5564,18 +5897,31 @@ pub const Store = struct {
         try exec(self.database, "BEGIN IMMEDIATE");
         try self.validateCurrentAttempt(binding);
         switch (disposition) {
-            .terminal => {
+            .terminal, .context_overflow => {
+                const compact = disposition == .context_overflow and try self.overflowCanCompact(binding);
+                const resolution = if (disposition == .context_overflow)
+                    (if (compact) "context_overflow" else "ResourceExceeded")
+                else
+                    code;
                 const update = try prepare(
                     self.database,
-                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2 " ++
+                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2," ++
+                        "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                 );
                 defer _ = c.sqlite3_finalize(update);
                 try bindU64(update, 1, binding.operation_id);
-                try bindText(update, 2, code);
+                try bindText(update, 2, resolution);
                 try bindU64(update, 3, binding.attempt_ordinal);
+                try bindI64(update, 4, @as(i64, if (disposition == .context_overflow) 1 else 0));
+                try bindText(update, 5, code);
                 try expectDone(update);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
+                if (compact) {
+                    if (faults.before_commit) return error.InjectedCommitFailure;
+                    try exec(self.database, "COMMIT");
+                    return;
+                }
 
                 const settle_turn = try prepare(
                     self.database,
@@ -5583,7 +5929,7 @@ pub const Store = struct {
                 );
                 defer _ = c.sqlite3_finalize(settle_turn);
                 try bindU64(settle_turn, 1, binding.turn_id);
-                try bindText(settle_turn, 2, code);
+                try bindText(settle_turn, 2, resolution);
                 try bindU64(settle_turn, 3, binding.operation_id);
                 try expectDone(settle_turn);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
@@ -5772,6 +6118,20 @@ pub const Store = struct {
         if (frozen_tools_value < 0 or frozen_tools_value > 3) return error.CorruptStore;
         const frozen_tools: u8 = @intCast(frozen_tools_value);
         var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
+        const purpose = try self.readModelOperationKind(binding.operation_id);
+        // Validate the explicit candidate before imports, projections or effects.
+        var candidate_metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
+        var compaction_count: u64 = 0;
+        while (try candidate_metadata.next()) |record| {
+            if (record.tag == .item and record.kind == .compaction) {
+                if (record.length == 0) return error.InvalidProviderEnvelope;
+                compaction_count += 1;
+            }
+            if (purpose == .compaction and record.kind == .function_call) return error.InvalidProviderEnvelope;
+        }
+        if (purpose == .compaction) {
+            if (compaction_count != 1 or output.call_count != 0) return error.InvalidProviderEnvelope;
+        } else if (compaction_count != 0) return error.InvalidProviderEnvelope;
 
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         var imported_items: u64 = 0;
@@ -5948,7 +6308,7 @@ pub const Store = struct {
         if (item_id_record != null or name_record != null or call_id_record != null or
             imported_calls != output.call_count) return error.CorruptOutputMetadata;
 
-        const answer_id: ?i64 = if (output.answer_length != 0)
+        const answer_id: ?i64 = if (purpose == .assistant_response and output.answer_length != 0)
             try self.importAnswerProjection(binding, output)
         else
             null;
@@ -5968,7 +6328,7 @@ pub const Store = struct {
             current.next_position = try std.math.add(u64, current.next_position, 1);
         }
         const pending = try self.countPendingMessages(session_ref.slice());
-        const resolution_code = if (output.call_count != 0) "tool_calls" else if (pending == 0) "completed" else "continued";
+        const resolution_code = if (purpose == .compaction) "continued" else if (output.call_count != 0) "tool_calls" else if (pending == 0) "completed" else "continued";
         {
             const update = try prepare(
                 self.database,
@@ -5990,7 +6350,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
-        if (output.call_count == 0 and pending == 0) {
+        if (purpose == .assistant_response and output.call_count == 0 and pending == 0) {
             const update = try prepare(
                 self.database,
                 "UPDATE turn SET outcome_code='completed',outcome_content_id=?2 WHERE turn_id=?1 AND operation_id=?3 AND outcome_code IS NULL",
@@ -6010,7 +6370,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
         }
-        if (output.call_count == 0 and pending == 0) try self.recordTurnOutcomePosition(binding.turn_id);
+        if (purpose == .assistant_response and output.call_count == 0 and pending == 0) try self.recordTurnOutcomePosition(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try exec(self.database, "COMMIT");
     }
@@ -6591,7 +6951,7 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider FROM session WHERE session_ref=?1");
+        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
@@ -6616,18 +6976,20 @@ pub const Store = struct {
         if (next_position <= 0) return error.CorruptStore;
         current.next_position = @intCast(next_position);
         current.provider = try readProvider(statement, 8);
+        current.compaction_trigger = try readNullableTokens(statement, 9, false);
+        current.output_reservation = try readNullableTokens(statement, 10, true);
         return current;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)");
+        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10 WHERE session_ref=?1");
+        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10,compaction_trigger=?11,output_reservation=?12 WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
@@ -6641,7 +7003,7 @@ pub const Store = struct {
         current: *const CurrentConfiguration,
         instructions_updated: bool,
     ) !void {
-        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)");
+        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, current.revision);
@@ -6654,6 +7016,8 @@ pub const Store = struct {
         try bindI64(statement, 9, current.permission_mode);
         try bindNullableI64(statement, 10, current.output_schema_id);
         try bindText(statement, 11, @tagName(current.provider));
+        try bindNullableU64(statement, 12, current.compaction_trigger);
+        try bindNullableU64(statement, 13, current.output_reservation);
         try expectDone(statement);
     }
 
@@ -7001,6 +7365,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ revision INTEGER NOT NULL CHECK(revision>0),
+        \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
+        \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
         \\ next_position INTEGER NOT NULL CHECK(next_position>0)
         \\) STRICT;
         \\CREATE INDEX session_workspace_list ON session(workspace);
@@ -7028,6 +7394,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ tools_mask INTEGER NOT NULL,
         \\ permission_mode INTEGER NOT NULL,
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
+        \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
+        \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
         \\ PRIMARY KEY(session_ref,revision)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE message_admission(
@@ -7069,6 +7437,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ settings_revision INTEGER NOT NULL CHECK(settings_revision>0),
         \\ input_cutoff INTEGER NOT NULL CHECK(input_cutoff>0),
         \\ admission_position INTEGER NOT NULL CHECK(admission_position>0),
+        \\ purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),
+        \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
+        \\ output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
         \\ allowance_used INTEGER NOT NULL CHECK(allowance_used BETWEEN 1 AND 4),
@@ -7114,7 +7485,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ item_ordinal INTEGER NOT NULL CHECK(item_ordinal>=0),
         \\ session_ref TEXT NOT NULL,
         \\ session_position INTEGER NOT NULL CHECK(session_position>0),
-        \\ item_kind INTEGER NOT NULL CHECK(item_kind IN (1,2,3)),
+        \\ item_kind INTEGER NOT NULL CHECK(item_kind IN (1,2,3,4)),
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
         \\ item_id_digest BLOB NOT NULL CHECK(length(item_id_digest)=32),
@@ -7187,6 +7558,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
+        \\CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
@@ -7195,8 +7567,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE resolution_code IN ('completed','continued','tool_calls');
+        \\CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='continued';
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
+        \\CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4;
         \\CREATE INDEX turn_session_latest ON turn(session_ref,turn_id DESC);
     );
     try exec(database, "PRAGMA application_id=1280591409");
@@ -7217,7 +7591,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','conversation_entry_history','model_output_history','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -7322,6 +7696,8 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindU64(statement, 8, current.revision);
     try bindU64(statement, 9, current.next_position);
     try bindText(statement, 10, @tagName(current.provider));
+    try bindNullableU64(statement, 11, current.compaction_trigger);
+    try bindNullableU64(statement, 12, current.output_reservation);
 }
 
 fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
@@ -7756,7 +8132,7 @@ fn settleCallsForTesting(
     file_prefix: []const u8,
     calls: []const TestingCall,
 ) !void {
-    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, .{});
+    return settleCallsForTestingWithFaults(storage, tmp, binding, file_prefix, calls, .{}, null);
 }
 
 fn settleCallsForTestingWithFaults(
@@ -7766,6 +8142,7 @@ fn settleCallsForTestingWithFaults(
     file_prefix: []const u8,
     calls: []const TestingCall,
     faults: Faults,
+    usage_json: ?[]const u8,
 ) !void {
     var source_buffer: [64 * 1024]u8 = undefined;
     var source_writer = std.Io.Writer.fixed(&source_buffer);
@@ -7779,7 +8156,7 @@ fn settleCallsForTestingWithFaults(
         file_prefix,
         .{
             .used = &metadata_used,
-            .limit = try std.math.mul(u64, calls.len, 5 * output_metadata_record_bytes),
+            .limit = try std.math.mul(u64, calls.len, 5 * output_metadata_record_bytes) + output_metadata_record_bytes,
         },
         false,
         &retained_metadata,
@@ -7849,6 +8226,10 @@ fn settleCallsForTestingWithFaults(
             .id_digest = protocol.contentDigest(call.item_id),
             .content_digest = protocol.contentDigest(source_writer.buffered()[@intCast(item_start)..@intCast(offset)]),
         });
+    }
+    if (usage_json) |bytes| {
+        try metadata.append(.{ .tag = .usage, .start = source_writer.end, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
+        try source_writer.writeAll(bytes);
     }
     try metadata.sealForRead();
     const source_bytes = source_writer.buffered();
@@ -9590,6 +9971,84 @@ test "runnable discovery fences structurally incomplete current tool calls" {
     }
 }
 
+test "compaction pressure uses provider usage appended input and complete call result groups" {
+    for (0..3) |scenario| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "config", "direct/compact");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("heuristics");
+        try patch.session.set("direct/compact");
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        patch.configuration.output_reservation.state = .value;
+        try patch.configuration.output_reservation.value.set("1");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "item-a", .name = "unknown", .encoded_call_id = "call-a", .decoded_call_id = "call-a", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "item-b", .name = "unknown", .encoded_call_id = "call-b", .decoded_call_id = "call-b", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &calls, .{}, if (scenario == 0)
+            "{\"input_tokens\":99999,\"output_tokens\":1,\"details\":{\"input_tokens\":0}}"
+        else
+            "{\"input_tokens\":9,\"output_tokens\":1,\"details\":{\"input_tokens\":1000000}}");
+        var appended: [5000]u8 = @splat('x');
+        try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", if (scenario == 2) &appended else "later");
+        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const purpose: ModelOperationKind = if (scenario == 1) .assistant_response else .compaction;
+        try std.testing.expectEqual(purpose, try storage.modelOperationKind(next));
+        {
+            var view = try storage.openHistoricalView(next);
+            defer view.close();
+            var cursor: TestingHistoryCursor = .{};
+            try std.testing.expect((try view.contextAnchor()) == null);
+            try std.testing.expectEqual(HistoricalEntryKind.user, (try cursor.next(&view)).?.kind);
+            for (0..2) |_| try std.testing.expectEqual(HistoricalEntryKind.provider_output, (try cursor.next(&view)).?.kind);
+            try std.testing.expectEqual(HistoricalEntryKind.tool_results, (try cursor.next(&view)).?.kind);
+            for ([_][]const u8{ "call-a", "call-b" }) |expected| {
+                const result = (try view.nextToolResult()).?;
+                var reader = try view.openContent(result.call_id);
+                defer reader.close();
+                var bytes: [64]u8 = undefined;
+                const count = try reader.read(0, &bytes);
+                try std.testing.expectEqualStrings(expected, bytes[0..count]);
+            }
+            try std.testing.expect((try view.nextToolResult()) == null);
+            if (scenario == 1) try std.testing.expectEqual(HistoricalEntryKind.user, (try cursor.next(&view)).?.kind);
+            try std.testing.expect((try cursor.next(&view)) == null);
+        }
+        if (purpose == .compaction) {
+            try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
+            try settleCompactionForTesting(&storage, &tmp, next, &.{.compaction});
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var view = try storage.openHistoricalView(successor);
+            defer view.close();
+            var cursor: TestingHistoryCursor = .{};
+            const anchor = (try view.contextAnchor()).?;
+            for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .tool_results }) |kind|
+                try std.testing.expectEqual(kind, (try cursor.next(&view)).?.kind);
+            while (try view.nextToolResult()) |_| {}
+            const base_entry = (try cursor.next(&view)).?;
+            try std.testing.expectEqual(anchor, base_entry.position);
+            try std.testing.expectEqual(HistoricalEntryKind.provider_output, base_entry.kind);
+            try std.testing.expectEqual(HistoricalEntryKind.user, (try cursor.next(&view)).?.kind);
+            try std.testing.expect((try cursor.next(&view)) == null);
+            if (scenario == 0) {
+                // Accepted suffix without usage must not revive the large
+                // pre-base usage on the next admission.
+                try settleCallsForTesting(&storage, &tmp, successor, "suffix-output", &calls);
+                try submitTestMessage(&storage, &tmp, "three", "three", "direct/compact", "small suffix");
+                const after_base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(after_base));
+            }
+        }
+    }
+}
+
 test "missing canonical call outcome rows fence history and inspection" {
     const corruptions = [_]enum { action, call, result_content }{ .action, .call, .result_content };
     const session_refs = [_][]const u8{
@@ -9797,7 +10256,7 @@ test "complete historical tool-result traversal scales with groups and calls" {
     try std.testing.expect(more_calls < call_baseline * 8);
 }
 
-test "historical preparation yields group populations and cancels proposal authentication" {
+test "historical preparation yields covered group populations and cancels proposal authentication" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -9862,7 +10321,7 @@ test "historical preparation yields group populations and cancels proposal authe
 }
 
 test "historical preparation rejects missing extra and reordered sibling classifications incrementally" {
-    {
+    for ([_]bool{ false, true }) |covered| {
         cases: for ([_][:0]const u8{
             "UPDATE model_tool_call SET call_ordinal=99 WHERE call_ordinal=0; UPDATE model_tool_call SET call_ordinal=0 WHERE call_ordinal=1; UPDATE model_tool_call SET call_ordinal=1 WHERE call_ordinal=99",
             "DELETE FROM model_tool_call WHERE call_ordinal=1",
@@ -9884,7 +10343,13 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 .{ .item_id = "b", .name = "unknown", .encoded_call_id = "b", .decoded_call_id = "b", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             };
             try settleCallsForTesting(&storage, &tmp, source, "sibling-output", &calls);
-            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (covered) {
+                try storage.settleModelAttemptFailure(next, "overflow", .context_overflow, .{});
+                const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
+                next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
             try exec(storage.database, "PRAGMA foreign_keys=OFF");
             try exec(storage.database, fault);
             try exec(storage.database, "PRAGMA foreign_keys=ON");
@@ -9964,7 +10429,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         var retained: ?named_scratch.Owner = null;
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .{});
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .assistant_response, .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", "direct/output", "second");
@@ -10117,9 +10582,9 @@ test "historical accepted output selection work excludes failed Operation popula
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-                "attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "attempt_ordinal,output_reservation,allowance_used,uncertain,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-                "1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "1,0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -10803,6 +11268,7 @@ test "controls wait behind an active model settlement transaction" {
                 "transaction-race-metadata",
                 self.calls,
                 .{ .settlement_trace = .{ .context = self.shared, .mark_fn = Shared.settlementTrace } },
+                null,
             ) catch |err| {
                 self.result = err;
             };
@@ -14438,11 +14904,11 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
-                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence; " ++
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807,0 FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) VALUES" ++
-                "({1},{1},'older-due',1,1,1,1,1,0,99),({2},{2},'earlier-deadline',1,1,1,1,1,0,1)",
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
+                "({1},{1},'older-due',1,1,1,1,1,0,99,0),({2},{2},'earlier-deadline',1,1,1,1,1,0,1,0)",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -14462,8 +14928,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
-                "SELECT value,value,printf('due-%d',value),1,1,1,1,1,0,1 FROM sequence",
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('due-%d',value),1,1,1,1,1,0,1,0 FROM sequence",
             .{due_count},
             0,
         );
@@ -14478,10 +14944,10 @@ test "retry due index excludes future population and preserves age ordering" {
     try exec(
         storage.database,
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) VALUES" ++
-            "(1,1,'oldest-active',1,1,1,1,1,0,99)," ++
-            "(2,2,'oldest-free',1,1,1,1,1,0,50)," ++
-            "(3,3,'earliest-deadline',1,1,1,1,1,0,1)",
+            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
+            "(1,1,'oldest-active',1,1,1,1,1,0,99,0)," ++
+            "(2,2,'oldest-free',1,1,1,1,1,0,50,0)," ++
+            "(3,3,'earliest-deadline',1,1,1,1,1,0,1,0)",
     );
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -14507,9 +14973,9 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
+            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
             "SELECT value,value,printf('retry-%d',value),1,1,1,1,1,0," ++
-            "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END FROM sequence",
+            "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0 FROM sequence",
     );
 
     const Active = struct {
@@ -14570,8 +15036,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(6000) UNION ALL SELECT value+1 FROM sequence WHERE value<6101) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
-            "SELECT value,value,printf('exhausted-%d',value),1,1,1,4,4,1,0 FROM sequence",
+            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
+            "SELECT value,value,printf('exhausted-%d',value),1,1,1,4,4,1,0,0 FROM sequence",
     );
     try exec(storage.database, "PRAGMA foreign_keys=ON");
 
@@ -14941,4 +15407,996 @@ test "live tool activity survives completed Turns and split result pages" {
     try std.testing.expectEqual(@as(usize, 0), frozen.count);
     try std.testing.expectEqual(@as(u64, 2), frozen.call_activity.total);
     try std.testing.expectEqual(next.operation_id, frozen.call_activity.entries[0].operation);
+}
+
+test "compaction overflow admits a new Operation without losing applied input" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "compact-config", "direct/compact");
+    try submitTestMessage(&storage, &tmp, "compact-input", "input", "direct/compact", "keep all input");
+    const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(original, "context_overflow", .context_overflow, .{});
+    const next = (try storage.admitNextModelAttempt(.{})) orelse return error.MissingCompaction;
+    try std.testing.expect(next.permit.binding.operation_id != original.operation_id);
+    try std.testing.expectEqual(original.turn_id, next.permit.binding.turn_id);
+    try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next.permit.binding));
+    var view = try storage.openHistoricalView(next.permit.binding);
+    defer view.close();
+    try std.testing.expectEqual(ModelOperationKind.compaction, (try view.settings()).operation);
+    try std.testing.expect((try view.contextAnchor()) == null);
+    const input = (try view.nextEntry(0)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
+    try std.testing.expect((try view.nextEntry(input.position)) == null);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+}
+
+const TestingHistoryCursor = struct {
+    position: u64 = 0,
+
+    fn next(self: *@This(), view: *HistoricalView) !?HistoricalEntry {
+        const entry = try view.nextEntry(self.position);
+        if (entry) |item| self.position = item.position;
+        return entry;
+    }
+};
+
+pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, kinds: []const OutputItemKind) !void {
+    if (!@import("builtin").is_test) @compileError("test-only Store fixture");
+    const source = try tmp.dir.createFile(std.testing.io, "compaction-output", .{ .read = true });
+    defer source.close(std.testing.io);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..root_length], "compaction-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+    defer metadata.deinit();
+    var offset: u64 = 0;
+    var calls: u64 = 0;
+    for (kinds, 0..) |kind, ordinal| {
+        var id_buffer: [64]u8 = undefined;
+        const id = try std.fmt.bufPrint(&id_buffer, "{s}-{d}", .{ @tagName(kind), ordinal });
+        const fields: []const u8 = switch (kind) {
+            .reasoning, .function_call => "",
+            .compaction => ",\"encrypted_content\":\"opaque\"",
+            .message => ",\"content\":[]",
+        };
+        var item_buffer: [256]u8 = undefined;
+        const bytes = try std.fmt.bufPrint(&item_buffer, "{{\"type\":\"{s}\",\"id\":\"{s}\"{s}}}", .{ @tagName(kind), id, fields });
+        if (kind == .function_call) calls += 1;
+        try source.writeStreamingAll(std.testing.io, bytes);
+        try metadata.append(.{ .tag = .item, .kind = kind, .ordinal = ordinal, .start = offset, .length = bytes.len, .content_digest = protocol.contentDigest(bytes), .id_digest = protocol.contentDigest(id) });
+        offset += bytes.len;
+    }
+    try source.sync(std.testing.io);
+    try metadata.sealForRead();
+    try storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = offset,
+        .metadata = metadata.file,
+        .item_count = kinds.len,
+        .call_count = calls,
+        // Deliberately present: compaction must not project visible messages.
+        .answer_length = if (try storage.modelOperationKind(binding) == .compaction) 6 else 0,
+        .answer_digest = protocol.contentDigest("answer"),
+        .response_id = .{},
+        .body_model = .{},
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+}
+
+test "compaction success retains host inputs and ordered anchor suffix across reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "compact-config", "direct/compact");
+    try submitTestMessage(&storage, &tmp, "compact-input", "input", "direct/compact", "original");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try submitTestMessage(&storage, &tmp, "compact-arrival", "arrival", "direct/compact", "later");
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{.message}));
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{ .compaction, .function_call }));
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{ .compaction, .compaction }));
+    try std.testing.expect(!storage.isFenced());
+    try settleCompactionForTesting(&storage, &tmp, compact, &.{ .reasoning, .compaction, .message });
+    var request: protocol.ConversationPage = .{};
+    try request.session.set("direct/compact");
+    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(request)).count);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).action_count);
+    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(compact.turn_id, successor.turn_id);
+    try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
+    {
+        var view = try storage.openHistoricalView(successor);
+        defer view.close();
+        var cursor: TestingHistoryCursor = .{};
+        const anchor = (try view.contextAnchor()).?;
+        for ([_][]const u8{ "original", "{\"type\":\"reasoning\",\"id\":\"reasoning-0\"}", "{\"type\":\"compaction\",\"id\":\"compaction-1\",\"encrypted_content\":\"opaque\"}", "{\"type\":\"message\",\"id\":\"message-2\",\"content\":[]}", "later" }, 0..) |expected, index| {
+            const entry = (try cursor.next(&view)).?;
+            if (index == 2) try std.testing.expectEqual(anchor, entry.position);
+            var reader = try view.openContent(entry.content.?);
+            defer reader.close();
+            var bytes: [256]u8 = undefined;
+            const count = try reader.read(0, &bytes);
+            try std.testing.expectEqualStrings(expected, bytes[0..count]);
+        }
+        try std.testing.expect((try cursor.next(&view)) == null);
+    }
+    // New applied input permits one new compaction; its unchanged successor
+    // must terminalize irreducible overflow rather than loop.
+    try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+    const second_base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCompactionForTesting(&storage, &tmp, second_base, &.{.compaction});
+    const exhausted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    {
+        var view = try storage.openHistoricalView(exhausted);
+        defer view.close();
+        var cursor: TestingHistoryCursor = .{};
+        const anchor = (try view.contextAnchor()).?;
+        for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user }) |kind|
+            try std.testing.expectEqual(kind, (try cursor.next(&view)).?.kind);
+        try std.testing.expectEqual(anchor, (try cursor.next(&view)).?.position);
+        try std.testing.expect((try cursor.next(&view)) == null);
+    }
+    try storage.settleModelAttemptFailure(exhausted, "overflow", .context_overflow, .{});
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    const observation = try storage.observeCommand("input");
+    try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
+}
+
+test "compaction defaults nullable overrides and frozen retry survive reopen" {
+    for ([_][]const u8{ "gpt-6-luna", "model-a", "gpt-6-luna-alias" }) |model| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+        var configure = try completeConfiguration("config", "direct/compact", workspace, model);
+        try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+        const expected: ?u64 = if (std.mem.eql(u8, model, "gpt-6-luna")) 244800 else null;
+        const initial = try storage.inspectSession("direct/compact");
+        try std.testing.expectEqual(expected, initial.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);
+        try std.testing.expect(initial.compaction_trigger_override == null and initial.output_reservation_override == null);
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("override");
+        try patch.session.set("direct/compact");
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("10");
+        patch.configuration.output_reservation.state = .value;
+        try patch.configuration.output_reservation.value.set("8");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        const selected = try storage.inspectSession("direct/compact");
+        try std.testing.expectEqual(@as(?u64, 10), selected.compaction_trigger_override);
+        try std.testing.expectEqual(@as(?u64, 8), selected.output_reservation_override);
+        try storage.close();
+        storage = try testingStore(&tmp, std.testing.io);
+        const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+        try std.testing.expectEqual(first.operation_id, retry.operation_id);
+        {
+            var view = try storage.openHistoricalView(retry);
+            defer view.close();
+            const frozen = try view.settings();
+            try std.testing.expectEqual(expected, frozen.compaction_trigger);
+            try std.testing.expectEqual(@as(u64, 0), frozen.output_reservation);
+        }
+        try patch.key.set("inherit");
+        patch.configuration.compaction_trigger.state = .explicit_null;
+        patch.configuration.output_reservation.state = .explicit_null;
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        const reset = try storage.inspectSession("direct/compact");
+        try std.testing.expectEqual(expected, reset.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 0), reset.output_reservation);
+        try std.testing.expect(reset.compaction_trigger_override == null and reset.output_reservation_override == null);
+        {
+            const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/compact", 1024 * 1024, .full);
+            defer std.testing.allocator.free(report);
+            try std.testing.expect(std.mem.indexOf(u8, report, "\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null") != null);
+            // Revision one records inheritance, not today's effective default.
+            try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":null,\"output_reservation\":null") != null);
+            try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"10\",\"output_reservation\":\"8\"") != null);
+        }
+        try storage.settleModelAttemptFailure(retry, "overflow", .context_overflow, .{});
+        const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
+        try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
+        const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // Overflow recovery remains enabled without a default trigger, but
+        // unchanged context cannot authorize another compaction.
+        try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+        try expectActivityOutcome(&storage, "direct/compact", successor, "ResourceExceeded");
+    }
+}
+
+test "compaction exact threshold zero reservation and integer usage fallback" {
+    for ([_][]const u8{ "{\"total_tokens\":999}", "{\"total_tokens\":1000}", "{\"total_tokens\":1000.5}", "{\"total_tokens\":1000e0}", "{\"total_tokens\":-1000}", "{\"total_tokens\":0}", "{\"total_tokens\":18446744073709551616}", "{\"total_tokens\":1000000}" }, 0..) |usage, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "config", "direct/compact");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("heuristics");
+        try patch.session.set("direct/compact");
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        // An unknown model has no guessed automatic capacity, even with
+        // accepted usage far above the known model's default threshold.
+        if (index == 7) patch.configuration.compaction_trigger.state = .omitted;
+        patch.configuration.output_reservation.state = .value;
+        try patch.configuration.output_reservation.value.set("0");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "");
+        try settleCallsForTestingWithFaults(&storage, &tmp, first, "usage-output", &.{}, .{}, usage);
+        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(if (index == 1) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+    }
+}
+
+test "compaction pressure uses the latest accepted output even without usage" {
+    for ([_]struct { usage: ?[]const u8, usable: bool }{
+        .{ .usage = null, .usable = false },
+        .{ .usage = "{\"total_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"total_tokens\":1}", .usable = true },
+        .{ .usage = "{\"input_tokens\":1}", .usable = false },
+        .{ .usage = "{\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":null}", .usable = false },
+        .{ .usage = "{\"input_tokens\":null,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":-1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":9223372036854775808}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1}", .usable = true },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999}", .usable = true },
+        .{ .usage = "{\"total_tokens\":1.5,\"input_tokens\":0,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":2,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":2}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":null,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":null,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":null}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1.5,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_\\u0074okens\":2,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_\\u0074okens\":2}", .usable = false },
+        .{ .usage = "{\"input_tokens\":99999,\"input_tokens\":99999,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":99999,\"output_tokens\":99999}", .usable = false },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999,\"input_tokens\":null,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":99999,\"total_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"details\":{\"input_tokens\":99999,\"output_tokens\":99999},\"output_tokens\":0}", .usable = true },
+    }) |case| {
+        for ([_]enum { host_input, provider_output, small }{ .host_input, .provider_output, .small }) |context| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/usage");
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("heuristics");
+            try patch.session.set("direct/usage");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            const original: [4000]u8 = @splat('x');
+            try submitTestMessage(&storage, &tmp, "one", "one", "direct/usage", if (context == .host_input) &original else "small input");
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"total_tokens\":1}");
+            try submitTestMessage(&storage, &tmp, "two", "two", "direct/usage", "small suffix");
+            const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(second));
+            var latest_calls = calls;
+            if (context == .provider_output) {
+                latest_calls[0].encoded_arguments = &original;
+                latest_calls[0].decoded_arguments = &original;
+            }
+            try settleCallsForTestingWithFaults(&storage, &tmp, second, "latest-output", &latest_calls, .{}, case.usage);
+            try submitTestMessage(&storage, &tmp, "three", "three", "direct/usage", "small suffix");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(if (case.usable or context == .small) ModelOperationKind.assistant_response else ModelOperationKind.compaction, try storage.modelOperationKind(next));
+        }
+    }
+}
+
+test "compaction soft trigger freezes settings before selecting arrivals and instructions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "config", "direct/compact");
+    var patch: protocol.ConfigureCommand = .{};
+    try patch.key.set("heuristics");
+    try patch.session.set("direct/compact");
+    patch.configuration.compaction_trigger.state = .value;
+    try patch.configuration.compaction_trigger.value.set("1");
+    patch.configuration.output_reservation.state = .value;
+    try patch.configuration.output_reservation.value.set("1");
+    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(first, "provider_failure", .terminal, .{});
+    try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "pending");
+    const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view = try storage.openHistoricalView(compact);
+    defer view.close();
+    const frozen = try view.settings();
+    try std.testing.expectEqual(ModelOperationKind.compaction, frozen.operation);
+    try std.testing.expectEqual(@as(u64, 1), frozen.compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 1), frozen.output_reservation);
+    try std.testing.expect((try view.contextAnchor()) == null);
+    const input = (try view.nextEntry(0)).?;
+    try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
+    try std.testing.expect((try view.nextEntry(input.position)) == null);
+    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
+    try patch.key.set("updated-heuristics");
+    try patch.configuration.compaction_trigger.value.set("999");
+    try patch.configuration.output_reservation.value.set("8");
+    patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", "later instruction");
+    defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 1), (try view.settings()).compaction_trigger);
+    try submitTestMessage(&storage, &tmp, "three", "three", "direct/compact", "arrival");
+    try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
+    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var later = try storage.openHistoricalView(successor);
+    defer later.close();
+    const settings = try later.settings();
+    try std.testing.expectEqual(ModelOperationKind.assistant_response, settings.operation);
+    try std.testing.expectEqual(@as(u64, 999), settings.compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 8), settings.output_reservation);
+    var cursor: TestingHistoryCursor = .{};
+    const anchor = (try later.contextAnchor()).?;
+    for ([_]HistoricalEntryKind{ .user, .provider_output, .user, .user, .instruction }) |kind| {
+        const entry = (try cursor.next(&later)).?;
+        try std.testing.expectEqual(kind, entry.kind);
+        if (kind == .provider_output) try std.testing.expectEqual(anchor, entry.position);
+    }
+    try std.testing.expect((try cursor.next(&later)) == null);
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+    const replay = storage.configure(&patch, .{});
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    var omitted: protocol.ConfigureCommand = .{};
+    try omitted.key.set("omitted-heuristics");
+    try omitted.session.set("direct/compact");
+    try std.testing.expect(storage.configure(&omitted, .{}) == .accepted);
+    const observed = try storage.inspectSession("direct/compact");
+    try std.testing.expectEqual(@as(u64, 999), observed.compaction_trigger);
+    try std.testing.expectEqual(@as(u64, 8), observed.output_reservation);
+    const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/compact", 1024 * 1024, .current);
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"999\",\"output_reservation\":\"8\"") != null);
+    for ([_][]const u8{ "0", "", "-1", "9223372036854775808", "+1", "1.5", "1_000", " 1", "١" }, 0..) |invalid, index| {
+        var invalid_patch: protocol.ConfigureCommand = .{};
+        var key: [32]u8 = undefined;
+        try invalid_patch.key.set(try std.fmt.bufPrint(&key, "invalid-heuristic-{d}", .{index}));
+        try invalid_patch.session.set("direct/compact");
+        invalid_patch.configuration.compaction_trigger.state = .value;
+        try invalid_patch.configuration.compaction_trigger.value.set(invalid);
+        const rejected = storage.configure(&invalid_patch, .{});
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(ConfigurationRejection.invalid_compaction_trigger, rejected.rejected.code);
+        try std.testing.expectEqual(observed.revision, (try storage.inspectSession("direct/compact")).revision);
+        if (!std.mem.eql(u8, invalid, "0")) {
+            try invalid_patch.key.set(try std.fmt.bufPrint(&key, "invalid-reserve-{d}", .{index}));
+            invalid_patch.configuration.compaction_trigger.state = .omitted;
+            invalid_patch.configuration.output_reservation.state = .value;
+            try invalid_patch.configuration.output_reservation.value.set(invalid);
+            const reserve_rejected = storage.configure(&invalid_patch, .{});
+            try std.testing.expect(reserve_rejected == .rejected);
+            try std.testing.expectEqual(ConfigurationRejection.invalid_output_reservation, reserve_rejected.rejected.code);
+            try std.testing.expectEqual(observed.revision, (try storage.inspectSession("direct/compact")).revision);
+        }
+    }
+}
+
+test "compaction failed and unresolved candidates preserve the accepted base" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "config", "direct/compact");
+    try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCompactionForTesting(&storage, &tmp, base, &.{ .reasoning, .compaction, .message });
+    try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "later");
+    const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(assistant, "overflow", .context_overflow, .{});
+    const candidate = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    {
+        var view = try storage.openHistoricalView(candidate);
+        defer view.close();
+        var cursor: TestingHistoryCursor = .{};
+        const anchor = (try view.contextAnchor()).?;
+        for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user }, 0..) |kind, index| {
+            const entry = (try cursor.next(&view)).?;
+            try std.testing.expectEqual(kind, entry.kind);
+            if (index == 2) try std.testing.expectEqual(anchor, entry.position);
+        }
+        try std.testing.expect((try cursor.next(&view)) == null);
+    }
+    try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, candidate, &.{}));
+    try storage.settleModelAttemptFailure(candidate, "bad_compaction", .terminal, .{});
+    try storage.close();
+    storage = try testingStore(&tmp, std.testing.io);
+    try submitTestMessage(&storage, &tmp, "three", "three", "direct/compact", "new turn");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var view = try storage.openHistoricalView(next);
+    defer view.close();
+    var cursor: TestingHistoryCursor = .{};
+    const anchor = (try view.contextAnchor()).?;
+    for ([_]HistoricalEntryKind{ .user, .provider_output, .provider_output, .provider_output, .user, .user }, 0..) |kind, index| {
+        const entry = (try cursor.next(&view)).?;
+        try std.testing.expectEqual(kind, entry.kind);
+        if (index == 2) try std.testing.expectEqual(anchor, entry.position);
+    }
+    try std.testing.expect((try cursor.next(&view)) == null);
+}
+
+test "compaction selected newest base corruption fences rather than using an older base" {
+    for ([_]enum { payload, anchor, tail }{ .payload, .anchor, .tail }) |corruption| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "config", "direct/compact");
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+        try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "later");
+        const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(assistant, "overflow", .context_overflow, .{});
+        const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleCompactionForTesting(&storage, &tmp, newest, &.{ .compaction, .message });
+        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        switch (corruption) {
+            .anchor => try exec(storage.database, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4"),
+            .tail => try exec(storage.database, "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=2"),
+            .payload => try exec(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4)"),
+        }
+        var view = try storage.openHistoricalView(next);
+        defer view.close();
+        if (corruption != .payload) {
+            try std.testing.expectError(error.CorruptStore, view.contextAnchor());
+        } else {
+            const anchor = (try view.contextAnchor()).?;
+            const selected = (try view.nextEntry(anchor - 1)).?;
+            try std.testing.expectEqual(anchor, selected.position);
+            var reader = try view.openContent(selected.content.?);
+            defer reader.close();
+            var bytes: [4096]u8 = undefined;
+            try std.testing.expectError(error.CorruptStore, reader.read(0, &bytes));
+        }
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "historical accepted output completeness and provenance fence both read paths" {
+    for ([_]enum { no_base, base, suffix, tied_base, tied_suffix }{ .no_base, .base, .suffix, .tied_base, .tied_suffix }) |scenario| {
+        for ([_][:0]const u8{
+            "DELETE FROM model_output_item WHERE operation_id=?1",
+            "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=?1",
+            "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=?1",
+            "DELETE FROM model_output_item WHERE operation_id=?1 AND item_ordinal=2",
+            "DELETE FROM model_output_item WHERE operation_id=?1 AND item_ordinal=1",
+            "DELETE FROM model_output_item WHERE operation_id=?1 AND item_ordinal=0",
+            "UPDATE model_output_item SET item_ordinal=8 WHERE operation_id=?1 AND item_ordinal=1",
+            "UPDATE model_output_item SET session_ref='foreign' WHERE operation_id=?1",
+            "UPDATE model_output_item SET attempt_ordinal=99 WHERE operation_id=?1",
+            "UPDATE model_output_item SET session_position=session_position+1000 WHERE operation_id=?1",
+        }) |sql| {
+            for ([_]bool{ false, true }) |context_read| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage = try testingStore(&tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                try configureTestSession(&storage, "config", "direct/compact");
+                try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+                var output = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var corrupt_id = output.operation_id;
+                var tied_id: ?u64 = null;
+                if (scenario != .no_base) {
+                    try storage.settleModelAttemptFailure(output, "overflow", .context_overflow, .{});
+                    const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try settleCompactionForTesting(&storage, &tmp, base, &.{ .reasoning, .compaction, .message });
+                    corrupt_id = base.operation_id;
+                    if (scenario == .tied_base) tied_id = base.operation_id;
+                    output = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+                if (scenario == .tied_suffix) {
+                    try submitTestMessage(&storage, &tmp, "between", "between", "direct/compact", "between");
+                    try settleCompactionForTesting(&storage, &tmp, output, &.{ .reasoning, .message });
+                    tied_id = output.operation_id;
+                    output = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+                if (scenario != .base) corrupt_id = output.operation_id;
+                try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "later");
+                try settleCompactionForTesting(&storage, &tmp, output, &.{ .reasoning, .message, .reasoning });
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (tied_id) |previous| {
+                    const tie = try prepare(storage.database, "UPDATE model_operation SET admission_position=" ++
+                        "(SELECT admission_position FROM model_operation WHERE operation_id=?1) WHERE operation_id=?2");
+                    defer _ = c.sqlite3_finalize(tie);
+                    try bindU64(tie, 1, previous);
+                    try bindU64(tie, 2, output.operation_id);
+                    try expectDone(tie);
+                }
+                const mutation = try prepare(storage.database, sql);
+                defer _ = c.sqlite3_finalize(mutation);
+                try bindU64(mutation, 1, corrupt_id);
+                try expectDone(mutation);
+                var view = try storage.openHistoricalView(next);
+                defer view.close();
+                if (context_read) {
+                    try std.testing.expectError(error.CorruptStore, view.contextAnchor());
+                } else {
+                    try std.testing.expectError(error.CorruptStore, view.nextEntry(0));
+                }
+                try std.testing.expect(storage.isFenced());
+                try std.testing.expectError(error.StoreFenced, view.settings());
+            }
+        }
+    }
+}
+
+test "compaction repeated overflow consumes fixed pending prefix without a proactive loop" {
+    for ([_]bool{ false, true }) |with_base| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "config", "direct/compact");
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        if (with_base) {
+            try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+            const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // A new bound input after the base makes another recovery necessary.
+            try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "bound suffix");
+            try settleCompactionForTesting(&storage, &tmp, assistant, &.{.reasoning});
+            const suffix = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(suffix, "network", .terminal, .{});
+        } else {
+            try storage.settleModelAttemptFailure(first, "network", .terminal, .{});
+        }
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("heuristics");
+        try patch.session.set("direct/compact");
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/compact", "fixed pending prefix");
+        const proactive = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(proactive));
+        try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
+        try storage.settleModelAttemptFailure(proactive, "overflow", .context_overflow, .{});
+        try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
+        const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
+        try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+        try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+        const recovery = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(recovery));
+        try storage.settleModelAttemptFailure(recovery, "overflow", .context_overflow, .{});
+        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+        try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+        const observation = try storage.observeCommand("pending");
+        try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "compaction does not repeat a soft trigger after a failed assistant with unchanged source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "config", "direct/compact");
+    try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(successor, "network_failure", .terminal, .{});
+    var patch: protocol.ConfigureCommand = .{};
+    try patch.key.set("heuristics");
+    try patch.session.set("direct/compact");
+    patch.configuration.compaction_trigger.state = .value;
+    try patch.configuration.compaction_trigger.value.set("1");
+    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "new pending input");
+    const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+    try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+}
+
+test "compaction missing usage estimates covered retained host input" {
+    for ([_]?[]const u8{
+        null,
+        "{\"total_tokens\":1.5}",
+        "{\"input_tokens\":1}",
+        "{\"input_tokens\":1,\"output_tokens\":1.5}",
+        "{\"input_tokens\":1,\"input_tokens\":null,\"output_tokens\":0}",
+        "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":1}",
+    }) |usage| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "config", "direct/compact");
+        var patch: protocol.ConfigureCommand = .{};
+        try patch.key.set("heuristics");
+        try patch.session.set("direct/compact");
+        patch.configuration.compaction_trigger.state = .value;
+        try patch.configuration.compaction_trigger.value.set("1000");
+        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+        const original: [4000]u8 = @splat('x');
+        try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", &original);
+        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+        const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
+        const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+        try settleCallsForTestingWithFaults(&storage, &tmp, successor, "usage", &calls, .{}, usage);
+        try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "small suffix");
+        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(next));
+    }
+}
+
+test "historical context selection work excludes nonmatching Operation population" {
+    const Measure = struct {
+        steps: u64 = 0,
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, with_base: bool) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/context-selection");
+            try submitTestMessage(&storage, &tmp, "input", "input", "direct/context-selection", "retain");
+            var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (with_base) {
+                try storage.settleModelAttemptFailure(current, "overflow", .context_overflow, .{});
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCompactionForTesting(&storage, &tmp, current, &.{ .reasoning, .compaction, .message });
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            // Isolate search work from payload work: failed assistant/compaction
+            // Operations have no accepted output. Their population must not be
+            // scanned inside one source/frontier/anchor selection step.
+            try exec(storage.database, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL");
+            const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+                "SELECT value+1 FROM sequence WHERE value<?1) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
+                "output_reservation,attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
+                "0,1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, population);
+            try bindU64(insert, 2, current.operation_id);
+            try expectDone(insert);
+
+            var view = try storage.openHistoricalView(current);
+            defer view.close();
+            var measured: @This() = .{};
+            c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            while (!try view.validateOutputsStep()) {}
+            try std.testing.expectEqual(with_base, (try view.contextAnchor()) != null);
+            return measured.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |with_base| {
+        const small = try Measure.run(8, with_base);
+        const large = try Measure.run(1024, with_base);
+        try std.testing.expect(large <= small + 100);
+    }
+}
+
+test "model admission work excludes failed historical Operation population" {
+    const Measure = struct {
+        steps: u64 = 0,
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, overflow: bool) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/admission-work");
+            try submitTestMessage(&storage, &tmp, "input", "input", "direct/admission-work", "retain");
+            const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // Keep the actual current Operation newer than all injected history.
+            try exec(storage.database, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001");
+            const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+                "SELECT value+1 FROM sequence WHERE value<?1) " ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
+                "output_reservation,attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
+                "0,1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+            defer _ = c.sqlite3_finalize(insert);
+            try bindU64(insert, 1, population);
+            try bindU64(insert, 2, current.operation_id);
+            try expectDone(insert);
+            try storage.settleModelAttemptFailure(current, if (overflow) "overflow" else "provider_http_422", if (overflow) .context_overflow else .terminal, .{});
+            try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/admission-work", "pending input");
+
+            var measured: @This() = .{};
+            const admitted = blk: {
+                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            };
+            try std.testing.expectEqual(if (overflow) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+            try std.testing.expectEqual(@as(u64, if (overflow) 1 else 0), (try storage.inspectSession("direct/admission-work")).pending_messages);
+            return measured.steps;
+        }
+    };
+    for ([_]bool{ false, true }) |overflow| {
+        const small = try Measure.run(8, overflow);
+        const large = try Measure.run(1024, overflow);
+        try std.testing.expect(large <= small + 100);
+    }
+}
+
+test "model admission work excludes accepted compaction base history" {
+    const Measure = struct {
+        steps: u64 = 0,
+        const Suffix = enum { unchanged, low, high, missing };
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, suffix: Suffix) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/base-work");
+            try submitTestMessage(&storage, &tmp, "input", "input", "direct/base-work", "retain");
+            var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            for (0..population) |index| {
+                try storage.settleModelAttemptFailure(current, "overflow", .context_overflow, .{});
+                const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+                try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
+                current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (index + 1 != population) {
+                    // Provider-only suffix allows the next overflow recovery
+                    // without accumulating retained host input.
+                    const call = TestingCall{ .item_id = "old-item", .name = "unknown", .encoded_call_id = "old-call", .decoded_call_id = "old-call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                    try settleCallsForTestingWithFaults(&storage, &tmp, current, "old-output", &.{call}, .{}, null);
+                    current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+            }
+            if (suffix == .unchanged) {
+                try storage.settleModelAttemptFailure(current, "network", .terminal, .{});
+            } else {
+                const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
+                try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
+                    .low => "{\"total_tokens\":1}",
+                    .high => "{\"total_tokens\":1000}",
+                    .missing => null,
+                    .unchanged => unreachable,
+                });
+            }
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("policy");
+            try patch.session.set("direct/base-work");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/base-work", "");
+            var measured: @This() = .{};
+            const admitted = blk: {
+                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            };
+            try std.testing.expectEqual(if (suffix == .high) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+            try std.testing.expectEqual(@as(u64, if (suffix == .high) 1 else 0), (try storage.inspectSession("direct/base-work")).pending_messages);
+            return measured.steps;
+        }
+    };
+    var bounded = true;
+    for ([_]Measure.Suffix{ .unchanged, .low, .high, .missing }) |suffix| {
+        const small = try Measure.run(8, suffix);
+        const large = try Measure.run(128, suffix);
+        bounded = bounded and large <= small + 200;
+    }
+    try std.testing.expect(bounded);
+}
+
+test "model admission work excludes usage-covered accepted tool and instruction history" {
+    const Measure = struct {
+        steps: u64 = 0,
+        const Population = enum { rejection, action, instruction };
+
+        fn progress(context: ?*anyopaque) callconv(.c) c_int {
+            const counter: *@This() = @ptrCast(@alignCast(context orelse return 1));
+            counter.steps += 1;
+            return 0;
+        }
+
+        fn run(population: usize, kind: Population, compact: bool) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/pressure-work");
+            if (kind == .action) {
+                var tools: protocol.ConfigureCommand = .{};
+                try tools.key.set("tools");
+                try tools.session.set("direct/pressure-work");
+                tools.configuration.tools.state = .value;
+                tools.configuration.tools.count = 1;
+                tools.configuration.tools.values[0] = .bash;
+                tools.configuration.permission_mode.state = .value;
+                try tools.configuration.permission_mode.value.set("bypass");
+                try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
+            }
+            const call = TestingCall{ .item_id = "item", .name = if (kind == .action) "bash" else "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = if (kind == .action) "{\\\"description\\\":\\\"Run no-op\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}" else "{}", .decoded_arguments = if (kind == .action) "{\"description\":\"Run no-op\",\"cmd\":\"true\",\"timeout_ms\":null}" else "{}" };
+            const instructions: [400]u8 = @splat('x');
+            for (0..population + 1) |index| {
+                var key: [64]u8 = undefined;
+                if (kind == .instruction) {
+                    var patch: protocol.ConfigureCommand = .{};
+                    try patch.key.set(try std.fmt.bufPrint(&key, "instructions-{d}", .{index}));
+                    try patch.session.set("direct/pressure-work");
+                    patch.configuration.instructions = try testingBytesContent(&tmp, "instruction", &instructions);
+                    defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+                    try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+                }
+                const message_key = try std.fmt.bufPrint(&key, "message-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, "input", message_key, "direct/pressure-work", "old input");
+                const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
+                if (kind == .instruction and index != population) {
+                    // Isolate revision history from accepted-output population.
+                    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+                } else {
+                    try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"total_tokens\":99900}" else "{\"total_tokens\":99999}") else "{\"total_tokens\":1}") else null);
+                }
+                if (kind == .action) {
+                    const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
+                    _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
+                    // Measure the actual tool successor: the producer's result
+                    // is after its usage/output and must remain in pressure.
+                    if (index != population) {
+                        const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
+                        try storage.settleModelAttemptFailure(continuation, "provider_http_422", .terminal, .{});
+                    }
+                }
+            }
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("policy");
+            try patch.session.set("direct/pressure-work");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("100000");
+            if (kind == .instruction) {
+                // Same-text updates are new input, not content deduplication.
+                patch.configuration.instructions = try testingBytesContent(&tmp, "pending-instruction", &instructions);
+            }
+            defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            if (kind == .instruction) {
+                var clear: protocol.ConfigureCommand = .{};
+                try clear.key.set("clear");
+                try clear.session.set("direct/pressure-work");
+                clear.configuration.instructions = try testingBytesContent(&tmp, "clear-instruction", "");
+                defer clear.removeTemporaryContent(std.testing.io) catch unreachable;
+                try std.testing.expect(storage.configure(&clear, .{}) == .accepted);
+            }
+            try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/pressure-work", "");
+            var measured: @This() = .{};
+            const admitted = blk: {
+                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                break :blk (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureAdmission).permit.binding;
+            };
+            try std.testing.expectEqual(if (compact) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
+            try std.testing.expectEqual(@as(u64, if (compact) 1 else 0), (try storage.inspectSession("direct/pressure-work")).pending_messages);
+            if (kind == .instruction) try std.testing.expectEqual(@as(u64, @intCast(population + 1 + @as(usize, if (compact) 0 else 2))), try queryU64(storage.database, "SELECT count(*) FROM conversation_entry WHERE source_revision IS NOT NULL"));
+            return measured.steps;
+        }
+    };
+    var bounded = true;
+    for ([_]Measure.Population{ .rejection, .action, .instruction }) |kind| {
+        for ([_]bool{ false, true }) |compact| {
+            const small = try Measure.run(8, kind, compact);
+            const large = try Measure.run(128, kind, compact);
+            bounded = bounded and large <= small + 200;
+        }
+    }
+    try std.testing.expect(bounded);
+}
+
+test "compaction new Turn evaluates pressure independently of stopped overflow recovery" {
+    for ([_]bool{ false, true }) |stop_compaction| {
+        for ([_]bool{ false, true }) |pressure| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/stopped-overflow");
+            try submitTestMessage(&storage, &tmp, "original", "original", "direct/stopped-overflow", "retain original input");
+            const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(original, "overflow", .context_overflow, .{});
+            if (stop_compaction) {
+                const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
+            }
+            var stop = try completeSessionStop("stop", "direct/stopped-overflow");
+            const stopped = storage.stopSession(&stop, .{});
+            try std.testing.expect(stopped == .accepted);
+            try std.testing.expectEqual(SessionStopCompletion.completed, stopped.accepted.completion);
+            try storage.close();
+            storage = try testingStore(&tmp, std.testing.io);
+
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("pressure");
+            try patch.session.set("direct/stopped-overflow");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set(if (pressure) "1" else "1000000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "new", "new", "direct/stopped-overflow", "new work");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expect(next.turn_id != original.turn_id);
+            try std.testing.expectEqual(if (pressure) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+            try std.testing.expectEqual(@as(u64, if (pressure) 1 else 0), (try storage.inspectSession("direct/stopped-overflow")).pending_messages);
+        }
+    }
+}
+
+test "compaction purpose admission fences a missing latest Turn Operation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try configureTestSession(&storage, "config", "direct/missing-current");
+    try submitTestMessage(&storage, &tmp, "input", "input", "direct/missing-current", "original input");
+    const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try storage.settleModelAttemptFailure(original, "provider_http_422", .terminal, .{});
+    try exec(storage.database, "UPDATE turn SET operation_id=99999");
+    try submitTestMessage(&storage, &tmp, "later", "later", "direct/missing-current", "new input");
+    try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
+    try std.testing.expect(storage.isFenced());
 }
