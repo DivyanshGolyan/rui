@@ -1090,8 +1090,27 @@ fn parseRetryWaits(value: []const u8) ![3]u64 {
     return waits;
 }
 
+fn setPolicyArgument(field: *client.OptionalPolicy, text: []const u8) !void {
+    if (field.present) return error.DuplicateArgument;
+    field.* = .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
+}
+
+test "policy arguments reset preserve spelling and reject duplicates" {
+    var reset: client.OptionalPolicy = .{};
+    try setPolicyArgument(&reset, "default");
+    try std.testing.expect(reset.present and reset.value == null);
+    try std.testing.expectError(error.DuplicateArgument, setPolicyArgument(&reset, "42"));
+    var value: client.OptionalPolicy = .{};
+    try setPolicyArgument(&value, "00042");
+    try std.testing.expectEqualStrings("00042", value.value.?);
+}
+
 fn configure(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
     const io = init.io;
+    if (standaloneHelp(args)) {
+        try std.Io.File.stdout().writeStreamingAll(io, configure_help ++ compaction_help ++ "\n");
+        return;
+    }
     var json = false;
     var input = client.ConfigureInput{
         .store = "",
@@ -1109,6 +1128,10 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
             key_seen = true;
         } else if (std.mem.eql(u8, arg, "--provider")) {
             input.provider = .{ .present = true, .value = try takeValue(args, &index) };
+        } else if (std.mem.eql(u8, arg, "--compaction-trigger")) {
+            try setPolicyArgument(&input.compaction_trigger, try takeValue(args, &index));
+        } else if (std.mem.eql(u8, arg, "--output-reservation")) {
+            try setPolicyArgument(&input.output_reservation, try takeValue(args, &index));
         } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--json")) json = true else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
         index += 1;
     }
@@ -1342,6 +1365,22 @@ fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: 
     try writeSafeField(init.io, "Provider: ", @tagName(work.settings.provider.value));
     try writeSafeField(init.io, "Model: ", work.settings.model.slice());
     try writeSafeField(init.io, "Permission: ", @tagName(work.settings.permission_mode.value));
+    {
+        const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
+        var buffer: [160]u8 = undefined;
+        const policy = if (work.settings.compaction_trigger) |tokens|
+            try std.fmt.bufPrint(&buffer, "estimated context pressure threshold: {s} tokens ({s})", .{ tokens.slice(), origin })
+        else
+            try std.fmt.bufPrint(&buffer, "no automatic threshold ({s})", .{origin});
+        try writeSafeField(init.io, "Automatic compaction: ", policy);
+        if (work.settings.compaction_trigger == null)
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Use /configure --compaction-trigger TOKENS to enable a threshold. Provider context-overflow recovery still applies.\n");
+    }
+    {
+        const origin = if (work.settings.output_reservation_override != null) "Session override" else "model default";
+        var buffer: [160]u8 = undefined;
+        try writeSafeField(init.io, "Extra compaction headroom: ", try std.fmt.bufPrint(&buffer, "{s} tokens ({s}); not a guaranteed output budget", .{ work.settings.output_reservation.slice(), origin }));
+    }
     try writeSafeField(init.io, "Work: ", @tagName(work.work.status.value));
     if (work.selected_message) |selected|
         try writeSafeField(init.io, "Current message: ", selected.slice());
@@ -1515,7 +1554,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         var count: usize = 4;
         var arguments: [20][]const u8 = undefined;
         const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
             return;
         };
         var next: usize = 0;
@@ -1526,6 +1565,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
                 std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
                 std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
+                std.mem.eql(u8, flag, "--compaction-trigger") or std.mem.eql(u8, flag, "--output-reservation") or
                 std.mem.eql(u8, flag, "--output-schema");
             if (!takes_value and !std.mem.eql(u8, flag, "--text-output")) {
                 valid = false;
@@ -1555,7 +1595,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
                 if (err == error.CanonicalStoreFailure) return err;
             };
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Usage: /configure --model MODEL [--tools bash] [--permission-mode ask|bypass] (settings for this Session only)\n");
+        } else try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
     } else {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
     }
@@ -1773,6 +1813,10 @@ fn observe(init: std.process.Init, args: []const []const u8) !void {
 
 fn inspect(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
+    if (standaloneHelp(args)) {
+        try std.Io.File.stdout().writeStreamingAll(io, inspect_help ++ "\n");
+        return;
+    }
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
     var profile: protocol.ReportProfile = .current;
@@ -2661,6 +2705,35 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     return args[index.*];
 }
 
+fn standaloneHelp(args: []const []const u8) bool {
+    return args.len == 1 and (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h"));
+}
+
+const compaction_help =
+    \\--compaction-trigger TOKENS|default sets a positive estimated context pressure threshold.
+    \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
+    \\Omission preserves the Session setting; default resets it to model policy.
+    \\Changes apply to new model requests. Requests already accepted keep their original settings, even when retried.
+    \\Unknown models have no automatic threshold. Inspect settings with /status or rui inspect-session.
+;
+
+const configure_help =
+    \\Usage: rui configure [--store PATH] --session REF [settings] [--json]
+    \\First configuration requires --workspace PATH --provider codex --model MODEL.
+    \\Settings: --model MODEL, --tools bash, --permission-mode ask|bypass,
+    \\--instructions FILE, --output-schema FILE, --text-output.
+    \\Use --record FILE --key KEY to capture an explicit recoverable request.
+    \\
+;
+
+const inspect_help =
+    \\Usage: rui inspect-session [--store PATH] --session REF [--profile current|full]
+    \\Print saved Session settings and work as JSON; current is the default profile.
+    \\Includes effective compaction settings and Session overrides.
+;
+
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ compaction_help ++ "\n";
+
 const usage_text =
     \\usage:
     \\  rui --help | -h
@@ -2692,6 +2765,10 @@ const usage_text =
     \\  rui serve [--store PATH] [--active-capacity N] [--codex | --provider-endpoint URL] [--provider-ca-file PATH] [--fault NAME]
     \\  rui configure [--store PATH] --session REF [settings] [--json]
     \\    First configuration requires --workspace PATH --provider codex --model MODEL.
+    \\    --compaction-trigger TOKENS|default: positive automatic compaction threshold.
+    \\    --output-reservation TOKENS|default: nonnegative extra headroom, not a guaranteed output budget.
+    \\    Omitted settings are preserved; default resets to model policy (unknown models have no automatic threshold).
+    \\    These are not model context capacity, message quotas or truncation limits.
     \\    All new commands use --store, then saved Store, then HOME/.local/share/rui/store.
     \\  One-shot commands (never prompt or change meaning on redirection):
     \\  rui message [--store PATH] --session REF TEXT|- [--json]

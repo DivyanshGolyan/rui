@@ -89,6 +89,11 @@ def compaction_cases(state, processes, endpoints, releases):
         thread.start()
         return endpoint, f"http://127.0.0.1:{endpoint.server_port}/responses"
 
+    def patch(store, session, key, *flags):
+        result = command("configure", "--store", store, "--record", state / f"{key}.json",
+                         "--session", session, "--key", key, *flags)
+        assert result["answer"]["status"] == "accepted", result
+
     def user_texts(request):
         return [item["content"][0]["text"] for item in request["input"] if item.get("role") == "user"]
 
@@ -107,6 +112,8 @@ def compaction_cases(state, processes, endpoints, releases):
         host = start_host(store, url)
         processes.append(host)
         configure(state, store, f"{route}-config", session, "model-a", instructions="baseline")
+        settings = command("inspect-session", "--store", store, "--session", session)["session"]
+        assert settings["compaction_trigger"] is None and settings["output_reservation"] == "0", settings
         message(state, store, f"{route}-first", session, "covered user input")
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
@@ -115,6 +122,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert user_texts(compaction) == ["covered user input"], compaction
         # Admission fixes coverage. Later settings and messages cannot enter it.
+        patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
         configure(state, store, f"{route}-instructions", session, "model-a", instructions="arrived during compaction")
         message(state, store, f"{route}-late", session, "pending input")
         gate.set()
@@ -140,11 +148,15 @@ def compaction_cases(state, processes, endpoints, releases):
                 (0, "context_overflow"), (1, "continued"), (0, "completed")]
             assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
             assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
-        # Restart reconstructs the same base and complete later suffix.
+        # Reset recovers default selection, then restart reconstructs the same base.
         followup, _, _ = sse_answer(f"{route}-followup", f"{route}-r2", f"{route}-m2", "after restart")
         endpoint.responses.append(followup)
         host = start_host(store, url)
         processes.append(host)
+        patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
+        current = command("inspect-session", "--store", store, "--session", session)["session"]
+        assert current["compaction_trigger"] is None and current["compaction_trigger_override"] is None, current
+        assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         message(state, store, f"{route}-followup-input", session, "followup input")
         wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
         assert read_result(store, f"{route}-followup-input") == b"after restart"
@@ -169,6 +181,29 @@ def compaction_cases(state, processes, endpoints, releases):
         stop_host(host)
         processes.remove(host)
         stop_endpoint(endpoint, endpoints)
+
+    # Proactive compaction holds the new input outside its frozen view.
+    first, _, _ = sse_answer("auto-first", "auto-r", "auto-m", "original answer")
+    compact, _ = compact_response("auto")
+    last, _, _ = sse_answer("auto-last", "auto-r2", "auto-m2", "automatic answer")
+    endpoint, url = endpoint_for([first, compact, last])
+    store, session = state / "compaction-auto", "direct/compact-auto"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "auto-config", session, "model-a")
+    message(state, store, "auto-first", session, "first")
+    wait_for(lambda: completed_observation(store, "auto-first"), "automatic first answer")
+    patch(store, session, "auto-policy", "--compaction-trigger", "1")
+    message(state, store, "auto-next", session, "apply only after compaction")
+    wait_for(lambda: completed_observation(store, "auto-next"), "automatic compaction answer")
+    assert read_result(store, "auto-first") == b"original answer"
+    assert read_result(store, "auto-next") == b"automatic answer"
+    assert len(endpoint.requests) == 3, endpoint.requests
+    assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
+    assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
 
     # A valid base followed by overflow of unchanged input is irreducible;
     # a second compaction would only repeat the same covered context forever.
@@ -2873,8 +2908,8 @@ def main():
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
                 "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence"
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
+                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807,0 FROM sequence"
             )
             database.commit()
         finally:
@@ -2968,8 +3003,8 @@ def main():
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
                 "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807 "
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
+                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807,0 "
                 "FROM sequence"
             )
             database.commit()

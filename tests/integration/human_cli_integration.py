@@ -55,12 +55,77 @@ def help_case():
             assert "rui [PROMPT]" in result.stdout, result.stdout
             assert not result.stderr, result.stderr
             assert list(home.iterdir()) == [], "help created runtime state"
+        for command in ("configure", "inspect-session"):
+            for flag in ("--help", "-h"):
+                output = run(home, command, flag)
+                assert f"Usage: rui {command}" in output, output
+                if command == "configure":
+                    for phrase in ("Omission preserves", "default resets", "Unknown models",
+                                   "/status", "extra compaction headroom",
+                                   "Changes apply to new model requests.",
+                                   "Requests already accepted keep their original settings, even when retried."):
+                        assert phrase in output, output
+                assert list(home.iterdir()) == [], "scoped help created runtime state"
+        for flag in ("--compaction-trigger", "--output-reservation"):
+            for args in ((flag, "10", flag, "20"), ("--model", "--help"),
+                         ("--session", "-h")):
+                output = run(home, "configure", *args, success=False)
+                assert "Usage: rui configure" not in output, output
+                assert list(home.iterdir()) == [], "invalid configuration captured a request"
         result = subprocess.run(
             [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
+
+
+def compaction_settings_case(home, store, workspace):
+    session = "human/compaction-settings"
+    run(home, "configure", "--store", store, "--session", session,
+        "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", session], env={**os.environ, "HOME": str(home)}) as (entered, master):
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status", "Work: ", composer=True)
+        assert "244800 tokens (model default)" in status, status
+        assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
+        usage = terminal_step(master, "/configure --bogus", "Omission preserves", composer=True)
+        assert "Unknown models have no automatic threshold" in usage, usage
+        assert "Changes apply to new model requests." in usage, usage
+        assert "Requests already accepted keep their original settings, even when retried." in usage, usage
+        for flags, trigger, headroom in (
+            ("--compaction-trigger 12345 --output-reservation 234", "12345 tokens (Session override)", "234 tokens (Session override)"),
+            ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)"),
+            ("--compaction-trigger default --output-reservation default", "244800 tokens (model default)", "0 tokens (model default)"),
+        ):
+            configured = terminal_step(master, "/configure " + flags, "Configured.", composer=True)
+            assert "revision:" not in configured and "request:" not in configured, configured
+            status = terminal_step(master, "/status", "Work: ", composer=True)
+            assert trigger in status and "Extra compaction headroom: " + headroom in status, status
+            assert "Output reservation:" not in status and "source unknown" not in status, status
+            assert "not a guaranteed output budget" in status, status
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
+    records = set((home / ".config/rui/requests").glob("*.json"))
+    for flag in ("--compaction-trigger", "--output-reservation"):
+        run(home, "configure", "--store", store, "--session", session,
+            flag, "10", flag, "20", success=False)
+        assert set((home / ".config/rui/requests").glob("*.json")) == records
+    report = json.loads(run(home, "inspect-session", "--store", store, "--session", session))
+    assert report["session"]["model"] == "gpt-6-luna", report
+    unknown = "human/compaction-unknown-model"
+    run(home, "configure", "--store", store, "--session", unknown,
+        "--workspace", workspace, "--provider", "codex", "--model", "unknown-model")
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status", "Work: ", composer=True)
+        assert "no automatic threshold (model default)" in status, status
+        assert "Use /configure --compaction-trigger TOKENS to enable a threshold." in status, status
+        assert "Provider context-overflow recovery still applies." in status, status
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
 
 
 def preference_edits(home, store):
@@ -537,7 +602,8 @@ def command_entry_cases():
         lost = subprocess.run([str(fixture.RUI), "exec", "lost original"], cwd=workspace,
             env=env, capture_output=True, timeout=10)
         assert lost.returncode != 0 and lost.stdout == b"", lost
-        handle = re.search(rb"Message request: ([a-z0-9-]+)", lost.stderr).group(1).decode()
+        receipt = re.search(rb"Message request: ([a-z0-9-]+)", lost.stderr)
+        handle = receipt.group(1).decode()
         assert f"rui recover {handle}".encode() in lost.stderr, lost.stderr
         record = home / ".config/rui/requests" / (handle + ".json")
         original_record = record.read_bytes()
@@ -2337,8 +2403,8 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
-    if selected == "all":
+    assert selected in ("all", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    if selected in ("all", "compaction-settings"):
         help_case()
     if selected in ("all", "terminal-waits"):
         prove_terminal_process()
@@ -2409,6 +2475,12 @@ def main(selected="all"):
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected in ("all", "compaction-settings"):
+            compaction_settings_case(home, store, workspace)
+        if selected == "compaction-settings":
+            completed = True
+            print("compaction settings and scoped help passed (partial human CLI suite)")
+            return
         if selected == "incomplete-input":
             run(home, "configure", "--store", store, "--session", "incomplete/input",
                 "--workspace", workspace, "--provider", "codex", "--model", "model-a")
