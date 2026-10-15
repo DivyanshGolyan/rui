@@ -98,6 +98,27 @@ Use `"$RUI" sessions` to list this project's Sessions, or `sessions --all` to in
 
 Bare `rui` always creates a new Session. Existing Sessions keep their saved settings, including approval mode. `/setup` changes defaults for future Sessions, not the current one.
 
+## Configure compaction
+
+Rui compacts model context without deleting saved conversation history. Codex with exact model `gpt-6-luna` defaults to an estimated 244,800-token threshold. Other model names have no automatic threshold unless you set one. Provider-reported context overflow can still start compaction.
+
+To change the current Session, enter:
+
+```text
+/configure --compaction-trigger 200000 --output-reservation 8000
+/status
+```
+
+The trigger is an estimate, not a message-size limit. Output reservation adds extra headroom to that estimate; it does not guarantee an output budget. Messages are not truncated to fit.
+
+To return to provider/model defaults, enter:
+
+```text
+/configure --compaction-trigger default --output-reservation default
+```
+
+Omitting either flag preserves its current setting. Scripts can use the same flags with `rui configure`; `rui inspect-session` reports effective values and overrides. Changes affect new model requests, not requests already admitted. If retained input still cannot fit after compaction, the request fails explicitly rather than repeatedly compacting unchanged input.
+
 ## Use Rui from scripts
 
 For a fresh conversation that waits for an answer:

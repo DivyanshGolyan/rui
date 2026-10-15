@@ -44,7 +44,7 @@ pub fn Bounded(comptime capacity: usize) type {
     };
 }
 
-pub const FieldState = enum { omitted, value };
+pub const FieldState = enum { omitted, value, explicit_null };
 
 pub fn OptionalBounded(comptime capacity: usize) type {
     return struct {
@@ -82,6 +82,8 @@ pub const Configuration = struct {
     tools: ToolsField = .{},
     permission_mode: OptionalBounded(16) = .{},
     output_schema: ContentField = .{},
+    compaction_trigger: OptionalBounded(20) = .{},
+    output_reservation: OptionalBounded(20) = .{},
 };
 
 pub const Kind = enum {
@@ -141,6 +143,8 @@ pub const ConfigureCommand = struct {
         }
         hashOptional(&hash, &self.configuration.permission_mode);
         hashContent(&hash, &self.configuration.output_schema);
+        hashOptional(&hash, &self.configuration.compaction_trigger);
+        hashOptional(&hash, &self.configuration.output_reservation);
         hash.update(&.{@intFromBool(self.require_model)});
         return hash.finalResult();
     }
@@ -762,6 +766,20 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("output_schema");
         try self.readContent(&request.configuration.output_schema, true);
+        var trigger_seen = false;
+        var reservation_seen = false;
+        while (try self.consumeIf(',')) {
+            var key: Bounded(32) = .{};
+            try self.readSmallString(&key);
+            try self.expectByte(':');
+            if (key.eql("compaction_trigger") and !trigger_seen) {
+                trigger_seen = true;
+                try self.readOptionalPolicy(&request.configuration.compaction_trigger);
+            } else if (key.eql("output_reservation") and !reservation_seen) {
+                reservation_seen = true;
+                try self.readOptionalPolicy(&request.configuration.output_reservation);
+            } else return error.UnexpectedField;
+        }
         try self.expectByte('}');
         if (try self.consumeIf(',')) {
             try self.expectKey("require_model");
@@ -1054,13 +1072,23 @@ const Parser = struct {
         return request;
     }
 
+    fn readOptionalPolicy(self: *Parser, field: *OptionalBounded(20)) !void {
+        try self.readOptionalSmallNullable(20, field, true);
+    }
+
     fn readOptionalSmall(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity)) !void {
+        try self.readOptionalSmallNullable(capacity, field, false);
+    }
+
+    fn readOptionalSmallNullable(self: *Parser, comptime capacity: usize, field: *OptionalBounded(capacity), allow_null: bool) !void {
         try self.expectByte('{');
         try self.expectKey("state");
         var state: Bounded(16) = .{};
         try self.readSmallString(&state);
         if (state.eql("omitted")) {
             field.state = .omitted;
+        } else if (allow_null and state.eql("null")) {
+            field.state = .explicit_null;
         } else if (state.eql("value")) {
             field.state = .value;
             try self.expectByte(',');
@@ -1950,6 +1978,54 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
             const request = try parser.parse();
             try std.testing.expect(request == .conversation_page);
         }
+    }
+}
+
+test "configuration token heuristics parse sparsely and bind idempotency" {
+    const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, failure: ?anyerror = null }{
+        .{ .suffix = "" },
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}" },
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"100000\"}", .trigger = "100000" },
+        .{ .suffix = ",\"output_reservation\":{\"state\":\"value\",\"value\":\"16384\"}", .reservation = "16384" },
+        // Numeric meaning belongs to atomic Store admission, not wire parsing.
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"0\"}", .trigger = "0" },
+        .{ .suffix = ",\"output_reservation\":{\"state\":\"value\",\"value\":\"9223372036854775808\"}", .reservation = "9223372036854775808" },
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"null\"}" },
+        .{ .suffix = ",\"output_reservation\":{\"state\":\"null\"}" },
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":100000}", .failure = error.InvalidJsonShape },
+        .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"123456789012345678901\"}", .failure = error.ValueTooLong },
+        .{ .suffix = ",\"context_capacity\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
+        .{ .suffix = ",\"output_reservation\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
+    };
+    var omitted_digest: [32]u8 = undefined;
+    for (cases, 0..) |case, index| {
+        var buffer: [2048]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+            "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
+            "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"omitted\"}},\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}{s}}}}}", .{case.suffix});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var cleanup_failed = false;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+            continue;
+        }
+        const command = (try parser.parse()).configure;
+        if (case.trigger) |value| try std.testing.expectEqualStrings(value, command.configuration.compaction_trigger.value.slice());
+        if (case.reservation) |value| try std.testing.expectEqualStrings(value, command.configuration.output_reservation.value.slice());
+        if (std.mem.indexOf(u8, case.suffix, "\"state\":\"null\"") != null) {
+            const state = if (std.mem.indexOf(u8, case.suffix, "compaction_trigger") != null)
+                command.configuration.compaction_trigger.state
+            else
+                command.configuration.output_reservation.state;
+            try std.testing.expectEqual(FieldState.explicit_null, state);
+        }
+        const digest = command.semanticDigest();
+        if (index == 0) omitted_digest = digest else if (index == 1) {
+            try std.testing.expectEqualSlices(u8, &omitted_digest, &digest);
+        } else try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &digest));
     }
 }
 
