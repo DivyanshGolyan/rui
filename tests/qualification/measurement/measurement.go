@@ -842,6 +842,10 @@ func RepositoryRoot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	working, err = filepath.EvalSymlinks(working)
+	if err != nil {
+		return "", err
+	}
 	if filepath.Base(working) == "qualification" && filepath.Base(filepath.Dir(working)) == "tests" {
 		if _, err := os.Stat(filepath.Join(working, "go.mod")); err == nil {
 			return filepath.Dir(filepath.Dir(working)), nil

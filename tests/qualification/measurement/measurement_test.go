@@ -446,7 +446,10 @@ func TestCanonicalStoreDoesNotUseUnresolvedTempDirJoin(t *testing.T) {
 }
 
 func TestRepositoryRootFromQualificationModule(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	module := filepath.Join(root, "tests", "qualification")
 	if err := os.MkdirAll(module, 0o700); err != nil {
 		t.Fatal(err)
@@ -463,6 +466,22 @@ func TestRepositoryRootFromQualificationModule(t *testing.T) {
 	got, err = RepositoryRoot()
 	if err != nil || got != root {
 		t.Fatalf("RepositoryRoot() from root = %q, %v; want %q", got, err, root)
+	}
+	alias := filepath.Join(t.TempDir(), "source-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	moduleAlias := filepath.Join(t.TempDir(), "module-alias")
+	if err := os.Symlink(module, moduleAlias); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{filepath.Join(alias, "tests", "qualification"), alias, moduleAlias} {
+		t.Chdir(directory)
+		t.Setenv("PWD", directory)
+		got, err = RepositoryRoot()
+		if err != nil || got != root {
+			t.Fatalf("RepositoryRoot() from alias %q = %q, %v; want canonical Workspace %q", directory, got, err, root)
+		}
 	}
 }
 
