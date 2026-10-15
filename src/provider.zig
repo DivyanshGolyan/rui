@@ -740,7 +740,9 @@ pub const Transfer = struct {
                 std.debug.assert(!self.in_reactor);
                 if (!finished.seal_queued and self.captureFailure() == null) {
                     switch (finished.completion.outcome) {
-                        .transport_finished => |evidence| if (evidence.disposition == .success) {
+                        .transport_finished => |evidence| if (evidence.disposition == .success or
+                            evidence.disposition == .permanent_http or evidence.disposition == .temporary_http)
+                        {
                             if (!self.writer.seal(&self.response, fail_seal)) return .pending;
                             finished.seal_queued = true;
                         },

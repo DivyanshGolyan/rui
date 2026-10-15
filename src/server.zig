@@ -2106,6 +2106,26 @@ fn completeTransfer(
         }
         return;
     }
+    if (evidence.disposition == .permanent_http or evidence.disposition == .temporary_http) {
+        const overflow_result = classify: {
+            var response = active.transfer.takeResponse();
+            defer response.deinit();
+            break :classify model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status);
+        };
+        const overflow = overflow_result catch |err| {
+            stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+            settleAttemptFailure(host, owner.token, owner.binding, "response_read_failed", .terminal);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        };
+        if (overflow) {
+            settleAttemptFailure(host, owner.token, owner.binding, "provider_context_overflow", .context_overflow);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        }
+    }
     var code_buffer: [96]u8 = undefined;
     const code = switch (evidence.disposition) {
         .success => unreachable,
@@ -2187,12 +2207,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     };
     defer metadata.deinit();
     traceOperation(host, "validation_started", owner.binding);
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, .{
+    const operation = host.store.modelOperationKind(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
+        return .cleanup;
+    };
+    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
         stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), .terminal);
+        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), if (err == error.ContextOverflow) .context_overflow else .terminal);
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
@@ -4907,6 +4931,118 @@ test "required Bash observations publish while optional stderr custody is held" 
             try std.testing.expectEqual(@as(u64, 0), observation.shared.active.load(.acquire));
         }
         try std.testing.expect(host.trace_lost.load(.acquire));
+    }
+}
+
+test "HTTP error capture retires before execution custody" {
+    const Boundary = struct {
+        var slot: *ExecutionSlot = undefined;
+        var custody: *execution.CustodyPool = undefined;
+        var used: *std.atomic.Value(u64) = undefined;
+        var response_fd: std.Io.File.Handle = -1;
+        var closes: usize = 0;
+        var retirement_observed: bool = false;
+
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            for (files) |file| if (file.handle == response_fd) {
+                // Observe the real descriptor while close still owns it,
+                // including a close that suspends before retiring the handle.
+                std.debug.assert(slot.* == .provider);
+                std.debug.assert(custody.occupied() == 1);
+                closes += 1;
+            };
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (slot.* == .free) {
+                std.debug.assert(closes == 1);
+                std.debug.assert(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+                std.debug.assert(used.load(.acquire) == 17);
+                retirement_observed = true;
+            }
+            return std.testing.io.vtable.now(userdata, clock);
+        }
+    };
+    try provider.initialize();
+    defer provider.deinitialize();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileClose = Boundary.close;
+    vtable.now = Boundary.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for (0..3) |kind| {
+        var used: std.atomic.Value(u64) = .init(17);
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{ .test_phase_trace = true },
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 3,
+            .operation_id = 7,
+            .attempt_ordinal = 2,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        // Delivery already claimed: this owner regression exercises physical
+        // retirement without fabricating a Store settlement. Dispatch integration
+        // separately verifies the durable HTTP overflow/failure meanings.
+        try std.testing.expect(host.custody.claimTerminalDelivery(token));
+        var slot: ExecutionSlot = .{ .provider = .{ .owner = .{ .token = token, .binding = binding } } };
+        Boundary.slot = &slot;
+        Boundary.custody = &host.custody;
+        Boundary.used = &used;
+        Boundary.response_fd = -1;
+        Boundary.closes = 0;
+        Boundary.retirement_observed = false;
+        const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
+        try request_file.writeStreamingAll(io, "{}");
+        try std.testing.expect(budget.reserve(2));
+        var writer = provider.CaptureWriter{ .io = io };
+        var retained: ?named_scratch.Owner = null;
+        try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
+            .io = io,
+            .file = request_file,
+            .length = 2,
+            .charged = 2,
+            .budget = budget,
+            .structured_output = false,
+            .session_affinity = @splat(0),
+        }, binding, .{}, &writer, root, budget, &retained);
+        errdefer if (slot == .provider) slot.provider.transfer.deinit();
+        const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
+        const response = &slot.provider.transfer.response;
+        try response.file.writeStreamingAll(io, body);
+        try std.testing.expect(budget.reserve(body.len));
+        response.charged = body.len;
+        response.length = body.len;
+        try response.seal(false);
+        Boundary.response_fd = response.file.handle;
+        if (kind == 1) {
+            // A short sealed read is a real classifier error, not malformed
+            // JSON's negative-overflow result.
+            response.length += 1;
+            try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
+        }
+        completeTransfer(&host, &slot, .{
+            .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } },
+            .queued_after = 0,
+        });
+        try std.testing.expect(Boundary.retirement_observed);
+        try std.testing.expectEqual(@as(usize, 1), Boundary.closes);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+        try std.testing.expect(slot == .free);
+        try std.testing.expect(host.custody.reserve() != null);
     }
 }
 

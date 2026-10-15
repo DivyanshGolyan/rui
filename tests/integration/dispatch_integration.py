@@ -63,6 +63,152 @@ def dispose_dispatch(processes, endpoints, releases, *after):
     )
 
 
+def compaction_cases(state, processes, endpoints, releases):
+    """Exercise compaction through ordinary intake, transport and recovery."""
+    def compact_response(label, *, extra=None):
+        items = [
+            {"type": "reasoning", "id": f"{label}-before", "summary": [], "encrypted_content": "discard-before-anchor"},
+            {"type": "compaction", "id": f"{label}-anchor", "encrypted_content": "opaque-" + "é" * 5000, "created_by": "response-only"},
+            {"type": "message", "id": f"{label}-tail", "role": "assistant", "content": [{"type": "output_text", "text": "private compaction tail"}]},
+        ]
+        if extra is not None:
+            items.append(extra)
+        payloads = []
+        for index, item in enumerate(items):
+            payloads.append({"type": "response.output_item.done", "output_index": index, "item": item})
+        payloads.append({"type": "response.completed", "response": {
+            "id": label, "status": "completed", "model": "model-a-served", "output": items,
+            "usage": {"total_tokens": 999999},
+        }})
+        return encode_sse(payloads), items
+
+    def endpoint_for(responses):
+        endpoint = SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        return endpoint, f"http://127.0.0.1:{endpoint.server_port}/responses"
+
+    def user_texts(request):
+        return [item["content"][0]["text"] for item in request["input"] if item.get("role") == "user"]
+
+    overflow_http = ResponseSpec(b'{"error":{"code":"context_length_exceeded"}}', {}, status=400)
+    overflow_sse = encode_sse([{"type": "response.failed", "response": {
+        "status": "failed", "error": {"code": "context_length_exceeded"},
+    }}], done=False)
+    for route, overflow in (("http", overflow_http), ("sse", overflow_sse)):
+        compact, items = compact_response(route)
+        gate = threading.Event()
+        releases.append(gate.set)
+        answer, _, _ = sse_answer(f"{route}-answer", f"{route}-reason", f"{route}-message", "recovered answer")
+        endpoint, url = endpoint_for([overflow, (compact, gate), answer])
+        store = state / f"compaction-{route}"
+        session = f"direct/compact-{route}"
+        host = start_host(store, url)
+        processes.append(host)
+        configure(state, store, f"{route}-config", session, "model-a", instructions="baseline")
+        message(state, store, f"{route}-first", session, "covered user input")
+        wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
+        compaction = json.loads(endpoint.requests[1])
+        assert compaction["input"][-1] == {"type": "compaction_trigger"}, compaction
+        assert compaction["store"] is False and compaction["stream"] is True, compaction
+        assert compaction["include"] == ["reasoning.encrypted_content"], compaction
+        assert user_texts(compaction) == ["covered user input"], compaction
+        # Admission fixes coverage. Later settings and messages cannot enter it.
+        configure(state, store, f"{route}-instructions", session, "model-a", instructions="arrived during compaction")
+        message(state, store, f"{route}-late", session, "pending input")
+        gate.set()
+        wait_for(lambda: completed_observation(store, f"{route}-late"), "compaction successor answer")
+        assert read_result(store, f"{route}-first") == b"recovered answer"
+        assert read_result(store, f"{route}-late") == b"recovered answer"
+        assert len(endpoint.requests) == 3, endpoint.requests
+        successor = json.loads(endpoint.requests[2])
+        assert user_texts(successor) == ["covered user input", "pending input"], successor
+        assert [item["content"][0]["text"] for item in successor["input"] if item.get("role") == "developer"] == ["arrived during compaction"], successor
+        assert not any(item.get("id") == items[0]["id"] for item in successor["input"]), successor
+        replay_anchor = dict(items[1])
+        replay_anchor.pop("created_by")
+        assert successor["input"][1:3] == [replay_anchor, items[2]], successor
+        report = command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        assert report["actions"]["count"] == "0", report
+        assert b"private compaction tail" not in json.dumps(report).encode(), report
+        # The full canonical output is saved once, with no Conversation projection.
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute("SELECT purpose,resolution_code FROM model_operation ORDER BY operation_id").fetchall() == [
+                (0, "context_overflow"), (1, "continued"), (0, "completed")]
+            assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
+            assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
+        # Restart reconstructs the same base and complete later suffix.
+        followup, _, _ = sse_answer(f"{route}-followup", f"{route}-r2", f"{route}-m2", "after restart")
+        endpoint.responses.append(followup)
+        host = start_host(store, url)
+        processes.append(host)
+        message(state, store, f"{route}-followup-input", session, "followup input")
+        wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
+        assert read_result(store, f"{route}-followup-input") == b"after restart"
+        restarted = json.loads(endpoint.requests[3])
+        assert replay_anchor in restarted["input"] and items[2] in restarted["input"], restarted
+        assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
+        execution = wait_for(lambda: (value := command("inspect-session", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
+        assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
+        stop_host(host)
+        processes.remove(host)
+        # Corruption after the base must not silently shorten the suffix.
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            database.execute("DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_operation) AND item_ordinal=0")
+        host = start_host(store, url)
+        processes.append(host)
+        message(state, store, f"{route}-corrupt-input", session, "do not dispatch incomplete history")
+        wait_for(lambda: host.poll() is not None, "missing suffix fences Host")
+        assert host.returncode == 1, host.returncode
+        failure = host.stderr.read()
+        assert b"dispatch fenced" in failure and b"CorruptStore" in failure, failure
+        assert len(endpoint.requests) == 4, endpoint.requests
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+
+    # A valid base followed by overflow of unchanged input is irreducible;
+    # a second compaction would only repeat the same covered context forever.
+    compact, _ = compact_response("irreducible")
+    endpoint, url = endpoint_for([overflow_sse, compact, overflow_sse])
+    store, session = state / "compaction-irreducible", "direct/irreducible"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "irreducible-config", session, "model-a")
+    message(state, store, "irreducible", session, "input cannot fit")
+    outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
+    assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
+    assert len(endpoint.requests) == 3, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    # Compaction can never grant tool authority, even after a valid anchor.
+    forbidden_effect = state / "compaction-forbidden-effect"
+    compact, _ = compact_response("unexpected-action", extra={
+        "type": "function_call", "id": "forbidden", "name": "bash", "call_id": "forbidden-call",
+        "arguments": json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None,
+            "description": "Create forbidden marker"}, separators=(",", ":")),
+    })
+    endpoint, url = endpoint_for([overflow_sse, compact])
+    store, session = state / "compaction-invalid", "direct/compact-invalid"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "invalid-config", session, "model-a")
+    message(state, store, "invalid-compaction", session, "compact without tools")
+    rejected = wait_for(lambda: (value := observe(store, "invalid-compaction")).get("result") and value, "invalid compaction settlement")
+    assert rejected["result"]["code"] == "unsupported_provider_output", rejected
+    report = command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+    assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
+    assert len(endpoint.requests) == 2, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -84,6 +230,7 @@ def main():
     completed = False
     try:
         endpoint_thread.start()
+        compaction_cases(state, processes, endpoints, releases)
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
             ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None, "description": "Create forbidden effect marker"}, separators=(",", ":"))),

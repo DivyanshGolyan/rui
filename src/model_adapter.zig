@@ -51,6 +51,7 @@ pub fn authenticationFailureCode(err: anyerror) []const u8 {
 
 pub fn preparationFailureCode(err: anyerror) []const u8 {
     return switch (err) {
+        error.ResourceExceeded => "resource_exceeded",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.UnsupportedCodexConfiguration => "unsupported_codex_configuration",
         error.InjectedFirstPreparationFailure => "request_preparation_failed",
@@ -217,6 +218,7 @@ pub const Preparation = struct {
     input_comma: bool = false,
     continuation_unavailable: bool = false,
     history_position: u64 = 0,
+    selected_anchor: ?u64 = null,
     current_entry: ?store.HistoricalEntry = null,
     current_tool_result: ?store.HistoricalToolResult = null,
     active: bool = true,
@@ -234,6 +236,8 @@ pub const Preparation = struct {
         instructions_content,
         input_prefix,
         history_next,
+        covered_tool_result_next,
+        compaction_trigger,
         entry_comma,
         entry_prefix,
         entry_content,
@@ -362,6 +366,7 @@ pub const Preparation = struct {
                 },
                 .history_validation => {
                     if (!(self.view.validateOutputsStep() catch |err| return .{ .failed = err })) continue;
+                    self.selected_anchor = self.view.contextAnchor() catch |err| return .{ .failed = err };
                     self.phase = switch (self.settings.?.provider) {
                         .codex => .model_prefix,
                     };
@@ -393,6 +398,12 @@ pub const Preparation = struct {
                     };
                     if (entry) |item| {
                         self.history_position = item.position;
+                        if (self.selected_anchor) |anchor| {
+                            if (item.position < anchor and (item.kind == .provider_output or item.kind == .tool_results)) {
+                                if (item.kind == .tool_results) self.phase = .covered_tool_result_next;
+                                continue;
+                            }
+                        }
                         if (item.requested_model) |model| {
                             validateRequestedBinding(model.slice(), self.settings.?.model.slice()) catch {
                                 self.continuation_unavailable = true;
@@ -401,10 +412,22 @@ pub const Preparation = struct {
                     }
                     self.current_entry = entry;
                     if (entry == null) {
-                        self.phase = .tools_prefix;
+                        self.phase = .compaction_trigger;
                     } else if (entry.?.kind == .tool_results) {
                         self.phase = .tool_result_next;
                     } else self.phase = .entry_comma;
+                },
+                .covered_tool_result_next => {
+                    const result = self.view.nextToolResult() catch |err| return .{ .failed = err };
+                    if (result == null) self.phase = .history_next;
+                },
+                .compaction_trigger => {
+                    if (self.settings.?.operation == .compaction) {
+                        self.emitFixed(if (self.input_comma)
+                            ",{\"type\":\"compaction_trigger\"}"
+                        else
+                            "{\"type\":\"compaction_trigger\"}", .tools_prefix);
+                    } else self.phase = .tools_prefix;
                 },
                 .entry_comma => {
                     if (self.input_comma) self.emitFixed(",", .entry_prefix) else self.phase = .entry_prefix;
@@ -1999,6 +2022,28 @@ test "request preparation resumes large private replay validation before emissio
     }
 }
 
+test "request preparation composes replay tool results and schema" {
+    for ([_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 } }) |schedule| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const binding = try establishComposedHistory(&setup, "direct/prep-composed");
+        const view = try setup.storage.openHistoricalView(binding);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
+        defer std.testing.allocator.free(result.bytes);
+        const expected = try requestGolden(setup.workspace, composed_expected);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, result.bytes);
+        try std.testing.expectEqual(@as(u64, expected.len), result.length);
+        try std.testing.expectEqual(protocol.contentDigest(expected), result.digest);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
 test "request preparation authenticates the historical requested model binding" {
     var setup: PreparationTestSetup = undefined;
     try setup.init();
@@ -2068,24 +2113,129 @@ test "request preparation cancellation yields inside canonical proposal authenti
     try std.testing.expect(!setup.storage.isFenced());
 }
 
-test "request preparation composes replay tool results and schema" {
-    for ([_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 } }) |schedule| {
+test "compaction preparation appends request only trigger and replays asymmetric anchor tail" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    try setup.configure("compact-prep-config", "direct/compact-prep");
+    try setup.submit("compact-first", "compact-first-key", "direct/compact-prep", "first host input");
+    var first = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const original = try first.permit.consume();
+    try setup.storage.settleModelAttemptFailure(original, "provider_context_overflow", .context_overflow, .{});
+    var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try compact.permit.consume();
+    {
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var prep: Preparation = undefined;
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (prep.active) prep.cancel();
+        const request = try drainPreparation(&prep, 1, 1, 16384);
+        defer std.testing.allocator.free(request.bytes);
+        try std.testing.expect(std.mem.indexOf(u8, request.bytes, "first host input\"}]},{\"type\":\"compaction_trigger\"}],\"tools\":") != null);
+        try std.testing.expect(std.mem.indexOf(u8, request.bytes, "\"store\":false,\"stream\":true") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, request.bytes, "compaction_trigger"));
+    }
+    // The prefix must disappear while both the anchor and following item
+    // survive; an encrypted-item-only reconstruction loses the tail.
+    const prefix = "{\"type\":\"reasoning\",\"id\":\"prefix\",\"encrypted_content\":\"covered-private\"}";
+    const anchor = "{\"type\":\"compaction\",\"id\":\"anchor\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical-only\",\"future\":null}";
+    const tail = "{\"type\":\"message\",\"id\":\"tail\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"tail retained\"}]}";
+    const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ prefix ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ anchor ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":" ++ tail ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n";
+    const source = try setup.tmp.dir.createFile(std.testing.io, "compact-sse", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, sse);
+    try source.sync(std.testing.io);
+    var metadata_used: std.atomic.Value(u64) = .init(0);
+    var retained_metadata: ?named_scratch.Owner = null;
+    var metadata = try store.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
+    defer metadata.deinit();
+    const result = try Output.validate(std.testing.io, source, sse.len, &metadata, .compaction, .{});
+    try setup.submit("compact-later", "compact-later-key", "direct/compact-prep", "later host input");
+    try setup.storage.settleModelSuccess(binding, &.{
+        .source = source,
+        .source_length = sse.len,
+        .metadata = metadata.file,
+        .item_count = result.item_count,
+        .call_count = result.call_count,
+        .answer_length = result.answer_length,
+        .answer_digest = result.answer_digest,
+        .response_id = result.evidence.response_id,
+        .body_model = result.evidence.served_model,
+        .openai_model = .{},
+        .x_openai_model = .{},
+        .request_id = .{},
+    }, .{});
+    var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const next_binding = try successor.permit.consume();
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var prep: Preparation = undefined;
+    try prep.init(std.testing.io, try setup.storage.openHistoricalView(next_binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+    defer if (prep.active) prep.cancel();
+    const request = try drainPreparation(&prep, 1, 1, 32768);
+    defer std.testing.allocator.free(request.bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    const input = parsed.value.object.get("input").?.array.items;
+    try std.testing.expectEqual(@as(usize, 4), input.len);
+    try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("compaction", input[1].object.get("type").?.string);
+    try std.testing.expect(input[1].object.get("created_by") == null);
+    try std.testing.expectEqualStrings("tail", input[2].object.get("id").?.string);
+    try std.testing.expectEqualStrings("later host input", input[3].object.get("content").?.array.items[0].object.get("text").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "covered-private") == null);
+    try std.testing.expect(std.mem.indexOf(u8, request.bytes, "compaction_trigger") == null);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "compaction public preparation rejects incompatible selected base and suffix bindings" {
+    for ([_]bool{ false, true }) |incompatible_suffix| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
-        const binding = try establishComposedHistory(&setup, "direct/prep-composed");
-        const view = try setup.storage.openHistoricalView(binding);
+        const session = "direct/binding-prep";
+        try setup.configure("binding-config", session);
+        try setup.submit("binding-one", "binding-one", session, "original");
+        const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try setup.storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        const base = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try store.settleCompactionForTesting(&setup.storage, &setup.tmp, base, &.{.compaction});
+        var revision: protocol.ConfigureCommand = .{};
+        try revision.key.set("binding-revision-two");
+        try revision.session.set(session);
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        // The suffix is produced against a distinct saved revision.
+        try setup.submit("binding-two", "binding-two", session, "later");
+        try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", "suffix", &.{});
+        try revision.key.set("binding-revision-three");
+        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        var preparation: Preparation = undefined;
-        try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
-        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 16384);
-        defer std.testing.allocator.free(result.bytes);
-        const expected = try requestGolden(setup.workspace, composed_expected);
-        defer std.testing.allocator.free(expected);
-        try std.testing.expectEqualStrings(expected, result.bytes);
-        try std.testing.expectEqual(@as(u64, expected.len), result.length);
-        try std.testing.expectEqual(protocol.contentDigest(expected), result.digest);
+        {
+            var prep: Preparation = undefined;
+            try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+            defer if (prep.active) prep.cancel();
+            var request = try drainLivePreparation(&prep, 1, 1, 32768);
+            defer request.deinit();
+        }
+        try setup.storage.setHistoricalModelForTesting(if (incompatible_suffix) suffix else base, "different-saved-model");
+        var prep: Preparation = undefined;
+        try prep.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (prep.active) prep.cancel();
+        if (drainLivePreparation(&prep, 1, 1, 32768)) |prepared| {
+            var unexpected = prepared;
+            unexpected.deinit();
+            return error.ExpectedContinuationUnavailable;
+        } else |err| try std.testing.expectEqual(error.ContinuationUnavailable, err);
+        prep.cancel();
+        try std.testing.expect(!setup.storage.isFenced());
+        try std.testing.expect(retained == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     }
 }

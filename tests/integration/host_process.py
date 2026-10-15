@@ -22,6 +22,10 @@ from collections import Counter
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+# Ten held inspections can each emit request, capture and gate-wait receipts
+# before their FIFO stops them. Provision this cohort before concurrent writes;
+# this is not whole-plan capacity or a guarantee against reader starvation.
+OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # Explicit finite native populations, not an execution-duration history.
 # list: 101 configuration + 37 list exchanges, two endpoints each.
 # status: 12 simultaneous clients + 40 repeated status calls + at most 20
@@ -817,6 +821,13 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
+            os.set_blocking(reader, False)
+            credit = bytes(OBSERVATION_STARTUP_CREDIT)
+            supplied = os.write(writer, credit)
+            assert supplied == len(credit), f"incomplete observation startup credit: {supplied}/{len(credit)}"
+            drained = os.read(reader, len(credit))
+            assert drained == credit, "incomplete or corrupt observation startup credit drain"
+            os.set_blocking(reader, True)
             state_file = tempfile.TemporaryFile()
             state_file.truncate(OBSERVATION_STATE_BYTES)
             state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_WRITE)
