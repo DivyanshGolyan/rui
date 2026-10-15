@@ -4932,7 +4932,7 @@ pub const Store = struct {
                 else => {},
             }
         }
-        return total orelse if (input) |value| value +| (output orelse 0) else null;
+        return total orelse if (input) |value| value +| (output orelse return null) else null;
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
@@ -15631,30 +15631,52 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
 }
 
 test "compaction pressure uses the latest accepted output even without usage" {
-    for ([_]?[]const u8{ null, "{\"total_tokens\":1.5}", "{\"total_tokens\":1}" }, 0..) |usage, index| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var storage = try testingStore(&tmp, std.testing.io);
-        defer storage.close() catch unreachable;
-        try configureTestSession(&storage, "config", "direct/usage");
-        var patch: protocol.ConfigureCommand = .{};
-        try patch.key.set("heuristics");
-        try patch.session.set("direct/usage");
-        patch.configuration.compaction_trigger.state = .value;
-        try patch.configuration.compaction_trigger.value.set("1000");
-        try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
-        const original: [4000]u8 = @splat('x');
-        try submitTestMessage(&storage, &tmp, "one", "one", "direct/usage", &original);
-        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
-        try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"total_tokens\":1}");
-        try submitTestMessage(&storage, &tmp, "two", "two", "direct/usage", "small suffix");
-        const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(second));
-        try settleCallsForTestingWithFaults(&storage, &tmp, second, "latest-output", &calls, .{}, usage);
-        try submitTestMessage(&storage, &tmp, "three", "three", "direct/usage", "small suffix");
-        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try std.testing.expectEqual(if (index == 2) ModelOperationKind.assistant_response else ModelOperationKind.compaction, try storage.modelOperationKind(next));
+    for ([_]struct { usage: ?[]const u8, usable: bool }{
+        .{ .usage = null, .usable = false },
+        .{ .usage = "{\"total_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"total_tokens\":1}", .usable = true },
+        .{ .usage = "{\"input_tokens\":1}", .usable = false },
+        .{ .usage = "{\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":null}", .usable = false },
+        .{ .usage = "{\"input_tokens\":null,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":-1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":9223372036854775808}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1}", .usable = true },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999}", .usable = true },
+        .{ .usage = "{\"total_tokens\":1.5,\"input_tokens\":0,\"output_tokens\":0}", .usable = true },
+    }) |case| {
+        for ([_]bool{ false, true }) |large_output| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/usage");
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("heuristics");
+            try patch.session.set("direct/usage");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            const original: [4000]u8 = @splat('x');
+            try submitTestMessage(&storage, &tmp, "one", "one", "direct/usage", if (large_output) "small input" else &original);
+            const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"total_tokens\":1}");
+            try submitTestMessage(&storage, &tmp, "two", "two", "direct/usage", "small suffix");
+            const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(second));
+            var latest_calls = calls;
+            if (large_output) {
+                latest_calls[0].encoded_arguments = &original;
+                latest_calls[0].decoded_arguments = &original;
+            }
+            try settleCallsForTestingWithFaults(&storage, &tmp, second, "latest-output", &latest_calls, .{}, case.usage);
+            try submitTestMessage(&storage, &tmp, "three", "three", "direct/usage", "small suffix");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(if (case.usable) ModelOperationKind.assistant_response else ModelOperationKind.compaction, try storage.modelOperationKind(next));
+        }
     }
 }
 
@@ -15977,7 +15999,7 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
 }
 
 test "compaction missing usage estimates covered retained host input" {
-    for ([_]?[]const u8{ null, "{\"total_tokens\":1.5}" }) |usage| {
+    for ([_]?[]const u8{ null, "{\"total_tokens\":1.5}", "{\"input_tokens\":1}", "{\"input_tokens\":1,\"output_tokens\":1.5}" }) |usage| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage = try testingStore(&tmp, std.testing.io);
