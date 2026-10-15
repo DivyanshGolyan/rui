@@ -169,7 +169,9 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
         }
         record("disable\n");
         disabled = 1;
-        if (!strcmp(fault, "disable") || !strcmp(fault, "both")) {
+        /* A blocked renderer write does not imply that this smaller control
+           lacks credit. Establish the cleanup failure independently. */
+        if (!strcmp(fault, "disable") || !strcmp(fault, "both") || !strcmp(fault, "backpressure")) {
             errno = EIO;
             return -1;
         }
