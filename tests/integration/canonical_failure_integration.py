@@ -395,6 +395,10 @@ def interactive_cases(state, binding=False, null_code=False):
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                screen = human.capture_for(master)
+                screen.forbidden = ("admitted:", "Configured.", "You: ")
+                if line is None:
+                    screen.forbidden += ("› ", "Detached.")
                 if line is not None:
                     if route == "/v1/control/permission-decision":
                         proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
@@ -440,6 +444,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     assert set(message_records) - set(before_messages) == {f"{accepted_key}.json"}
                     assert message_records[f"{accepted_key}.json"] == accepted_request
                     assert len(proxy.exchanges) == 1 and proxy.mutations == [("/v1/message", accepted_request)]
+                    screen.forbidden += ("Original reserved request:", "Not confirmed", "› ")
                     proxy.rewrite = None
                     proxy.route = route
                 if binding and line is not None:
@@ -606,6 +611,7 @@ def permission_read_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "permission/read"],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                human.capture_for(master).forbidden = ("a: Allow once", "Run Bash:")
                 try:
                     output, errors = human.terminal_exit(caller, master, timeout=10)
                 except AssertionError as error:

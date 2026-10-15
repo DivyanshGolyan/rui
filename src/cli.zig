@@ -1667,6 +1667,36 @@ fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []
     }
 }
 
+test "local recovery enumeration observes cancellation before skipping invalid records" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var store_directory = try tmp.dir.createDirPathOpen(io, "store", .{ .permissions = .fromMode(0o700) });
+    defer store_directory.close(io);
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+    var directory = try tmp.dir.createDirPathOpen(io, ".config/rui/requests", .{ .permissions = .fromMode(0o700) });
+    defer directory.close(io);
+    const file = try directory.createFile(io, "invalid.json", .{ .permissions = .fromMode(0o600) });
+    file.close(io);
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{home});
+    var token: client.Cancellation = .{};
+    const requester: client.Requests = .{ .io = io, .cancellation = &token };
+    var buffer: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try sessionRequests(init, requester, store, "original/session", &out);
+    token.requestStop();
+    try std.testing.expectError(error.Cancelled, sessionRequests(init, requester, store, "original/session", &out));
+}
+
 fn stopSession(init: std.process.Init, args: []const []const u8) !void {
     const io = init.io;
     var input = client.SessionStopInput{ .store = "", .record = "", .key = "", .session = "" };

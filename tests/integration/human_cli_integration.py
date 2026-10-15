@@ -434,6 +434,22 @@ def terminal_wait_oracles():
             pass
         else:
             raise AssertionError("invalid frame boundary accepted")
+    # Visible forbidden text can span cursor-position writes and disappear
+    # before the read finishes. Neither raw absence nor the final frame proves
+    # it was never presented.
+    forbidden = "a: Allow once"
+    transient = start + b"a: Al\x1b[1;6Hlow once" + end + start + b"\x1b[2J" + end
+    assert forbidden.encode() not in transient
+    for split in range(len(transient) + 1):
+        negative = ScreenCapture()
+        negative.forbidden = (forbidden,)
+        try:
+            negative.feed(transient[:split])
+            negative.feed(transient[split:])
+        except AssertionError as failure:
+            assert failure.args[0][:2] == ("forbidden terminal presentation", forbidden), failure
+        else:
+            raise AssertionError("transient forbidden frame escaped observation")
     opening = ScreenCapture()
     opening.feed(start + "\x1b[1;1HOpening…\x1b[3;1H› \x1b[3;3H".encode() + end)
     assert not opening.reached("› "), "opening composer permitted submission"

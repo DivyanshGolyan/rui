@@ -69,6 +69,7 @@ class ScreenCapture:
         self.synchronized = False
         self.generation = 0
         self.completed = ""
+        self.forbidden = ()
 
     def resize(self, columns, rows):
         assert 0 < columns <= 4096 and 0 < rows <= 512
@@ -135,6 +136,10 @@ class ScreenCapture:
                     "› " if line.rstrip() == "›" else line.rstrip()
                     for line in self.screen.display)
                 assert len(self.completed.encode()) < LIMIT, "unexpected unbounded terminal output"
+                # Check every commit, even if a later frame or restoration in
+                # this same read erases it. Raw substring absence proves less.
+                for marker in self.forbidden:
+                    assert marker not in self.completed, ("forbidden terminal presentation", marker, self.completed)
 
     def reached(self, marker, composer=False):
         # Pyte composes adjacent combining marks in its cells. Match visible

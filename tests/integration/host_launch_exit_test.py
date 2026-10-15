@@ -123,6 +123,21 @@ raise SystemExit(17)
         assert wait_for_exit(caller, master, output, time.monotonic() + 5) == 17
         assert output == b"entry:head:asymmetric-tail", "delayed collector lost unread exit output"
 
+    # Exit output retains the same screen authority as startup, including a
+    # forbidden frame erased before the collector's read finishes.
+    from terminal_screen import ScreenCapture
+    frame = b"\x1b[?2026hHost re\x1b[1;8Hady\x1b[?2026l\x1b[?2026h\x1b[2J\x1b[?2026l"
+    assert b"Host ready" not in frame
+    with child_pty(f"import os; os.write(1,{frame!r})") as (caller, master):
+        screen = ScreenCapture()
+        screen.forbidden = ("Host ready",)
+        try:
+            wait_for_exit(caller, master, bytearray(), time.monotonic() + 5, screen)
+        except AssertionError as error:
+            assert error.args[0][:2] == ("forbidden terminal presentation", "Host ready"), error
+        else:
+            raise AssertionError("exit collection skipped committed screen checks")
+
     with child_pty("import os; os.write(1,b'z')") as (caller, master):
         output = bytearray(b"x" * (1024 * 1024 - 2))
         assert wait_for_exit(caller, master, output, time.monotonic() + 5) == 0
@@ -207,8 +222,11 @@ os.read(release, 1)
 
     owner = sys.modules[action_ready.__module__]
     # Original deadline, not a fresh budget after each credited output window.
+    # This clock control supplies synthetic descriptors; the native PTY above
+    # independently exercises descriptor identity and actual screen ingestion.
     with patch.object(owner.time, "monotonic", side_effect=[10, 11, 14]), \
             patch.object(owner.select, "select", return_value=([123], [], [])) as waited, \
+            patch.object(owner, "capture_for", return_value=owner.ScreenCapture()), \
             patch.object(owner.os, "read", return_value=b"prefix"):
         try:
             action_ready(456, 123, timeout=3)

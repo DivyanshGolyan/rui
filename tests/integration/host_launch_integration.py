@@ -19,6 +19,7 @@ import termios
 import time
 
 from host_process import start_ready_process, stop_process
+from terminal_screen import capture_for, release_capture
 import codex_integration as codex_fixture
 
 
@@ -236,7 +237,7 @@ def lower_descriptor_limit():
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
-def wait_for_terminal_exit(caller, master, output, deadline):
+def wait_for_terminal_exit(caller, master, output, deadline, screen=None):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
         exited = caller.poll() is not None
@@ -258,6 +259,8 @@ def wait_for_terminal_exit(caller, master, output, deadline):
             return caller.wait(timeout=max(0, deadline - time.monotonic()))
         assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
         output.extend(chunk)
+        if screen is not None:
+            screen.feed(chunk)
 
 
 def main():
@@ -431,18 +434,30 @@ def main():
             caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
                 stdin=slave, stdout=slave, stderr=slave)
             output = bytearray()
+            screen = capture_for(master)
+            screen.forbidden = ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:",
+                                "Bash commands can run without asking you", "Host ready",
+                                "Attached to the ready Host", "Diagnostics:")
+            private_identity = None
             until = time.monotonic() + COMMAND_TIMEOUT
-            while "› ".encode("utf-8") not in output:
+            while not screen.reached("› ", composer=True):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], output
                 chunk = os.read(master, 65536)
                 assert chunk, ("terminal closed before prompt", output)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
+                if private_identity is None:
+                    captures = list((bare_home / ".config/rui/requests").glob("*.json"))
+                    if captures:
+                        assert len(captures) == 1, captures
+                        private_identity = (captures[0].stem, "rui/" + captures[0].stem)
+                        screen.forbidden += private_identity
+                screen.feed(chunk)
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
             assert all(noise not in output for noise in (b"Provider:", b"Model:", b"Permission:", b"request:", b"Session:", b"Workspace:")), output
-            assert b"Bash runs without approval" in output, output
+            assert "Bash runs without approval" in screen.completed, screen.completed
             assert b"Bash commands can run without asking you" not in output, output
             captures = list((bare_home / ".config/rui/requests").glob("*.json"))
             assert len(captures) == 1, captures
@@ -458,6 +473,7 @@ def main():
             assert configuration["tools"] == {"state": "value", "value": ["bash"]}, captured
             assert configuration["permission_mode"] == {"state": "value", "value": "bypass"}, captured
             assert captured["require_model"] is True, captured
+            assert private_identity == (key, reference), "frontend preceded its captured configuration"
             assert key.encode() not in output and reference.encode() not in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
             # Transfer this thread's reader from prompt to exit without
@@ -465,7 +481,7 @@ def main():
             os.set_blocking(master, False)
             deadline = time.monotonic() + 5
             assert os.write(master, b"/exit\n") == 6, "incomplete /exit submission"
-            assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
+            assert wait_for_terminal_exit(caller, master, output, deadline, screen) == 0, output
             actual_terminal = termios.tcgetattr(slave)
             if sys.platform == "darwin":
                 mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
@@ -497,6 +513,7 @@ def main():
                     caller.wait(timeout=5)
             finally:
                 try:
+                    release_capture(master)
                     os.close(master)
                 finally:
                     try:
