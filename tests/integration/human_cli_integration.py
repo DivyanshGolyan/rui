@@ -113,7 +113,7 @@ def read_pipe_output(stream, *, count=None, timeout=10):
         assert len(output) < limit, ("pipe record exceeds 16 KiB", bytes(output))
 
 
-def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b""):
+def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", raw=False):
     output = initial
     received = 0
     started = time.monotonic()
@@ -123,7 +123,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
     assert len(marker.encode()) < limit, "terminal marker exceeds retained output bound"
     screen = capture_for(master)
     first_generation = screen.generation
-    raw_exit = marker in ("Detached.", "Resume: ")
+    raw_output = raw or marker in ("Detached.", "Resume: ")
     def feed(data):
         nonlocal deadline, observer_seconds
         # This is a collection budget, not a wall-response measurement. Pyte
@@ -137,9 +137,9 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             observer_seconds += elapsed
             deadline += elapsed
     def visible():
-        return output if raw_exit else screen.completed.encode()
+        return output if raw_output else screen.completed.encode()
     def reached():
-        if raw_exit:
+        if raw_output:
             return not screen.synchronized and marker.encode() in output
         return (screen.generation > first_generation or bool(initial)) and screen.reached(marker, composer)
     try:
@@ -398,6 +398,8 @@ def terminal_wait_oracles():
     for byte in end:
         screen.feed(bytes([byte]))
     assert screen.reached("Working…", composer=True)
+    assert screen.reached("› cafe\u0301"), "canonical equivalent composer was not recognized"
+    assert not screen.reached("› cafè"), "a different combining accent matched"
     # No heading bytes in the update: retained cells are screen state, not a
     # required repetition of the old inline renderer's transcript.
     screen.feed(start + b"\x1b[3;3Hfresh\x1b[K\x1b[3;8H" + end)
@@ -447,6 +449,22 @@ def terminal_wait_oracles():
         screen.feed(bytes([byte]))
     assert screen.generation > generation and screen.reached("new lifetime")
     assert heading not in screen.completed, "new invocation inherited old PTY cells"
+    # The separate provider chooser has no synchronized frame. Only an
+    # explicitly raw observer may accept its prompt before conversation entry.
+    for raw in (False, True):
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, b"Provider: [c] Codex login, [d] defer > ")
+            os.close(writer)
+            writer = None
+            try:
+                output = read_terminal(reader, "Provider: [c]", raw=raw)
+            except AssertionError as error:
+                assert not raw and error.args[0][0] == "terminal closed before marker", error
+            else:
+                assert raw and "Codex login" in output, output
+        finally:
+            dispose_all(lambda: os.close(reader), lambda: os.close(writer) if writer is not None else None)
     # A returned empty composer must be a new committed frame, not queued
     # text from the preceding command or an unfinished synchronized update.
     reader, writer = os.pipe()
@@ -494,7 +512,8 @@ def terminal_wait_oracles():
             except AssertionError as error:
                 assert not complete and error.args[0][0] == "terminal closed before marker", error
             else:
-                assert complete and "Configured." in output and title in output, output
+                assert complete and "Configured." in output and title not in output, output
+                assert title in capture_for(reader.fileno()).completed
         finally:
             reader.close()
             thread.join(timeout=2)
@@ -646,8 +665,8 @@ def terminal_gate(caller, master, reached, context, timeout=10):
     return bytes(streams[master])
 
 
-def terminal_return(master, marker, *, composer=False, input_master=None, timeout=15):
-    """Collect restored command output, confirm, then await a fresh screen."""
+def terminal_return(master, marker, *, returned_marker="", composer=False, input_master=None, timeout=15):
+    """Return only restored command output after confirming fresh re-entry."""
     prompt = b"Press Enter to return to the Session.\r\n"
     output = bytearray()
     deadline = time.monotonic() + timeout
@@ -660,22 +679,22 @@ def terminal_return(master, marker, *, composer=False, input_master=None, timeou
         capture_for(master).feed(chunk)
         assert b"\x1b[?1049h" not in output, "command output hidden before confirmation"
         assert len(output) < 1024 * 1024, "unexpected unbounded command output"
-    text = output.decode(errors="replace").replace("\r\n", "\n")
+    # Queued UI frames precede alternate-screen departure. Neither those nor
+    # the resumed conversation are this synchronous command's response.
+    text = output.decode(errors="replace").replace("\r\n", "\n").rsplit("\x1b[?1049l", 1)[-1]
+    assert marker in text, ("command response missing before confirmation", marker, text)
     os.write(master if input_master is None else input_master, b"\n")
-    # The requested response may be command output or the returned Action.
-    # Neither substitutes for a newly committed screen after confirmation.
-    returned = read_terminal(master, "" if marker in text else marker,
+    read_terminal(master, returned_marker,
         composer=composer, timeout=deadline - time.monotonic())
-    assert marker in text + returned, (marker, text, returned)
-    return text + returned
+    return text
 
 
-def terminal_step(master, command, marker, *, composer=False):
+def terminal_step(master, command, marker, *, composer=False, returned_marker=""):
     # A redraw can precede this command's response. Callers choose the actual
     # response boundary; synchronous commands retain output until confirmation.
     os.write(master, (command + "\n").encode())
-    if command.split(maxsplit=1)[:1] in (["/configure"], ["/setup"], ["/inspect-action"], ["/result"]):
-        return terminal_return(master, marker, composer=composer)
+    if command.lstrip("\x01\x0b\x15").split(maxsplit=1)[:1] in (["/configure"], ["/setup"], ["/inspect-action"], ["/result"]):
+        return terminal_return(master, marker, returned_marker=returned_marker, composer=composer)
     return read_terminal(master, marker, composer=composer)
 
 
@@ -1120,7 +1139,8 @@ def persistent_opening_case():
             terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
             os.write(master, b"/history\n" + handoff)
             if handoff == b"/inspect-action\n":
-                output = terminal_return(master, "")
+                terminal_return(master, "", returned_marker="History page complete")
+                output = capture_for(master).completed
             else:
                 raw = read_terminal(master, "History page complete", preserve_colour=True)
                 assert "\x1b[?1049l" not in raw, "in-app status released the alternate screen"
@@ -2369,7 +2389,7 @@ def store_selection_cases(state, workspace, valid_store):
                 os.write(master, b"d\n")
                 # Darwin prompt cleanup can wait for this PTY consumer. Drain
                 # the actual deferral response within the original exit budget.
-                read_terminal(master, "Rui: Login deferred.", timeout=response_deadline - time.monotonic())
+                read_terminal(master, "Rui: Login deferred.", timeout=response_deadline - time.monotonic(), raw=True)
                 settlement_timeout = response_deadline - time.monotonic()
                 assert settlement_timeout > 0, "saved-Store deferral did not settle within 5 seconds"
             if not case.startswith("saved"):
@@ -2439,7 +2459,7 @@ def provider_prompt(master, ready, command=None):
         assert not select.select([ready], [], [], 0)[0], "stale provider readiness"
         os.write(master, (command + "\n").encode())
     deadline = time.monotonic() + 15
-    output = read_terminal(master, "Provider: [c]", timeout=deadline - time.monotonic())
+    output = read_terminal(master, "Provider: [c]", timeout=deadline - time.monotonic(), raw=True)
     output += action_ready(ready, master, timeout=deadline - time.monotonic())
     assert not select.select([ready], [], [], 0)[0], "extra provider readiness"
     return output
@@ -3067,7 +3087,7 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "long-input", "invalid-input", "terminal-waits", "persistent-permission", "incomplete-input", "draft-geometry-burst",
+    assert selected in ("all", "core", "long-input", "invalid-input", "terminal-waits", "persistent-permission", "incomplete-input", "draft-geometry-burst",
                         "screen-consent-full", "screen-consent-bounded", "screen-consent-narrow", "screen-consent-oversized"), selected
     if selected.startswith("screen-consent-"):
         screen_consent_case(selected.removeprefix("screen-consent-"))
@@ -3127,7 +3147,7 @@ def main(selected="all"):
         fixture.sse_tool_calls("sibling-calls", [("bash", "pending-call", arguments),
             ("bash", "running-call", sibling_arguments)]),
         fixture.sse_answer("sibling-answer", "sibling-reason", "sibling-message", "siblings done")[0],
-    ] if selected == "all" else [])
+    ] if selected in ("all", "core") else [])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
@@ -3416,7 +3436,8 @@ def main(selected="all"):
         try:
             offered = provider_prompt(master, ready_read)
             assert "No locally ready provider" in offered and "Codex login" in offered, offered
-            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            os.write(master, b"d\n")
+            assert "No new Session created" in read_terminal(master, "No new Session created", raw=True)
             assert deferred.wait(timeout=5) == 0
             assert set(run(preferences_home, "requests").splitlines()) == before_missing
         finally:
@@ -3560,7 +3581,7 @@ def main(selected="all"):
                 status = terminal_step(master, "/status", "Session: ", composer=True)
                 assert f"Permission: {mode}\n" in status, status
                 assert fixture.command("inspect-session", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
-                assert "Bash runs without approval" not in status, status
+                assert ("Bash runs without approval" in status) == warning, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
         created = []
@@ -3769,8 +3790,10 @@ def main(selected="all"):
             binding = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {session}" in binding and f"Workspace (Bash cwd): {workspace.resolve()}" in binding, binding
             assert "Provider: codex" in binding and "Model: model-a" in binding and "Permission: ask" in binding, binding
-            help_text = terminal_step(master, "/help", "/result KEY", composer=True)
-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
+            # Status already contains /result KEY guidance. Await help's own
+            # recovery instructions, not an edited frame of the previous view.
+            help_text = terminal_step(master, "/help", "Ctrl-R retries the exact", composer=True)
+            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/recover KEY", "/discard", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui login codex" in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
@@ -3950,7 +3973,6 @@ def main(selected="all"):
             assert counter.read_text() == "x" and not sibling_effect.exists(), "opening authorized pending sibling"
             run(home, "deny-action", "--store", store, "--session", sibling_session,
                 "--action", pending)
-            sibling_release.touch()
             rejected = terminal_step(master, "a", "action_not_pending")
             assert "Decision rejected" in rejected and counter.read_text() == "x", rejected
             if "› " not in rejected.split("action_not_pending", 1)[1]:
@@ -3968,8 +3990,11 @@ def main(selected="all"):
             assert {path: path.read_bytes() for path in records.glob("*.json")} == sealed
             # Slash commands are composition: replacing this draft is an
             # explicit caller edit, not discard consuming a separate draft.
-            caught_up = rejected + terminal_step(master, "\x01\x0b/discard",
-                "› " if "siblings done" in rejected else "siblings done", composer=True)
+            terminal_step(master, "\x01\x0b/discard", "› ", composer=True)
+            # Do not race a continuing command against the final answer's
+            # owned output. Release that independent result after discard.
+            sibling_release.touch()
+            caught_up = rejected + read_terminal(master, "siblings done", composer=True)
             assert "siblings done" in caught_up and counter.read_text() == "x", caught_up
             assert {path: path.read_bytes() for path in records.glob("*.json")} == sealed
             terminal_step(master, "/exit", "Detached.")
@@ -4158,6 +4183,9 @@ def main(selected="all"):
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         master, slave = pty.openpty()
+        # This case authenticates an entire 4-KiB-boundary command in one
+        # frame. Separate screen-consent cases exercise bounded browsing.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 96, 80, 0, 0))
         ready_read, ready_write = os.pipe()
         try:
             entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
@@ -4175,7 +4203,6 @@ def main(selected="all"):
             proposal = read_terminal(master, "a: Allow once / d: Deny (Enter)")
             proposal += action_ready(ready_read, master)
             assert counter.read_text() == "x", "pasted typeahead approved an unseen Action"
-            assert "\n› interactive request" in proposal, proposal
             shown_command = proposal.split("\n? Run Bash:\n", 1)[1].split("\n  Description:", 1)[0].split("\n  Workspace:", 1)[0]
             assert "".join(line.removeprefix("  ") for line in shown_command.splitlines()) == json.loads(padded_arguments)["cmd"], proposal
             assert_permission_workspace(proposal, workspace.resolve())
@@ -4184,10 +4211,12 @@ def main(selected="all"):
             interactive_key = fixture.command("inspect-session", "--store", store, "--session", interactive)["selected_message"]
             assert interactive_key is not None, proposal
             assert interactive_key in run(home, "requests").splitlines(), "hidden receipt must remain recoverable"
+            original = json.loads((home / ".config/rui/requests" / f"{interactive_key}.json").read_bytes())
+            assert original["text"]["value"] == "interactive request", original
             current_action = fixture.command("inspect-session", "--store", store, "--session", interactive)
             action_id = current_action["actionable_permissions"][0]["action"]
             assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
-            inspection = terminal_step(master, "/inspect-action", "a: Allow once / d: Deny (Enter)")
+            inspection = terminal_step(master, "/inspect-action", "Bash arguments:", returned_marker="a: Allow once / d: Deny (Enter)")
             inspection += action_ready(ready_read, master)
             assert json.loads(inspection.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, inspection
             assert "\\r  " in inspection and "\u202e" not in inspection, inspection
@@ -4208,7 +4237,7 @@ def main(selected="all"):
                 assert "a: Allow once / d: Deny (Enter)" in rejected_choice, (invalid, rejected_choice)
                 assert counter.read_text() == "x", "non-exact choice approved an Action"
                 assert set(records.glob("*.json")) == before_choice, "no-op choice captured authorization"
-                assert "Run Bash:" not in rejected_choice, "no-op repeated the command"
+                assert capture_for(master).completed.count("Run Bash:") == 1, "no-op duplicated the retained command"
             completed_turn = terminal_step(master, "a", "interactive complete", composer=True)
             assert "\n  interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             decision_record, = set(records.glob("*.json")) - before_choice
@@ -4364,7 +4393,10 @@ def main(selected="all"):
             for index, (typed, expected) in enumerate(cases):
                 if index == 0:
                     os.write(master, b"first second\x1b\x7f")
-                    read_terminal(master, "› first ")
+                    read_terminal(master, "› first")
+                    # Committed cell text trims trailing blanks. The caret
+                    # independently proves the retained space after first.
+                    assert capture_for(master).screen.cursor.x == 8
                     observed = terminal_step(master, "Z", f"edited {index}")
                 elif index == 1:
                     os.write(master, typed.encode())
@@ -4480,7 +4512,8 @@ def main(selected="all"):
                     os.write(master, b"\x03")
                 output, errors = terminal_exit(entered, master)
                 assert entered.returncode == (1 if columns == 7 else 0), errors
-                assert (b"UncertainTerminalCursor" in errors) == (columns == 7), errors
+                assert (b"TerminalTooSmall" in errors) == (columns == 7), errors
+                assert (b"Enlarge the terminal and resume" in errors) == (columns == 7), errors
                 assert (b"Detached." in output) == (columns == 8), output
                 actual = termios.tcgetattr(slave)
                 if sys.platform == "darwin":

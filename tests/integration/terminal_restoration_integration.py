@@ -948,9 +948,11 @@ def persistent_cases(state, library, home, store, host):
                     # The one-shot inspection runs outside alternate-screen
                     # custody. Keep its diagnostic bytes separately from the
                     # returned committed composer used for readiness.
-                    resumed = human.terminal_return(output_master, "Not confirmed", composer=True, input_master=master)
-                    assert "STALE" not in resumed, resumed
-                    assert "No actionable permission" in resumed, resumed
+                    command_output = human.terminal_return(output_master, "No actionable permission",
+                        returned_marker="Not confirmed", composer=True, input_master=master)
+                    resumed = human.capture_for(output_master).completed
+                    assert "STALE" not in command_output + resumed, (command_output, resumed)
+                    assert "No actionable permission" in command_output, command_output
                     os.write(master, "next café!\x1b[D\x1b[DX".encode())
                     human.read_terminal(output_master, "› next cafXé!")
                     os.write(master, b"\x12")

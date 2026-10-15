@@ -775,8 +775,6 @@ fn dispatchCommand(self: *Self) !void {
             self.notice = "Work continues while you compose.";
         } else if (std.mem.eql(u8, text, "/login")) {
             self.notice = "Login uses rui login codex in your shell.";
-        } else if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
         } else {
             try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
             if (self.submission.view()) |submission| if (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests")) {
@@ -887,7 +885,7 @@ fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn browse · Ctrl-G returns to latest or the pending Action\nComplete bounded Actions: a + Enter allows once, d + Enter denies\nOversized previews: approval is disabled; use the exact shell commands above\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn browse · Ctrl-G returns to latest or the pending Action\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui login codex in your shell.\n");
     } else {
         try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.

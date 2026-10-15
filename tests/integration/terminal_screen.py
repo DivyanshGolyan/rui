@@ -137,6 +137,9 @@ class ScreenCapture:
                 assert len(self.completed.encode()) < LIMIT, "unexpected unbounded terminal output"
 
     def reached(self, marker, composer=False):
+        # Pyte composes adjacent combining marks in its cells. Match visible
+        # text canonically; exact submitted bytes have separate capture checks.
+        marker = unicodedata.normalize("NFC", marker)
         if self.synchronized or not self.generation or marker not in self.completed:
             return False
         if not composer and not marker.startswith("› "):
