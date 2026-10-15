@@ -331,6 +331,7 @@ const Intake = struct {
                 @min(buffer.len, ingress.options.content_length - ingress.received)
             else
                 buffer.len;
+            if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
             const result = std.c.read(self.fd, &buffer, @intCast(wanted));
             if (result < 0) switch (std.posix.errno(result)) {
                 .AGAIN, .INTR => return,
@@ -6693,6 +6694,73 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         thread.join();
         joined = true;
         try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    }
+}
+
+test "readable ingress cannot cross its header or body deadline" {
+    const Clock = struct {
+        var nanoseconds: i96 = std.time.ns_per_s;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = nanoseconds };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    var host = Host{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{} };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    for ([_]Route{ .host_stop, .host_info }) |route| {
+        for ([_]bool{ false, true }) |body_only| {
+            for ([_]i96{ -1, 0, 1 }) |offset| {
+                Clock.nanoseconds = std.time.ns_per_s;
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try setNonblocking(sockets[0]);
+                const exchange = try std.testing.allocator.create(Intake.Exchange);
+                exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
+                defer std.debug.assert(exchange.destroy());
+                var body_buffer: [128]u8 = undefined;
+                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"1\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
+                var header_buffer: [256]u8 = undefined;
+                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
+                if (body_only) {
+                    try writeAll(std.testing.io, sockets[1], header);
+                    try exchange.read();
+                    try std.testing.expectEqual(.body, exchange.state);
+                }
+                const deadline = exchange.deadline;
+                Clock.nanoseconds = @intCast(deadline + offset);
+                var wire_buffer: [384]u8 = undefined;
+                const wire = try std.fmt.bufPrint(&wire_buffer, "{s}{s}", .{ if (body_only) "" else header, body });
+                try writeAll(std.testing.io, sockets[1], wire);
+                // Readiness is real, but cannot authorize bytes after expiry.
+                var poll = [_]std.c.pollfd{.{ .fd = sockets[0], .events = std.posix.POLL.IN, .revents = 0 }};
+                try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&poll, poll.len, 0));
+                if (offset >= 0) {
+                    try std.testing.expectError(error.TransferInactive, exchange.read());
+                    try std.testing.expectEqual(deadline, exchange.deadline);
+                    try std.testing.expectEqual(null, exchange.request);
+                    var remaining: [384]u8 = undefined;
+                    const count = std.c.read(sockets[0], &remaining, remaining.len);
+                    try std.testing.expectEqual(@as(isize, @intCast(wire.len)), count);
+                    try std.testing.expectEqualStrings(wire, remaining[0..@intCast(count)]);
+                } else {
+                    try exchange.read();
+                    try std.testing.expectEqual(.ready, exchange.state);
+                    try std.testing.expectEqual(route.kind(), std.meta.activeTag(exchange.request.?.*));
+                    const expected = if (route == .host_info) deadline else Clock.nanoseconds + 60 * std.time.ns_per_s;
+                    try std.testing.expectEqual(@as(i128, expected), exchange.deadline);
+                }
+            }
+        }
     }
 }
 

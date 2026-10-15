@@ -3537,7 +3537,10 @@ fn waitRequest(requests: Requests, fd: std.posix.fd_t, events: i16, deadline: ?i
         const result = std.c.poll(&poll_fd, poll_fd.len, milliseconds);
         try requests.check();
         switch (std.posix.errno(result)) {
-            .SUCCESS => if (result != 0) return true,
+            .SUCCESS => if (result != 0) {
+                if (deadline) |end| if (std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds >= end) return false;
+                return true;
+            },
             .INTR => continue,
             else => return error.PollFailed,
         }
@@ -5353,6 +5356,54 @@ test "transport cancellation retains synchronous sink loans and respects deliver
             },
             .list => try std.testing.expectEqual(error.Cancelled, worker.failure.?),
             .result => try std.testing.expectEqual(error.SinkFailed, worker.failure.?),
+        }
+    }
+}
+
+test "transport readiness cannot authorize reads or writes across a deadline" {
+    const Clock = struct {
+        var first: bool = true;
+        var after_poll: i96 = undefined;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            const value = if (first) std.time.ns_per_s else after_poll;
+            first = false;
+            return .{ .nanoseconds = value };
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const requests: Requests = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable } };
+    const deadline = 10 * std.time.ns_per_s;
+    for ([_]bool{ false, true }) |writing| {
+        for ([_]i96{ -1, 0, 1 }) |offset| {
+            const sockets = try socketPair();
+            defer closeTestDescriptor(sockets[0]);
+            defer closeTestDescriptor(sockets[1]);
+            try addNonblocking(sockets[0]);
+            try addNonblocking(sockets[1]);
+            if (!writing) try writeAll(sockets[1], "x");
+            Clock.first = true;
+            Clock.after_poll = deadline + offset;
+            var buffer: [1]u8 = undefined;
+            if (writing) {
+                if (offset >= 0) {
+                    try std.testing.expectError(error.TransferInactive, writeAllRequest(requests, sockets[0], "x", deadline));
+                    const count = std.c.read(sockets[1], &buffer, buffer.len);
+                    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(count));
+                } else {
+                    try writeAllRequest(requests, sockets[0], "x", deadline);
+                    try std.testing.expectEqual(@as(isize, 1), std.c.read(sockets[1], &buffer, buffer.len));
+                    try std.testing.expectEqualStrings("x", &buffer);
+                }
+            } else {
+                if (offset >= 0) {
+                    try std.testing.expectError(error.ResponseInactive, readRequest(requests, sockets[0], &buffer, deadline));
+                    // Expiry does not consume the byte; no-deadline waiting
+                    // still accepts readiness at the same observed time.
+                    try std.testing.expectEqual(@as(usize, 1), try readRequest(requests, sockets[0], &buffer, null));
+                } else try std.testing.expectEqual(@as(usize, 1), try readRequest(requests, sockets[0], &buffer, deadline));
+                try std.testing.expectEqualStrings("x", &buffer);
+            }
         }
     }
 }
