@@ -4781,8 +4781,8 @@ pub const Store = struct {
         if (c.sqlite3_changes(self.database) == 1) try self.recordTurnOutcomePosition(turn_id);
     }
 
-    fn nextModelOperationKind(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
-        const last = try prepare(self.database, "SELECT current.purpose,current.resolution_code,current.operation_id FROM turn latest INDEXED BY turn_session_latest " ++
+    fn nextModelOperationKind(self: *Store, session_ref: []const u8, first_admission: i64, current: *const CurrentConfiguration, policy: model_capability.CompactionPolicy) !ModelOperationKind {
+        const last = try prepare(self.database, "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest " ++
             "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
             "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1");
         defer _ = c.sqlite3_finalize(last);
@@ -4793,10 +4793,14 @@ pub const Store = struct {
         _ = try readNullablePositiveI64(last, 2) orelse return error.CorruptStore;
         var resolution: protocol.Bounded(96) = .{};
         try readText(last, 1, &resolution);
-        if (resolution.eql("context_overflow")) return .compaction;
-        // A compaction successor must apply pending input, even when retained
-        // host input alone still exceeds the soft heuristic. No retry flag.
-        if (c.sqlite3_column_int(last, 0) == 1) return .assistant_response;
+        const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
+        if (active and resolution.eql("context_overflow")) return .compaction;
+        if (c.sqlite3_column_int(last, 0) == 1) {
+            const previous_first = try readNullablePositiveI64(last, 4) orelse return error.CorruptStore;
+            // Apply the same pending prefix after compaction, including failure
+            // before projection. A stop excludes that prefix, not future work.
+            if (active or previous_first == first_admission) return .assistant_response;
+        }
         const trigger = policy.compaction_trigger orelse return .assistant_response;
         if (!try self.contextChangedSinceBase(session_ref, current.next_position)) return .assistant_response;
         var usage_tokens: ?u64 = null;
@@ -4988,7 +4992,7 @@ pub const Store = struct {
         }
         const current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
-        const purpose = try self.nextModelOperationKind(session_ref.slice(), &current, policy);
+        const purpose = try self.nextModelOperationKind(session_ref.slice(), first_admission, &current, policy);
         if (purpose == .compaction) selected = 0;
 
         const turn_id = if (existing_turn) |value| @as(u64, @intCast(value)) else try nextIdentity(self.database, "turn", "turn_id");
@@ -16280,6 +16284,43 @@ test "model admission work excludes usage-covered accepted tool and instruction 
         }
     }
     try std.testing.expect(bounded);
+}
+
+test "compaction new Turn evaluates pressure independently of stopped overflow recovery" {
+    for ([_]bool{ false, true }) |stop_compaction| {
+        for ([_]bool{ false, true }) |pressure| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "config", "direct/stopped-overflow");
+            try submitTestMessage(&storage, &tmp, "original", "original", "direct/stopped-overflow", "retain original input");
+            const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try storage.settleModelAttemptFailure(original, "overflow", .context_overflow, .{});
+            if (stop_compaction) {
+                const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
+            }
+            var stop = try completeSessionStop("stop", "direct/stopped-overflow");
+            const stopped = storage.stopSession(&stop, .{});
+            try std.testing.expect(stopped == .accepted);
+            try std.testing.expectEqual(SessionStopCompletion.completed, stopped.accepted.completion);
+            try storage.close();
+            storage = try testingStore(&tmp, std.testing.io);
+
+            var patch: protocol.ConfigureCommand = .{};
+            try patch.key.set("pressure");
+            try patch.session.set("direct/stopped-overflow");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set(if (pressure) "1" else "1000000");
+            try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "new", "new", "direct/stopped-overflow", "new work");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expect(next.turn_id != original.turn_id);
+            try std.testing.expectEqual(if (pressure) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+            try std.testing.expectEqual(@as(u64, if (pressure) 1 else 0), (try storage.inspectSession("direct/stopped-overflow")).pending_messages);
+        }
+    }
 }
 
 test "compaction purpose admission fences a missing latest Turn Operation" {
