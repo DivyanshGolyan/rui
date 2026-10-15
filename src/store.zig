@@ -4880,6 +4880,9 @@ pub const Store = struct {
         var total: ?u64 = null;
         var input: ?u64 = null;
         var output: ?u64 = null;
+        var input_seen = false;
+        var output_seen = false;
+        var duplicate_split = false;
         while (try source.next()) |byte| {
             switch (byte) {
                 '{', '[' => depth += 1,
@@ -4903,6 +4906,18 @@ pub const Store = struct {
                     }
                     if (try source.peek() != ':') continue;
                     _ = try source.take();
+                    const is_input = std.mem.eql(u8, key[0..length], "input_tokens");
+                    const is_output = std.mem.eql(u8, key[0..length], "output_tokens");
+                    // Occurrence is independent of value validity. An invalid
+                    // duplicate cannot repair or preserve a usable split pair.
+                    if (is_input) {
+                        duplicate_split = duplicate_split or input_seen;
+                        input_seen = true;
+                    }
+                    if (is_output) {
+                        duplicate_split = duplicate_split or output_seen;
+                        output_seen = true;
+                    }
                     while (try source.peek()) |next| {
                         if (!std.ascii.isWhitespace(next)) break;
                         _ = try source.take();
@@ -4926,13 +4941,15 @@ pub const Store = struct {
                     const delimiter = try source.peek();
                     if (delimiter != ',' and delimiter != '}') continue;
                     if (std.mem.eql(u8, key[0..length], "total_tokens")) total = number;
-                    if (std.mem.eql(u8, key[0..length], "input_tokens")) input = number;
-                    if (std.mem.eql(u8, key[0..length], "output_tokens")) output = number;
+                    if (is_input) input = number;
+                    if (is_output) output = number;
                 },
                 else => {},
             }
         }
-        return total orelse if (input) |value| value +| (output orelse return null) else null;
+        if (total) |value| return value;
+        if (duplicate_split) return null;
+        return (input orelse return null) +| (output orelse return null);
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
@@ -15646,8 +15663,25 @@ test "compaction pressure uses the latest accepted output even without usage" {
         .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1}", .usable = true },
         .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999}", .usable = true },
         .{ .usage = "{\"total_tokens\":1.5,\"input_tokens\":0,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":2,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":2}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":null,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":null,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":null}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1.5,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":1.5}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_tokens\":1,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_tokens\":1}", .usable = false },
+        .{ .usage = "{\"input_tokens\":1,\"input_\\u0074okens\":2,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":1,\"output_\\u0074okens\":2}", .usable = false },
+        .{ .usage = "{\"input_tokens\":99999,\"input_tokens\":99999,\"output_tokens\":0}", .usable = false },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":99999,\"output_tokens\":99999}", .usable = false },
+        .{ .usage = "{\"total_tokens\":0,\"input_tokens\":99999,\"input_tokens\":null,\"output_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":99999,\"total_tokens\":0}", .usable = true },
+        .{ .usage = "{\"input_tokens\":0,\"details\":{\"input_tokens\":99999,\"output_tokens\":99999},\"output_tokens\":0}", .usable = true },
     }) |case| {
-        for ([_]bool{ false, true }) |large_output| {
+        for ([_]enum { host_input, provider_output, small }{ .host_input, .provider_output, .small }) |context| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage = try testingStore(&tmp, std.testing.io);
@@ -15660,7 +15694,7 @@ test "compaction pressure uses the latest accepted output even without usage" {
             try patch.configuration.compaction_trigger.value.set("1000");
             try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
             const original: [4000]u8 = @splat('x');
-            try submitTestMessage(&storage, &tmp, "one", "one", "direct/usage", if (large_output) "small input" else &original);
+            try submitTestMessage(&storage, &tmp, "one", "one", "direct/usage", if (context == .host_input) &original else "small input");
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
             try settleCallsForTestingWithFaults(&storage, &tmp, first, "older-output", &calls, .{}, "{\"total_tokens\":1}");
@@ -15668,14 +15702,14 @@ test "compaction pressure uses the latest accepted output even without usage" {
             const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(second));
             var latest_calls = calls;
-            if (large_output) {
+            if (context == .provider_output) {
                 latest_calls[0].encoded_arguments = &original;
                 latest_calls[0].decoded_arguments = &original;
             }
             try settleCallsForTestingWithFaults(&storage, &tmp, second, "latest-output", &latest_calls, .{}, case.usage);
             try submitTestMessage(&storage, &tmp, "three", "three", "direct/usage", "small suffix");
             const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try std.testing.expectEqual(if (case.usable) ModelOperationKind.assistant_response else ModelOperationKind.compaction, try storage.modelOperationKind(next));
+            try std.testing.expectEqual(if (case.usable or context == .small) ModelOperationKind.assistant_response else ModelOperationKind.compaction, try storage.modelOperationKind(next));
         }
     }
 }
@@ -15999,7 +16033,14 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
 }
 
 test "compaction missing usage estimates covered retained host input" {
-    for ([_]?[]const u8{ null, "{\"total_tokens\":1.5}", "{\"input_tokens\":1}", "{\"input_tokens\":1,\"output_tokens\":1.5}" }) |usage| {
+    for ([_]?[]const u8{
+        null,
+        "{\"total_tokens\":1.5}",
+        "{\"input_tokens\":1}",
+        "{\"input_tokens\":1,\"output_tokens\":1.5}",
+        "{\"input_tokens\":1,\"input_tokens\":null,\"output_tokens\":0}",
+        "{\"input_tokens\":0,\"output_tokens\":null,\"output_tokens\":1}",
+    }) |usage| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage = try testingStore(&tmp, std.testing.io);
