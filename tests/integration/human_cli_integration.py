@@ -735,6 +735,19 @@ def terminal_return(master, marker, *, returned_marker="", composer=False, input
     text = output.decode(errors="replace").replace("\r\n", "\n").rsplit("\x1b[?1049l", 1)[-1]
     assert marker in text, ("command response missing before confirmation", marker, text)
     os.write(master if input_master is None else input_master, b"\n")
+    if input_master is not None and input_master != master:
+        # Canonical echo belongs to the input PTY, not the screen PTY. Its
+        # unread output can hold raw re-entry's flush on Darwin. Consume only
+        # this confirmation's exact echo, then require actual screen readiness.
+        echo = bytearray()
+        while len(echo) < 2:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([input_master], [], [], remaining)[0], (
+                "confirmation echo deadline exceeded", bytes(echo))
+            chunk = os.read(input_master, 2 - len(echo))
+            assert chunk, ("input terminal closed before confirmation echo", bytes(echo))
+            echo.extend(chunk)
+            assert b"\r\n".startswith(echo), ("unexpected confirmation echo", bytes(echo))
     read_terminal(master, returned_marker,
         composer=composer, timeout=deadline - time.monotonic())
     return text
