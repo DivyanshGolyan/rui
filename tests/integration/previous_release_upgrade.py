@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Verify same-format upgrades and prompt, preserving breaking-format refusal."""
+import contextlib
+import hashlib
+import os
+import pathlib
+import re
+import resource
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+import model_fixture as fixture
+from host_process import canonical_fixture_root, dispose_all, stop_process
+
+
+def install(checkout):
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+    print(f"Installing {revision} through ./install.sh", flush=True)
+    subprocess.run(["bash", "./install.sh"], cwd=checkout, check=True, timeout=1200)
+    binary = pathlib.Path(os.environ["HOME"], ".local/bin/rui")
+    print(f"Installed artifact sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}", flush=True)
+    return binary
+
+
+def soft_256():
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+
+
+def supported_format(checkout):
+    source = (checkout / "src/store.zig").read_text()
+    return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
+
+
+def database_hashes(store):
+    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in store.glob("rui.sqlite3*")}
+
+
+def stop_detached(binary, store):
+    deadline = time.monotonic() + 10
+    stop_requested = False
+    while True:
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, "Store ownership release unconfirmed"
+        status = subprocess.run([binary, "host", "status", "--store", store],
+                                capture_output=True, text=True, check=True, timeout=min(5, remaining))
+        if "Host: unavailable" in status.stdout:
+            return
+        if "Host: ready" in status.stdout and not stop_requested:
+            stop_requested = True
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, status.stdout
+            subprocess.run([binary, "host", "stop", "--store", store],
+                           check=True, timeout=min(5, remaining))
+        time.sleep(.025)
+
+
+def main():
+    previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
+    previous_format, candidate_format = supported_format(previous), supported_format(candidate)
+    # Do not use the runner's HOME, default Store or credentials. Keep the
+    # compiler cache outside HOME so both normal installs can reuse compilation.
+    os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
+    directory = tempfile.mkdtemp(prefix="rui-upgrade-")
+    try:
+        root = canonical_fixture_root(directory)
+        home, workspace, store = root / "home", root / "workspace", root / "store"
+        home.mkdir()
+        workspace.mkdir()
+        os.environ["HOME"] = str(home)
+        os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "absent-credentials.json")
+        fixture.ROOT = workspace
+        binary = install(previous)
+        previous_artifact = binary.resolve()
+        previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
+        fixture.RUI = binary
+        expected = "Saved before reinstall: café\nsecond line remains intact".encode()
+        endpoint = fixture.SuccessEndpoint([
+            fixture.sse_answer("upgrade-response", "upgrade-reasoning", "upgrade-message",
+                               expected.decode())[0],
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        seed = None
+        attempted_restart = False
+        try:
+            seed = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            fixture.configure(root, store, "upgrade-configure", "upgrade/session", "model-a")
+            fixture.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
+            observation, answer, _ = fixture.wait_for_result_release(
+                store, "upgrade-message", "upgrade/session", time.monotonic() + 15)
+            assert observation["result"]["status"] == "completed" and answer == expected, observation
+            assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
+            configuration = {
+                "workspace": str(workspace), "provider": "codex", "model": "model-a",
+                "tools": ["bash", "edit"], "permission_mode": "ask",
+            }
+            before = fixture.command("inspect-session", "--store", store, "--session", "upgrade/session")["session"]
+            for field, value in configuration.items():
+                assert before[field] == value, (field, value, before)
+            subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=10)
+            # The serving command reports EffectAwareShutdown as status1.
+            assert seed.wait(timeout=10) == 1
+            stop_detached(binary, store)  # Confirm lease release, not just acknowledgement.
+            stop_process(seed)
+            seed = None
+            with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro", uri=True)) as database:
+                assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
+            before_hashes = database_hashes(store)
+            assert "rui.sqlite3" in before_hashes
+            print("Previous build saved the exact answer and released the Store", flush=True)
+
+            binary = install(candidate)
+            assert binary.resolve() != previous_artifact, "installation did not publish a new build"
+            assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
+            fixture.RUI = binary
+            commands = (("host", "start"),) if previous_format == candidate_format else (("host", "start"), ("serve",))
+            for command in commands:
+                attempted_restart = True
+                started_at = time.monotonic()
+                restarted = subprocess.run([binary, *command, "--store", store],
+                                           capture_output=True, text=True, timeout=16, preexec_fn=soft_256)
+                elapsed = time.monotonic() - started_at
+                print(restarted.stdout + restarted.stderr, flush=True)
+                if previous_format == candidate_format:
+                    assert restarted.returncode == 0, "same-format upgrade must start without a fresh Store"
+                    status = subprocess.run([binary, "host", "status", "--store", store],
+                                            capture_output=True, text=True, check=True, timeout=5)
+                    assert "Host: ready" in status.stdout, status.stdout
+                    print(status.stdout, flush=True)
+                else:
+                    assert restarted.returncode != 0 and elapsed < 5, (elapsed, restarted)
+                    for text in (str(store), f"found schema {previous_format}",
+                                 f"supports schema {candidate_format}", "compatible Rui build",
+                                 "original path", "back up", "fresh Store", "No migration was performed"):
+                        assert text in restarted.stderr, (text, restarted.stderr)
+                    assert "HostReadinessUnconfirmed" not in restarted.stderr
+                    assert database_hashes(store) == before_hashes, "refusal changed SQLite data or file membership"
+                    stop_detached(binary, store)
+                    attempted_restart = False
+                    print(f"Breaking format {previous_format}→{candidate_format} {' '.join(command)} refused in {elapsed:.3f}s; SQLite hashes unchanged", flush=True)
+            if previous_format != candidate_format:
+                # The previous installed artifact must still recover the exact
+                # work at its original Store path. This is not a migration.
+                fixture.RUI = previous_artifact
+                seed = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            assert fixture.read_result(store, "upgrade-message") == expected, "saved answer changed"
+            after = fixture.command("inspect-session", "--store", store, "--session", "upgrade/session")["session"]
+            for field, value in configuration.items():
+                assert after[field] == value, (field, value, after)
+            assert len(endpoint.requests) == 1, "upgrade replayed completed work"
+        finally:
+            dispose_all(
+                lambda: stop_detached(binary, store) if attempted_restart else None,
+                lambda: stop_process(seed) if seed is not None else None,
+                endpoint.shutdown,
+                endpoint.server_close,
+                lambda: thread.join(timeout=5),
+            )
+    except BaseException:
+        # A failed/unknown start may still own this Store. Never delete beneath
+        # it, even when cleanup also failed. Retain the original failure first.
+        print(f"Upgrade failure state retained at {directory}; confirm Host release before removal", flush=True)
+        raise
+    else:
+        shutil.rmtree(directory)
+        print("Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay", flush=True)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+name: Previous installed-release upgrade
+on:
+  push:
+    branches: ['wip/host-*']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: previous-release-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    name: upgrade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Normal detached startup under the default soft limit
+        run: zig build host-launch-integration -j2 --summary all
+      - name: Check out the previous known installed build
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Prior known serving build, not inferred Store-creation provenance.
+          ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+          path: .amp/previous-release
+          persist-credentials: false
+      - name: Install, save real work, reinstall and restart the same Store
+        run: |
+          set -euo pipefail
+          uname -sm
+          git rev-parse HEAD
+          zig version
+          python3 -B tests/integration/previous_release_upgrade.py . .
+          python3 -B tests/integration/previous_release_upgrade.py .amp/previous-release .
