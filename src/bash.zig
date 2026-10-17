@@ -332,23 +332,19 @@ pub const Execution = struct {
     };
 
     pub fn requestStop(self: *Execution, now: std.Io.Clock.Timestamp) TerminationAttempt {
-        const attempted = self.lifecycle.process == .running;
-        self.send(self.lifecycle.requestTermination(.stopped, now));
-        return .{ .attempted = attempted, .signal_failed = self.signalFailed() };
+        const signal = self.lifecycle.requestTermination(.stopped, now);
+        self.sendSignal(signal);
+        return .{ .attempted = signal != null, .signal_failed = self.lifecycle.signalFailed() };
     }
 
     pub fn requestInfrastructureShutdown(self: *Execution, now: std.Io.Clock.Timestamp) void {
-        self.send(self.lifecycle.requestTermination(.infrastructure_shutdown, now));
+        self.sendSignal(self.lifecycle.requestTermination(.infrastructure_shutdown, now));
     }
 
     pub fn applyDueDeadline(self: *Execution, now: std.Io.Clock.Timestamp) ?TimeoutAction {
         const expiry = self.lifecycle.expireDeadline(now) orelse return null;
-        self.send(expiry.signal);
-        return .{ .deadline_ns = @intCast(expiry.deadline.raw.nanoseconds), .signal_failed = self.signalFailed() };
-    }
-
-    fn signalFailed(self: *const Execution) bool {
-        return self.lifecycle.signal_failure or self.lifecycle.group_permission_denied;
+        self.sendSignal(expiry.signal);
+        return .{ .deadline_ns = @intCast(expiry.deadline.raw.nanoseconds), .signal_failed = self.lifecycle.signalFailed() };
     }
 
     pub const ServiceResult = struct {
@@ -389,7 +385,7 @@ pub const Execution = struct {
         made_progress = self.servicePipe(.stdout, window, time, &now, &fault) or made_progress;
         made_progress = self.servicePipe(.stderr, window, time, &now, &fault) or made_progress;
         if (self.lifecycle.expireGrace(now)) |signal| {
-            self.send(signal);
+            self.sendSignal(signal);
             made_progress = true;
         }
         made_progress = (self.reapLeader(now) catch |err| reaped: {
@@ -513,7 +509,7 @@ pub const Execution = struct {
         self.stderr_capture.published = true;
     }
 
-    fn send(self: *Execution, signal: ?BashLifecycle.Signal) void {
+    fn sendSignal(self: *Execution, signal: ?BashLifecycle.Signal) void {
         switch (signal orelse return) {
             .terminate_group => self.signalGroup(.TERM),
             .kill_group => self.signalGroup(.KILL),
@@ -556,7 +552,7 @@ pub const Execution = struct {
 
     fn endPipe(self: *Execution, stream: BashLifecycle.Stream, end: BashLifecycle.PipeEnd, now: std.Io.Clock.Timestamp) void {
         self.closeDescriptor(stream);
-        self.send(self.lifecycle.endPipe(stream, end, now));
+        self.sendSignal(self.lifecycle.endPipe(stream, end, now));
     }
 
     /// One bounded pipe operation's result, applied at the service-time
@@ -596,13 +592,14 @@ pub const Execution = struct {
     }
 
     fn readPipe(self: *Execution, stream: BashLifecycle.Stream, window: []u8) !PipeStep {
-        const pipe = self.pipes[@backingInt(stream)] orelse return .idle;
+        const state = self.lifecycle.pipes[@backingInt(stream)];
+        const descriptor_slot = self.pipes[@backingInt(stream)];
+        // The descriptor is open exactly while the lifecycle pipe is not closed.
+        std.debug.assert((state == .closed) == (descriptor_slot == null));
+        if (state == .closed) return .idle;
+        const pipe = descriptor_slot.?;
         const destination = self.capture(stream);
-        switch (self.lifecycle.pipes[@backingInt(stream)]) {
-            .reading => {},
-            .tail => |remaining| return self.readTail(pipe, destination, remaining, window),
-            .closed => unreachable,
-        }
+        if (state == .tail) return self.readTail(pipe, destination, state.tail, window);
         var descriptor = [_]std.posix.pollfd{.{
             .fd = pipe.handle,
             .events = std.posix.POLL.IN,
@@ -696,7 +693,7 @@ pub const Execution = struct {
                 break :live decodeObservation(observation);
             },
         };
-        self.send(self.lifecycle.observeLeader(term, now));
+        self.sendSignal(self.lifecycle.observeLeader(term, now));
         return true;
     }
 
@@ -727,19 +724,19 @@ pub const Execution = struct {
     fn cutCapture(self: *Execution, now: std.Io.Clock.Timestamp, fault: *?anyerror) bool {
         const cutoff = self.lifecycle.cutoff(now) orelse return false;
         for (std.enums.values(BashLifecycle.Stream)) |stream| {
-            if (cutoff.snapshot[@backingInt(stream)]) self.beginTail(stream, now);
+            if (cutoff.snapshot[@backingInt(stream)]) self.beginTail(stream);
         }
         if (cutoff.unconfirmed) fault.* = fault.* orelse error.BashCleanupUnconfirmed;
         return cutoff.changed();
     }
 
-    fn beginTail(self: *Execution, stream: BashLifecycle.Stream, now: std.Io.Clock.Timestamp) void {
+    fn beginTail(self: *Execution, stream: BashLifecycle.Stream) void {
         const pipe = self.pipes[@backingInt(stream)].?;
         var queued: u64 = 0;
         const observed = self.faults.lifecycle != .tail_snapshot and
             rui_bash_pipe_queued_bytes(pipe.handle, &queued) >= 0;
         if (!observed) self.closeDescriptor(stream);
-        self.send(self.lifecycle.beginTail(stream, if (observed) queued else null, now));
+        self.lifecycle.beginTail(stream, if (observed) queued else null);
     }
     fn formatResult(
         self: *Execution,

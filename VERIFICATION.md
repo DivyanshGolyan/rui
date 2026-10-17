@@ -26,7 +26,7 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using exi
 | Preference privacy fixture and native actor | `preference-policy-integration` on both systems | Already runs in `check` and `check-full`; publication fault policy runs with the native owner tests |
 | Server, protocol, shared execution and scratch | `check` on both systems | Shared native boundaries need the composed suite, not every unrelated measurement |
 | Server admission/capture owner or admission fixture | Also `admission-debug-integration` on both systems | The ordinary Debug artifact smoke does not cover the complete recovery matrix |
-| Bash | `test`, Bash owner, lifecycle, recovery and caller integration targets | Real execution and custody checks retained; no general sandbox or power-loss claim |
+| Bash | `test`, Bash owner, lifecycle, recovery and caller integration targets; also `test-logic` for `src/BashLifecycle.zig` | Real execution and custody checks retained; no general sandbox or power-loss claim |
 | Model and transport | `test`, `dispatch-integration`, `transport-h2-integration` | Synthetic native transport covers changed adapter; live provider remains opt-in |
 | Codex credentials | `test`, Codex, credential and Codex H2 integration targets | No real account login required for synthetic mutation and route checks |
 | Evaluator | `workflow-check`, `evaluator-host-integration`, `evaluator-churn`; string sanitizer for string changes | Exact engine limits and real child cleanup remain; no Host resource campaign for an unchanged Host |

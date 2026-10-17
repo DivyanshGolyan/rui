@@ -170,6 +170,11 @@ pub fn expireGrace(self: *Self, now: Timestamp) ?Signal {
     return if (grace.observed == null) .kill_group_and_leader else .kill_group;
 }
 
+/// Any signaling observation the saved result must qualify.
+pub fn signalFailed(self: *const Self) bool {
+    return self.signal_failure or self.group_permission_denied;
+}
+
 pub fn recordSignal(self: *Self, result: SignalResult) void {
     switch (result) {
         .delivered => {},
@@ -180,12 +185,14 @@ pub fn recordSignal(self: *Self, result: SignalResult) void {
 
 /// The reap found no exited child. Unconfirmed after the watchdog.
 pub fn reapPending(self: *const Self, now: Timestamp) error{BashCleanupUnconfirmed}!void {
+    std.debug.assert(self.process == .reaping);
     if (reached(now, self.process.reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
 }
 
 /// Consumes the direct child's status. An earlier observation remains the
 /// recorded status; disagreement is reported after the reap is retired.
 pub fn reaped(self: *Self, term: Term) error{BashStatusChanged}!void {
+    std.debug.assert(self.process == .reaping);
     const reaping = self.process.reaping;
     self.process = .{ .checking_group = .{
         .term = reaping.observed orelse term,
@@ -197,12 +204,15 @@ pub fn reaped(self: *Self, term: Term) error{BashStatusChanged}!void {
 }
 
 pub fn groupAbsent(self: *Self) void {
+    std.debug.assert(self.process == .checking_group);
     const term = self.process.checking_group.term;
     self.process = .{ .gone = term };
 }
 
 /// Capture cutoff: after original-group absence, or when the cleanup
 /// watchdog expires first, every reading pipe drains one finite tail.
+/// `unconfirmed` persists on every later observation until group absence:
+/// the watchdog expiry remains a fact, not a one-time event.
 pub fn cutoff(self: *const Self, now: Timestamp) ?Cutoff {
     const expired = switch (self.process) {
         .grace => |value| reached(now, value.cleanup_deadline),
@@ -219,26 +229,31 @@ pub fn cutoff(self: *const Self, now: Timestamp) ?Cutoff {
 
 /// Starts a finite tail of `queued` bytes, or ends capture when the queued
 /// size cannot be observed.
-pub fn beginTail(self: *Self, stream: Stream, queued: ?u64, now: Timestamp) ?Signal {
-    std.debug.assert(self.pipes[@backingInt(stream)] == .reading);
+pub fn beginTail(self: *Self, stream: Stream, queued: ?u64) void {
+    const pipe = &self.pipes[@backingInt(stream)];
+    std.debug.assert(pipe.* == .reading);
     if (queued) |bytes| {
-        self.pipes[@backingInt(stream)] = .{ .tail = bytes };
-        return null;
+        pipe.* = .{ .tail = bytes };
+    } else {
+        pipe.* = .{ .closed = .failed };
+        self.capture_failure = .read;
     }
-    return self.endPipe(stream, .{ .failed = .read }, now);
 }
 
 pub fn drainedTail(self: *Self, stream: Stream, bytes: u64) void {
     const pipe = &self.pipes[@backingInt(stream)];
-    std.debug.assert(bytes != 0 and bytes <= pipe.tail);
+    std.debug.assert(pipe.* == .tail and bytes != 0 and bytes <= pipe.tail);
     pipe.tail -= bytes;
 }
 
-/// Records a pipe's terminal reason. A capture failure stops the Attempt:
-/// output can no longer be complete.
+/// Records a pipe's terminal reason. A failure while the pipe is live
+/// requests termination: output can no longer be complete. A finite tail
+/// begins only after cutoff, so its failure is capture evidence alone and
+/// leaves a later stop or shutdown free to supply the stop reason.
 pub fn endPipe(self: *Self, stream: Stream, end: PipeEnd, now: Timestamp) ?Signal {
     const pipe = &self.pipes[@backingInt(stream)];
     std.debug.assert(pipe.* != .closed);
+    const live = pipe.* == .reading;
     switch (end) {
         .eof => pipe.* = .{ .closed = .eof },
         .incomplete => pipe.* = .{ .closed = .incomplete },
@@ -246,7 +261,7 @@ pub fn endPipe(self: *Self, stream: Stream, end: PipeEnd, now: Timestamp) ?Signa
             std.debug.assert(failure != .none);
             pipe.* = .{ .closed = .failed };
             self.capture_failure = failure;
-            return self.requestTermination(.capture_failed, now);
+            if (live) return self.requestTermination(.capture_failed, now);
         },
     }
     return null;
@@ -397,7 +412,7 @@ test "capture cutoff waits for group absence or the cleanup watchdog" {
         if (phase == .gone or watchdog) {
             try std.testing.expectEqual(watchdog, result.?.unconfirmed);
             try std.testing.expectEqual([2]bool{ true, false }, result.?.snapshot);
-            try std.testing.expect(lifecycle.beginTail(.stdout, 2, at(now_ms)) == null);
+            lifecycle.beginTail(.stdout, 2);
             // A tail is never snapshotted twice.
             try std.testing.expect(!lifecycle.cutoff(at(now_ms)).?.changed());
         } else {
@@ -412,8 +427,8 @@ test "a finite tail closes complete only on EOF" {
     _ = lifecycle.expireGrace(at(100)).?;
     try lifecycle.reaped(.{ .exited = 0 });
     lifecycle.groupAbsent();
-    _ = lifecycle.beginTail(.stdout, 3, at(101));
-    _ = lifecycle.beginTail(.stderr, 0, at(101));
+    lifecycle.beginTail(.stdout, 3);
+    lifecycle.beginTail(.stderr, 0);
     lifecycle.drainedTail(.stdout, 2);
     lifecycle.drainedTail(.stdout, 1);
     try std.testing.expectEqual(Pipe{ .tail = 0 }, lifecycle.pipes[0]);
@@ -440,14 +455,47 @@ test "capture failure stops a running Attempt and saves storage failure" {
         try std.testing.expectEqual(Resolution.storage_failed, lifecycle.resolution());
     }
 
-    // An unobservable tail size fails capture without restarting grace.
-    var lifecycle = Self.start(at(0), 100);
-    _ = lifecycle.requestTermination(.timed_out, at(0));
-    _ = lifecycle.expireGrace(at(100)).?;
-    try std.testing.expect(lifecycle.beginTail(.stdout, null, at(5_000)) == null);
-    try std.testing.expectEqual(Pipe{ .closed = .failed }, lifecycle.pipes[0]);
-    try std.testing.expectEqual(CaptureFailure.read, lifecycle.capture_failure);
-    try std.testing.expectEqual(StopReason.timed_out, lifecycle.stop_reason);
+    // A live pipe that fails after natural exit still supplies the reason.
+    var live = Self.start(at(0), 100);
+    _ = live.observeLeader(.{ .exited = 0 }, at(1));
+    try std.testing.expect(live.endPipe(.stdout, .{ .failed = .read }, at(2)) == null);
+    try std.testing.expect(live.requestTermination(.stopped, at(3)) == null);
+    try live.retire(.{ .exited = 0 }, at(4));
+    try std.testing.expectEqual(Resolution.storage_failed, live.resolution());
+}
+
+test "finite-tail capture failure leaves the stop reason to a later request" {
+    const Failure = enum { snapshot, tail_read };
+    const Later = enum { none, stop, shutdown };
+    for (std.enums.values(Failure)) |failure| for (std.enums.values(Later)) |later| {
+        var lifecycle = Self.start(at(0), 100);
+        _ = lifecycle.observeLeader(.{ .exited = 0 }, at(1));
+        _ = lifecycle.expireGrace(at(101)).?;
+        try lifecycle.reaped(.{ .exited = 0 });
+        lifecycle.groupAbsent();
+        // stderr still owes a tail, so the Attempt is not yet retired.
+        lifecycle.beginTail(.stderr, 32 * 1024);
+        switch (failure) {
+            .snapshot => lifecycle.beginTail(.stdout, null),
+            .tail_read => {
+                lifecycle.beginTail(.stdout, 8);
+                try std.testing.expect(lifecycle.endPipe(.stdout, .{ .failed = .write }, at(102)) == null);
+            },
+        }
+        try std.testing.expectEqual(Pipe{ .closed = .failed }, lifecycle.pipes[0]);
+        try std.testing.expectEqual(StopReason.none, lifecycle.stop_reason);
+        switch (later) {
+            .none => {},
+            .stop => try std.testing.expect(lifecycle.requestTermination(.stopped, at(103)) == null),
+            .shutdown => try std.testing.expect(lifecycle.requestTermination(.infrastructure_shutdown, at(103)) == null),
+        }
+        _ = lifecycle.endPipe(.stderr, .eof, at(104));
+        try std.testing.expectEqual(@as(Resolution, switch (later) {
+            .none => .storage_failed,
+            .stop => .cancelled,
+            .shutdown => .infrastructure_shutdown,
+        }), lifecycle.resolution());
+    };
 }
 
 test "resolution follows the first stop reason, then capture, then exit status" {
