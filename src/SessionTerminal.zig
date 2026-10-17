@@ -85,8 +85,8 @@ pub fn finish(self: *Self) !void {
 }
 
 /// Optional exit notice cannot hold a restored caller on stdout backpressure.
-pub fn detached(self: *Self, store: []const u8, session: []const u8) !void {
-    return self.detachedWithOps(store, session, NativeNoticeOps{});
+pub fn detached(self: *Self, store: []const u8, session: []const u8, action: ?u64) !void {
+    return self.detachedWithOps(store, session, action, NativeNoticeOps{});
 }
 
 const NativeNoticeOps = struct {
@@ -98,15 +98,25 @@ const NativeNoticeOps = struct {
     }
 };
 
-fn detachedWithOps(self: *Self, store: []const u8, session: []const u8, ops: anytype) !void {
+fn detachedWithOps(self: *Self, store: []const u8, session: []const u8, action: ?u64, ops: anytype) !void {
     std.debug.assert(!self.active);
-    // Four characters per escaped byte, plus fixed labels and quoting.
-    var buffer: [4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128]u8 = undefined;
+    // Resume plus three exact pending-Action commands; one bounded nonblocking
+    // write after restoration. No Action means the original inline bytes.
+    var buffer: [4 * (4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128)]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
     try notice.writeAll("\nDetached. Host work continues.\nResume: rui resume --store ");
     try Text.writeShellWord(&notice, store);
     try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");
+    if (action) |id| {
+        try notice.writeAll("Pending Action: inspect the complete proposal before deciding.\n");
+        for ([_][]const u8{ "inspect-action", "allow-action", "deny-action" }) |command| {
+            try notice.print("rui {s} --store ", .{command});
+            try Text.writeShellWord(&notice, store);
+            try Text.writeShellSession(&notice, session, false);
+            try notice.print(" --action {d}\n", .{id});
+        }
+    }
     try self.noticeWithOps(notice.buffered(), ops);
 }
 
@@ -178,7 +188,7 @@ test "detached notice restores flags and requires one complete nonblocking write
             for ([_]@FieldType(Output, "delivery"){ .failed, .zero, .short, .full }) |delivery| {
                 var output: Output = .{ .enable_failed = enable_failed, .restore_failed = restore_failed, .delivery = delivery };
                 var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .colour = false, .active = false };
-                const result = terminal.detachedWithOps("/tmp/a'\\\n", "--s", &output);
+                const result = terminal.detachedWithOps("/tmp/a'\\\n", "--s", null, &output);
                 const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
                 try std.testing.expectEqual(@as(c_int, 2) | (if (restore_failed) nonblock else 0), output.flags);
                 try std.testing.expectEqual(@as(usize, 2), output.sets);
@@ -194,8 +204,12 @@ test "detached notice restores flags and requires one complete nonblocking write
     }
     var output: Output = .{ .enable_failed = false, .restore_failed = false, .delivery = .full };
     var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .colour = false, .active = false };
-    try terminal.detachedWithOps("/tmp/store", "A\x00Z", &output);
-    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/store' --session-hex 41005a\n", output.bytes[0..output.len]);
+    try terminal.detachedWithOps("/tmp/store", "A\x00Z", 913, &output);
+    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/store' --session-hex 41005a\n" ++
+        "Pending Action: inspect the complete proposal before deciding.\n" ++
+        "rui inspect-action --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
+        "rui allow-action --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
+        "rui deny-action --store $'/tmp/store' --session-hex 41005a --action 913\n", output.bytes[0..output.len]);
 }
 
 pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {
@@ -226,10 +240,7 @@ fn write(self: *Self, bytes: []const u8) !void {
         if (n < 0) switch (std.posix.errno(n)) {
             .INTR => continue,
             .AGAIN => {
-                if (self.pump) |pump| pump.step(pump.context) catch |err| {
-                    // A partly emitted Vaxis frame cannot survive handoff.
-                    return if (self.screen != null and err == error.CommandHandoff) error.Cancelled else err;
-                } else return error.TerminalCleanupFailed;
+                if (self.pump) |pump| try pump.step(pump.context) else return error.TerminalCleanupFailed;
                 continue;
             },
             else => return error.TerminalCleanupFailed,

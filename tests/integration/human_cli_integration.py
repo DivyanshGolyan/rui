@@ -2583,9 +2583,10 @@ def renderer_cases():
             # These are protocol cleanup checks, not displayed-content claims.
             assert b"\x1b[?1049l" in output and b"\x1b[?2004l" in output, output
             assert b"\x1b[?25h" in output, output
+            return bytes(output), bytes(errors)
 
     @contextmanager
-    def terminal(session, ready_write=None):
+    def terminal(session, ready_write=None, *, columns=80, rows=24, opening=True):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
@@ -2595,7 +2596,7 @@ def renderer_cases():
         caller = None
         terminal = None
         try:
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color", "RUI_RENDERER": "vaxis"}
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
@@ -2603,7 +2604,8 @@ def renderer_cases():
                 env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
-            terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
+            if opening:
+                terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
             yield terminal
             assert caller.poll() is not None, "case did not retire its renderer"
             actual, expected = termios.tcgetattr(slave), list(original)
@@ -2696,6 +2698,19 @@ def renderer_cases():
             tty.finish()
         print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
 
+        records = set((home / ".config/rui/requests").glob("*.json"))
+        for initial in (True, False):
+            with terminal("renderer/geometry", columns=480 if initial else 80,
+                    rows=135 if initial else 24, opening=not initial) as tty:
+                if not initial:
+                    tty.resize(480, 135)
+                _, errors = tty.finish(expected=1)
+                for marker in (b"TerminalTooLarge", b"49,152", b"Shrink the terminal", b"unset RUI_RENDERER"):
+                    assert marker in errors, errors
+                assert b"OutOfMemory" not in errors, errors
+                assert set((home / ".config/rui/requests").glob("*.json")) == records
+        print("renderer: initial oversize and excessive resize give typed actionable guidance and restore exactly", flush=True)
+
         configure("renderer/recovery")
         marker = answer("recovery")
         proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"" if len(proxy.exchanges) == 1 else response)
@@ -2724,9 +2739,32 @@ def renderer_cases():
         proxy = None
         print("renderer: lost admission exact replay, retained draft/caret and SIGTERM restoration passed", flush=True)
 
+        configure("renderer/invisible")
+        invisible = "\u00ad\u200b\u2060\ufeff\n\u200b\u0301\njoined e\u0301"
+        arguments = json.dumps({"cmd": "printf '\\302\\255\\342\\200\\213\\342\\201\\240\\357\\273\\277\\n\\342\\200\\213\\314\\201\\njoined e\\314\\201'", "description": "Invisible output", "timeout_ms": None})
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-invisible", [("bash", "renderer-invisible-call", arguments)]))
+        endpoint.responses.append(fixture.sse_answer("invisible-answer", "invisible-reason", "invisible-message", invisible + "\noutput survived")[0])
+        escaped = ("\\u{ad}", "\\u{200b}", "\\u{2060}", "\\u{feff}", "\\u{301}")
+        with terminal("renderer/invisible") as tty:
+            shown = tty.send("show invisible output\n", "output survived")
+            assert all(value in shown for value in escaped), shown
+            joined(tty)
+            shown = tty.send("/details\n", "joined é")
+            # Both the saved Tool Result and answer use the same display sink.
+            assert all(value in shown for value in escaped), shown
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        with terminal("renderer/invisible") as tty:
+            shown = tty.wait("output survived")
+            assert all(value in shown for value in escaped), shown
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: invisible answer and tool output escaped; saved conversation reopens", flush=True)
+
         configure("renderer/consent", "ask")
         proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-        arguments = json.dumps({"cmd": "printf approved > renderer-effect", "description": "Renderer consent", "timeout_ms": None})
+        command = "\n".join(f"# exact command line {index}" for index in range(40)) + "\nprintf approved > renderer-effect"
+        arguments = json.dumps({"cmd": command, "description": "Renderer consent", "timeout_ms": None})
         release = threading.Event()
         endpoint.responses.append((fixture.sse_tool_calls("renderer-call", [("bash", "renderer-action", arguments)]), release))
         marker = answer("consent")
@@ -2735,15 +2773,24 @@ def renderer_cases():
             with terminal("renderer/consent", ready_write) as tty:
                 tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
                 release.set()
+                shown = tty.wait("Action continues · PgDn")
+                assert "printf approved > renderer-effect" not in shown, shown
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                tty.send("a\n", "Action continues · PgDn")
+                assert not (workspace / "renderer-effect").exists(), "unseen Action tail was approved"
+                for _ in range(8):
+                    tty.send("\x1b[6~", predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
+                    if "Action read" in tty.capture.completed:
+                        break
+                else:
+                    raise AssertionError("complete Action never became ready after paging")
                 tty.ready(ready_read)
                 shown = tty.wait("a: Allow once / d: Deny (Enter)")
                 assert "printf approved > renderer-effect" in shown, shown
                 shown_workspace = shown.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
                 assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"
                 assert shown_workspace.replace("\n", "") == str(workspace), shown
-                # The earlier draft frame can precede Message publication.
-                # Action readiness follows it; only later Decisions are new.
-                records = set((home / ".config/rui/requests").glob("*.json"))
+                assert set((home / ".config/rui/requests").glob("*.json")) == records, "early a survived until approval readiness"
                 current = fixture.command("inspect-session", "--store", store, "--session", "renderer/consent")
                 action = current["actionable_permissions"][0]["action"]
                 exact = json.loads(run(home, "inspect-action", "--store", store, "--session", "renderer/consent", "--action", action, "--json"))
@@ -2768,8 +2815,28 @@ def renderer_cases():
                 tty.finish()
         finally:
             dispose_all(release.set, lambda: os.close(ready_read), lambda: os.close(ready_write))
-        completed = True
         print("renderer: fresh complete non-pasted exact Action consent and SIGINT restoration passed", flush=True)
+
+        proxy.close()
+        proxy = None
+        configure("renderer/oversized", "ask")
+        command = "#" + "x" * (256 * 1024) + "\nprintf forbidden > renderer-oversized-effect"
+        arguments = json.dumps({"cmd": command, "description": "Oversized proposal", "timeout_ms": None})
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-oversized", [("bash", "renderer-oversized-call", arguments)]))
+        with terminal("renderer/oversized") as tty:
+            tty.send("propose oversized action\n", "Approval disabled")
+            current = fixture.command("inspect-session", "--store", store, "--session", "renderer/oversized")
+            action = current["actionable_permissions"][0]["action"]
+            records = set((home / ".config/rui/requests").glob("*.json"))
+            tty.send("a\n", "Approval disabled")
+            tty.caller.send_signal(signal.SIGINT)
+            detached = tty.finish()[0].decode()
+            for name in ("inspect-action", "allow-action", "deny-action"):
+                assert f"rui {name} --store $'{store}' --session $'renderer/oversized' --action {action}" in detached, detached
+            assert set((home / ".config/rui/requests").glob("*.json")) == records
+            assert not (workspace / "renderer-oversized-effect").exists()
+        completed = True
+        print("renderer: oversized Action cannot approve; exact shell commands survive alternate-screen exit", flush=True)
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
