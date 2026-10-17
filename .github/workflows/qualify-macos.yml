@@ -27,6 +27,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 # Requested refs execute their own setup/build code, but must not publish
 # caches into the dispatching workflow's trusted ref. Tokens enforce this cap.
@@ -45,6 +46,7 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
       platform: ${{ steps.plan.outputs.platform }}
+      targets: ${{ steps.plan.outputs.targets }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -58,16 +60,52 @@ jobs:
           set -euo pipefail
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(python3 tests/ci/qualification.py --suite "$SUITE" --platform "$PLATFORM")" >> "$GITHUB_OUTPUT"
-  qualify:
+          python3 tests/ci/qualification.py --suite "$SUITE" --platform "$PLATFORM" > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          rows = json.load(open('matrix.json'))['include']
+          targets = {target for row in rows for target in row['targets']}
+          if any(row['resource'] for row in rows):
+              targets.add('measurement-check')
+          print('targets=' + json.dumps(sorted(targets)))
+          PY
+  compile:
     needs: plan
+    runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+          check-part: compiled
+      - name: Compile selected gates once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-${{ needs.plan.outputs.platform }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  qualify:
+    needs: [plan, compile]
     name: ${{ needs.plan.outputs.platform }} / ${{ matrix.name }}
     runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
     timeout-minutes: 30
     strategy:
       # Separate VMs avoid measuring concurrent qualification workloads on one Mac.
       fail-fast: false
-      max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 4 }}
+      max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 3 }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Select runner-owned evidence directories
@@ -111,8 +149,14 @@ jobs:
       - uses: ./.github/actions/setup
         id: setup
         with:
-          targets: ${{ matrix.resource && '["measurement-check"]' || toJSON(matrix.targets) }}
-          check-part: ${{ matrix.name }}
+          targets: ${{ needs.plan.outputs.targets }}
+          compiled: 'true'
+      - name: Verify the successful producer's compiled artifact
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          ARTIFACT_ID: ${{ needs.compile.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Record the compiler used by every suite
         run: zig version | tee "$EVIDENCE/zig-version.txt"
       - name: Existing measurement setup and tests

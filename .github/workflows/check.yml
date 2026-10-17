@@ -86,22 +86,26 @@ jobs:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
-              print('macos_matrix=' + json.dumps(shards(p['native_targets'])), file=f)
+              print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
           PY
+  policy:
+    # Lint/test policy alongside selection; it must not delay native allocation.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: python3 -B -m unittest discover -s tests/ci -v
-        if: ${{ steps.cadence.outputs.run == 'true' }}
       - name: Reject undefined fixture names before native builds
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
           python3 -m ruff check --select F821 tests
       - name: Install the pinned workflow linter
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           set -euo pipefail
           # The official release avoids rebuilding the Go CLI on every plan.
@@ -112,7 +116,6 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Validate workflows with one pinned-linter compatibility exception
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
@@ -123,9 +126,59 @@ jobs:
               actionlint -shellcheck= "$workflow"
             fi
           done
+  linux_build:
+    needs: plan
+    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+          check-part: compiled
+      - name: Compile selected gates once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  macos_build:
+    needs: plan
+    if: ${{ needs.plan.outputs.native == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.native_targets }}
+          check-part: compiled
+      - name: Compile selected gates once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.native_targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-macos-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
   linux_suites:
     name: linux suites (${{ matrix.name }})
-    needs: plan
+    needs: [plan, linux_build]
     if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -138,8 +191,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ toJSON(matrix.targets) }}
-          check-part: ${{ matrix.name }}
+          targets: ${{ needs.plan.outputs.targets }}
+          compiled: 'true'
+      - name: Verify the exact producer artifact before executing gates
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Run selected targets or verify identical-tree evidence
         id: gates
         env:
@@ -181,7 +240,7 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     # Preserve the existing required status for the entire selected Linux gate.
-    needs: [plan, linux_suites]
+    needs: [plan, policy, linux_build, linux_suites]
     if: ${{ always() && ((needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]') || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -189,27 +248,37 @@ jobs:
       - name: Require every selected Linux part
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+          BUILD_RESULT: ${{ needs.linux_build.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
+          test "$POLICY_RESULT" = success
+          test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
   macos_suites:
     name: macos suites (${{ matrix.name }})
-    needs: plan
+    needs: [plan, macos_build]
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
       # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ toJSON(matrix.targets) }}
-          check-part: ${{ matrix.name }}
+          targets: ${{ needs.plan.outputs.native_targets }}
+          compiled: 'true'
+      - name: Verify the exact producer artifact before executing gates
+        env:
+          TARGETS: ${{ needs.plan.outputs.native_targets }}
+          ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Run required native targets
         id: gates
         env:
@@ -244,7 +313,7 @@ jobs:
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.
-    needs: [plan, macos_suites]
+    needs: [plan, macos_build, macos_suites]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -252,7 +321,9 @@ jobs:
       - name: Require every selected Apple Silicon part
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
+          BUILD_RESULT: ${{ needs.macos_build.result }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
+          test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success

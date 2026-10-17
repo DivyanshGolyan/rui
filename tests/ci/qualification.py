@@ -18,7 +18,24 @@ NATIVE = (
 )
 
 
-def shards(targets):
+def shards(targets, platform="linux"):
+    if platform == "macos":
+        # The standard account cap is five Macs shared by all workflows. Use
+        # three workers, leaving room for another PR; never queue ten compilers.
+        rows = []
+        if "check-full" in targets:
+            rows.extend([
+                dict(name="full-execution", targets=["check-full"] +
+                     (["test-logic"] if "test-logic" in targets else []),
+                     part="execution", resource=False, args=[]),
+                dict(name="full-callers", targets=["check-full"], part="callers", resource=False, args=[]),
+            ])
+        remaining = [t for t in targets if t not in RESOURCES and t != "check-full"
+                     and not (t == "test-logic" and "check-full" in targets)]
+        if remaining:
+            rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
+        rows.extend(shards([t for t in targets if t in RESOURCES])["include"])
+        return {"include": rows}
     rows = []
     for target in targets:
         if target == "measure-model-output":
@@ -49,7 +66,7 @@ def qualification(suite, platform):
         targets.extend(NATIVE)
         if platform == "linux":
             targets.append("login-signal-integration")
-    return shards(targets)
+    return shards(targets, platform)
 
 
 def main():
@@ -59,7 +76,7 @@ def main():
     source.add_argument("--suite", choices=("footprint", "resources", "native", "all"))
     parser.add_argument("--platform", choices=("linux", "macos"), default="linux")
     args = parser.parse_args()
-    result = shards(json.loads(args.targets)) if args.targets is not None else qualification(args.suite, args.platform)
+    result = shards(json.loads(args.targets), args.platform) if args.targets is not None else qualification(args.suite, args.platform)
     print(json.dumps(result))
 
 

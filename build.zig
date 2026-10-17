@@ -706,6 +706,29 @@ pub fn build(b: *std.Build) void {
         "Measure production execution service across completions, history, replay fields, and owner populations",
     );
     measure_execution_service_step.dependOn(&measure_execution_service.step);
+
+    // Compile the selected gates once, without executing their fixture Run
+    // steps. Workers still execute the original gates and their assertions.
+    const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
+    if (b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile")) |selected| {
+        var names = std.mem.splitScalar(u8, selected, ',');
+        var visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+        while (names.next()) |name| {
+            const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
+            if (&root.step == ci_build) @panic("ci-build cannot select itself");
+            collectCiCompiles(b, ci_build, &root.step, &visited);
+        }
+    }
+}
+
+fn collectCiCompiles(b: *std.Build, destination: *std.Build.Step, source: *std.Build.Step, visited: *std.AutoHashMapUnmanaged(*std.Build.Step, void)) void {
+    const entry = visited.getOrPut(b.allocator, source) catch @panic("OOM");
+    if (entry.found_existing) return;
+    if (source.cast(std.Build.Step.Compile) != null) {
+        destination.dependOn(source);
+        return;
+    }
+    for (source.dependencies.items) |dependency| collectCiCompiles(b, destination, dependency, visited);
 }
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {

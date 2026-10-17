@@ -17,6 +17,7 @@ on:
     - cron: '13 6 * * *'
 permissions:
   contents: read
+  actions: read
 jobs:
   qualify:
     if: ${{ !github.event.repository.private }}

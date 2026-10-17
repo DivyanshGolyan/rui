@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 import os
@@ -275,10 +276,25 @@ class SelectionTest(unittest.TestCase):
                           ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
         self.assertEqual(shards([]), {"include": []})
 
+    def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
+        rows = qualification("native", "macos")["include"]
+        self.assertEqual(len(rows), 3, "avoid queuing twelve setup/build copies on three Mac workers")
+        execution = next(row for row in rows if row["part"] == "execution")
+        self.assertEqual(execution["targets"], ["check-full", "test-logic"])
+        self.assertEqual(execution_batches(execution["targets"], execution["part"]),
+                         [["check-full", "-Dcheck-part=execution"], ["test-logic"]])
+        callers = next(row for row in rows if row["part"] == "callers")
+        self.assertEqual(callers["targets"], ["check-full"])
+        batches = [batch for row in rows for batch in execution_batches(row["targets"], row["part"])]
+        selected = [target for batch in batches for target in batch if not target.startswith("-")]
+        self.assertCountEqual(selected, [*NATIVE, "check-full"])
+        self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
+        self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
+
     def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
         for platform in ("linux", "macos"):
             rows = qualification("all", platform)["include"]
-            targets = {row["targets"][0] for row in rows}
+            targets = {target for row in rows for target in row["targets"]}
             self.assertTrue(targets <= AVAILABLE)
             resources = set(RESOURCES) if platform == "macos" else {
                 "measure-repeat-work", "measure-model-output", "measure-model-queue",
@@ -287,7 +303,7 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(set(NATIVE) | resources <= targets)
             self.assertEqual("login-signal-integration" in targets, platform == "linux")
             self.assertEqual({row["targets"][0] for row in rows if row["resource"]}, resources)
-            self.assertTrue(all(len(row["targets"]) == 1 for row in rows))
+            self.assertTrue(all(len(row["targets"]) == 1 for row in rows if row["resource"] or platform == "linux"))
         self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
         self.assertFalse(any(row["resource"] for row in qualification("native", "linux")["include"]))
 
@@ -302,11 +318,21 @@ class SelectionTest(unittest.TestCase):
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         workflow = Path(".github/workflows/qualify-macos.yml").read_text()
+        # The server's scoped token, not requested-ref setup code, owns access.
         self.assertRegex(workflow, r'(?m)^cache-mode: read$')
         self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
                          'a job override could restore cache-write authority')
         self.assertIn('workflow_call:', workflow)
-        self.assertIn('persist-credentials: false', workflow)
+        self.assertEqual(workflow.count('persist-credentials: false'),
+                         workflow.count('uses: actions/checkout@'))
+
+    def test_ci_test_methods_cannot_silently_replace_another_check(self):
+        for path in Path('tests/ci').glob('test_*.py'):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ClassDef):
+                    methods = [method.name for method in node.body
+                               if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                    self.assertEqual(len(methods), len(set(methods)), (str(path), node.name))
 
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
@@ -321,14 +347,6 @@ class SelectionTest(unittest.TestCase):
             ["host-launch-integration"], ["check-full"],
         ])
         self.assertEqual(execution_batches([]), [])
-
-    def test_requested_ref_cannot_publish_shared_caches(self):
-        workflow = Path('.github/workflows/qualify-macos.yml').read_text()
-        # Dispatch may run on main while executing an unreviewed source SHA.
-        # The server's scoped token, not requested-ref setup code, owns access.
-        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
-        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
-                         'a job override could restore cache-write authority')
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
@@ -345,7 +363,8 @@ class SelectionTest(unittest.TestCase):
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
         targets = ["admission-debug-integration", "check-full", "evaluator-churn", "test-full"]
         self.assertEqual(execution_batches(targets, "execution"),
-                         [["check-full", "-Dcheck-part=execution"]])
+                         [["check-full", "-Dcheck-part=execution"],
+                          ["admission-debug-integration"], ["evaluator-churn"], ["test-full"]])
         self.assertEqual(execution_batches(targets, "callers"), [
             ["admission-debug-integration"], ["check-full", "-Dcheck-part=callers"],
             ["evaluator-churn"], ["test-full"],

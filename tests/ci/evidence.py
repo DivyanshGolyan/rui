@@ -62,7 +62,7 @@ def verify(archive, artifact, run, inputs):
     if run["conclusion"] != "success" or run["event"] != inputs["event"]:
         raise ValueError("Origin did not finish successfully in the same event")
     workflow = inputs["workflow"].split("/", 2)[2]
-    if run["path"] != workflow or run["head_branch"] != inputs["branch"].removeprefix("refs/heads/"):
+    if run["path"].split("@", 1)[0] != workflow or run["head_branch"] != inputs["branch"].removeprefix("refs/heads/"):
         raise ValueError("Origin workflow or branch mismatch")
     repository = os.environ["GITHUB_REPOSITORY"]
     if run["head_repository"]["full_name"] != repository:

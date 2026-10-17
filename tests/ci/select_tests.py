@@ -121,7 +121,8 @@ def execution_batches(targets, check_part="all"):
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
     if check_part == "execution":
-        return [["check-full", "-Dcheck-part=execution"]]
+        return [["check-full", "-Dcheck-part=execution"],
+                *execution_batches([target for target in targets if target != "check-full"])]
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
