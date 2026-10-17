@@ -127,16 +127,14 @@ jobs:
           set -euo pipefail
           if [ "$RESOURCE" = true ]; then
             target=$(python3 -c 'import json,os; print(json.loads(os.environ["TARGETS"])[0])')
-            arguments=()
-            stdout=result.json
+            trap 'cat "$EVIDENCE/build.log" >&2' EXIT
             # This existing runner publishes a summary plus compressed evidence
             # to files instead of stdout; keep both under the upload directory.
             if [ "$target" = measure-execution-service ]; then
-              arguments=(-- --output "$EVIDENCE/result.json")
-              stdout=runner.log
+              zig build "$target" -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
+            else
+              zig build "$target" -j2 --summary all 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
             fi
-            trap 'cat "$EVIDENCE/build.log" >&2' EXIT
-            zig build "$target" -j2 --summary all "${arguments[@]}" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/$stdout"
           else
             python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" 2>&1 | tee "$EVIDENCE/gates.log"
           fi
