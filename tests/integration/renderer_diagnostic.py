@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import traceback
 
@@ -49,6 +50,27 @@ def run(mode):
         roots.append(root)
         return root
     module.canonical_fixture_root = remember
+    original_popen = subprocess.Popen
+    caller = None
+    def track(*args, **kwargs):
+        nonlocal caller
+        child = original_popen(*args, **kwargs)
+        if args and isinstance(args[0], list) and "resume" in args[0]:
+            caller = child
+        return child
+    subprocess.Popen = track
+    original_wait = module.fixture.wait_for
+    def sampled_wait(*args, **kwargs):
+        try:
+            return original_wait(*args, **kwargs)
+        except BaseException:
+            if caller is not None:
+                destination = pathlib.Path(".amp/diagnostic") / (mode + "-sample.txt")
+                original_popen(["sample", str(caller.pid), "1", "-file", str(destination)]).wait(timeout=10)
+                if destination.exists():
+                    print(destination.read_text(), flush=True)
+            raise
+    module.fixture.wait_for = sampled_wait
     failure = None
     try:
         module.main("renderer-backpressure")

@@ -1039,7 +1039,7 @@ def renderer_backpressure_case(state, library, home, store):
             remaining = deadline - time.monotonic()
             assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
             ready = select.select([output_master, caller.stderr], [], [], remaining)[0]
-            assert ready, (description, caller.poll(), bytes(errors))
+            assert ready, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
             for fd in ready:
                 chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
                 assert chunk, (description, caller.poll(), bytes(errors))

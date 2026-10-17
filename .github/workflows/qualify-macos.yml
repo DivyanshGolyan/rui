@@ -35,6 +35,7 @@ jobs:
           ulimit -n 256
           RUI_BACKPRESSURE_DIAG=old zig build terminal-restoration-integration -j2 --summary all -- renderer-backpressure 2>&1 | tee .amp/diagnostic/old.log
       - name: Controlled PTY output, same scratch4 product
+        continue-on-error: true
         run: |
           set -o pipefail
           ulimit -n 256
