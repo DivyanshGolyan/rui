@@ -1609,15 +1609,14 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             TerminalText.diagnostic("rui: status: {s}\n", .{@errorName(err)});
         };
     } else if (std.mem.eql(u8, text, "/requests")) {
-        var buffer: [256]u8 = undefined;
+        // Inline enumeration was unbuffered: preserve partial-output ordering
+        // and keep output failures inside the original requests diagnostic.
+        var buffer: [0]u8 = .{};
         var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-        // Preserve already rendered detail on failure; the primary error wins.
-        defer writer.flush() catch {};
         sessionInspect(init, requests_context, destination, reference, text, &writer.interface) catch |err| {
             TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
             return;
         };
-        try writer.flush();
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});

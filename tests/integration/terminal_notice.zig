@@ -11,5 +11,5 @@ pub fn main() !void {
         .colour = false,
         .active = false,
     };
-    try terminal.detached("/tmp/a' path", "--session");
+    try terminal.detached("/tmp/a' path", "--session", null);
 }
