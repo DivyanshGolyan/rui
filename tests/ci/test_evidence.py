@@ -271,6 +271,11 @@ class EvidenceTest(unittest.TestCase):
             with patch.dict(os.environ, GITHUB_REPOSITORY='owner/repo'), \
                     patch.object(evidence, 'api', return_value=commit):
                 self.assertEqual(evidence.verify(data, artifact, run, inputs), receipt)
+                # GitHub updates nested PR metadata when the branch advances,
+                # even on historical runs; run.head_sha remains immutable.
+                advanced = dict(run, pull_requests=[dict(base=dict(sha=base),
+                                                         head=dict(sha='newer-pr-head'))])
+                self.assertEqual(evidence.verify(data, artifact, advanced, inputs), receipt)
                 # A self-consistent receipt claiming a candidate different from
                 # the origin run cannot pass merely by naming its tree.
                 other = dict(run, head_sha=base,

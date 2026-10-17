@@ -106,8 +106,10 @@ def verify(archive, artifact, run, inputs):
             raise ValueError("Origin run did not test the receipt source")
     elif run["event"] == "pull_request":
         pulls = run["pull_requests"]
-        if len(pulls) != 1 or pulls[0]["head"]["sha"] != run["head_sha"]:
+        if len(pulls) != 1:
             raise ValueError("Origin PR identity unavailable")
+        # Nested PR heads advance even on historical runs. Only the run's
+        # immutable head_sha binds the source merge's second parent below.
         base, head = pulls[0]["base"]["sha"], run["head_sha"]
         if [parent["sha"] for parent in commit["parents"]] != [base, head]:
             raise ValueError("Origin merge parents mismatch")
