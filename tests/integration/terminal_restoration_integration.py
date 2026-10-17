@@ -145,7 +145,9 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
         }
         record("disable\n");
         disabled = 1;
-        if (!strcmp(fault, "disable") || !strcmp(fault, "both")) {
+        /* EAGAIN on a large repaint does not establish lack of credit for
+           this small control. Inject its cleanup failure independently. */
+        if (!strcmp(fault, "disable") || !strcmp(fault, "both") || !strcmp(fault, "backpressure")) {
             errno = EIO;
             return -1;
         }
@@ -684,7 +686,8 @@ def check_forwarding(state, library):
         dispose_all(
             lambda: stop_process(caller, timeout=5) if caller is not None else None,
             lambda: termios.tcflush(slave, termios.TCOFLUSH),
-            lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+            lambda: termios.tcflush(slave, termios.TCIFLUSH),
+            lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
             lambda: os.close(master), lambda: os.close(slave),
         )
 
@@ -978,7 +981,10 @@ def persistent_cases(state, library, home, store, host):
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: proxy.close() if proxy is not None else None,
                 lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                # Discard and restore independently; do not wait for unread
+                # Darwin canonical echo on the separate input terminal.
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
             )
 
@@ -1080,7 +1086,8 @@ def consent_boundary_cases(state, library):
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
                 lambda: termios.tcflush(slave, termios.TCOFLUSH),
-                lambda: termios.tcsetattr(slave, termios.TCSAFLUSH, original),
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 *(lambda fd=fd: os.close(fd) for fd in (master, slave, read_ready, write_ready)),
             )
 

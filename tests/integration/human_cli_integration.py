@@ -2464,11 +2464,313 @@ def incomplete_input_case(home, store, session, endpoint, host):
     print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
 
 
+def renderer_cases():
+    """Opt-in renderer closure; the default inline suite keeps its own oracle."""
+    from contextlib import contextmanager
+    from terminal_screen import ScreenCapture
+    import canonical_failure_integration as canonical
+    import resource
+
+    original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
+
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-renderer."))
+    home, store, workspace = state / "home", state / "store", state / "workspace"
+    home.mkdir(mode=0o700)
+    workspace.mkdir()
+    endpoint = fixture.SuccessEndpoint([])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = proxy = None
+    completed = False
+
+    class Terminal:
+        def __init__(self, master, slave, caller):
+            self.master, self.slave, self.caller = master, slave, caller
+            self.capture = ScreenCapture()
+
+        def resize(self, columns, rows=24):
+            self.capture.resize(columns, rows)
+            fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
+        def feed(self, data):
+            self.capture.feed(data)
+
+        def wait(self, marker=None, *, predicate=None, after=None, timeout=15):
+            deadline = time.monotonic() + timeout
+            while not ((after is None or self.capture.generation > after) and
+                       (predicate() if predicate is not None else self.capture.reached(marker))):
+                remaining = deadline - time.monotonic()
+                assert remaining > 0 and select.select([self.master], [], [], remaining)[0], (
+                    "renderer screen deadline", marker, self.capture.completed,
+                    self.caller.poll(), self.capture.screen.cursor)
+                chunk = os.read(self.master, 65536)
+                assert chunk, ("renderer terminal closed", marker)
+                # Collection budget excludes observer work on long combining
+                # cells; this is not a native wall-response performance claim.
+                before = time.monotonic()
+                self.feed(chunk)
+                deadline += time.monotonic() - before
+            return self.capture.completed
+
+        def send(self, text, marker=None, *, predicate=None):
+            generation = self.capture.generation
+            payload = text.encode()
+            failure = []
+            def write():
+                try:
+                    for offset in range(0, len(payload), 1024):
+                        remaining = memoryview(payload)[offset:offset + 1024]
+                        while remaining:
+                            remaining = remaining[os.write(self.master, remaining):]
+                except BaseException as error:
+                    failure.append(error)
+            writer = threading.Thread(target=write, daemon=True)
+            writer.start()
+            result = self.wait(marker, predicate=predicate, after=generation)
+            writer.join(timeout=5)
+            assert not writer.is_alive(), "renderer input writer stalled"
+            if failure:
+                raise failure[0]
+            return result
+
+        def ready(self, descriptor):
+            deadline = time.monotonic() + 15
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "renderer Action readiness deadline"
+                ready = select.select([descriptor, self.master], [], [], remaining)[0]
+                assert ready, "renderer Action readiness missing"
+                if self.master in ready:
+                    self.feed(os.read(self.master, 65536))
+                if descriptor in ready:
+                    assert os.read(descriptor, 1) == b"x"
+                    while select.select([self.master], [], [], 0)[0]:
+                        assert time.monotonic() < deadline
+                        self.feed(os.read(self.master, 65536))
+                    return
+
+        def finish(self, expected=0):
+            # Own BOTH streams through actual exit, rather than communicate
+            # while an undrained PTY can still hold the final renderer writes.
+            deadline = time.monotonic() + 10
+            pending = {self.master, self.caller.stderr.fileno()}
+            output, errors = bytearray(), bytearray()
+            while True:
+                exited = self.caller.poll() is not None
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, ("renderer exit deadline", bytes(errors))
+                ready = select.select(list(pending), [], [], 0 if exited else min(remaining, 0.1))[0]
+                if exited and not ready:
+                    break
+                for fd in ready:
+                    try:
+                        chunk = os.read(fd, 65536)
+                    except OSError as error:
+                        if fd != self.master or error.errno != errno.EIO:
+                            raise
+                        chunk = b""
+                    if not chunk:
+                        pending.remove(fd)
+                    elif fd == self.master:
+                        output.extend(chunk)
+                        self.feed(chunk)
+                    else:
+                        errors.extend(chunk)
+                    assert len(output) + len(errors) < 1024 * 1024
+            assert self.caller.wait(timeout=1) == expected, bytes(errors)
+            # These are protocol cleanup checks, not displayed-content claims.
+            assert b"\x1b[?1049l" in output and b"\x1b[?2004l" in output, output
+            assert b"\x1b[?25h" in output, output
+
+    @contextmanager
+    def terminal(session, ready_write=None):
+        master, slave = pty.openpty()
+        original = termios.tcgetattr(slave)
+        original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
+        # Asymmetric user state catches restoration to generic sane defaults.
+        original[6][termios.VERASE] = b"\x08"
+        termios.tcsetattr(slave, termios.TCSANOW, original)
+        caller = None
+        terminal = None
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color", "RUI_RENDERER": "vaxis"}
+            if ready_write is not None:
+                env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
+            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--", session],
+                env=env, pass_fds=(() if ready_write is None else (ready_write,)),
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            terminal = Terminal(master, slave, caller)
+            terminal.wait(predicate=lambda: terminal.capture.draft("", 2))
+            yield terminal
+            assert caller.poll() is not None, "case did not retire its renderer"
+            actual, expected = termios.tcgetattr(slave), list(original)
+            if sys.platform == "darwin":
+                mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                actual[3] &= ~mask
+                expected[3] &= ~mask
+            assert actual == expected, ("renderer termios restoration", expected, actual)
+            from terminal_restoration_integration import assert_file_flags
+            assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
+        finally:
+            if sys.exception() is not None:
+                preserve_failure_metadata(state / "screen-failure.json", lambda: {
+                    "session": session, "screen": terminal.capture.completed if terminal else None,
+                    "cursor": repr(terminal.capture.screen.cursor) if terminal else None,
+                    "returncode": caller.poll() if caller else None})
+            dispose_all(
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                lambda: os.close(master), lambda: os.close(slave))
+
+    def configure(session, permission="bypass"):
+        run(home, "configure", "--store", store, "--session", session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--permission-mode", permission)
+
+    def answer(index):
+        marker = f"renderer answer {index}"
+        endpoint.responses.append(fixture.sse_answer(f"renderer-{index}", f"reason-{index}", f"message-{index}", marker)[0])
+        return marker
+
+    def submitted(text):
+        body = json.loads(endpoint.requests[-1])
+        actual = next(item["content"][0]["text"] for item in reversed(body["input"]) if item.get("role") == "user")
+        assert actual.encode() == text.encode(), ("renderer changed submitted bytes", actual, text)
+
+    def joined(tty):
+        # A final answer frame is not proof that its reader has joined.
+        tty.send("/status\n", "Inspection ready")
+        tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
+
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        configure("renderer/geometry")
+        with terminal("renderer/geometry") as tty:
+            # Keep the historical native Mac OOM sequence exactly: wide5000X
+            # at 24x2048, shrink to 24x80, then a + 2048 combining acutes.
+            tty.resize(2048)
+            marker = answer("wide")
+            tty.send("X" * 5000 + "\n", marker)
+            submitted("X" * 5000)
+            joined(tty)
+            tty.resize(80)
+            for index, (draft, caret) in enumerate((("a" + "\u0301" * 2048, 3),
+                    ("A中e\u0301\tB", 11), ("e" + "\u0301" * 1024, 3))):
+                before = len(endpoint.requests)
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                drawn = "A中é    B" if index == 1 else draft
+                tty.send("\x1b[200~" + draft + "\x1b[201~", predicate=lambda: tty.capture.draft(drawn, caret))
+                assert len(endpoint.requests) == before and set((home / ".config/rui/requests").glob("*.json")) == records
+                marker = answer(index)
+                tty.send("\n", marker)
+                submitted(draft)
+                joined(tty)
+            multiline = "first café\nsecond 中"
+            before = len(endpoint.requests)
+            tty.send("\x1b[200~" + multiline + "\x1b[201~", "> second 中")
+            screen = tty.capture.screen
+            assert screen.display[screen.cursor.y - 1].rstrip() == "› first café"
+            assert screen.display[screen.cursor.y].rstrip() == "> second 中" and screen.cursor.x == 11
+            assert len(endpoint.requests) == before
+            tty.send("\n", answer("multiline"))
+            submitted(multiline)
+            joined(tty)
+            os.write(tty.master, b"/exit\n")
+            tty.finish()
+        print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
+
+        configure("renderer/recovery")
+        marker = answer("recovery")
+        proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"" if len(proxy.exchanges) == 1 else response)
+        with terminal("renderer/recovery") as tty:
+            before = len(endpoint.requests)
+            tty.send("original é\n", "Not confirmed")
+            saved = proxy.exchanges[0][0]
+            tty.send("next café!\x1b[D\x1b[DX", predicate=lambda: tty.capture.draft("next cafXé!", 11))
+            generation = tty.capture.generation
+            tty.resize(40, 12)
+            tty.wait(predicate=lambda: tty.capture.draft("next cafXé!", 11), after=generation)
+            tty.send("\x12", "Original confirmed")
+            assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved
+            assert json.loads(saved)["text"]["value"] == "original é"
+            fixture.wait_for(lambda: len(endpoint.requests) == before + 1, "original renderer request")
+            submitted("original é")
+            assert tty.capture.draft("next cafXé!", 11), tty.capture.completed
+            marker = answer("retained")
+            tty.send("Y\n", marker)
+            submitted("next cafXYé!")
+            tty.resize(80)
+            joined(tty)
+            tty.caller.send_signal(signal.SIGTERM)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: lost admission exact replay, retained draft/caret and SIGTERM restoration passed", flush=True)
+
+        configure("renderer/consent", "ask")
+        proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
+        arguments = json.dumps({"cmd": "printf approved > renderer-effect", "description": "Renderer consent", "timeout_ms": None})
+        release = threading.Event()
+        endpoint.responses.append((fixture.sse_tool_calls("renderer-call", [("bash", "renderer-action", arguments)]), release))
+        marker = answer("consent")
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal("renderer/consent", ready_write) as tty:
+                tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                release.set()
+                tty.ready(ready_read)
+                shown = tty.wait("a: Allow once / d: Deny (Enter)")
+                assert "printf approved > renderer-effect" in shown and f"Workspace: {workspace}" in shown, shown
+                current = fixture.command("inspect-session", "--store", store, "--session", "renderer/consent")
+                action = current["actionable_permissions"][0]["action"]
+                exact = json.loads(run(home, "inspect-action", "--store", store, "--session", "renderer/consent", "--action", action, "--json"))
+                assert exact["arguments"] == arguments
+                assert not (workspace / "renderer-effect").exists()
+                tty.send("\x1b[200~a\x1b[201~\n", "a: Allow once / d: Deny (Enter)")
+                tty.ready(ready_read)
+                assert set((home / ".config/rui/requests").glob("*.json")) == records
+                assert not (workspace / "renderer-effect").exists(), "pasted consent authorized an Action"
+                # A complete non-pasted line, not its first byte, authorizes.
+                tty.send("a", "a: Allow once / d: Deny (Enter)")
+                assert not (workspace / "renderer-effect").exists()
+                tty.send("\n", marker)
+                assert (workspace / "renderer-effect").read_bytes() == b"approved"
+                decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
+                assert len(decisions) == 1 and decisions[0]["action"] == action and decisions[0]["decision"] == "allow_once", decisions
+                assert len(proxy.exchanges) == 1, "consent transmitted more than one decision"
+                body, response = proxy.exchanges[0]
+                assert json.loads(body)["action"] == action and json.loads(body)["decision"] == "allow_once"
+                assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(release.set, lambda: os.close(ready_read), lambda: os.close(ready_write))
+        completed = True
+        print("renderer: fresh complete non-pasted exact Action consent and SIGINT restoration passed", flush=True)
+    finally:
+        dispose_all(lambda: proxy.close() if proxy is not None else None,
+            lambda: fixture.stop_host(host) if host is not None else None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            print(f"retained renderer failure state: {state}", file=sys.stderr)
+        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+
+
 def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    assert selected in ("all", "renderer", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    if selected == "renderer":
+        renderer_cases()
+        return
+    if selected == "all":
+        renderer_cases()
     if selected in ("all", "compaction-settings"):
         help_case()
     if selected in ("all", "terminal-waits"):
