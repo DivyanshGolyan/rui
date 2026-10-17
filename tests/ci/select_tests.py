@@ -11,9 +11,10 @@ import subprocess
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
-    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig",
-      "src/ResponseTiming.zig"),
+    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
+    (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
+     "Response policy values alongside native timeout consumers"),
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
@@ -21,7 +22,7 @@ RULES = (
      ("test-logic", "check", "admission-debug-integration"),
      ("test-logic", "check", "admission-debug-integration"),
      "Frontend value decisions and native terminal/borrower handoffs"),
-    (("src/cli.zig", "src/client.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig",
+    (("src/cli.zig", "src/client.zig", "src/ResponseTiming.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig",
       "src/new_session_selection.zig", "src/preference_values.zig"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native terminal/caller checks"),
@@ -183,7 +184,7 @@ def select(paths, phase, available):
             targets.add("check")
             native_targets.add("check")
             reasons.add("Unmapped source: full fallback")
-        if path == "src/client.zig":
+        if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
         if "evaluator_string" in path:

@@ -265,7 +265,7 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?
         const wanted: usize = @intCast(@min(remaining, window.len));
         var filled: usize = 0;
         while (filled != wanted) {
-            const count = try readRequest(requests, fd, window[filled..wanted], std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+            const count = try readRequest(requests, fd, window[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true));
             if (count == 0) return error.TruncatedResponse;
             filled += count;
         }
@@ -281,7 +281,7 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?
 fn completeContentEOF(requests: Requests, fd: std.posix.fd_t, actual: [32]u8, expected: ?CommandObservation.ContentReference) !void {
     if (expected) |reference| if (!std.mem.eql(u8, &actual, &reference.digest)) return error.ContentBindingMismatch;
     var tail: [1]u8 = undefined;
-    if (try readRequest(requests, fd, &tail, std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s) != 0) return error.InvalidResponse;
+    if (try readRequest(requests, fd, &tail, ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, null, true)) != 0) return error.InvalidResponse;
 }
 
 pub const ConversationCursor = struct {
@@ -3253,7 +3253,7 @@ const ResponseHead = struct {
 };
 
 fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
-    return readResponseHeadWithInactivity(fd, 60_000);
+    return readResponseHeadUntil(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, ResponseTiming.transfer, null);
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
@@ -3408,7 +3408,7 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, buffer.len));
-        const count = try readRequest(requests, fd, buffer[0..wanted], std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+        const count = try readRequest(requests, fd, buffer[0..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
         if (count == 0) return error.TruncatedResponse;
         if (@TypeOf(sink) == std.Io.File)
             try sink.writeStreamingAll(io, buffer[0..count])
@@ -3668,7 +3668,7 @@ fn writeAll(fd: std.posix.fd_t, value: []const u8) !void {
 fn writeAllRequest(requests: Requests, fd: std.posix.fd_t, value: []const u8, until: ?i128) !void {
     const io = requests.io;
     var offset: usize = 0;
-    var deadline = until orelse (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+    var deadline = ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, until, true).?;
     while (offset < value.len) {
         if (!try waitRequest(requests, fd, std.posix.POLL.OUT, deadline)) return error.TransferInactive;
         const count = std.c.write(fd, value[offset..].ptr, value.len - offset);
@@ -3682,7 +3682,7 @@ fn writeAllRequest(requests: Requests, fd: std.posix.fd_t, value: []const u8, un
             return error.ConnectionClosed;
         }
         offset += @intCast(count);
-        if (until == null) deadline = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
+        if (until == null) deadline = ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true).?;
     }
 }
 
@@ -3770,7 +3770,8 @@ test "mutation response progress renews inactivity through header and body" {
             writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n") catch return;
             std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
             writeAll(fd, "\r\n{") catch return;
-            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
+            // Still exceeds five seconds overall, without a second long gap.
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1_000), .awake) catch return;
             writeAll(fd, "}") catch return;
         }
     };
@@ -4063,7 +4064,12 @@ test "capture retransmits complete original bytes after a lost reply" {
             }
             switch (response) {
                 .closed => {},
-                .silent => try std.Io.sleep(std.testing.io, .fromSeconds(6), .awake),
+                .silent => {
+                    try addNonblocking(fd);
+                    const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 6 * std.time.ns_per_s;
+                    var tail: [1]u8 = undefined;
+                    try std.testing.expectEqual(@as(usize, 0), try readRequest(.{ .io = std.testing.io }, fd, &tail, until));
+                },
                 .reply => try writeAll(fd, empty_test_response),
             }
         }

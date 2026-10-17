@@ -6,6 +6,7 @@ const ResponseTiming = @This();
 inactivity_ms: i32 = 60_000,
 wait_for_first_byte: bool = true,
 
+pub const transfer: ResponseTiming = .{};
 pub const mutation: ResponseTiming = .{ .inactivity_ms = 5_000, .wait_for_first_byte = false };
 
 pub fn deadline(self: ResponseTiming, now: i128, absolute: ?i128, progressed: bool) ?i128 {
@@ -20,8 +21,8 @@ test "response policy separates mutation silence transfer inactivity and discove
     const cases = [_]struct { timing: ResponseTiming, progressed: bool, expected: ?i128 }{
         .{ .timing = mutation, .progressed = false, .expected = 12 * second },
         .{ .timing = mutation, .progressed = true, .expected = 12 * second },
-        .{ .timing = .{}, .progressed = false, .expected = null },
-        .{ .timing = .{}, .progressed = true, .expected = 67 * second },
+        .{ .timing = transfer, .progressed = false, .expected = null },
+        .{ .timing = transfer, .progressed = true, .expected = 67 * second },
     };
     for (cases) |case| {
         try testing.expectEqual(case.expected, case.timing.deadline(7 * second, null, case.progressed));
