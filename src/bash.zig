@@ -2,6 +2,7 @@ const std = @import("std");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const BashLifecycle = @import("BashLifecycle.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
@@ -9,8 +10,6 @@ const tools = @import("tools.zig");
 pub const excerpt_bytes: usize = 10_000;
 pub const copy_window_bytes: usize = 16 * 1024;
 const command_write_window_bytes: usize = 4096;
-const termination_grace_ms: u64 = 100;
-const cleanup_observation_ms: u64 = 5_000;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
@@ -48,56 +47,8 @@ pub const Faults = struct {
     fault_gated: bool = false,
 };
 
-const CaptureFailure = enum { none, read, write, exhausted, seal };
-const StopReason = enum { none, stopped, timed_out, infrastructure_shutdown, capture_failed };
-
-const Term = union(enum) {
-    exited: u8,
-    signal: u8,
-    unknown: u32,
-};
-
-const AnchoredChild = struct {
-    child: std.process.Child,
-    pgid: std.process.Child.Id,
-    observed: ?Term = null,
-};
-
-const ReapOwner = struct {
-    child: std.process.Child,
-    pgid: std.process.Child.Id,
-    observed: ?Term,
-};
-
-const Process = union(enum) {
-    running: struct {
-        anchor: AnchoredChild,
-        deadline: std.Io.Clock.Timestamp,
-    },
-    grace: struct {
-        anchor: AnchoredChild,
-        kill_at: std.Io.Clock.Timestamp,
-        cleanup_deadline: std.Io.Clock.Timestamp,
-    },
-    reaping: struct {
-        owner: ReapOwner,
-        cleanup_deadline: std.Io.Clock.Timestamp,
-    },
-    checking_group: struct {
-        pgid: std.process.Child.Id,
-        term: Term,
-        cleanup_deadline: std.Io.Clock.Timestamp,
-    },
-    gone: Term,
-};
-
-const PipeClose = enum { eof, incomplete, failed };
+const Term = BashLifecycle.Term;
 const CleanupFault = enum { none, persistent, gated };
-
-const PipeService = struct {
-    made_progress: bool,
-    termination_requested: bool = false,
-};
 
 const ServiceTime = union(enum) {
     live: std.Io,
@@ -110,37 +61,6 @@ const ServiceTime = union(enum) {
         };
     }
 };
-
-const Pipe = union(enum) {
-    reading: std.Io.File,
-    tail: struct {
-        file: std.Io.File,
-        remaining: u64,
-    },
-    closed: PipeClose,
-};
-
-fn addMilliseconds(timestamp: std.Io.Clock.Timestamp, milliseconds: u64) std.Io.Clock.Timestamp {
-    return timestamp.addDuration(.{
-        .raw = .fromMilliseconds(@intCast(milliseconds)),
-        .clock = .awake,
-    });
-}
-
-fn timestampReached(now: std.Io.Clock.Timestamp, deadline: std.Io.Clock.Timestamp) bool {
-    return now.raw.nanoseconds >= deadline.raw.nanoseconds;
-}
-
-fn pipeClosed(pipe: Pipe) bool {
-    return pipe == .closed;
-}
-
-fn pipeIncomplete(pipe: Pipe) bool {
-    return switch (pipe) {
-        .closed => |reason| reason != .eof,
-        else => true,
-    };
-}
 
 fn faultGateActive(io: std.Io, scratch_path: []const u8) bool {
     var scratch = std.Io.Dir.cwd().openDir(io, scratch_path, .{}) catch return true;
@@ -296,14 +216,12 @@ pub const Prepared = struct {
         self.script = null;
         self.stdout_capture = null;
         self.stderr_capture = null;
-        var execution = Execution{
+        return .{
             .io = self.io,
-            .process = .{ .running = .{
-                .anchor = .{ .child = child, .pgid = child.id.? },
-                .deadline = undefined,
-            } },
-            .stdout_pipe = .{ .reading = stdout_pipe },
-            .stderr_pipe = .{ .reading = stderr_pipe },
+            .lifecycle = .start(started, self.timeout_ms),
+            .leader = child.id.?,
+            .pgid = child.id.?,
+            .pipes = .{ stdout_pipe, stderr_pipe },
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
             .script = script,
@@ -312,11 +230,6 @@ pub const Prepared = struct {
             .timeout_ms = self.timeout_ms,
             .faults = self.faults,
         };
-        execution.process.running.deadline = execution.started.addDuration(.{
-            .raw = .fromMilliseconds(@intCast(self.timeout_ms)),
-            .clock = .awake,
-        });
-        return execution;
     }
 };
 
@@ -390,9 +303,13 @@ const ObservationSource = union(enum) {
 
 pub const Execution = struct {
     io: std.Io,
-    process: Process,
-    stdout_pipe: Pipe,
-    stderr_pipe: Pipe,
+    lifecycle: BashLifecycle,
+    /// Direct child until its status is consumed by the reap.
+    leader: ?std.process.Child.Id,
+    /// Anchored original process group: the cancellation scope.
+    pgid: std.process.Child.Id,
+    /// Open while the matching lifecycle pipe is not closed.
+    pipes: [2]?std.Io.File,
     stdout_capture: OwnedFile,
     stderr_capture: OwnedFile,
     script: OwnedFile,
@@ -400,10 +317,6 @@ pub const Execution = struct {
     started: std.Io.Clock.Timestamp,
     timeout_ms: u64,
     faults: Faults,
-    stop_reason: StopReason = .none,
-    capture_failure: CaptureFailure = .none,
-    signal_failure: bool = false,
-    group_permission_denied: bool = false,
     read_fault_used: bool = false,
     service_fault_used: bool = false,
     output_reservation: ?output_retention.Pair = null,
@@ -419,21 +332,23 @@ pub const Execution = struct {
     };
 
     pub fn requestStop(self: *Execution, now: std.Io.Clock.Timestamp) TerminationAttempt {
-        const attempted = self.process == .running;
-        self.requestTerminationAt(.stopped, now);
-        return .{ .attempted = attempted, .signal_failed = self.signal_failure or self.group_permission_denied };
+        const attempted = self.lifecycle.process == .running;
+        self.send(self.lifecycle.requestTermination(.stopped, now));
+        return .{ .attempted = attempted, .signal_failed = self.signalFailed() };
     }
 
     pub fn requestInfrastructureShutdown(self: *Execution, now: std.Io.Clock.Timestamp) void {
-        self.requestTerminationAt(.infrastructure_shutdown, now);
+        self.send(self.lifecycle.requestTermination(.infrastructure_shutdown, now));
     }
 
     pub fn applyDueDeadline(self: *Execution, now: std.Io.Clock.Timestamp) ?TimeoutAction {
-        if (self.process != .running or !timestampReached(now, self.process.running.deadline)) return null;
-        const deadline_ns: u64 = @intCast(self.process.running.deadline.raw.nanoseconds);
-        if (self.stop_reason == .none) self.stop_reason = .timed_out;
-        self.beginGrace(now);
-        return .{ .deadline_ns = deadline_ns, .signal_failed = self.signal_failure or self.group_permission_denied };
+        const expiry = self.lifecycle.expireDeadline(now) orelse return null;
+        self.send(expiry.signal);
+        return .{ .deadline_ns = @intCast(expiry.deadline.raw.nanoseconds), .signal_failed = self.signalFailed() };
+    }
+
+    fn signalFailed(self: *const Execution) bool {
+        return self.lifecycle.signal_failure or self.lifecycle.group_permission_denied;
     }
 
     pub const ServiceResult = struct {
@@ -459,81 +374,63 @@ pub const Execution = struct {
         if (self.faults.service and !self.service_fault_used) {
             self.service_fault_used = true;
             fault = error.InjectedBashServiceFailure;
-            self.requestTerminationAt(.infrastructure_shutdown, now);
+            self.requestInfrastructureShutdown(now);
         }
         var made_progress = false;
         const timeout_action = self.applyDueDeadline(now);
         if (timeout_action != null) made_progress = true;
         const leader_observed = self.observeLeader(now, source) catch |err| observed: {
             fault = fault orelse err;
-            self.requestTerminationAt(.infrastructure_shutdown, now);
+            self.requestInfrastructureShutdown(now);
             break :observed false;
         };
         made_progress = leader_observed or made_progress;
-        if (self.process == .running and self.process.running.anchor.observed != null) {
-            self.beginGrace(now);
+        made_progress = self.cutCapture(now, &fault) or made_progress;
+        made_progress = self.servicePipe(.stdout, window, time, &now, &fault) or made_progress;
+        made_progress = self.servicePipe(.stderr, window, time, &now, &fault) or made_progress;
+        if (self.lifecycle.expireGrace(now)) |signal| {
+            self.send(signal);
             made_progress = true;
         }
-        made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
-        const stdout_service = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault);
-        now = time.observe();
-        if (stdout_service.termination_requested) self.requestTerminationAt(.capture_failed, now);
-        made_progress = stdout_service.made_progress or made_progress;
-        const stderr_service = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault);
-        now = time.observe();
-        if (stderr_service.termination_requested) self.requestTerminationAt(.capture_failed, now);
-        made_progress = stderr_service.made_progress or made_progress;
-        made_progress = self.applyGraceDeadline(now) or made_progress;
         made_progress = (self.reapLeader(now) catch |err| reaped: {
             fault = fault orelse err;
             break :reaped false;
         }) or made_progress;
-        if (self.process == .checking_group) {
+        if (self.lifecycle.process == .checking_group) {
             const check = if (self.lifecycleFaultActive(.group_probe)) check: {
                 fault = fault orelse error.InjectedBashGroupProbeFailure;
                 break :check 0;
             } else if (self.lifecycleFaultActive(.cleanup_watchdog))
                 0
             else
-                rui_bash_group_absent(self.process.checking_group.pgid);
+                rui_bash_group_absent(self.pgid);
             if (check == 1) {
-                const term = self.process.checking_group.term;
-                self.process = .{ .gone = term };
+                self.lifecycle.groupAbsent();
                 made_progress = true;
             } else if (check < 0) {
                 fault = fault orelse error.BashGroupProbeFailed;
             }
         }
-        made_progress = self.freezeCaptureIfRequired(now, &fault) or made_progress;
-        if (self.process == .gone) {
-            const stdout_tail = self.servicePipe(&self.stdout_pipe, &self.stdout_capture, window, &fault);
-            now = time.observe();
-            if (stdout_tail.termination_requested) self.requestTerminationAt(.capture_failed, now);
-            made_progress = stdout_tail.made_progress or made_progress;
-            const stderr_tail = self.servicePipe(&self.stderr_pipe, &self.stderr_capture, window, &fault);
-            now = time.observe();
-            if (stderr_tail.termination_requested) self.requestTerminationAt(.capture_failed, now);
-            made_progress = stderr_tail.made_progress or made_progress;
+        made_progress = self.cutCapture(now, &fault) or made_progress;
+        if (self.lifecycle.process == .gone) {
+            made_progress = self.servicePipe(.stdout, window, time, &now, &fault) or made_progress;
+            made_progress = self.servicePipe(.stderr, window, time, &now, &fault) or made_progress;
         }
         return .{
             .made_progress = made_progress,
             .retired = self.retired(),
-            .leader_observed_with_open_pipes = leader_observed and
-                (!pipeClosed(self.stdout_pipe) or !pipeClosed(self.stderr_pipe)),
+            .leader_observed_with_open_pipes = leader_observed and !self.lifecycle.pipesClosed(),
             .timeout_action = timeout_action,
             .fault = fault,
         };
     }
 
     pub fn deadlineNs(self: *const Execution) u64 {
-        return switch (self.process) {
-            .running => |value| @intCast(value.deadline.raw.nanoseconds),
-            else => unreachable,
-        };
+        return @intCast(self.lifecycle.process.running.deadline.raw.nanoseconds);
     }
 
     pub fn retired(self: *const Execution) bool {
-        return self.process == .gone and pipeClosed(self.stdout_pipe) and pipeClosed(self.stderr_pipe);
+        return self.lifecycle.retired();
     }
 
     /// Test/slow-check aid: the process is gone and both pipes are closed.
@@ -562,24 +459,11 @@ pub const Execution = struct {
     }
 
     pub fn outcome(self: *Execution, include_paths: bool) !Outcome {
-        self.stdout_capture.file.?.sync(self.io) catch {
-            self.capture_failure = .seal;
-        };
-        self.stderr_capture.file.?.sync(self.io) catch {
-            self.capture_failure = .seal;
-        };
-        if (self.faults.seal) self.capture_failure = .seal;
-        const code: store.ActionResolutionCode = switch (self.stop_reason) {
-            .stopped => .cancelled,
-            .timed_out => .timed_out,
-            .infrastructure_shutdown => .infrastructure_shutdown,
-            .capture_failed => .storage_failed,
-            .none => if (self.capture_failure != .none)
-                .storage_failed
-            else switch (self.process.gone) {
-                .exited => |exit_code| if (exit_code == 0) .succeeded else .failed,
-                else => .failed,
-            },
+        self.stdout_capture.file.?.sync(self.io) catch self.lifecycle.recordSealFailure();
+        self.stderr_capture.file.?.sync(self.io) catch self.lifecycle.recordSealFailure();
+        if (self.faults.seal) self.lifecycle.recordSealFailure();
+        const code: store.ActionResolutionCode = switch (self.lifecycle.resolution()) {
+            inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
         };
         var result: Outcome = .{ .code = code };
         var writer = std.Io.Writer.fixed(&result.content);
@@ -629,202 +513,208 @@ pub const Execution = struct {
         self.stderr_capture.published = true;
     }
 
+    fn send(self: *Execution, signal: ?BashLifecycle.Signal) void {
+        switch (signal orelse return) {
+            .terminate_group => self.signalGroup(.TERM),
+            .kill_group => self.signalGroup(.KILL),
+            .kill_group_and_leader => {
+                self.signalGroup(.KILL);
+                self.signalLeader(.KILL);
+            },
+        }
+    }
+
+    fn signalGroup(self: *Execution, signal_value: std.posix.SIG) void {
+        if (self.faults.lifecycle == .signal) return self.lifecycle.recordSignal(.failed);
+        std.posix.kill(-self.pgid, signal_value) catch |err| self.lifecycle.recordSignal(switch (err) {
+            error.ProcessNotFound => .delivered,
+            error.PermissionDenied => if (@import("builtin").os.tag == .macos) .group_permission_denied else .failed,
+            else => .failed,
+        });
+    }
+
+    fn signalLeader(self: *Execution, signal_value: std.posix.SIG) void {
+        if (self.faults.lifecycle == .signal) return self.lifecycle.recordSignal(.failed);
+        std.posix.kill(self.leader.?, signal_value) catch |err| self.lifecycle.recordSignal(switch (err) {
+            error.ProcessNotFound => .delivered,
+            else => .failed,
+        });
+    }
+
+    fn capture(self: *Execution, stream: BashLifecycle.Stream) *OwnedFile {
+        return switch (stream) {
+            .stdout => &self.stdout_capture,
+            .stderr => &self.stderr_capture,
+        };
+    }
+
+    fn closeDescriptor(self: *Execution, stream: BashLifecycle.Stream) void {
+        const slot = &self.pipes[@backingInt(stream)];
+        if (slot.*) |file| file.close(self.io);
+        slot.* = null;
+    }
+
+    fn endPipe(self: *Execution, stream: BashLifecycle.Stream, end: BashLifecycle.PipeEnd, now: std.Io.Clock.Timestamp) void {
+        self.closeDescriptor(stream);
+        self.send(self.lifecycle.endPipe(stream, end, now));
+    }
+
+    /// One bounded pipe operation's result, applied at the service-time
+    /// observation taken after the potentially blocking operation.
+    const PipeStep = union(enum) {
+        idle,
+        copied,
+        drained: u64,
+        ended: BashLifecycle.PipeEnd,
+    };
+
     fn servicePipe(
         self: *Execution,
-        pipe_slot: *Pipe,
-        destination: *OwnedFile,
+        stream: BashLifecycle.Stream,
         window: []u8,
+        time: ServiceTime,
+        now: *std.Io.Clock.Timestamp,
         fault: *?anyerror,
-    ) PipeService {
-        return self.readPipe(pipe_slot, destination, window) catch |err| {
+    ) bool {
+        const step = self.readPipe(stream, window) catch |err| failed: {
             fault.* = fault.* orelse err;
-            self.capture_failure = .read;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
+            break :failed PipeStep{ .ended = .{ .failed = .read } };
         };
-    }
-
-    fn requestTerminationAt(self: *Execution, reason: StopReason, now: std.Io.Clock.Timestamp) void {
-        if (self.stop_reason == .none) self.stop_reason = reason;
-        if (self.process == .running) self.beginGrace(now);
-    }
-
-    fn beginGrace(self: *Execution, now: std.Io.Clock.Timestamp) void {
-        const running = self.process.running;
-        self.signalAnchored(&running.anchor, .TERM);
-        self.process = .{ .grace = .{
-            .anchor = running.anchor,
-            .kill_at = addMilliseconds(now, termination_grace_ms),
-            .cleanup_deadline = addMilliseconds(now, cleanup_observation_ms),
-        } };
-    }
-
-    fn applyGraceDeadline(self: *Execution, now: std.Io.Clock.Timestamp) bool {
-        if (self.process != .grace or !timestampReached(now, self.process.grace.kill_at)) return false;
-        self.finishSignaling();
-        return true;
-    }
-
-    fn finishSignaling(self: *Execution) void {
-        const grace = self.process.grace;
-        self.signalAnchored(&grace.anchor, .KILL);
-        if (grace.anchor.observed == null) self.signalPid(grace.anchor.child.id.?, .KILL);
-        self.process = .{ .reaping = .{
-            .owner = .{
-                .child = grace.anchor.child,
-                .pgid = grace.anchor.pgid,
-                .observed = grace.anchor.observed,
+        now.* = time.observe();
+        switch (step) {
+            .idle => return false,
+            .copied => return true,
+            .drained => |bytes| {
+                self.lifecycle.drainedTail(stream, bytes);
+                return true;
             },
-            .cleanup_deadline = grace.cleanup_deadline,
-        } };
-    }
-
-    fn signalAnchored(self: *Execution, anchor: *const AnchoredChild, signal_value: std.posix.SIG) void {
-        if (self.faults.lifecycle == .signal) {
-            self.signal_failure = true;
-            return;
-        }
-        std.posix.kill(-anchor.pgid, signal_value) catch |err| switch (err) {
-            error.ProcessNotFound => {},
-            error.PermissionDenied => if (@import("builtin").os.tag == .macos) {
-                self.group_permission_denied = true;
-            } else {
-                self.signal_failure = true;
+            .ended => |end| {
+                self.endPipe(stream, end, now.*);
+                return true;
             },
-            else => self.signal_failure = true,
-        };
-    }
-
-    fn signalPid(self: *Execution, child_id: std.process.Child.Id, signal_value: std.posix.SIG) void {
-        if (self.faults.lifecycle == .signal) {
-            self.signal_failure = true;
-            return;
         }
-        std.posix.kill(child_id, signal_value) catch |err| switch (err) {
-            error.ProcessNotFound => {},
-            else => self.signal_failure = true,
-        };
     }
 
-    fn readPipe(
-        self: *Execution,
-        pipe_slot: *Pipe,
-        destination: *OwnedFile,
-        window: []u8,
-    ) !PipeService {
-        if (pipe_slot.* == .closed) return .{ .made_progress = false };
-        if (pipe_slot.* == .tail) return .{ .made_progress = try self.readTail(pipe_slot, destination, window) };
-        const pipe = pipe_slot.reading;
+    fn readPipe(self: *Execution, stream: BashLifecycle.Stream, window: []u8) !PipeStep {
+        const pipe = self.pipes[@backingInt(stream)] orelse return .idle;
+        const destination = self.capture(stream);
+        switch (self.lifecycle.pipes[@backingInt(stream)]) {
+            .reading => {},
+            .tail => |remaining| return self.readTail(pipe, destination, remaining, window),
+            .closed => unreachable,
+        }
         var descriptor = [_]std.posix.pollfd{.{
             .fd = pipe.handle,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        if (try std.posix.poll(&descriptor, 0) == 0) return .{ .made_progress = false };
+        if (try std.posix.poll(&descriptor, 0) == 0) return .idle;
         const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
             const count = std.posix.read(pipe.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) return .{ .made_progress = false };
-                self.capture_failure = .read;
-                self.closePipe(pipe_slot, .failed);
-                return .{ .made_progress = true, .termination_requested = true };
+                if (err == error.WouldBlock) return .idle;
+                return .{ .ended = .{ .failed = .read } };
             };
-            if (count == 0) {
-                self.closePipe(pipe_slot, .eof);
-                return .{ .made_progress = true };
-            }
-            self.capture_failure = .exhausted;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
+            if (count == 0) return .{ .ended = .eof };
+            return .{ .ended = .{ .failed = .exhausted } };
         }
         const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
             destination.budget.release(reserved);
-            if (err == error.WouldBlock) return .{ .made_progress = false };
-            self.capture_failure = .read;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
+            if (err == error.WouldBlock) return .idle;
+            return .{ .ended = .{ .failed = .read } };
         };
         if (count < reserved) destination.budget.release(reserved - count);
-        if (count == 0) {
-            self.closePipe(pipe_slot, .eof);
-            return .{ .made_progress = true };
-        }
+        if (count == 0) return .{ .ended = .eof };
         if (self.faults.capture_read and !self.read_fault_used) {
             self.read_fault_used = true;
             destination.budget.release(count);
-            self.capture_failure = .read;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
+            return .{ .ended = .{ .failed = .read } };
         }
         destination.charged += count;
-        if (self.faults.capture_write) {
-            self.capture_failure = .write;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
-        }
+        if (self.faults.capture_write) return .{ .ended = .{ .failed = .write } };
         destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
-            self.capture_failure = .write;
-            self.closePipe(pipe_slot, .failed);
-            return .{ .made_progress = true, .termination_requested = true };
+            return .{ .ended = .{ .failed = .write } };
         };
-        return .{ .made_progress = true };
+        return .copied;
+    }
+
+    fn readTail(
+        self: *Execution,
+        pipe: std.Io.File,
+        destination: *OwnedFile,
+        remaining: u64,
+        window: []u8,
+    ) !PipeStep {
+        if (remaining == 0) {
+            var descriptor = [_]std.posix.pollfd{.{
+                .fd = pipe.handle,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            if (try std.posix.poll(&descriptor, 0) == 0) return .{ .ended = .incomplete };
+            var probe: [1]u8 = undefined;
+            const count = std.posix.read(pipe.handle, &probe) catch |err| {
+                if (err == error.WouldBlock) return .{ .ended = .incomplete };
+                return .{ .ended = .{ .failed = .read } };
+            };
+            return .{ .ended = if (count == 0) .eof else .incomplete };
+        }
+        const wanted: usize = @intCast(@min(remaining, window.len));
+        const reserved: usize = @intCast(destination.budget.reserveUpTo(wanted));
+        if (reserved == 0) return .{ .ended = .{ .failed = .exhausted } };
+        const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
+            destination.budget.release(reserved);
+            if (err == error.WouldBlock) return .idle;
+            return .{ .ended = .{ .failed = .read } };
+        };
+        if (count < reserved) destination.budget.release(reserved - count);
+        if (count == 0) return .{ .ended = .{ .failed = .read } };
+        destination.charged += count;
+        destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
+            return .{ .ended = .{ .failed = .write } };
+        };
+        return .{ .drained = count };
     }
 
     fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp, source: ObservationSource) !bool {
-        const anchor = switch (self.process) {
-            .running => |*value| &value.anchor,
-            .grace => |*value| &value.anchor,
-            .reaping, .checking_group, .gone => return false,
-        };
-        if (anchor.observed != null) return false;
-        switch (source) {
+        if (!self.lifecycle.awaitsLeader()) return false;
+        const term: Term = switch (source) {
             .none => return false,
-            .observed => |term| {
-                anchor.observed = term;
-                return true;
-            },
+            .observed => |term| term,
             .failed => return error.BashObserveFailed,
-            .live => {},
-        }
-        if (self.lifecycleFaultActive(.observe) and
-            timestampReached(now, addMilliseconds(self.started, fault_observation_delay_ms)))
-        {
-            return error.InjectedBashObserveFailure;
-        }
-        var observation: BashObservation = undefined;
-        const result = rui_bash_observe(anchor.child.id.?, &observation);
-        if (result < 0) return error.BashObserveFailed;
-        if (result == 0) return false;
-        anchor.observed = decodeObservation(observation);
+            .live => live: {
+                if (self.lifecycleFaultActive(.observe) and
+                    BashLifecycle.reached(now, BashLifecycle.addMilliseconds(self.started, fault_observation_delay_ms)))
+                {
+                    return error.InjectedBashObserveFailure;
+                }
+                var observation: BashObservation = undefined;
+                const result = rui_bash_observe(self.leader.?, &observation);
+                if (result < 0) return error.BashObserveFailed;
+                if (result == 0) return false;
+                break :live decodeObservation(observation);
+            },
+        };
+        self.send(self.lifecycle.observeLeader(term, now));
         return true;
     }
 
     fn reapLeader(self: *Execution, now: std.Io.Clock.Timestamp) !bool {
-        if (self.process != .reaping) return false;
+        if (self.lifecycle.process != .reaping) return false;
         if (self.lifecycleFaultActive(.reap)) return error.InjectedBashReapFailure;
-        var reaping = self.process.reaping;
-        const child_id = reaping.owner.child.id.?;
         var observation: BashObservation = undefined;
         const result = if (self.lifecycleFaultActive(.reap_watchdog))
             0
         else
-            rui_bash_reap(child_id, &observation);
+            rui_bash_reap(self.leader.?, &observation);
         if (result == 0) {
-            if (timestampReached(now, reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
+            try self.lifecycle.reapPending(now);
             return false;
         }
         if (result < 0) return error.BashWaitFailed;
-        reaping.owner.child.id = null;
-        const term = decodeObservation(observation);
-        self.process = .{ .checking_group = .{
-            .pgid = reaping.owner.pgid,
-            .term = reaping.owner.observed orelse term,
-            .cleanup_deadline = reaping.cleanup_deadline,
-        } };
-        if (reaping.owner.observed) |observed| {
-            if (!std.meta.eql(observed, term)) return error.BashStatusChanged;
-        }
+        self.leader = null;
+        try self.lifecycle.reaped(decodeObservation(observation));
         return true;
     }
 
@@ -834,117 +724,23 @@ pub const Execution = struct {
         return faultGateActive(self.io, self.scratch_path);
     }
 
-    fn freezeCaptureIfRequired(
-        self: *Execution,
-        now: std.Io.Clock.Timestamp,
-        fault: *?anyerror,
-    ) bool {
-        const deadline_expired = switch (self.process) {
-            .grace => |value| timestampReached(now, value.cleanup_deadline),
-            .reaping => |value| timestampReached(now, value.cleanup_deadline),
-            .checking_group => |value| timestampReached(now, value.cleanup_deadline),
-            .running, .gone => false,
-        };
-        if (self.process != .gone and !deadline_expired) return false;
-        const changed = self.stdout_pipe == .reading or self.stderr_pipe == .reading;
-        self.beginCaptureTails() catch |err| {
-            fault.* = fault.* orelse err;
-        };
-        if (deadline_expired and self.process != .gone) {
-            fault.* = fault.* orelse error.BashCleanupUnconfirmed;
+    fn cutCapture(self: *Execution, now: std.Io.Clock.Timestamp, fault: *?anyerror) bool {
+        const cutoff = self.lifecycle.cutoff(now) orelse return false;
+        for (std.enums.values(BashLifecycle.Stream)) |stream| {
+            if (cutoff.snapshot[@backingInt(stream)]) self.beginTail(stream, now);
         }
-        return changed;
+        if (cutoff.unconfirmed) fault.* = fault.* orelse error.BashCleanupUnconfirmed;
+        return cutoff.changed();
     }
 
-    fn beginCaptureTails(self: *Execution) !void {
-        try self.beginCaptureTail(&self.stdout_pipe);
-        try self.beginCaptureTail(&self.stderr_pipe);
-    }
-
-    fn beginCaptureTail(self: *Execution, pipe_slot: *Pipe) !void {
-        if (pipe_slot.* != .reading) return;
-        const pipe = pipe_slot.reading;
+    fn beginTail(self: *Execution, stream: BashLifecycle.Stream, now: std.Io.Clock.Timestamp) void {
+        const pipe = self.pipes[@backingInt(stream)].?;
         var queued: u64 = 0;
-        if (self.faults.lifecycle == .tail_snapshot or
-            rui_bash_pipe_queued_bytes(pipe.handle, &queued) < 0)
-        {
-            self.closePipe(pipe_slot, .failed);
-            self.capture_failure = .read;
-            return;
-        }
-        pipe_slot.* = .{ .tail = .{ .file = pipe, .remaining = queued } };
+        const observed = self.faults.lifecycle != .tail_snapshot and
+            rui_bash_pipe_queued_bytes(pipe.handle, &queued) >= 0;
+        if (!observed) self.closeDescriptor(stream);
+        self.send(self.lifecycle.beginTail(stream, if (observed) queued else null, now));
     }
-
-    fn readTail(
-        self: *Execution,
-        pipe_slot: *Pipe,
-        destination: *OwnedFile,
-        window: []u8,
-    ) !bool {
-        var tail = pipe_slot.tail;
-        if (tail.remaining == 0) {
-            var descriptor = [_]std.posix.pollfd{.{
-                .fd = tail.file.handle,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            if (try std.posix.poll(&descriptor, 0) == 0) {
-                self.closePipe(pipe_slot, .incomplete);
-                return true;
-            }
-            var probe: [1]u8 = undefined;
-            const count = std.posix.read(tail.file.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) {
-                    self.closePipe(pipe_slot, .incomplete);
-                    return true;
-                }
-                self.capture_failure = .read;
-                self.closePipe(pipe_slot, .failed);
-                return true;
-            };
-            self.closePipe(pipe_slot, if (count == 0) .eof else .incomplete);
-            return true;
-        }
-        const wanted: usize = @intCast(@min(tail.remaining, window.len));
-        const reserved: usize = @intCast(destination.budget.reserveUpTo(wanted));
-        if (reserved == 0) {
-            self.capture_failure = .exhausted;
-            self.closePipe(pipe_slot, .failed);
-            return true;
-        }
-        const count = std.posix.read(tail.file.handle, window[0..reserved]) catch |err| {
-            destination.budget.release(reserved);
-            if (err == error.WouldBlock) return false;
-            self.capture_failure = .read;
-            self.closePipe(pipe_slot, .failed);
-            return true;
-        };
-        if (count < reserved) destination.budget.release(reserved - count);
-        if (count == 0) {
-            self.capture_failure = .read;
-            self.closePipe(pipe_slot, .failed);
-            return true;
-        }
-        destination.charged += count;
-        destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
-            self.capture_failure = .write;
-            self.closePipe(pipe_slot, .failed);
-            return true;
-        };
-        tail.remaining -= count;
-        pipe_slot.* = .{ .tail = tail };
-        return true;
-    }
-
-    fn closePipe(self: *Execution, pipe_slot: *Pipe, reason: PipeClose) void {
-        switch (pipe_slot.*) {
-            .reading => |pipe| pipe.close(self.io),
-            .tail => |tail| tail.file.close(self.io),
-            .closed => return,
-        }
-        pipe_slot.* = .{ .closed = reason };
-    }
-
     fn formatResult(
         self: *Execution,
         writer: *std.Io.Writer,
@@ -952,7 +748,7 @@ pub const Execution = struct {
         include_paths: bool,
     ) !void {
         try writer.print("Bash {s}. ", .{@tagName(code)});
-        switch (self.process.gone) {
+        switch (self.lifecycle.process.gone) {
             .exited => |exit_code| try writer.print("Exit code: {d}.\n", .{exit_code}),
             .signal => |signal_value| try writer.print("Signal: {d}.\n", .{signal_value}),
             .unknown => |status| try writer.print("Unknown process status: {d}.\n", .{status}),
@@ -966,13 +762,13 @@ pub const Execution = struct {
                 .{self.timeout_ms},
             );
         }
-        if (self.capture_failure != .none) {
-            try writer.print("Capture failure: {s}; output may be incomplete.\n", .{@tagName(self.capture_failure)});
-        } else if (pipeIncomplete(self.stdout_pipe) or pipeIncomplete(self.stderr_pipe)) {
+        if (self.lifecycle.capture_failure != .none) {
+            try writer.print("Capture failure: {s}; output may be incomplete.\n", .{@tagName(self.lifecycle.capture_failure)});
+        } else if (self.lifecycle.captureIncomplete()) {
             try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
-        if (self.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
-        if (self.group_permission_denied) {
+        if (self.lifecycle.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
+        if (self.lifecycle.group_permission_denied) {
             try writer.writeAll("Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial.\n");
         }
         var tail: [excerpt_bytes]u8 = undefined;
@@ -1241,57 +1037,22 @@ fn createOwnedFile(
     };
 }
 
-test "a due deadline starts termination from a later service-time observation" {
-    const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
-    var execution = Execution{
-        .io = std.testing.io,
-        .process = .{ .running = .{
-            .anchor = .{
-                .child = undefined,
-                .pgid = 1,
-            },
-            .deadline = deadline,
-        } },
-        .stdout_pipe = .{ .closed = .eof },
-        .stderr_pipe = .{ .closed = .eof },
-        .stdout_capture = undefined,
-        .stderr_capture = undefined,
-        .script = undefined,
-        .scratch_path = "",
-        .started = started,
-        .timeout_ms = 100,
-        .faults = .{ .lifecycle = .signal },
-    };
-    const before = started.addDuration(.{ .raw = .fromMilliseconds(99), .clock = .awake });
-    try std.testing.expect(execution.applyDueDeadline(before) == null);
-    try std.testing.expect(execution.process == .running);
-    const after = started.addDuration(.{ .raw = .fromMilliseconds(101), .clock = .awake });
-    const action = execution.applyDueDeadline(after).?;
-    try std.testing.expectEqual(@as(u64, 100 * std.time.ns_per_ms), action.deadline_ns);
-    try std.testing.expect(action.signal_failed);
-    try std.testing.expect(execution.process == .grace);
-    try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
-}
-
-fn runningWithDeadline(started: std.Io.Clock.Timestamp, deadline: std.Io.Clock.Timestamp) Execution {
+fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Execution {
     return .{
         .io = std.testing.io,
-        .process = .{ .running = .{
-            .anchor = .{
-                .child = undefined,
-                .pgid = 1,
-            },
-            .deadline = deadline,
-        } },
-        .stdout_pipe = .{ .closed = .eof },
-        .stderr_pipe = .{ .closed = .eof },
+        .lifecycle = .{
+            .process = .{ .running = .{ .deadline = BashLifecycle.addMilliseconds(started, timeout_ms) } },
+            .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+        },
+        .leader = 1,
+        .pgid = 1,
+        .pipes = .{ null, null },
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
         .scratch_path = "",
         .started = started,
-        .timeout_ms = @intCast(@divTrunc(deadline.raw.nanoseconds - started.raw.nanoseconds, std.time.ns_per_ms)),
+        .timeout_ms = timeout_ms,
         // Signaling is faulted to a no-op so no real process is signaled.
         .faults = .{ .lifecycle = .signal },
     };
@@ -1299,77 +1060,69 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, deadline: std.Io.Clock.T
 
 test "service acts on its service-time observation rather than an earlier one" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    const deadline = started.addDuration(.{ .raw = .fromMilliseconds(20), .clock = .awake });
+    const deadline = BashLifecycle.addMilliseconds(started, 20);
     // A pre-work observation is before the deadline: no timeout.
-    const before = started.addDuration(.{ .raw = .fromMilliseconds(1), .clock = .awake });
-    var execution = runningWithDeadline(started, deadline);
+    const before = BashLifecycle.addMilliseconds(started, 1);
+    var execution = runningWithDeadline(started, 20);
     try std.testing.expect(execution.applyDueDeadline(before) == null);
-    try std.testing.expect(execution.process == .running);
+    try std.testing.expect(execution.lifecycle.process == .running);
     // The service-time observation is after the deadline: the real owner
     // requests termination through the production service path. No clock is
     // sampled and no syscall runs; both observations are explicit inputs.
-    const after = started.addDuration(.{ .raw = .fromMilliseconds(21), .clock = .awake });
+    const after = BashLifecycle.addMilliseconds(started, 21);
     var window: [copy_window_bytes]u8 = undefined;
     const result = execution.serviceAt(&window, after, .none);
     const timeout = result.timeout_action orelse return error.TestExpectedResult;
     try std.testing.expectEqual(@as(u64, @intCast(deadline.raw.nanoseconds)), timeout.deadline_ns);
+    // The faulted TERM is reported with the timeout that sent it.
+    try std.testing.expect(timeout.signal_failed);
     try std.testing.expect(result.fault == null);
     try std.testing.expect(result.made_progress);
     try std.testing.expect(!result.retired);
-    try std.testing.expect(execution.process == .grace);
-    try std.testing.expectEqual(StopReason.timed_out, execution.stop_reason);
+    try std.testing.expect(execution.lifecycle.process == .grace);
+    try std.testing.expectEqual(BashLifecycle.StopReason.timed_out, execution.lifecycle.stop_reason);
     // Substituting the earlier observation performs no timeout.
-    var stale = runningWithDeadline(started, deadline);
+    var stale = runningWithDeadline(started, 20);
     const idle = stale.serviceAt(&window, before, .none);
     try std.testing.expect(idle.timeout_action == null);
     try std.testing.expect(idle.fault == null);
-    try std.testing.expect(stale.process == .running);
+    try std.testing.expect(stale.lifecycle.process == .running);
     // A failed observation is reported without a timeout, and the grace
     // deadlines derive from the supplied service-time observation.
-    var unobservable = runningWithDeadline(started, deadline);
+    var unobservable = runningWithDeadline(started, 20);
     const failed = unobservable.serviceAt(&window, before, .failed);
     try std.testing.expect(failed.timeout_action == null);
     try std.testing.expect(failed.fault.? == error.BashObserveFailed);
-    try std.testing.expectEqual(StopReason.infrastructure_shutdown, unobservable.stop_reason);
-    const grace = unobservable.process.grace;
+    try std.testing.expectEqual(BashLifecycle.StopReason.infrastructure_shutdown, unobservable.lifecycle.stop_reason);
+    const grace = unobservable.lifecycle.process.grace;
     try std.testing.expectEqual(
-        before.raw.nanoseconds + termination_grace_ms * std.time.ns_per_ms,
+        before.raw.nanoseconds + BashLifecycle.termination_grace_ms * std.time.ns_per_ms,
         grace.kill_at.raw.nanoseconds,
     );
     try std.testing.expectEqual(
-        before.raw.nanoseconds + cleanup_observation_ms * std.time.ns_per_ms,
+        before.raw.nanoseconds + BashLifecycle.cleanup_observation_ms * std.time.ns_per_ms,
         grace.cleanup_deadline.raw.nanoseconds,
     );
-    const later = before.addDuration(.{ .raw = .fromMilliseconds(50), .clock = .awake });
-    unobservable.requestTerminationAt(.stopped, later);
-    try std.testing.expectEqual(StopReason.infrastructure_shutdown, unobservable.stop_reason);
-    try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, unobservable.process.grace.kill_at.raw.nanoseconds);
-    try std.testing.expectEqual(
-        grace.cleanup_deadline.raw.nanoseconds,
-        unobservable.process.grace.cleanup_deadline.raw.nanoseconds,
-    );
-    unobservable.process.grace.anchor.observed = .{ .exited = 0 };
-    const just_before_grace = before.addDuration(.{
-        .raw = .fromMilliseconds(termination_grace_ms - 1),
-        .clock = .awake,
-    });
-    try std.testing.expect(!unobservable.applyGraceDeadline(just_before_grace));
-    try std.testing.expect(unobservable.process == .grace);
-    try std.testing.expect(unobservable.applyGraceDeadline(grace.kill_at));
-    try std.testing.expect(unobservable.process == .reaping);
+    // A later stop is acknowledged without a new TERM or deadlines.
+    const stop = unobservable.requestStop(BashLifecycle.addMilliseconds(before, 50));
+    try std.testing.expect(!stop.attempted);
+    try std.testing.expectEqual(BashLifecycle.StopReason.infrastructure_shutdown, unobservable.lifecycle.stop_reason);
+    try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, unobservable.lifecycle.process.grace.kill_at.raw.nanoseconds);
     // An observed leader retires the running state without a deadline.
-    var witnessed = runningWithDeadline(started, deadline);
+    var witnessed = runningWithDeadline(started, 20);
     const seen = witnessed.serviceAt(&window, before, .{ .observed = .{ .exited = 0 } });
     try std.testing.expect(seen.timeout_action == null);
     try std.testing.expect(seen.fault == null);
-    try std.testing.expect(witnessed.process == .grace);
+    try std.testing.expect(seen.made_progress);
+    try std.testing.expect(witnessed.lifecycle.process == .grace);
+    try std.testing.expectEqual(BashLifecycle.StopReason.none, witnessed.lifecycle.stop_reason);
 }
 
 test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    const deadline = addMilliseconds(started, 100);
-    const before = addMilliseconds(started, 99);
-    const after = addMilliseconds(started, 101);
+    const deadline = BashLifecycle.addMilliseconds(started, 100);
+    const before = BashLifecycle.addMilliseconds(started, 99);
+    const after = BashLifecycle.addMilliseconds(started, 101);
     const phases = [_]enum { grace, reaping, checking_group }{ .grace, .reaping, .checking_group };
     const observations = [_]struct { now: std.Io.Clock.Timestamp, cutoff: bool }{
         .{ .now = before, .cutoff = false },
@@ -1408,9 +1161,13 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         defer _ = std.c.close(stderr_fds[1]);
         var execution = Execution{
             .io = std.testing.io,
-            .process = undefined,
-            .stdout_pipe = .{ .reading = .{ .handle = stdout_fds[0], .flags = .{ .nonblocking = false } } },
-            .stderr_pipe = .{ .reading = .{ .handle = stderr_fds[0], .flags = .{ .nonblocking = false } } },
+            .lifecycle = .{ .process = undefined },
+            .leader = null,
+            .pgid = 1,
+            .pipes = .{
+                .{ .handle = stdout_fds[0], .flags = .{ .nonblocking = false } },
+                .{ .handle = stderr_fds[0], .flags = .{ .nonblocking = false } },
+            },
             .stdout_capture = undefined,
             .stderr_capture = undefined,
             .script = undefined,
@@ -1421,8 +1178,8 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         };
         stdout_read_owned = false;
         stderr_read_owned = false;
-        defer execution.closePipe(&execution.stdout_pipe, .failed);
-        defer execution.closePipe(&execution.stderr_pipe, .failed);
+        defer execution.closeDescriptor(.stdout);
+        defer execution.closeDescriptor(.stderr);
         execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stdout_capture.cleanup(root) catch {};
         execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
@@ -1430,23 +1187,22 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         execution.script = try createOwnedFile(std.testing.io, root, budget, "deadline-script", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.script.cleanup(root) catch {};
         switch (phase) {
-            .grace => execution.process = .{ .grace = .{
-                .anchor = .{ .child = undefined, .pgid = 1 },
-                .kill_at = addMilliseconds(after, 1),
-                .cleanup_deadline = deadline,
-            } },
-            .reaping => {
-                execution.process = .{ .reaping = .{
-                    .owner = .{ .child = undefined, .pgid = 1, .observed = null },
+            .grace => {
+                execution.leader = 1;
+                execution.lifecycle.process = .{ .grace = .{
+                    .kill_at = BashLifecycle.addMilliseconds(after, 1),
                     .cleanup_deadline = deadline,
+                    .observed = null,
                 } };
+            },
+            .reaping => {
+                execution.lifecycle.process = .{ .reaping = .{ .cleanup_deadline = deadline, .observed = null } };
                 // The reap gate suppresses the syscall, not reading its PID.
-                execution.process.reaping.owner.child.id = 1;
+                execution.leader = 1;
                 execution.faults.lifecycle = .reap_watchdog;
             },
             .checking_group => {
-                execution.process = .{ .checking_group = .{
-                    .pgid = 1,
+                execution.lifecycle.process = .{ .checking_group = .{
                     .term = .{ .exited = 0 },
                     .cleanup_deadline = deadline,
                 } };
@@ -1455,8 +1211,8 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         }
         var window: [copy_window_bytes]u8 = undefined;
         const result = execution.serviceAt(&window, observation.now, .none);
-        try std.testing.expectEqual(observation.cutoff, pipeClosed(execution.stdout_pipe));
-        try std.testing.expectEqual(observation.cutoff, pipeClosed(execution.stderr_pipe));
+        try std.testing.expectEqual(observation.cutoff, execution.lifecycle.pipesClosed());
+        try std.testing.expectEqual(observation.cutoff, execution.pipes[0] == null and execution.pipes[1] == null);
         try std.testing.expect(!result.retired);
         try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
         if (observation.cutoff) {
@@ -1481,9 +1237,13 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     defer _ = std.c.close(gone_fds[1]);
     var gone = Execution{
         .io = std.testing.io,
-        .process = .{ .gone = .{ .exited = 0 } },
-        .stdout_pipe = .{ .reading = .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } } },
-        .stderr_pipe = .{ .closed = .eof },
+        .lifecycle = .{
+            .process = .{ .gone = .{ .exited = 0 } },
+            .pipes = .{ .reading, .{ .closed = .eof } },
+        },
+        .leader = null,
+        .pgid = 1,
+        .pipes = .{ .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } }, null },
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
@@ -1493,7 +1253,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         .faults = .{},
     };
     gone_read_owned = false;
-    defer gone.closePipe(&gone.stdout_pipe, .failed);
+    defer gone.closeDescriptor(.stdout);
     gone.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stdout", 1, 1, .none);
     defer gone.stdout_capture.cleanup(root) catch {};
     gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stderr", 1, 1, .none);
@@ -1508,8 +1268,8 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     try std.testing.expect(!gone_repeated.made_progress);
     try std.testing.expect(gone_repeated.retired);
 
-    gone.signal_failure = true;
-    gone.group_permission_denied = true;
+    gone.lifecycle.recordSignal(.failed);
+    gone.lifecycle.recordSignal(.group_permission_denied);
     const result = try gone.outcome(false);
     const text = result.content[0..result.content_len];
     try std.testing.expect(std.mem.indexOf(u8, text, "Process-group signaling reported a failure.\n") != null);
@@ -1642,9 +1402,13 @@ test "retired execution is independent of outstanding capture reclamation" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
     var execution = Execution{
         .io = std.testing.io,
-        .process = .{ .gone = .{ .exited = 0 } },
-        .stdout_pipe = .{ .closed = .eof },
-        .stderr_pipe = .{ .closed = .eof },
+        .lifecycle = .{
+            .process = .{ .gone = .{ .exited = 0 } },
+            .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+        },
+        .leader = null,
+        .pgid = 1,
+        .pipes = .{ null, null },
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
@@ -1659,8 +1423,7 @@ test "retired execution is independent of outstanding capture reclamation" {
     try execution.checkRetired();
     // A closed capture cannot release custody while process/group cleanup is
     // still unconfirmed.
-    execution.process = .{ .checking_group = .{
-        .pgid = 1,
+    execution.lifecycle.process = .{ .checking_group = .{
         .term = .{ .exited = 0 },
         .cleanup_deadline = started,
     } };
@@ -1668,13 +1431,7 @@ test "retired execution is independent of outstanding capture reclamation" {
     try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
     // A running process is not retired regardless of closed pipes, and
     // delivery state never substitutes for this ownership fact.
-    execution.process = .{ .running = .{
-        .anchor = .{
-            .child = undefined,
-            .pgid = 1,
-        },
-        .deadline = started,
-    } };
+    execution.lifecycle.process = .{ .running = .{ .deadline = started } };
     try std.testing.expect(!execution.retired());
     try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
 }
@@ -1703,9 +1460,13 @@ test "output publication closes producer aliases before making output evictable"
         errdefer script.cleanup(root) catch {};
         execution = .{
             .io = std.testing.io,
-            .process = .{ .gone = .{ .exited = 0 } },
-            .stdout_pipe = .{ .closed = .eof },
-            .stderr_pipe = .{ .closed = .eof },
+            .lifecycle = .{
+                .process = .{ .gone = .{ .exited = 0 } },
+                .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+            },
+            .leader = null,
+            .pgid = 1,
+            .pipes = .{ null, null },
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
             .script = script,
