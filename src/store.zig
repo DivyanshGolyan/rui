@@ -403,6 +403,13 @@ pub const ModelFailureDisposition = union(enum) {
     retryable: RetryPolicyInput,
 };
 
+pub const ModelFailure = struct {
+    code: []const u8,
+    // Borrowed for settlement only; never Turn output or model continuation.
+    diagnostic: ?[]const u8 = null,
+    request_id: protocol.Bounded(256) = .{},
+};
+
 const ModelRetryDecision = union(enum) {
     schedule_at_ms: i64,
     exhausted,
@@ -2804,7 +2811,8 @@ pub const Store = struct {
         const statement = try prepare(self.database, if (ordinal == 0)
             "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
                 "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-                "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id)) THEN 1 ELSE 0 END " ++
+                "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id " ++
+                "AND o.resolution_code IN ('completed','continued','tool_calls'))) THEN 1 ELSE 0 END " ++
                 "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
@@ -5867,18 +5875,23 @@ pub const Store = struct {
     pub fn settleModelAttemptFailure(
         self: *Store,
         binding: AttemptBinding,
-        code: []const u8,
+        failure: ModelFailure,
         disposition: ModelFailureDisposition,
         faults: Faults,
     ) !void {
+        const code = failure.code;
         if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
             return error.InvalidFailureCode;
+        }
+        if (failure.diagnostic) |detail| {
+            std.debug.assert(disposition != .retryable);
+            std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
         if (self.fenced.load(.acquire)) return error.StoreFenced;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.settleModelAttemptFailureLocked(binding, code, disposition, faults) catch |err| {
+        self.settleModelAttemptFailureLocked(binding, failure, disposition, faults) catch |err| {
             return self.finishTransactionError(
                 err,
                 faults,
@@ -5890,10 +5903,11 @@ pub const Store = struct {
     fn settleModelAttemptFailureLocked(
         self: *Store,
         binding: AttemptBinding,
-        code: []const u8,
+        failure: ModelFailure,
         disposition: ModelFailureDisposition,
         faults: Faults,
     ) !void {
+        const code = failure.code;
         try exec(self.database, "BEGIN IMMEDIATE");
         try self.validateCurrentAttempt(binding);
         switch (disposition) {
@@ -5903,9 +5917,13 @@ pub const Store = struct {
                     (if (compact) "context_overflow" else "ResourceExceeded")
                 else
                     code;
+                const diagnostic_id = if (failure.diagnostic) |detail|
+                    try self.importBytesContent(detail, false, faults.content_import)
+                else
+                    null;
                 const update = try prepare(
                     self.database,
-                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2," ++
+                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?6,request_id=?7," ++
                         "last_failure_code=CASE WHEN ?4=1 THEN ?5 ELSE last_failure_code END " ++
                         "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                 );
@@ -5915,6 +5933,8 @@ pub const Store = struct {
                 try bindU64(update, 3, binding.attempt_ordinal);
                 try bindI64(update, 4, @as(i64, if (disposition == .context_overflow) 1 else 0));
                 try bindText(update, 5, code);
+                try bindNullableI64(update, 6, diagnostic_id);
+                try bindOptionalText(update, 7, failure.request_id.slice());
                 try expectDone(update);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 if (compact) {
@@ -8579,7 +8599,7 @@ test "Current selects active then queued work and bounds recent Message identiti
         var key: [48]u8 = undefined;
         try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file, "selection-file-{d}", .{index}), try std.fmt.bufPrint(&key, "selection-message-{d}", .{index}), "direct/selection", "input");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+        try storage.settleModelAttemptFailure(binding, .{ .code = "provider_http_422" }, .terminal, .{});
     }
     {
         const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
@@ -8645,7 +8665,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
         defer report.deinit();
         try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
     }
-    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try storage.settleModelAttemptFailure(binding, .{ .code = "provider_http_422" }, .terminal, .{});
     try std.testing.expect((try storage.observeCommand("")).message.?.progress == null);
     try submitTestMessage(&storage, &tmp, "after-empty-file", "after-empty", "direct/empty-key", "next");
     {
@@ -9849,7 +9869,7 @@ test "production turn preserves skipped continuation preference through actual S
         bindings[index] = (try sustained.admitModelAttempt(.message, .{})).?.permit.binding;
     }
     try settleCallsForTesting(&sustained, &sustained_tmp, bindings[0], "continued-result", &unknown);
-    try sustained.settleModelAttemptFailure(bindings[1], "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try sustained.settleModelAttemptFailure(bindings[1], .{ .code = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
     try settleCallsForTesting(&sustained, &sustained_tmp, bindings[2], "sending-result", &bash_calls);
     try configureTestSession(&sustained, "fresh-loop-config", "fresh-loop");
     var progress = [_]usize{ 0, 0, 0, 0 }; // Bash, retry, fresh Message, continuation.
@@ -9877,7 +9897,7 @@ test "production turn preserves skipped continuation preference through actual S
             if (model.operation_id == bindings[1].operation_id) {
                 progress[1] += 1;
                 try std.testing.expect(model.attempt_ordinal > 1);
-                try sustained.settleModelAttemptFailure(model, "temporary", .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+                try sustained.settleModelAttemptFailure(model, .{ .code = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
             } else if (model.turn_id == bindings[0].turn_id or model.turn_id == bindings[2].turn_id) {
                 progress[3] += 1;
                 var name_buffer: [64]u8 = undefined;
@@ -9885,7 +9905,7 @@ test "production turn preserves skipped continuation preference through actual S
                 try settleCallsForTesting(&sustained, &sustained_tmp, model, name, if (model.turn_id == bindings[0].turn_id) &unknown else &bash_calls);
             } else {
                 progress[2] += 1;
-                try sustained.settleModelAttemptFailure(model, "completed-fixture", .terminal, .{});
+                try sustained.settleModelAttemptFailure(model, .{ .code = "completed-fixture" }, .terminal, .{});
             }
         } else return error.NoProgressUnderSustainedInput;
     }
@@ -10345,7 +10365,7 @@ test "historical preparation rejects missing extra and reordered sibling classif
             try settleCallsForTesting(&storage, &tmp, source, "sibling-output", &calls);
             var next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             if (covered) {
-                try storage.settleModelAttemptFailure(next, "overflow", .context_overflow, .{});
+                try storage.settleModelAttemptFailure(next, .{ .code = "overflow" }, .context_overflow, .{});
                 const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
                 next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -10429,7 +10449,8 @@ test "historical accepted assistant output completeness and provenance fence rea
         var retained: ?named_scratch.Owner = null;
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .assistant_response, .{});
+        var rejection: @import("provider_output.zig").Rejection = .{};
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .assistant_response, &rejection, .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", "direct/output", "second");
@@ -10650,7 +10671,7 @@ test "Current report work is independent of terminal tool history" {
                     &calls,
                 );
                 const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try storage.settleModelAttemptFailure(continuation, "provider_http_422", .terminal, .{});
+                try storage.settleModelAttemptFailure(continuation, .{ .code = "provider_http_422" }, .terminal, .{});
             }
             try submitTestMessage(
                 &storage,
@@ -11094,7 +11115,7 @@ test "exact model interruption continues only with applicable pending input" {
 
     try std.testing.expectError(
         error.SupersededByControl,
-        storage.settleModelAttemptFailure(binding, "late_old_failure", .terminal, .{}),
+        storage.settleModelAttemptFailure(binding, .{ .code = "late_old_failure" }, .terminal, .{}),
     );
     const successor_observation = (try storage.observeCommand("interrupt-message-b")).message.?.queue.?;
     const observed_successor = switch (successor_observation.state) {
@@ -11114,7 +11135,7 @@ test "exact model interruption continues only with applicable pending input" {
     const replay = storage.interruptModel(&interrupt, .{});
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
-    try storage.settleModelAttemptFailure(successor.permit.binding, "successor_failure", .terminal, .{});
+    try storage.settleModelAttemptFailure(successor.permit.binding, .{ .code = "successor_failure" }, .terminal, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         storage.database,
         "SELECT count(*) FROM model_operation WHERE resolution_code='successor_failure'",
@@ -11157,7 +11178,7 @@ test "exact model interruption rejects stale targets and replays before applicab
     );
     try std.testing.expectError(
         error.SupersededByControl,
-        storage.settleModelAttemptFailure(admitted.permit.binding, "late_failure", .terminal, .{}),
+        storage.settleModelAttemptFailure(admitted.permit.binding, .{ .code = "late_failure" }, .terminal, .{}),
     );
 
     var after = try completeModelInterruption("after-interrupt", "direct/rejected-interrupt", admitted.permit.binding);
@@ -11420,7 +11441,7 @@ test "controls remove scheduled retries and replay without cancelling newer work
         try configureTestSession(&storage, "retry-config", "direct/retry-control");
         try submitTestMessage(&storage, &tmp, "retry-first", "retry-message", "direct/retry-control", "first");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(binding, "temporary", .{ .retryable = .{
+        try storage.settleModelAttemptFailure(binding, .{ .code = "temporary" }, .{ .retryable = .{
             .waits_ms = .{ 60_000, 60_000, 60_000 },
         } }, .{});
         // Make the saved retry due without depending on wall-clock scheduling.
@@ -12703,7 +12724,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
             error.CanonicalRollbackFailed,
             storage.settleModelAttemptFailure(
                 stale,
-                "must-not-settle",
+                .{ .code = "must-not-settle" },
                 .terminal,
                 .{ .rollback_failure = true },
             ),
@@ -12711,7 +12732,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(
             error.StoreFenced,
-            storage.settleModelAttemptFailure(binding, "must-not-settle", .terminal, .{}),
+            storage.settleModelAttemptFailure(binding, .{ .code = "must-not-settle" }, .terminal, .{}),
         );
         try storage.close();
     }
@@ -12725,7 +12746,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
             else => return error.ExpectedProcessingObservation,
         };
         try std.testing.expectEqual(binding.operation_id, observed_binding.operation_id);
-        try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+        try storage.settleModelAttemptFailure(binding, .{ .code = "provider_http_422" }, .terminal, .{});
         try std.testing.expect(
             (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .failed,
         );
@@ -13219,7 +13240,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     defer later.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.configure(&later, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", "direct/public", "later public input");
-    try storage.settleModelAttemptFailure(active.permit.binding, "fixture_failure", .terminal, .{});
+    try storage.settleModelAttemptFailure(active.permit.binding, .{ .code = "fixture_failure" }, .terminal, .{});
     _ = (try storage.admitNextModelAttempt(.{})).?;
     const fixed_first = try storage.publicConversationPage(.{ .session = request.session, .end = first.end });
     try std.testing.expectEqual(first.end, fixed_first.end);
@@ -14083,7 +14104,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(!first_input.content.?.belongsTo(&view));
     try std.testing.expect(!first_reader.usable());
 
-    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+    try storage.settleModelAttemptFailure(binding, .{ .code = "provider_http_422" }, .terminal, .{});
     try expectActivityOutcome(&storage, "direct/dispatch", binding, "provider_http_422");
     const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const failure = switch (failed.state) {
@@ -14288,6 +14309,103 @@ test "continued accepted output keeps model immutable and public projection read
     );
 }
 
+test "model rejection diagnostic is atomic Attempt-bound provenance not Turn output" {
+    const Fault = enum { stale, import, commit };
+    for ([_]Fault{ .stale, .import, .commit }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const detail = "{\"reason\":\"UnsupportedMessagePhase\",\"stage\":\"item\",\"byte_offset\":\"37\",\"output_index\":1}";
+        var failure = ModelFailure{ .code = "unsupported_provider_output", .diagnostic = detail };
+        try failure.request_id.set("safe-request-id");
+        var binding: AttemptBinding = undefined;
+        var original_content: u64 = 0;
+        {
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try configureTestSession(&storage, "diagnostic-config", "direct/diagnostic");
+            try submitTestMessage(&storage, &tmp, "diagnostic-input", "diagnostic-message", "direct/diagnostic", "input");
+            binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            original_content = try queryU64(storage.database, "SELECT count(*) FROM content");
+            var delivered = binding;
+            if (fault == .stale) delivered.attempt_ordinal += 1;
+            try std.testing.expectError(switch (fault) {
+                .stale => error.StaleAttemptBinding,
+                .import => error.InjectedContentImportFailure,
+                .commit => error.InjectedCommitFailure,
+            }, storage.settleModelAttemptFailure(delivered, failure, .terminal, .{
+                .content_import = fault == .import,
+                .before_commit = fault == .commit,
+            }));
+        }
+        {
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(original_content, try queryU64(storage.database, "SELECT count(*) FROM content"));
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NOT NULL OR resolution_content_id IS NOT NULL OR request_id IS NOT NULL"));
+            try storage.settleModelAttemptFailure(binding, failure, .terminal, .{});
+        }
+        {
+            var storage = try testingStore(&tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const bytes = try testingSessionReportWithProfile(&storage, &tmp, "direct/diagnostic", 64 * 1024, .full);
+            defer std.testing.allocator.free(bytes);
+            var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer report.deinit();
+            const full = report.value.object.get("full").?.object;
+            const resolution = full.get("model_operations").?.array.items[0].object.get("resolution").?.object;
+            try std.testing.expectEqualStrings("unsupported_provider_output", resolution.get("code").?.string);
+            try std.testing.expectEqualStrings(detail, resolution.get("content").?.object.get("text").?.string);
+            try std.testing.expect(full.get("turns").?.array.items[0].object.get("outcome").?.object.get("content").? == .null);
+            try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id='safe-request-id'"));
+            try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
+            try expectActivityOutcome(&storage, "direct/diagnostic", binding, "unsupported_provider_output");
+        }
+    }
+}
+
+test "model rejection diagnostic cannot masquerade as assistant content" {
+    const Route = enum { conversation, conversation_content, activity, activity_content };
+    for ([_]Route{ .conversation, .conversation_content, .activity, .activity_content }) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "diagnostic-config", "direct/diagnostic");
+        try submitTestMessage(&storage, &tmp, "diagnostic-input", "diagnostic-message", "direct/diagnostic", "input");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try storage.settleModelAttemptFailure(binding, .{
+            .code = "unsupported_provider_output",
+            .diagnostic = "{\"reason\":\"UnsupportedMessagePhase\"}",
+        }, .terminal, .{});
+        var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try session.set("direct/diagnostic");
+        const healthy = try storage.publicConversationPage(.{ .session = session });
+        try std.testing.expectEqual(@as(usize, 1), healthy.count);
+        try std.testing.expect(healthy.items[0].kind == .user);
+        const position = try queryU64(storage.database, "SELECT next_position FROM session");
+        try exec(storage.database, "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_operation_id,content_id) " ++
+            "SELECT o.session_ref,2,s.next_position,3,o.turn_id,o.operation_id,o.resolution_content_id " ++
+            "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref");
+        try exec(storage.database, "UPDATE session SET next_position=next_position+1");
+        const result: anyerror!void = switch (route) {
+            .conversation => if (storage.publicConversationPage(.{ .session = session })) |_| {} else |err| err,
+            .activity => if (storage.activityPage(.{ .session = session })) |_| {} else |err| err,
+            .conversation_content => if (storage.openPublicConversationContent(.{ .session = session, .position = position })) |value| blk: {
+                var reader = value;
+                reader.close();
+                break :blk {};
+            } else |err| err,
+            .activity_content => if (storage.openActivityContent(.{ .session = session, .position = position })) |value| blk: {
+                var reader = value;
+                reader.close();
+                break :blk {};
+            } else |err| err,
+        };
+        try std.testing.expectError(error.CorruptStore, result);
+        try std.testing.expect(storage.isFenced());
+    }
+}
+
 test "failed model settlement recovers uncertainty with a fresh consumed Attempt" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -14309,7 +14427,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             error.InjectedCommitFailure,
             storage.settleModelAttemptFailure(
                 binding,
-                "request_preparation_failed",
+                .{ .code = "request_preparation_failed" },
                 .terminal,
                 .{ .before_commit = true },
             ),
@@ -14402,7 +14520,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     };
     try storage.settleModelAttemptFailure(
         first,
-        "provider_temporary_http_429",
+        .{ .code = "provider_temporary_http_429" },
         .{ .retryable = retry_policy },
         .{},
     );
@@ -14439,13 +14557,13 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(u64, 2), second.attempt_ordinal);
     try std.testing.expectError(
         error.StaleAttemptBinding,
-        storage.settleModelAttemptFailure(first, "late_old_failure", .terminal, .{}),
+        storage.settleModelAttemptFailure(first, .{ .code = "late_old_failure" }, .terminal, .{}),
     );
     try std.testing.expect(!storage.isFenced());
 
     try storage.settleModelAttemptFailure(
         second,
-        "provider_transport_failure",
+        .{ .code = "provider_transport_failure" },
         .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
         .{},
     );
@@ -14454,7 +14572,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(u64, 3), third.attempt_ordinal);
     try storage.settleModelAttemptFailure(
         third,
-        "provider_temporary_http_503",
+        .{ .code = "provider_temporary_http_503" },
         .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
         .{},
     );
@@ -14463,7 +14581,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(u64, 4), fourth.attempt_ordinal);
     try storage.settleModelAttemptFailure(
         fourth,
-        "provider_transport_failure",
+        .{ .code = "provider_transport_failure" },
         .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
         .{},
     );
@@ -14610,7 +14728,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(
         error.StoreFenced,
-        storage.settleModelAttemptFailure(binding, "request_preparation_failed", .terminal, .{}),
+        storage.settleModelAttemptFailure(binding, .{ .code = "request_preparation_failed" }, .terminal, .{}),
     );
 }
 
@@ -15417,7 +15535,10 @@ test "compaction overflow admits a new Operation without losing applied input" {
     try configureTestSession(&storage, "compact-config", "direct/compact");
     try submitTestMessage(&storage, &tmp, "compact-input", "input", "direct/compact", "keep all input");
     const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(original, "context_overflow", .context_overflow, .{});
+    const detail = "{\"reason\":\"ContextOverflow\",\"stage\":\"response\",\"byte_offset\":\"0\",\"output_index\":null}";
+    var failure = ModelFailure{ .code = "context_overflow", .diagnostic = detail };
+    try failure.request_id.set("compact-overflow-request");
+    try storage.settleModelAttemptFailure(original, failure, .context_overflow, .{});
     const next = (try storage.admitNextModelAttempt(.{})) orelse return error.MissingCompaction;
     try std.testing.expect(next.permit.binding.operation_id != original.operation_id);
     try std.testing.expectEqual(original.turn_id, next.permit.binding.turn_id);
@@ -15430,6 +15551,14 @@ test "compaction overflow admits a new Operation without losing applied input" {
     try std.testing.expectEqual(HistoricalEntryKind.user, input.kind);
     try std.testing.expect((try view.nextEntry(input.position)) == null);
     try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
+    const bytes = try testingSessionReportWithProfile(&storage, &tmp, "direct/compact", 64 * 1024, .full);
+    defer std.testing.allocator.free(bytes);
+    var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer report.deinit();
+    const resolution = report.value.object.get("full").?.object.get("model_operations").?.array.items[0].object.get("resolution").?.object;
+    try std.testing.expectEqualStrings("context_overflow", resolution.get("code").?.string);
+    try std.testing.expectEqualStrings(detail, resolution.get("content").?.object.get("text").?.string);
+    try std.testing.expectEqual(original.operation_id, try queryU64(storage.database, "SELECT operation_id FROM model_operation WHERE request_id='compact-overflow-request' AND resolution_code='context_overflow' AND last_failure_code='context_overflow'"));
 }
 
 const TestingHistoryCursor = struct {
@@ -15496,7 +15625,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try configureTestSession(&storage, "compact-config", "direct/compact");
     try submitTestMessage(&storage, &tmp, "compact-input", "input", "direct/compact", "original");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
     const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try submitTestMessage(&storage, &tmp, "compact-arrival", "arrival", "direct/compact", "later");
     try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, compact, &.{.message}));
@@ -15532,7 +15661,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     }
     // New applied input permits one new compaction; its unchanged successor
     // must terminalize irreducible overflow rather than loop.
-    try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(successor, .{ .code = "overflow" }, .context_overflow, .{});
     const second_base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleCompactionForTesting(&storage, &tmp, second_base, &.{.compaction});
     const exhausted = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -15546,7 +15675,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
         try std.testing.expectEqual(anchor, (try cursor.next(&view)).?.position);
         try std.testing.expect((try cursor.next(&view)) == null);
     }
-    try storage.settleModelAttemptFailure(exhausted, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(exhausted, .{ .code = "overflow" }, .context_overflow, .{});
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
     const observation = try storage.observeCommand("input");
     try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
@@ -15607,14 +15736,14 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
             try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":null,\"output_reservation\":null") != null);
             try std.testing.expect(std.mem.indexOf(u8, report, "\"compaction_trigger\":\"10\",\"output_reservation\":\"8\"") != null);
         }
-        try storage.settleModelAttemptFailure(retry, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(retry, .{ .code = "overflow" }, .context_overflow, .{});
         const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
         try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
         const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         // Overflow recovery remains enabled without a default trigger, but
         // unchanged context cannot authorize another compaction.
-        try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(successor, .{ .code = "overflow" }, .context_overflow, .{});
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         try expectActivityOutcome(&storage, "direct/compact", successor, "ResourceExceeded");
     }
@@ -15730,7 +15859,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(first, "provider_failure", .terminal, .{});
+    try storage.settleModelAttemptFailure(first, .{ .code = "provider_failure" }, .terminal, .{});
     try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "pending");
     const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view = try storage.openHistoricalView(compact);
@@ -15813,12 +15942,12 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
     try configureTestSession(&storage, "config", "direct/compact");
     try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
     const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleCompactionForTesting(&storage, &tmp, base, &.{ .reasoning, .compaction, .message });
     try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "later");
     const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(assistant, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(assistant, .{ .code = "overflow" }, .context_overflow, .{});
     const candidate = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     {
         var view = try storage.openHistoricalView(candidate);
@@ -15833,7 +15962,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
         try std.testing.expect((try cursor.next(&view)) == null);
     }
     try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, candidate, &.{}));
-    try storage.settleModelAttemptFailure(candidate, "bad_compaction", .terminal, .{});
+    try storage.settleModelAttemptFailure(candidate, .{ .code = "bad_compaction" }, .terminal, .{});
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
     try submitTestMessage(&storage, &tmp, "three", "three", "direct/compact", "new turn");
@@ -15859,12 +15988,12 @@ test "compaction selected newest base corruption fences rather than using an old
         try configureTestSession(&storage, "config", "direct/compact");
         try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
         const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
         try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "later");
         const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(assistant, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(assistant, .{ .code = "overflow" }, .context_overflow, .{});
         const newest = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try settleCompactionForTesting(&storage, &tmp, newest, &.{ .compaction, .message });
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -15915,7 +16044,7 @@ test "historical accepted output completeness and provenance fence both read pat
                 var corrupt_id = output.operation_id;
                 var tied_id: ?u64 = null;
                 if (scenario != .no_base) {
-                    try storage.settleModelAttemptFailure(output, "overflow", .context_overflow, .{});
+                    try storage.settleModelAttemptFailure(output, .{ .code = "overflow" }, .context_overflow, .{});
                     const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                     try settleCompactionForTesting(&storage, &tmp, base, &.{ .reasoning, .compaction, .message });
                     corrupt_id = base.operation_id;
@@ -15968,7 +16097,7 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
         try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         if (with_base) {
-            try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+            try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
             const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
             const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -15976,9 +16105,9 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
             try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "bound suffix");
             try settleCompactionForTesting(&storage, &tmp, assistant, &.{.reasoning});
             const suffix = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try storage.settleModelAttemptFailure(suffix, "network", .terminal, .{});
+            try storage.settleModelAttemptFailure(suffix, .{ .code = "network" }, .terminal, .{});
         } else {
-            try storage.settleModelAttemptFailure(first, "network", .terminal, .{});
+            try storage.settleModelAttemptFailure(first, .{ .code = "network" }, .terminal, .{});
         }
         var patch: protocol.ConfigureCommand = .{};
         try patch.key.set("heuristics");
@@ -15990,15 +16119,15 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
         const proactive = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(proactive));
         try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
-        try storage.settleModelAttemptFailure(proactive, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(proactive, .{ .code = "overflow" }, .context_overflow, .{});
         try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
         const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
         try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
-        try storage.settleModelAttemptFailure(successor, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(successor, .{ .code = "overflow" }, .context_overflow, .{});
         const recovery = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(recovery));
-        try storage.settleModelAttemptFailure(recovery, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(recovery, .{ .code = "overflow" }, .context_overflow, .{});
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSession("direct/compact")).pending_messages);
         const observation = try storage.observeCommand("pending");
@@ -16015,11 +16144,11 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
     try configureTestSession(&storage, "config", "direct/compact");
     try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+    try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
     const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(successor, "network_failure", .terminal, .{});
+    try storage.settleModelAttemptFailure(successor, .{ .code = "network_failure" }, .terminal, .{});
     var patch: protocol.ConfigureCommand = .{};
     try patch.key.set("heuristics");
     try patch.session.set("direct/compact");
@@ -16055,7 +16184,7 @@ test "compaction missing usage estimates covered retained host input" {
         const original: [4000]u8 = @splat('x');
         try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", &original);
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        try storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
         const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
         const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -16087,7 +16216,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             try submitTestMessage(&storage, &tmp, "input", "input", "direct/context-selection", "retain");
             var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             if (with_base) {
-                try storage.settleModelAttemptFailure(current, "overflow", .context_overflow, .{});
+                try storage.settleModelAttemptFailure(current, .{ .code = "overflow" }, .context_overflow, .{});
                 current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try settleCompactionForTesting(&storage, &tmp, current, &.{ .reasoning, .compaction, .message });
                 current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -16154,7 +16283,7 @@ test "model admission work excludes failed historical Operation population" {
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
             try expectDone(insert);
-            try storage.settleModelAttemptFailure(current, if (overflow) "overflow" else "provider_http_422", if (overflow) .context_overflow else .terminal, .{});
+            try storage.settleModelAttemptFailure(current, .{ .code = if (overflow) "overflow" else "provider_http_422" }, if (overflow) .context_overflow else .terminal, .{});
             try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/admission-work", "pending input");
 
             var measured: @This() = .{};
@@ -16195,7 +16324,7 @@ test "model admission work excludes accepted compaction base history" {
             try submitTestMessage(&storage, &tmp, "input", "input", "direct/base-work", "retain");
             var current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             for (0..population) |index| {
-                try storage.settleModelAttemptFailure(current, "overflow", .context_overflow, .{});
+                try storage.settleModelAttemptFailure(current, .{ .code = "overflow" }, .context_overflow, .{});
                 const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
                 try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
@@ -16209,7 +16338,7 @@ test "model admission work excludes accepted compaction base history" {
                 }
             }
             if (suffix == .unchanged) {
-                try storage.settleModelAttemptFailure(current, "network", .terminal, .{});
+                try storage.settleModelAttemptFailure(current, .{ .code = "network" }, .terminal, .{});
             } else {
                 const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                 try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
@@ -16291,7 +16420,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
                 if (kind == .instruction and index != population) {
                     // Isolate revision history from accepted-output population.
-                    try storage.settleModelAttemptFailure(binding, "provider_http_422", .terminal, .{});
+                    try storage.settleModelAttemptFailure(binding, .{ .code = "provider_http_422" }, .terminal, .{});
                 } else {
                     try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"total_tokens\":99900}" else "{\"total_tokens\":99999}") else "{\"total_tokens\":1}") else null);
                 }
@@ -16302,7 +16431,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     // is after its usage/output and must remain in pressure.
                     if (index != population) {
                         const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
-                        try storage.settleModelAttemptFailure(continuation, "provider_http_422", .terminal, .{});
+                        try storage.settleModelAttemptFailure(continuation, .{ .code = "provider_http_422" }, .terminal, .{});
                     }
                 }
             }
@@ -16359,7 +16488,7 @@ test "compaction new Turn evaluates pressure independently of stopped overflow r
             try configureTestSession(&storage, "config", "direct/stopped-overflow");
             try submitTestMessage(&storage, &tmp, "original", "original", "direct/stopped-overflow", "retain original input");
             const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try storage.settleModelAttemptFailure(original, "overflow", .context_overflow, .{});
+            try storage.settleModelAttemptFailure(original, .{ .code = "overflow" }, .context_overflow, .{});
             if (stop_compaction) {
                 const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(compact));
@@ -16394,7 +16523,7 @@ test "compaction purpose admission fences a missing latest Turn Operation" {
     try configureTestSession(&storage, "config", "direct/missing-current");
     try submitTestMessage(&storage, &tmp, "input", "input", "direct/missing-current", "original input");
     const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(original, "provider_http_422", .terminal, .{});
+    try storage.settleModelAttemptFailure(original, .{ .code = "provider_http_422" }, .terminal, .{});
     try exec(storage.database, "UPDATE turn SET operation_id=99999");
     try submitTestMessage(&storage, &tmp, "later", "later", "direct/missing-current", "new input");
     try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));

@@ -1425,7 +1425,7 @@ test "request preparation escapes instructions and user content" {
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
     const first = try drainPreparation(&preparation, 2, 2, 4096);
     defer std.testing.allocator.free(first.bytes);
-    try setup.storage.settleModelAttemptFailure(binding, "prep_escape_release", .terminal, .{});
+    try setup.storage.settleModelAttemptFailure(binding, .{ .code = "prep_escape_release" }, .terminal, .{});
 
     // Independent escape expectations: quotes, backslashes, newline and
     // control bytes use short or \u00xx forms; UTF-8 bytes pass through.
@@ -2121,7 +2121,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try setup.submit("compact-first", "compact-first-key", "direct/compact-prep", "first host input");
     var first = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try first.permit.consume();
-    try setup.storage.settleModelAttemptFailure(original, "provider_context_overflow", .context_overflow, .{});
+    try setup.storage.settleModelAttemptFailure(original, .{ .code = "provider_context_overflow" }, .context_overflow, .{});
     var compact = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try compact.permit.consume();
     {
@@ -2153,7 +2153,8 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try store.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
-    const result = try Output.validate(std.testing.io, source, sse.len, &metadata, .compaction, .{});
+    var rejection: Output.Rejection = .{};
+    const result = try Output.validate(std.testing.io, source, sse.len, &metadata, .compaction, &rejection, .{});
     try setup.submit("compact-later", "compact-later-key", "direct/compact-prep", "later host input");
     try setup.storage.settleModelSuccess(binding, &.{
         .source = source,
@@ -2201,7 +2202,7 @@ test "compaction public preparation rejects incompatible selected base and suffi
         try setup.configure("binding-config", session);
         try setup.submit("binding-one", "binding-one", session, "original");
         const first = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try setup.storage.settleModelAttemptFailure(first, "overflow", .context_overflow, .{});
+        try setup.storage.settleModelAttemptFailure(first, .{ .code = "overflow" }, .context_overflow, .{});
         const base = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         try store.settleCompactionForTesting(&setup.storage, &setup.tmp, base, &.{.compaction});
         var revision: protocol.ConfigureCommand = .{};
