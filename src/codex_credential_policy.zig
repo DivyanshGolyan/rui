@@ -159,11 +159,14 @@ pub fn localStatus(record: *const Record, now_seconds: i64) !LocalStatus {
 /// Credential failures the user can resolve by logging in again are
 /// authentication failures; everything else is a backend failure.
 pub fn failureCode(err: anyerror) []const u8 {
-    return switch (err) {
-        error.RefreshRejected, error.RefreshRequiresLogin, error.ExpiredCredential, error.AccountMismatch, error.AccountChanged, error.InvalidCredentialExpiry => "provider_authentication_failed",
-        else => "provider_authentication_backend_failed",
-    };
+    inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return "provider_authentication_failed";
+    }
+    return "provider_authentication_backend_failed";
 }
+
+/// Credential failures that only a new login resolves.
+pub const LoginRequired = error{ RefreshRejected, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry };
 
 pub const Claim = enum { claimed, superseded };
 

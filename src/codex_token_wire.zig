@@ -139,12 +139,12 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
 /// tokens. The generation is assigned at admission. On error the replacement
 /// is zeroed.
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record) !void {
+    replacement.* = current.*;
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
     if (status < 200 or status >= 300) return error.RefreshRejected;
     var wire: OwnedWire = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
     try parseWire(json, &wire);
-    replacement.* = current.*;
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
     if (wire.has_id) {
         const account = try policy.parseAccount(wire.id.slice());
         if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice()) or
@@ -265,7 +265,9 @@ test "refresh preserves omitted fields and refuses account replacement" {
     try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, response, 79, &updated));
     try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&updated), 0));
     for ([_]u16{ 199, 300, 401, 500 }) |status| {
+        try parseRefreshResponse(&current, 200, "{}", 79, &updated);
         try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, status, "{}", 79, &updated));
+        try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&updated), 0));
     }
 }
 
@@ -385,17 +387,10 @@ fn raises(comptime function: anytype, comptime name: []const u8) bool {
 }
 
 test "authentication failure classes name errors their producers raise" {
-    // `policy.failureCode` classifies by name; a renamed producer error would
-    // silently become a backend failure.
-    inline for (.{
-        .{ parseRefreshResponse, "RefreshRejected" },
-        .{ parseRefreshResponse, "AccountChanged" },
-        .{ policy.select, "RefreshRequiresLogin" },
-        .{ policy.select, "AccountMismatch" },
-        .{ policy.select, "InvalidCredentialExpiry" },
-        .{ policy.launchCheck, "ExpiredCredential" },
-    }) |case| {
-        try std.testing.expect(comptime raises(case[0], case[1]));
-        try std.testing.expectEqualStrings("provider_authentication_failed", policy.failureCode(@field(anyerror, case[1])));
+    // `policy.failureCode` classifies by name; a misspelled or renamed
+    // producer error would silently become a backend failure.
+    inline for (@typeInfo(policy.LoginRequired).error_set.error_names.?) |name| {
+        try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
+        try std.testing.expectEqualStrings("provider_authentication_failed", policy.failureCode(@field(anyerror, name)));
     }
 }
