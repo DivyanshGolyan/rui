@@ -33,6 +33,7 @@ PTY_OUTPUT_LIMIT = 1024 * 1024
 LAUNCH_PROBE = r"""
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,8 +41,28 @@ LAUNCH_PROBE = r"""
 #include <unistd.h>
 
 extern int rui_launch_detached(const char *, const char *const *, size_t);
+extern int rui_launch_detached_observed(const char *, const char *const *, size_t, int *);
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "startup-failure") == 0) {
+        const char failure[] = "error: StartupProbeFailed (exit status 1)\n";
+        if (write(2, failure, sizeof(failure) - 1) != sizeof(failure) - 1) return 108;
+        return 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "closed-startup") == 0) {
+        int mask = atoi(argv[2]);
+        for (int fd = 0; fd < 3; fd++) if (mask & (1 << fd)) close(fd);
+        const char *child_argv[] = {argv[0], "startup-failure", NULL};
+        int reader = -1;
+        if (rui_launch_detached_observed(argv[0], child_argv, 2, &reader)) return 109;
+        struct pollfd ready = {.fd = reader, .events = POLLIN};
+        if (poll(&ready, 1, 3000) <= 0) return 110;
+        char data[128];
+        ssize_t count = read(reader, data, sizeof(data));
+        close(reader);
+        const char expected[] = "error: StartupProbeFailed (exit status 1)\n";
+        return count == sizeof(expected) - 1 && !memcmp(data, expected, sizeof(expected) - 1) ? 0 : 111;
+    }
     if (argc == 2 && strcmp(argv[1], "launch") == 0) {
         int pipe_fds[2];
         if (pipe(pipe_fds) != 0) return 90;
@@ -105,6 +126,10 @@ def assert_launch_adapter(root, env):
     result = subprocess.run([actor, "launch"], cwd=root, env=probe_env,
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result
+    for mask in range(1, 8):
+        result = subprocess.run([actor, "closed-startup", str(mask)], env=probe_env,
+                                capture_output=True, timeout=5)
+        assert result.returncode == 0, (mask, result)
     expected = [str(actor), "witness", "", "two words", "--not-a-launch-option", "final",
                 probe_env["RUI_LAUNCH_PROBE_VALUE"], "", env["HOME"], "/", "closed"]
     deadline = time.monotonic() + 5
@@ -275,8 +300,23 @@ def startup_limits(root, env):
                         response = bytearray()
                         while chunk := peer.recv(4096):
                             response.extend(chunk)
-                        assert b"503" in response and b"ClientCapacity" in response, response
+                        header, body = bytes(response).split(b"\r\n\r\n", 1)
+                        assert header.startswith(b"HTTP/1.1 503 "), response
+                        assert json.loads(body) == {
+                            "version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
+                        }, response
                     assert "Host: ready" in status(store, env)
+                    for _ in range(3):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                    assert "Host: ready" in status(store, env), "unknown routes blocked discovery"
+                    stopped = subprocess.run(
+                        [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
+                        env=env, text=True, capture_output=True, timeout=5,
+                    )
+                    assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
                 finally:
                     for peer in borrowers:
                         peer.close()

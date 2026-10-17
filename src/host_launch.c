@@ -233,11 +233,16 @@ int rui_launch_detached(const char *executable, const char *const *argv, size_t 
 int rui_launch_detached_observed(const char *executable, const char *const *argv, size_t argc, int *startup_read) {
     int channel[2];
     if (pipe(channel) != 0) return errno;
-    int result = fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
-        fcntl(channel[1], F_SETFD, FD_CLOEXEC) < 0 ||
-        fcntl(channel[0], F_SETFL, O_NONBLOCK) < 0 ? errno : 0;
-    if (result == 0) result = launch_with_signals(executable, argv, argc, channel[1]);
+    /* Stdio may have been closed by our caller. Both launch paths replace
+     * 0..2 and reserve 3 for exec errors; establish stable writer ownership
+     * before either child remaps descriptors. */
+    int writer = fcntl(channel[1], F_DUPFD_CLOEXEC, 4);
+    int result = writer < 0 ? errno : 0;
     close(channel[1]);
+    if (result == 0 && (fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(channel[0], F_SETFL, O_NONBLOCK) < 0)) result = errno;
+    if (result == 0) result = launch_with_signals(executable, argv, argc, writer);
+    if (writer >= 0) close(writer);
     if (result != 0) close(channel[0]);
     else *startup_read = channel[0];
     return result;
