@@ -74,7 +74,8 @@ pub const PipeRead = union(enum) {
     /// Nothing was ready.
     empty,
     /// Bytes read. During a tail with nothing owed, these are writer
-    /// output past the snapshot and are not retained.
+    /// output past the snapshot; the owner reads them only as a one-byte
+    /// probe and does not retain them.
     bytes: u64,
     /// A zero-byte read: every writer closed.
     end,

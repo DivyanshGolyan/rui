@@ -574,8 +574,10 @@ pub const Execution = struct {
         // Apply the read at an observation taken after the potentially
         // blocking pipe operation.
         now.* = time.observe();
-        self.sendSignal(self.lifecycle.observePipe(stream, read, now.*));
+        const signal = self.lifecycle.observePipe(stream, read, now.*);
+        // Close a failed pipe before signaling its writers.
         self.releaseClosedDescriptor(stream);
+        self.sendSignal(signal);
         return read != .empty or !std.meta.eql(before, self.lifecycle.pipes.get(stream));
     }
 
@@ -596,7 +598,8 @@ pub const Execution = struct {
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        if (try std.posix.poll(&descriptor, 0) == 0) return .empty;
+        // A tail that still owes bytes has them queued, so it reads directly.
+        if (!(state == .tail and wanted != 0) and try std.posix.poll(&descriptor, 0) == 0) return .empty;
         const reserved: usize = if (wanted == 0) 0 else @intCast(destination.budget.reserveUpTo(wanted));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
