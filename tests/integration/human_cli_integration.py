@@ -2475,7 +2475,8 @@ def renderer_cases():
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-renderer."))
-    home, store, workspace = state / "home", state / "store", state / "workspace"
+    # Always wrap the Workspace, including on short Linux temporary roots.
+    home, store, workspace = state / "home", state / "store", state / ("workspace-" + "w" * 80)
     home.mkdir(mode=0o700)
     workspace.mkdir()
     endpoint = fixture.SuccessEndpoint([])
@@ -2736,7 +2737,10 @@ def renderer_cases():
                 release.set()
                 tty.ready(ready_read)
                 shown = tty.wait("a: Allow once / d: Deny (Enter)")
-                assert "printf approved > renderer-effect" in shown and f"Workspace: {workspace}" in shown, shown
+                assert "printf approved > renderer-effect" in shown, shown
+                shown_workspace = shown.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
+                assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"
+                assert shown_workspace.replace("\n", "") == str(workspace), shown
                 # The earlier draft frame can precede Message publication.
                 # Action readiness follows it; only later Decisions are new.
                 records = set((home / ".config/rui/requests").glob("*.json"))
