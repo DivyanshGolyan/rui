@@ -1,5 +1,16 @@
 name: On-demand macOS qualification
 on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      suite:
+        type: string
+        default: native
+      platform:
+        type: string
+        default: macos
   workflow_dispatch:
     inputs:
       ref:
@@ -8,7 +19,7 @@ on:
         default: main
         type: string
       suite:
-        description: 'Existing suites: footprint=1 job, resources=10, native=4, all=14'
+        description: Existing suites, one isolated job per target or full-check partition
         required: true
         default: footprint
         type: choice
@@ -16,10 +27,15 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
-# Dispatch can execute an unreviewed ref while the workflow runs on main.
-# Scoped cache tokens deny publication even from requested-ref setup/build code.
+# Requested refs execute their own setup/build code, but must not publish
+# caches into the dispatching workflow's trusted ref. Tokens enforce this cap.
 cache-mode: read
+
+concurrency:
+  group: qualification-${{ inputs.platform || 'macos' }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
 
 jobs:
   plan:
@@ -29,6 +45,8 @@ jobs:
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      platform: ${{ steps.plan.outputs.platform }}
+      targets: ${{ steps.plan.outputs.targets }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -37,41 +55,57 @@ jobs:
       - id: plan
         env:
           SUITE: ${{ inputs.suite }}
+          PLATFORM: ${{ inputs.platform || 'macos' }}
         run: |
           set -euo pipefail
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          python3 - <<'PY'
-          import json, os
-          suite = os.environ['SUITE']
-          resources = ['measure-repeat-work', 'measure-admission', 'measure-message-admission',
-                       'measure-model-dispatch', 'measure-model-output', 'measure-model-retry',
-                       'measure-model-queue', 'measure-model-control', 'measure-call-classification',
-                       'measure-execution-service']
-          rows = []
-          if suite in ('footprint', 'resources', 'all'):
-              rows += [dict(name=target, targets=[target], part='all', resource=True)
-                       for target in (resources if suite != 'footprint' else resources[:1])]
-          if suite in ('native', 'all'):
-              rows += [dict(name='full-' + part, targets=['check-full'], part=part, resource=False)
-                       for part in ('execution', 'callers')]
-              rows += [dict(name='integrations', targets=['test-logic', 'admission-debug-integration',
-                       'transport-h2-integration', 'codex-h2-integration', 'codex-credential-integration',
-                       'current-facts-integration', 'server-delivery-integration'], part='all', resource=False),
-                       dict(name='long', targets=['test-full', 'evaluator-churn'], part='all', resource=False)]
-          if not rows:
-              raise SystemExit('Unknown suite')
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-              print('matrix=' + json.dumps({'include': rows}), file=output)
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          python3 tests/ci/qualification.py --suite "$SUITE" --platform "$PLATFORM" > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          rows = json.load(open('matrix.json'))['include']
+          targets = {target for row in rows for target in row['targets']}
+          if any(row['resource'] for row in rows):
+              targets.add('measurement-check')
+          print('targets=' + json.dumps(sorted(targets)))
           PY
-  qualify:
+  compile:
     needs: plan
-    name: macOS / ${{ matrix.name }}
-    runs-on: macos-15
-    timeout-minutes: 90
+    runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+          check-part: compiled
+      - name: Compile selected gates once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-${{ needs.plan.outputs.platform }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  qualify:
+    needs: [plan, compile]
+    name: ${{ needs.plan.outputs.platform }} / ${{ matrix.name }}
+    runs-on: ${{ needs.plan.outputs.platform == 'linux' && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: 30
     strategy:
       # Separate VMs avoid measuring concurrent qualification workloads on one Mac.
       fail-fast: false
-      max-parallel: 4
+      max-parallel: ${{ needs.plan.outputs.platform == 'linux' && 10 || 3 }}
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Select runner-owned evidence directories
@@ -95,22 +129,34 @@ jobs:
             git rev-parse HEAD
             git status --porcelain
             uname -a
-            sw_vers
-            sysctl hw.model hw.ncpu hw.memsize
-            sysctl vm.swapusage
-            memory_pressure
-            df -h /private/tmp
+            if [ "$(uname -s)" = Darwin ]; then
+              sw_vers
+              sysctl hw.model hw.ncpu hw.memsize
+              sysctl vm.swapusage
+              memory_pressure
+              xcodebuild -version
+              xcrun --sdk macosx --show-sdk-version
+              test "$(uname -m)" = arm64
+            else
+              nproc
+              free -m
+              test "$(uname -m)" = x86_64
+            fi
+            df -h "${TMPDIR:-/tmp}"
             ulimit -a
-            xcodebuild -version
-            xcrun --sdk macosx --show-sdk-version
           } | tee "$EVIDENCE/environment.txt"
-          test "$(uname -m)" = arm64
-          echo "Tested SHA $(git rev-parse HEAD); hosted $(sw_vers -productVersion)/$(uname -m). VM-specific resource evidence, not personal-Mac equivalence." >> "$GITHUB_STEP_SUMMARY"
+          echo "Tested SHA $(git rev-parse HEAD); hosted $(uname -s)/$(uname -m). VM-specific resource evidence, not personal-machine or pacing equivalence." >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.github/actions/setup
         id: setup
         with:
-          targets: ${{ matrix.resource && '["measurement-check"]' || toJSON(matrix.targets) }}
-          check-part: ${{ matrix.part }}
+          targets: ${{ needs.plan.outputs.targets }}
+          compiled: 'true'
+      - name: Verify the successful producer's compiled artifact
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          ARTIFACT_ID: ${{ needs.compile.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Record the compiler used by every suite
         run: zig version | tee "$EVIDENCE/zig-version.txt"
       - name: Existing measurement setup and tests
@@ -120,13 +166,14 @@ jobs:
           set -euo pipefail
           { zig version; go version; shasum -a 256 tests/qualification/go.mod tests/qualification/go.sum; } | tee "$EVIDENCE/toolchains.txt"
           GOTOOLCHAIN=local go -C tests/qualification mod download
-          zig build measurement-check -j2 --summary all 2>&1 | tee "$EVIDENCE/measurement-check.log"
+          zig build measurement-check -Dci-artifacts=.zig-cache/o/ci-compiled -j2 --summary all 2>&1 | tee "$EVIDENCE/measurement-check.log"
       - name: Execute the existing gates without changing their verdicts
         id: gates
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           PART: ${{ matrix.part }}
           RESOURCE: ${{ matrix.resource }}
+          ARGS: ${{ toJSON(matrix.args) }}
         run: |
           set -euo pipefail
           if [ "$RESOURCE" = true ]; then
@@ -135,12 +182,18 @@ jobs:
             # This existing runner publishes a summary plus compressed evidence
             # to files instead of stdout; keep both under the upload directory.
             if [ "$target" = measure-execution-service ]; then
-              zig build "$target" -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
+              zig build "$target" -Dci-artifacts=.zig-cache/o/ci-compiled -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
             else
-              zig build "$target" -j2 --summary all 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
+              python3 - <<'PY' 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
+          import json, os, subprocess
+          target = json.loads(os.environ['TARGETS'])[0]
+          args = json.loads(os.environ['ARGS'])
+          command = ['zig', 'build', target, '-Dci-artifacts=.zig-cache/o/ci-compiled', '-j2', '--summary', 'all']
+          raise SystemExit(subprocess.call(command + (['--', *args] if args else [])))
+          PY
             fi
           else
-            python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" 2>&1 | tee "$EVIDENCE/gates.log"
+            python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" --ci-artifacts .zig-cache/o/ci-compiled 2>&1 | tee "$EVIDENCE/gates.log"
           fi
       - name: Retain raw measurement diagnostics, never Stores or payload files
         id: retention
@@ -181,7 +234,11 @@ jobs:
                       receipt['copied'].append(str(relative))
           (destination / 'retention.json').write_text(json.dumps(receipt, indent=2))
           PY
-          { sysctl vm.swapusage; memory_pressure; df -h /private/tmp; } > "$EVIDENCE/environment-after.txt"
+          if [ "$(uname -s)" = Darwin ]; then
+            { sysctl vm.swapusage; memory_pressure; df -h /private/tmp; } > "$EVIDENCE/environment-after.txt"
+          else
+            { free -m; df -h /tmp; } > "$EVIDENCE/environment-after.txt"
+          fi
       - name: Retain setup's actual native-tool identity even if setup failed
         if: ${{ always() }}
         run: |
@@ -194,7 +251,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: macos-${{ matrix.name }}-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
+          name: ${{ needs.plan.outputs.platform }}-${{ matrix.name }}-${{ needs.plan.outputs.sha }}-${{ github.run_attempt }}
           path: ${{ env.EVIDENCE }}
           retention-days: 3
           if-no-files-found: warn

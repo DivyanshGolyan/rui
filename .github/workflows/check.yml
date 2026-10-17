@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 concurrency:
   group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
@@ -24,6 +25,8 @@ jobs:
       native: ${{ steps.select.outputs.native }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
+      linux_matrix: ${{ steps.select.outputs.linux_matrix }}
+      macos_matrix: ${{ steps.select.outputs.macos_matrix }}
     steps:
       - name: Avoid duplicate development work for a ready PR
         id: cadence
@@ -61,7 +64,8 @@ jobs:
         id: select
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          PHASE: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'review' || 'development' }}
+          # Pushes use the same affected-owner mapping, not an unconditional full run.
+          PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
@@ -74,26 +78,34 @@ jobs:
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
           python3 - <<'PY'
-          import json, os
+          import json, os, sys
+          sys.path.insert(0, 'tests/ci')
+          from qualification import shards
           p = json.load(open('selection.json'))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
+              print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
+              print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
           PY
+  policy:
+    # Lint/test policy alongside selection; it must not delay native allocation.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: python3 -B -m unittest discover -s tests/ci -v
-        if: ${{ steps.cadence.outputs.run == 'true' }}
       - name: Reject undefined fixture names before native builds
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
           python3 -m ruff check --select F821 tests
       - name: Install the pinned workflow linter
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           set -euo pipefail
           # The official release avoids rebuilding the Go CLI on every plan.
@@ -103,122 +115,211 @@ jobs:
           echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - name: Validate workflows
-        if: ${{ steps.cadence.outputs.run == 'true' }}
+      - name: Validate workflows with one pinned-linter compatibility exception
         run: |
+          set -euo pipefail
           for workflow in .github/workflows/*.yml; do
             if [ "$workflow" = .github/workflows/qualify-macos.yml ]; then
-              # 1.7.7 predates GitHub's scoped cache tokens. CI tests validate
-              # this one workflow's read-only value and reject job overrides.
+              # 1.7.7 predates GitHub's server-enforced cache policy key.
               actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
             else
               actionlint -shellcheck= "$workflow"
             fi
           done
-  linux_suites:
-    name: linux suites (${{ matrix.part }})
+  linux_build:
     needs: plan
     if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      # The serial full gate is the measured critical path on both platforms.
-      # Keep ordinary selections single-worker and full-gate parts isolated.
-      fail-fast: false
-      matrix:
-        part: ${{ contains(fromJSON(needs.plan.outputs.targets || '[]'), 'check-full') && fromJSON('["execution", "callers"]') || fromJSON('["all"]') }}
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ matrix.part == 'execution' && '["check-full"]' || needs.plan.outputs.targets }}
-          check-part: ${{ matrix.part }}
-      - name: Run selected targets without acceptance-result caching
+          targets: ${{ needs.plan.outputs.targets }}
+          check-part: compiled
+      - name: Prove warm compilation does not cache test acceptance
+        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        run: python3 -B tests/ci/cache_execution.py
+      - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-linux-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  macos_build:
+    needs: plan
+    if: ${{ needs.plan.outputs.native == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.native_targets }}
+          check-part: compiled
+      - name: Prove warm compilation does not cache test acceptance
+        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+        run: python3 -B tests/ci/cache_execution.py
+      - name: Compile selected gates once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.native_targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: publish
+        with:
+          name: compiled-macos-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  linux_suites:
+    name: linux suites (${{ matrix.name }})
+    needs: [plan, linux_build]
+    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      # Separate long witnesses from the full gate; the old callers job took 18m.
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+          compiled: 'true'
+      - name: Verify the exact producer artifact before executing gates
+        env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+      - name: Run selected targets or verify identical-tree evidence
+        id: gates
+        env:
+          TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
+          GH_TOKEN: ${{ github.token }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
+      - name: Publish input- and artifact-verified evidence
+        if: ${{ steps.gates.outputs.evidence_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.gates.outputs.evidence_name }}
+          path: ${{ steps.gates.outputs.evidence_path }}
+          overwrite: true # Replace only this run's earlier-attempt receipt.
+          retention-days: 3
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: failure-linux-${{ matrix.part }}-${{ github.run_attempt }}
+          name: failure-linux-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
-        run: python3 -B tests/ci/cache_execution.py
       - name: Existing Linux measurement-tool checks, not resource qualification
-        if: ${{ needs.plan.outputs.linux_memory == 'true' && matrix.part != 'execution' }}
+        if: ${{ needs.plan.outputs.linux_memory == 'true' && contains(matrix.targets, 'test-logic') }}
         run: |
           set -euo pipefail
           python3 -B -m unittest discover -s tests/qualification/linux-memory -v
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
-    # Preserve the existing required status for the entire selected Linux gate.
-    needs: [plan, linux_suites]
-    if: ${{ always() && ((needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]') || needs.plan.result == 'failure') }}
+    # Policy is required even for documentation and suppressed duplicate pushes.
+    needs: [plan, policy, linux_build, linux_suites]
+    if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every selected Linux part
         env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
           PLAN_RESULT: ${{ needs.plan.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+          BUILD_RESULT: ${{ needs.linux_build.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
-          test "$NATIVE_RESULT" = success
+          test "$POLICY_RESULT" = success
+          if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
+            test "$BUILD_RESULT" = success
+            test "$NATIVE_RESULT" = success
+          else
+            test "$BUILD_RESULT" = skipped
+            test "$NATIVE_RESULT" = skipped
+          fi
   macos_suites:
-    name: macos suites (${{ matrix.part }})
-    needs: plan
+    name: macos suites (${{ matrix.name }})
+    needs: [plan, macos_build]
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 20
     strategy:
-      # Only the measured serial full gate gets two isolated machines. Ordinary
-      # affected targets and the changed-main backstop keep their existing cadence.
+      # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
       fail-fast: false
-      matrix:
-        part: ${{ contains(fromJSON(needs.plan.outputs.native_targets || '[]'), 'check-full') && fromJSON('["execution", "callers"]') || fromJSON('["all"]') }}
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ matrix.part == 'execution' && '["check-full"]' || needs.plan.outputs.native_targets }}
-          check-part: ${{ matrix.part }}
-      - name: Run required native targets
+          targets: ${{ needs.plan.outputs.native_targets }}
+          compiled: 'true'
+      - name: Verify the exact producer artifact before executing gates
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
+          ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+      - name: Run required native targets
+        id: gates
+        env:
+          TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
+          GH_TOKEN: ${{ github.token }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
+      - name: Publish input- and artifact-verified evidence
+        if: ${{ steps.gates.outputs.evidence_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.gates.outputs.evidence_name }}
+          path: ${{ steps.gates.outputs.evidence_path }}
+          overwrite: true # Earlier attempts cannot qualify this attempt.
+          retention-days: 3
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: failure-macos-${{ matrix.part }}-${{ github.run_attempt }}
+          name: failure-macos-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
           if-no-files-found: ignore
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' && matrix.part != 'execution' }}
-        run: python3 -B tests/ci/cache_execution.py
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.
-    needs: [plan, macos_suites]
+    needs: [plan, macos_build, macos_suites]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -226,7 +327,9 @@ jobs:
       - name: Require every selected Apple Silicon part
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
+          BUILD_RESULT: ${{ needs.macos_build.result }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
+          test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success

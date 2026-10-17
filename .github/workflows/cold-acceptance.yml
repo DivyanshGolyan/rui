@@ -1,0 +1,42 @@
+name: Scheduled cold acceptance
+on:
+  schedule:
+    - cron: '17 4 * * *'
+permissions:
+  contents: read
+concurrency:
+  group: cold-acceptance
+  cancel-in-progress: true
+jobs:
+  cold:
+    if: ${{ !github.event.repository.private }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    # Empty-cache production and full native compilation are intentionally not
+    # candidate gates; allow the measured cold build overhead on this schedule.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          cold: 'true'
+          targets: '["check-full"]'
+      - name: Fresh production build and serial full acceptance
+        env:
+          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
+        run: |
+          set -euo pipefail
+          echo "Cold tested main SHA $(git rev-parse HEAD), $(uname -sm)" >> "$GITHUB_STEP_SUMMARY"
+          zig build -Doptimize=ReleaseSafe -j2 --summary all
+          python3 -B tests/ci/run_selected.py '["check-full"]'
+      - name: Retain bounded failed-fixture diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cold-failure-${{ runner.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-failure-artifacts
+          retention-days: 3
+          if-no-files-found: ignore
