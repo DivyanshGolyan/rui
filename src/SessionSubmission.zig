@@ -490,9 +490,9 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         switch (self.intent.?) {
             .message => |ticket| {
                 const bytes = try self.input.message(ticket);
-                if (!capture.saved.kind.eql("message") or capture.target != .message or capture.target.message.bytes != bytes.len or !std.mem.eql(u8, &capture.target.message.digest, &protocol.contentDigest(bytes))) return error.OriginalBindingMismatch;
+                if (!capture.saved.isKind(.message) or capture.target != .message or capture.target.message.bytes != bytes.len or !std.mem.eql(u8, &capture.target.message.digest, &protocol.contentDigest(bytes))) return error.OriginalBindingMismatch;
             },
-            .decision => |decision| if (!capture.saved.kind.eql("permission_decision") or capture.target != .permission_decision or capture.target.permission_decision.action != decision.action or capture.target.permission_decision.decision != decision.decision) return error.OriginalBindingMismatch,
+            .decision => |decision| if (!capture.saved.isKind(.permission_decision) or capture.target != .permission_decision or capture.target.permission_decision.action != decision.action or capture.target.permission_decision.decision != decision.decision) return error.OriginalBindingMismatch,
         }
         self.publication = .published;
     }
