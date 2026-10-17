@@ -9,6 +9,9 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("session_consent.zig");
     _ = @import("session_departure.zig");
+    _ = @import("ConversationViewport.zig");
+    _ = @import("TerminalFrame.zig");
+    _ = @import("TerminalInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("TerminalText.zig");
 }
