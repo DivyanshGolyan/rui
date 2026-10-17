@@ -117,12 +117,14 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     if (plan.failure) |err| {
         if (screen != null) switch (err) {
             error.TerminalTooSmall => @import("TerminalText.zig").diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
-            error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This content cannot be displayed faithfully in this terminal. Use the ordinary message, result or inspect-action commands; saved content is unchanged.\n", .{}),
+            error.TerminalTooLarge => @import("TerminalText.zig").diagnostic("rui: The vaxis renderer supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged.\n", .{}),
+            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds the bounded renderer. Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged. Ordinary message, result and inspect-action commands remain available.\n", .{}),
             else => {},
         };
         return err;
     }
-    self.terminal.detached(store, session) catch |err| {
+    const action = if (screen) |value| (if (value.action_view != null) self.current.first_action else null) else null;
+    self.terminal.detached(store, session, action) catch |err| {
         if (!plan.recovery_before_notice) self.recoveryGuide();
         return err;
     };
@@ -372,6 +374,9 @@ fn driveActive(self: *Self) !void {
             self.dirty = true;
         }
         if (self.dirty and (self.terminal.screen != null or (!self.opening and (self.reader.thread == null or !self.reader_output_started)))) {
+            if (self.terminal.screen) |screen| {
+                if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
+            }
             const view: Input.View = if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const action_visible = self.actionVisible();
             const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) "a: Allow once / d: Deny (Enter)" else "Approval paused · Ctrl-G returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
@@ -409,7 +414,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.actionVisible() or (self.terminal.screen != null and self.dirty))) {
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.approvalReady() or (self.terminal.screen != null and self.dirty))) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -438,7 +443,16 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
 }
 
 fn actionVisible(self: *const Self) bool {
-    return self.consent.presentation == .complete and (if (self.terminal.screen) |screen| screen.actionVisible() else true);
+    return self.consent.presentation == .complete and (if (self.terminal.screen) |screen| screen.actionVisible() and screen.preview_complete else true);
+}
+
+fn approvalReady(self: *const Self) bool {
+    if (!self.actionVisible()) return false;
+    if (self.terminal.screen) |screen| {
+        const size = Terminal.geometry();
+        return size.row == self.terminal.size.row and size.col == self.terminal.size.col and screen.approvalReady();
+    }
+    return true;
 }
 
 fn navigation(self: *Self, event: Editor.Event, editor: *const Editor) !void {
@@ -470,6 +484,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     if (self.consent.active()) {
         self.choice.vaxis_input = self.terminal.screen != null;
         const visible = self.actionVisible();
+        if (!self.approvalReady()) self.consent.invalidate();
         if (visible and !self.consent.acceptsInput()) {
             // Discard text but retain fragmented input's decoder custody.
             const event = self.choice.feed(byte);
@@ -493,7 +508,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             },
             .submit => {
                 const text = self.choice.buffer[0..self.choice.length];
-                const decision = if (visible) self.consent.submit(text) else null;
+                const decision = if (self.approvalReady()) self.consent.submit(text) else null;
                 if (decision) |selected| {
                     if (self.terminal.screen) |screen| screen.releaseAction();
                     try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
@@ -627,8 +642,10 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     try sink.permanent(out.buffered());
     try sink.permanent(View.Style.normal.code(self.colour));
     try sink.permanent("\n");
-    @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
-    self.notice = self.notice_buffer[0..out.buffered().len];
+    if (self.terminal.screen != null) {
+        @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
+        self.notice = self.notice_buffer[0..out.buffered().len];
+    }
     self.pending_diagnostic = null;
     self.dirty = true;
 }
@@ -685,6 +702,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try std.testing.expect(self.pending_diagnostic == null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "History unavailable") != null);
+            try std.testing.expect(self.notice == null); // Inline output was already presented once.
         }
     }
 }
