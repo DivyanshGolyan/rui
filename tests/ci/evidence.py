@@ -20,6 +20,21 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+def target_executables(targets):
+    root = Path(".zig-cache/o/ci-compiled")
+    rows = json.loads((root / "ci-targets.json").read_text())
+    result = set()
+    for target in targets:
+        matches = [row["executables"] for row in rows if row["target"] == target]
+        if len(matches) != 1 or not matches[0]:
+            raise ValueError("Missing or ambiguous target executable inventory")
+        for name in matches[0]:
+            if not isinstance(name, str) or Path(name).name != name or name.startswith("."):
+                raise ValueError("Foreign target executable path")
+            result.add(str(root / name))
+    return sorted(result)
+
+
 def identity(targets, part, *, compiled=False):
     # Go's test runner discards its executable. Unrelated restored Zig binaries
     # cannot establish that test artifact's identity, so run these cheap checks.
@@ -44,7 +59,8 @@ def identity(targets, part, *, compiled=False):
         if any(manifest.get(key) != value for key, value in cpu.items()):
             raise ValueError("CI CPU identity mismatch")
         cpu = manifest
-    return dict(tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
+    return dict(format=2, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
+                executables=target_executables(targets) if not compiled else None,
                 system=system, machine=machine, cpu=cpu,
                 image=[os.environ.get("ImageOS"), os.environ.get("ImageVersion")],
                 tools=digest(Path(os.environ["RUNNER_TEMP"]) / "rui-native-tools.txt"),
@@ -69,7 +85,7 @@ def api(path, binary=False):
 
 
 def verify(archive, artifact, run, inputs):
-    """Refuse mismatched provenance, tampered archives and absent executables."""
+    """Verify the exact artifact that passed, not a nondeterministic rebuild."""
     if artifact.get("digest") != "sha256:" + hashlib.sha256(archive).hexdigest():
         raise ValueError("Artifact digest mismatch or unavailable")
     if artifact["workflow_run"]["id"] != run["id"]:
@@ -83,21 +99,26 @@ def verify(archive, artifact, run, inputs):
     if run["head_repository"]["full_name"] != repository:
         raise ValueError("Foreign repository evidence")
     with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
-        if zipped.namelist() != ["evidence.json"] or zipped.getinfo("evidence.json").file_size > 1024 * 1024:
+        paths = inputs["executables"]
+        expected_files = ["evidence.json"] + ["executables/" + Path(path).name for path in paths]
+        if (sorted(zipped.namelist()) != sorted(expected_files)
+                or zipped.getinfo("evidence.json").file_size > 1024 * 1024
+                or sum(info.file_size for info in zipped.infolist()) > 256 * 1024 * 1024):
             raise ValueError("Unexpected evidence archive")
         receipt = json.loads(zipped.read("evidence.json"))
-    if receipt["inputs"] != inputs or receipt["run_id"] != run["id"] or receipt["run_attempt"] != run["run_attempt"]:
-        raise ValueError("Evidence inputs or run identity mismatch")
-    if receipt["verdict"] != "passed" or not receipt["executables"]:
-        raise ValueError("No passing executable evidence")
-    for executable, expected in receipt["executables"].items():
-        path = Path(executable)
-        # Hash only direct children of the verified handoff, never worker-local
-        # compiler bootstraps or artifact-supplied paths elsewhere in the cache.
-        if path.parent != Path(".zig-cache/o/ci-compiled"):
-            raise ValueError("Foreign executable path")
-        if path.is_symlink() or not path.is_file() or digest(path) != expected:
-            raise ValueError("Test executable missing or changed")
+        if receipt["inputs"] != inputs or receipt["run_id"] != run["id"] or receipt["run_attempt"] != run["run_attempt"]:
+            raise ValueError("Evidence inputs or run identity mismatch")
+        if receipt["verdict"] != "passed" or not paths or set(receipt["executables"]) != set(paths):
+            raise ValueError("No passing evidence for the complete target executable set")
+        for executable, expected in receipt["executables"].items():
+            path = Path(executable)
+            if path.parent != Path(".zig-cache/o/ci-compiled"):
+                raise ValueError("Foreign executable path")
+            # Stream archived bytes. Never strip debug sections, normalize
+            # embedded paths/timestamps, or execute artifact-supplied code.
+            with zipped.open("executables/" + path.name) as stream:
+                if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
+                    raise ValueError("Test executable missing or changed")
     commit = api(f"repos/{repository}/git/commits/{receipt['source_sha']}")
     if commit["tree"]["sha"] != inputs["tree"]:
         raise ValueError("Origin source tree mismatch")
@@ -131,7 +152,7 @@ def restore(inputs):
     # evidence, unavailable API or cache identity means run, never accept.
     artifacts = api(f"repos/{repository}/actions/artifacts?name={name(inputs)}&per_page=20")["artifacts"]
     for artifact in artifacts:
-        if artifact["expired"] or artifact["size_in_bytes"] > 2 * 1024 * 1024 or artifact["workflow_run"]["id"] == int(os.environ["GITHUB_RUN_ID"]):
+        if artifact["expired"] or artifact["size_in_bytes"] > 256 * 1024 * 1024 or artifact["workflow_run"]["id"] == int(os.environ["GITHUB_RUN_ID"]):
             continue
         try:
             run = api(f"repos/{repository}/actions/runs/{artifact['workflow_run']['id']}")
@@ -143,24 +164,31 @@ def restore(inputs):
         print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']}). "
-                  "Inputs, archive digest and cached executable hashes match. No new execution.", file=summary)
+                  "Source and platform inputs match; the retained target executables match their exact passing hashes. "
+                  "No new execution; this run's rebuilt executables are not accepted by this evidence.", file=summary)
         return True
     return False
 
 
 def record(inputs):
-    # Native configurer binaries belong to each worker, not the portable handoff
-    # consumed by these gates. Their CPU-dependent hashes are not test identity.
-    executables = {str(path): digest(path) for path in sorted(Path(".zig-cache/o/ci-compiled").glob("*"))
-                   if path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)}
+    destination = Path(os.environ["RUNNER_TEMP"]) / "rui-evidence"
+    if destination.exists():
+        shutil.rmtree(destination)
+    (destination / "executables").mkdir(parents=True)
+    executables = {}
+    for executable in inputs["executables"]:
+        path = Path(executable)
+        if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError("Target executable missing or not executable")
+        retained = destination / "executables" / path.name
+        shutil.copyfile(path, retained)
+        executables[executable] = digest(retained)
     if not executables:
-        return  # No artifact identity: never publish reusable acceptance.
+        raise ValueError("No target executable evidence")
     receipt = dict(inputs=inputs, executables=executables, verdict="passed",
                    source_sha=git("rev-parse", "HEAD"), run_id=int(os.environ["GITHUB_RUN_ID"]),
                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]))
-    destination = Path(os.environ["RUNNER_TEMP"]) / "rui-evidence" / "evidence.json"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(receipt, sort_keys=True))
+    (destination / "evidence.json").write_text(json.dumps(receipt, sort_keys=True))
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         print(f"evidence_name={name(inputs)}", file=output)
         print(f"evidence_path={destination}", file=output)

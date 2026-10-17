@@ -446,6 +446,39 @@ class SelectionTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             execution_batches(["test-logic"], "execution")
 
+    def test_wip_pushes_qualify_the_complete_candidate_even_after_an_empty_commit(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        prefix = dedent(re.search(
+            r'(?s)        run: \|\n(          set -euo pipefail\n          fallback=\(\).*?)'
+            r'          python3 tests/ci/select_tests.py', workflow)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            def git(*args):
+                return subprocess.check_output(
+                    ['git', '-c', 'user.name=Selector test', '-c', 'user.email=test@example.invalid',
+                     *args], cwd=directory, text=True, stderr=subprocess.DEVNULL).strip()
+            git('init', '-b', 'main')
+            root = Path(directory)
+            (root / 'build.zig').write_text(Path('build.zig').read_text())
+            git('add', '.')
+            git('commit', '-m', 'base')
+            git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+            base = git('rev-parse', 'HEAD')
+            git('checkout', '-b', 'wip/ci-1')
+            (root / 'src').mkdir()
+            (root / 'src/request_encoding.zig').write_text('// changed owner\n')
+            git('add', '.')
+            git('commit', '-m', 'candidate')
+            before = git('rev-parse', 'HEAD')
+            git('commit', '--allow-empty', '-m', 'same-tree proof')
+            with patch.dict(os.environ, BASE=before, EVENT_NAME='push', REF_NAME='wip/ci-1'):
+                result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
+                                        cwd=directory, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, base)
+            selected = subprocess.check_output([
+                sys.executable, str(Path('tests/ci/select_tests.py').resolve()),
+                '--base', result.stdout, '--phase', 'review'], cwd=directory, text=True)
+            self.assertEqual(json.loads(selected)['targets'], ['test-logic'])
+
     def test_unreachable_push_base_falls_back_without_hiding_review_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             def git(*args):
