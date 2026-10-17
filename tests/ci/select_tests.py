@@ -42,6 +42,8 @@ RULES = (
      ("check",), ("check",), "Shared protocol, native execution or resource ownership"),
     (("src/BashLifecycle.zig", "src/deadline.zig"), ("test-logic",), ("test-logic",),
      "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
+    (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
+     "Portable Codex credential decisions and token messages; native owner checks follow below"),
     (("src/bash*", "src/BashLifecycle.zig", "src/deadline.zig", "tests/integration/bash*"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
