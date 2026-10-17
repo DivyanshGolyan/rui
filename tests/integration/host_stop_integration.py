@@ -16,7 +16,7 @@ import time
 
 import bash_integration as bash_fixture
 import model_fixture as fixture
-from host_process import HostDiagnostics, ReleaseGate, stop_process
+from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
 from host_status_integration import socket_path, status
 
 
@@ -92,12 +92,17 @@ def request(sock, store, identity=None, *, extra=b""):
 
 
 def finish(stream, body):
+    response = bytearray()
     with stream:
-        stream.sendall(body)
-        response = bytearray()
-        while chunk := stream.recv(4096):
-            response.extend(chunk)
-            assert len(response) < 8192
+        try:
+            stream.sendall(body)
+            while chunk := stream.recv(4096):
+                response.extend(chunk)
+                assert len(response) < 8192
+        except OSError as error:
+            if not is_peer_disconnect(error):
+                raise
+            # A late reset must not erase a captured acceptance prefix.
     return bytes(response)
 
 
@@ -105,7 +110,7 @@ def mixed_effect_drain(provider_first):
     """A held provider capture cannot postpone another owner's retirement."""
     order = "provider-before-Bash" if provider_first else "Bash-before-provider"
     with tempfile.TemporaryDirectory(prefix="rui-mixed-stop-") as root, contextlib.ExitStack() as handles:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         # These real shutdown journeys must survive absent optional stderr.
         # The existing startup adapter owns an EOF reader while fd 2 goes to
@@ -239,10 +244,11 @@ def mixed_effect_drain(provider_first):
 
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-host-stop-") as root:
-        state = pathlib.Path(root)
+        state = canonical_fixture_root(root)
         store = state / "store"
         gate = state / "bash-cleanup-gate"
         gate.write_text("held")
+        reply_gate = state / "reply-gate"
         responses = []
         bash_fixture.add_exchange(responses, "host-stop", "printf stopped")
         endpoint = fixture.SuccessEndpoint(responses)
@@ -252,9 +258,15 @@ def main():
         replacement = None
         diagnostics = None
         pending = None
+        transferred = None
+        inspector = None
+        report_release = None
+        uploads = []
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                                      "--test-bash-cleanup-gate-path", gate, "--test-phase-trace", observations="stop")
+                                      "--test-bash-cleanup-gate-path", gate,
+                                      "--test-inspection-reply-gate-path", reply_gate,
+                                      "--test-phase-trace", observations="stop")
             diagnostics = HostDiagnostics(host)
             target = instance(store)
             sock = socket_path(store)
@@ -275,13 +287,44 @@ def main():
             assert not diagnostics.matching("cleanup_completed", action=str(action["action"]))
             occupied = fixture.command("inspect-session", "--store", store, "--session", "direct/stop")["execution"]
             assert int(occupied["custody_occupied"]) > 0, occupied
+            report_release = ReleaseGate(reply_gate)
+            began = time.monotonic_ns()
+            inspector = fixture.start_command("inspect-session", "--store", store, "--session", "direct/stop")
+            exchange_phase(diagnostics, "test_gate_waiting", began, time.monotonic() + 5,
+                           subject=str(reply_gate))
             held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if sys.platform == "linux" else None
+
+            # Both classified headers and captured bodies still belong to
+            # intake, not admission. Completing either after stop must not save
+            # work that an explicit restart would later execute.
+            for kind in ("message", "configure"):
+                for phase in ("header", "body"):
+                    fields = {"text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
+                        "configuration": {name: {"state": "omitted"} for name in
+                            ("workspace", "provider", "model", "tools", "permission_mode", "output_schema")}}
+                    if kind == "configure":
+                        fields["configuration"]["instructions"] = {"state": "value", "value": "x" * 8192}
+                    body = json.dumps({"version": "1", "kind": kind, "store": str(store),
+                        "key": f"late-{kind}-{phase}", "session": "direct/stop", **fields}).encode()
+                    header = (f"POST /v1/{kind} HTTP/1.1\r\nHost: local\r\n".encode()
+                        + b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n"
+                        + f"Content-Length: {len(body)}\r\n\r\n".encode())
+                    upload = socket.socket(socket.AF_UNIX)
+                    uploads.append((upload, b"\r\n" + body if phase == "header" else body[-3:]))
+                    upload.settimeout(5)
+                    upload.connect(str(sock))
+                    began = time.monotonic_ns()
+                    upload.sendall(header[:-2] if phase == "header" else header + body[:-3])
+                    exchange_phase(diagnostics,
+                        "ordinary_classification_released" if phase == "header" else f"connection_request_{kind}",
+                        began, time.monotonic() + 5,
+                        **({"subject": kind} if phase == "header" else {}))
 
             # Share the original ten-second actor budget with synchronization;
             # connects and header writes alone do not establish classification.
             deadline = time.monotonic() + 10
             began_ns = time.monotonic_ns()
-            pending, pending_body = request(sock, store, target)
+            pending, _ = request(sock, store, target)
             pending_phase = exchange_phase(diagnostics, "connection_request_host_stop", began_ns, deadline,
                                            subject_kind="request_number")
             assert not diagnostics.matching("connection_resources_released", subject=pending_phase["subject"])
@@ -292,9 +335,14 @@ def main():
             transferred.sendall(b"POST /v1/observe-command HTTP/1.1\r\n")
             first = actor_after_classification(diagnostics, began_ns, deadline, pending_phase, store, target)
             assert first == "TruncatedResponse", first
-            retry = finish(pending, pending_body)
-            assert retry.startswith(b"HTTP/1.1 200") and b'"status":"acknowledged"' in retry, retry
+            # Routed headers are still incomplete input, not a guarded retry.
+            # The complete-retry owner test separately requires acknowledgment.
+            assert pending.recv(1) == b"", "incomplete Host stop survived shutdown"
+            pending.close()
             pending = None
+            for upload, remainder in uploads:
+                response = finish(upload, remainder)
+                assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
             with socket.socket(socket.AF_UNIX) as newcomer:
                 try:
@@ -313,12 +361,18 @@ def main():
             assert not diagnostics.matching("cleanup_completed", action=str(action["action"]))
             gate.unlink()
             diagnostics.wait("cleanup_completed", action=str(action["action"]))
-            assert host.poll() is None, "transferred connection must retain lease"
+            assert host.poll() is None, "owned report must retain lease"
             assert status(store) == "owned_unavailable"
             drained_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if held_fds is not None else None
             if held_fds is not None:
                 assert drained_fds < held_fds, (held_fds, drained_fds)
+            assert transferred.recv(1) == b"", "unhanded read survived the intake fence"
             transferred.close()
+            transferred = None
+            report_release.release()
+            output, errors = inspector.communicate(timeout=5)
+            assert inspector.returncode == 0 and json.loads(output)["session"]["reference"] == "direct/stop", (output, errors)
+            inspector = None
             assert host.wait(timeout=10) != 0  # existing graceful owner reports EffectAwareShutdown
             stop_process(host)
             diagnostics = None
@@ -328,6 +382,9 @@ def main():
             replacement = fixture.start_host(store, None)
             newer = instance(store)
             assert newer != target
+            for kind in ("message", "configure"):
+                for phase in ("header", "body"):
+                    assert fixture.observe(store, f"late-{kind}-{phase}") == {"status": "absent"}
             # The first reply was lost. Retrying A's retained input must not
             # rediscover or stop live replacement B.
             assert actor("stop", store, target) == "instance_changed"
@@ -345,18 +402,19 @@ def main():
             replacement.stderr.close()
             replacement = None
             assert actor("stop", store, newer) == "unavailable", "retry may not select a replacement"
-            print(f"host-stop passed: guarded rejection, acknowledged retry, held cleanup/connection lease, replacement; Linux fd={held_fds}->{drained_fds}, scratch=0")
+            print(f"host-stop passed: guarded rejection, incomplete-stop retirement, held cleanup/connection lease, replacement; Linux fd={held_fds}->{drained_fds}, scratch=0")
         finally:
-            gate.unlink(missing_ok=True)
-            if pending is not None:
-                pending.close()
-            if host is not None:
-                stop_process(host)
-            if replacement is not None:
-                stop_process(replacement)
-            endpoint.shutdown()
-            endpoint.server_close()
-            thread.join(timeout=5)
+            dispose_all(
+                lambda: gate.unlink(missing_ok=True),
+                lambda: report_release.release() if report_release is not None else None,
+                lambda: pending.close() if pending is not None else None,
+                lambda: transferred.close() if transferred is not None else None,
+                *(upload.close for upload, _ in uploads),
+                lambda: stop_process(inspector) if inspector is not None else None,
+                lambda: stop_process(host) if host is not None else None,
+                lambda: stop_process(replacement) if replacement is not None else None,
+                endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+            )
 
 
 if __name__ == "__main__":

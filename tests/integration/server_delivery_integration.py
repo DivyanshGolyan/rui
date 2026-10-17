@@ -113,14 +113,14 @@ def main():
                 peers.started(held_requests[-1], deadline)
             peers.held(held_requests)
             full = resources(host.pid)
-            head, _ = peers.release_place("classification", lambda: exchange(
-                sock, store, "/v1/observe-command", "observe_command", key="reply-message"), timeout=5)
-            assert b" 503 " in head, head
+            head, observation = read("/v1/observe-command", "observe_command", key="reply-message")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            assert json.loads(observation)["observation"]["result"]["status"] == "completed"
             discovery_head, discovery_body = read("/v1/host-info", "host_info")
             assert discovery_head.startswith(b"HTTP/1.1 200 "), discovery_head
             assert json.loads(discovery_body)["store"] == str(store), discovery_body
-            # A committed idle stop fits protected capacity while all ten
-            # ordinary writers remain held; it cannot revoke the saved answer.
+            # A committed idle stop progresses while all ten ordinary writers
+            # remain held; it cannot revoke the saved answer.
             assert peers.call("session_stop", lambda: control.stop_session(
                 state, store, "reply-stop", "direct/reply"))["answer"]["status"] == "accepted"
             # Disconnect releases one exchange, not the committed result.

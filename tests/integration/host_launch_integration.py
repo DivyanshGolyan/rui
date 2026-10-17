@@ -352,13 +352,15 @@ def main():
 
         # A descriptor opened before lowering the soft limit is still owned
         # by the launcher; the detached Host must not hold its pipe open.
+        # The admitted eight-credit Host needs 460 descriptors for its
+        # supported intake burst. Keep the inherited fd above that soft limit.
         inherited_store = root / "inherited-fd"
         read_fd, write_fd = os.pipe()
-        inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 200)
+        inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 768)
         try:
             def inherited_above_limit():
                 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-                resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+                resource.setrlimit(resource.RLIMIT_NOFILE, (512, hard))
 
             inherited = run_start(inherited_store, env, pass_fds=(inherited_fd,),
                 preexec_fn=inherited_above_limit)
@@ -368,7 +370,7 @@ def main():
             os.close(write_fd)
             try:
                 ready, _, _ = select.select([read_fd], [], [], 1)
-                assert ready and os.read(read_fd, 1) == b"", "detached Host inherited fd 200"
+                assert ready and os.read(read_fd, 1) == b"", "detached Host inherited fd 768"
             finally:
                 os.close(read_fd)
                 forced_crash_cleanup(inherited_store)
