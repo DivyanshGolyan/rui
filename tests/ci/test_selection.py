@@ -276,9 +276,18 @@ class SelectionTest(unittest.TestCase):
         ])
         self.assertEqual(execution_batches([]), [])
 
+    def test_requested_ref_cannot_publish_shared_caches(self):
+        workflow = Path('.github/workflows/qualify-macos.yml').read_text()
+        # Dispatch may run on main while executing an unreviewed source SHA.
+        # The server's scoped token, not requested-ref setup code, owns access.
+        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
+        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
+                         'a job override could restore cache-write authority')
+
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
-                     ".github/workflows/cache-maintenance.yml", ".github/scripts/prune-caches.cjs"):
+                     ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml",
+                     ".github/scripts/prune-caches.cjs"):
             self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
         self.assertFalse(select(["src/store.zig"], "review", AVAILABLE)["cache_execution_checks"])
 
