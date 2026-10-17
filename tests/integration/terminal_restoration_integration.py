@@ -9,6 +9,7 @@ import select
 import shutil
 import signal
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -157,6 +158,16 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *readiness_fault = getenv("RUI_TERMINAL_FAULT");
+    static int handoff_held = 0;
+    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "renderer-backpressure") &&
+        count == 8 && !memcmp(bytes, "\033[?2026l", 8) && !handoff_held) {
+        handoff_held = 1;
+        record("handoff-cleanup-entered\n");
+        /* The parent withholds output credit until the pumped command has
+           actually unwound the blocked frame. Release before cleanup writes:
+           this tests handoff, not success while cleanup has no output credit. */
+        while (access(getenv("RUI_TERMINAL_HANDOFF_RELEASE"), F_OK)) usleep(1000);
+    }
     if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "alias-poison"))
         record("readiness-write-entry\n");
     if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-write\n");
@@ -276,7 +287,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     static int blocked = 0;
     if (fd == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
-        !strcmp(getenv("RUI_TERMINAL_FAULT"), "backpressure")) {
+        (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"))) {
         blocked = 1;
         record("output-blocked\n");
     }
@@ -987,6 +998,162 @@ def persistent_cases(state, library, home, store, host):
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
             )
+
+
+def renderer_backpressure_case(state, library, home, store):
+    """A real blocked frame must hand off a command, not become cancellation."""
+    from terminal_screen import ScreenCapture
+
+    session = "terminal/renderer-backpressure"
+    human.run(home, "configure", "--store", store, "--session", session,
+        "--workspace", state, "--provider", "codex", "--model", "model-a")
+    master, slave = pty.openpty()
+    output_master, output_slave = pty.openpty()
+    original = termios.tcgetattr(slave)
+    original[6][termios.VERASE] = b"\x08"
+    termios.tcsetattr(slave, termios.TCSANOW, original)
+    flags = {fd: fcntl.fcntl(fd, fcntl.F_GETFL) for fd in (slave, output_slave)}
+    fcntl.ioctl(output_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    log = state / "renderer-backpressure.log"
+    release = state / "renderer-backpressure-release"
+    records = home / ".config/rui/requests"
+    before = set(records.glob("*.json"))
+    caller = writer = None
+    stop = threading.Event()
+    failures = []
+    output, errors = bytearray(), bytearray()
+
+    def drain_until(predicate, description, timeout=15):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
+            ready = select.select([output_master, caller.stderr], [], [], remaining)[0]
+            assert ready, (description, caller.poll(), bytes(errors))
+            for fd in ready:
+                chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
+                assert chunk, (description, caller.poll(), bytes(errors))
+                (output if fd == output_master else errors).extend(chunk)
+            assert len(output) + len(errors) < 1024 * 1024, "unbounded renderer witness"
+
+    try:
+        environment = {**os.environ, "HOME": str(home), "TERM": "xterm-256color",
+            "RUI_RENDERER": "vaxis", "RUI_TERMINAL_FAULT": "renderer-backpressure",
+            "RUI_TERMINAL_PROBE": str(log),
+            "RUI_TERMINAL_HANDOFF_RELEASE": str(release),
+            "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library)}
+        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            "--", session], env=environment,
+            stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
+        screen = ScreenCapture()
+        consumed = 0
+        def composer_ready():
+            nonlocal consumed
+            screen.feed(bytes(output[consumed:]))
+            consumed = len(output)
+            return screen.draft("", 2)
+        drain_until(composer_ready, "opening alternate-screen composer")
+        # No newline/paste: each bounded input batch changes the live composer,
+        # never admits a Message. Varied cells defeat repeated-cell compression.
+        draft = bytes(33 + ((index * 37 + index // 71) % 94) for index in range(60000))
+        fcntl.fcntl(master, fcntl.F_SETFL, os.O_NONBLOCK)
+        def write_draft():
+            deadline = time.monotonic() + 15
+            offset = 0
+            try:
+                while offset < len(draft) and not stop.is_set():
+                    assert time.monotonic() < deadline, "draft input deadline"
+                    if select.select([], [master], [], 0.05)[1]:
+                        try:
+                            offset += os.write(master, draft[offset:offset + 256])
+                        except BlockingIOError:
+                            pass  # Real input credit, bounded by the original deadline.
+            except BaseException as error:
+                failures.append(error)
+        writer = threading.Thread(target=write_draft)
+        writer.start()
+        fixture.wait_for(lambda: log.exists() and "output-blocked\n" in log.read_text(),
+            "renderer actual kernel EAGAIN")
+        writer.join(timeout=15)
+        assert not writer.is_alive(), "draft writer did not finish"
+        assert not failures, failures
+        os.write(master, b"\x15/configure --permission-mode ask\n")
+        fixture.wait_for(lambda: "handoff-cleanup-entered\n" in log.read_text(),
+            "command unwound blocked renderer before restoring output credit")
+        while select.select([output_master], [], [], 0)[0]:
+            output.extend(os.read(output_master, 65536))
+        release.touch()
+        drain_until(lambda: b"Press Enter to return" in output, "main-screen command return")
+        main_start = output.rfind(b"\x1b[?1049l")
+        assert main_start >= 0, bytes(output[-4096:])
+        main_output = bytes(output[main_start:])
+        assert b"Rui: Configured." in main_output, main_output
+        assert b"\x1b[?1049h" not in main_output, "returned before fresh Enter"
+        actual = termios.tcgetattr(slave)
+        expected = list(original)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            expected[3] &= ~mask
+        assert actual == expected, "command did not restore main-screen termios"
+        captured, = set(records.glob("*.json")) - before
+        saved = captured.read_bytes()
+        record = json.loads(saved)
+        assert record["kind"] == "configure", record
+        observed = fixture.command("observe-command", "--store", store, "--key", record["key"])
+        assert observed["observation"]["status"] == "accepted", observed
+        assert observed["observation"]["revision"] == "2", observed
+        assert fixture.command("inspect-session", "--store", store,
+            "--session", session)["session"]["permission_mode"] == "ask"
+        # Canonical reads above provide work while no consent is sent. Neither
+        # screen switching nor command replay may occur in that interval.
+        while select.select([output_master], [], [], 0)[0]:
+            output.extend(os.read(output_master, 65536))
+        assert bytes(output[main_start:]) == main_output, "main-screen output changed without fresh Enter"
+        assert caller.poll() is None
+        refresh_start = len(output)
+        os.write(master, b"\n")
+        refreshed = ScreenCapture()
+        refresh_consumed = refresh_start
+        def refreshed_composer():
+            nonlocal refresh_consumed
+            # Start at the fresh alternate-screen entry, not the main screen.
+            if refreshed.generation == 0 and b"\x1b[?1049h" not in output[refresh_start:]:
+                return False
+            new = bytes(output[refresh_consumed:])
+            refresh_consumed = len(output)
+            refreshed.feed(new)
+            return refreshed.draft("", 2)
+        drain_until(refreshed_composer, "refreshed alternate-screen composer")
+        assert b"\x1b[?1049h" in output[refresh_start:]
+        os.write(master, b"\x03")
+        drain_until(lambda: b"\x1b[?1049l" in output[refresh_start:], "final alternate-screen exit")
+        assert caller.wait(timeout=5) == 0, caller.stderr.read()
+        assert not errors and not caller.stderr.read(), bytes(errors)
+        actual = termios.tcgetattr(slave)
+        if sys.platform == "darwin":
+            mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+            actual[3] &= ~mask
+            original[3] &= ~mask
+        assert actual == original, (actual, original)
+        for fd, expected in flags.items():
+            assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL), expected)
+        assert set(records.glob("*.json")) - before == {captured}
+        assert captured.read_bytes() == saved
+        assert output.count(b"Rui: Configured.") == 1
+        assert log.read_text().count("output-blocked\n") == 1
+        assert log.read_text().count("handoff-cleanup-entered\n") == 1
+        print("renderer backpressure: actual EAGAIN; one accepted Configure/capture; main screen held until fresh Enter; refreshed composer; exact termios/fd restoration", flush=True)
+    finally:
+        stop.set()
+        dispose_all(
+            release.touch,
+            lambda: writer.join(timeout=2) if writer is not None else None,
+            lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
+            lambda: termios.tcflush(slave, termios.TCIFLUSH),
+            lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+            *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)))
 
 
 def consent_boundary_cases(state, library):
@@ -2561,6 +2728,11 @@ def main(selected=None):
         host = fixture.start_host(store, None)
         human.run(home, "configure", "--store", store, "--session", "terminal/restoration",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
+        if selected in (None, "renderer-backpressure"):
+            renderer_backpressure_case(state, library, home, store)
+        if selected == "renderer-backpressure":
+            completed = True
+            return
         assert selected in (None, "persistent"), selected
         persistent_cases(state, library, home, store, host)
         completed = True

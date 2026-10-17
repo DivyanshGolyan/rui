@@ -6,6 +6,14 @@ const Self = @This();
 pub const Composer = Viewport.Sized(65_536, false);
 pub const Call = Viewport.Sized(512, false);
 pub const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
+// Includes the historical 24 × 2048 resize witness without increasing the
+// renderer's 16-MiB cell/cache/frame budget.
+pub const max_cells = 24 * 2048;
+
+pub fn validateGeometry(width: u16, height: u16) !void {
+    if (height < 2 or width < 8) return error.TerminalTooSmall;
+    if (@as(u32, width) * height > max_cells) return error.TerminalTooLarge;
+}
 
 status: Viewport.Sized(2048, false),
 calls: [3]Call,
@@ -23,6 +31,8 @@ draft_height: usize,
 draft_top: u16,
 caret_row: u16,
 caret_column: u16,
+action_seen: usize,
+approval_ready: bool,
 
 pub const Input = struct {
     width: u16,
@@ -35,6 +45,7 @@ pub const Input = struct {
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
+    action_seen: usize = 0,
     preview_complete: bool,
 };
 
@@ -45,7 +56,7 @@ pub fn enabled(setting: []const u8, term: []const u8) bool {
 /// Returned row decisions borrow only the supplied document/composer values.
 /// The shell consumes the plan before pumping input or changing either value.
 pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, input: Input) !void {
-    if (input.height < 2 or input.width < 8) return error.TerminalTooSmall;
+    try validateGeometry(input.width, input.height);
     const method = composer.width_method;
     self.* = .{
         .status = .{ .width_method = method },
@@ -64,6 +75,8 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
         .draft_top = 0,
         .caret_row = 0,
         .caret_column = 0,
+        .action_seen = input.action_seen,
+        .approval_ready = false,
     };
     if (input.width < 45 and std.mem.startsWith(u8, input.status, inspection_ready)) {
         try self.status.append(if (input.width >= 18) "PgUp/PgDn · Ctrl-G" else "PgUp\nPgDn\nCtrl-G");
@@ -84,6 +97,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
     const caret_row = composer.rowAt(input.cursor);
     self.draft_first = caret_row -| (self.draft_height - 1);
     const available: u16 = @intCast(input.height - self.draft_height - self.status_height);
+    try document.layout(input.width);
     for (input.calls, 0..) |line, index| {
         self.calls[index].width_method = method;
         try self.calls[index].append(line);
@@ -103,7 +117,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
                 try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
                 try self.heading.layout(input.width);
                 heading_height = @intCast(self.heading.displayRows());
-            } else heading_height = if ((if (input.selected) !input.action_visible or !input.preview_complete else document.origin != 0) and available -| call_rows > 1) 1 else 0;
+            } else heading_height = if ((if (input.selected) !input.action_visible or !input.preview_complete or document.displayRows() > available else document.origin != 0) and available -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= available) break;
             if (omitted != 0 and !compact) {
                 compact = true;
@@ -133,6 +147,15 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
     try document.layout(input.width);
     self.first = document.first(self.height);
     self.document_rows = if (document.text().len == 0) 0 else @min(self.height, document.displayRows() -| self.first);
+    if (input.action_visible and input.preview_complete) {
+        if (self.first <= input.action_seen) self.action_seen = @max(input.action_seen, self.first + self.document_rows);
+        self.approval_ready = self.action_seen >= document.displayRows();
+        if (heading_height != 0) {
+            self.heading.clear();
+            try self.heading.append(if (self.approval_ready) (if (input.width >= 11) "Action read" else "Read") else if (input.width >= 24) "Action continues · PgDn" else "PgDn");
+            try self.heading.layout(input.width);
+        }
+    }
     self.overflow_height = if (!input.selected and input.total_calls > self.used) heading_height else 0;
     self.navigation_height = heading_height - self.overflow_height;
     const end = self.navigation_height + self.document_rows;
@@ -148,6 +171,13 @@ test "renderer selection is explicit and dumb terminals retain inline output" {
         try std.testing.expectEqual(std.mem.eql(u8, setting, "vaxis"), enabled(setting, "xterm-256color"));
         try std.testing.expect(!enabled(setting, "dumb"));
     }
+}
+
+test "geometry is bounded before the shell allocates cells" {
+    try validateGeometry(2048, 24);
+    try validateGeometry(256, 192);
+    try std.testing.expectError(error.TerminalTooLarge, validateGeometry(2049, 24));
+    try std.testing.expectError(error.TerminalTooLarge, validateGeometry(480, 135));
 }
 
 test "compact frame keeps exact-fit transcript and multiline caret without bottom pinning" {
@@ -218,4 +248,30 @@ test "inspection notice preserves navigation and work status at narrow widths" {
         try std.testing.expectEqualStrings(if (width == 80) input.status else if (width == 20) "PgUp/PgDn · Ctrl-G\nWorking…" else "PgUp\nPgDn\nCtrl-G\nWorking…", frame.status.text());
         try std.testing.expect(frame.caret_row < input.height);
     }
+}
+
+test "Action approval requires contiguous displayed rows and resets after resize" {
+    var document: Viewport.Document = .{};
+    for (0..40) |_| try document.append("command line\n");
+    var composer: Composer = .{};
+    try composer.layout(78);
+    var frame: Self = undefined;
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "a: Allow once / d: Deny (Enter)", .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    document.top = 0;
+    try frame.plan(&document, &composer, input);
+    try std.testing.expect(!frame.approval_ready);
+    try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
+    const seen = frame.action_seen;
+    document.top = 30; // A jump must not certify the skipped rows.
+    input.action_seen = seen;
+    try frame.plan(&document, &composer, input);
+    try std.testing.expect(!frame.approval_ready);
+    document.top = seen;
+    try frame.plan(&document, &composer, input);
+    try std.testing.expect(frame.approval_ready);
+    input.action_seen = 0;
+    input.width = 40;
+    try composer.layout(38);
+    try frame.plan(&document, &composer, input);
+    try std.testing.expect(!frame.approval_ready);
 }

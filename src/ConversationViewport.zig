@@ -107,7 +107,49 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.bytes[0..end];
         }
 
+        /// Output has no canonical byte offsets: escape standalone invisible
+        /// clusters in this display copy, never in saved content or input.
         pub fn layout(self: *Self, columns: u16) !void {
+            if (self.dirty) try self.escapeZeroWidth();
+            try self.layoutInput(columns);
+        }
+
+        fn escapeZeroWidth(self: *Self) !void {
+            var search = unicode.graphemeIterator(self.text());
+            while (search.next()) |cluster| {
+                const raw_cluster = cluster.bytes(self.text());
+                if (std.mem.eql(u8, raw_cluster, "\n") or std.mem.eql(u8, raw_cluster, "\t") or gwidth.gwidth(raw_cluster, self.width_method) != 0) continue;
+                const length = self.length;
+                var bytes: [limit]u8 = undefined;
+                var styles: [if (styled) limit else 0]u8 = undefined;
+                @memcpy(bytes[0..length], self.bytes[0..length]);
+                if (styled) @memcpy(styles[0..length], self.styles[0..length]);
+                const complete = self.text().len;
+                const saved_style = self.style;
+                defer self.style = saved_style;
+                self.length = 0;
+                var clusters = unicode.graphemeIterator(bytes[0..complete]);
+                while (clusters.next()) |value| {
+                    if (styled) self.style = styles[value.start];
+                    const raw = value.bytes(bytes[0..complete]);
+                    if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or gwidth.gwidth(raw, self.width_method) != 0) {
+                        try self.appendText(raw);
+                    } else {
+                        var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
+                        while (scalars.nextCodepoint()) |point| {
+                            var escaped: [10]u8 = undefined;
+                            try self.appendText(try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{point}));
+                        }
+                    }
+                }
+                if (styled and complete < length) self.style = styles[complete];
+                try self.appendText(bytes[complete..length]);
+                return;
+            }
+        }
+
+        /// Composer offsets refer to original input bytes, not escaped output.
+        pub fn layoutInput(self: *Self, columns: u16) !void {
             std.debug.assert(columns != 0);
             if (!self.dirty and self.columns == columns) return;
             self.columns = columns;
@@ -277,10 +319,31 @@ test "retention never starts inside an extended grapheme across append windows" 
     }
 }
 
+test "output zero-width clusters become visible escapes without changing joined accents" {
+    const cases = .{
+        .{ "hello\u{200b}world", "hello\\u{200b}world" },
+        .{ "\u{feff}line", "\\u{feff}line" },
+        .{ "co\u{ad}operate", "co\\u{ad}operate" },
+        .{ "a\u{2060}b", "a\\u{2060}b" },
+        .{ "x\n\u{301}y", "x\n\\u{301}y" },
+        .{ "e\u{301}", "e\u{301}" },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var view: Sized(128, true) = .{};
+            try view.append(case[0][0..split]);
+            try view.layout(8);
+            try view.append(case[0][split..]);
+            try view.layout(8);
+            try std.testing.expectEqualStrings(case[1], view.text());
+        }
+    }
+}
+
 test "geometry refuses unrepresentable clusters instead of inventing cell widths" {
     var view: Sized(32, false) = .{};
     try view.append("́Z");
-    try std.testing.expectError(error.UnrepresentableTerminalGrapheme, view.layout(8));
+    try std.testing.expectError(error.UnrepresentableTerminalGrapheme, view.layoutInput(8));
     view.clear();
     try view.append("中Z");
     try std.testing.expectError(error.UnrepresentableTerminalGrapheme, view.layout(1));

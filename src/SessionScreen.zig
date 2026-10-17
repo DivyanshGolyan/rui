@@ -16,6 +16,8 @@ composer: Frame.Composer = .{},
 selected: bool = false,
 file_action: bool = false,
 preview_complete: bool = true,
+action_seen: usize = 0,
+approval_ready: bool = false,
 // Borrowed from the frontend: immutable and open until releaseAction or screen
 // disposal. This owner neither closes the file nor grants its consent authority.
 action_view: ?struct { io: std.Io, file: std.Io.File } = null,
@@ -43,6 +45,8 @@ pub fn append(self: *Self, bytes: []const u8) !void {
 
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.vx.caps.unicode == method) return;
+    self.action_seen = 0;
+    self.approval_ready = false;
     self.vx.caps.unicode = method;
     self.vx.screen.width_method = method;
     inline for (.{ &self.live, &self.browsing, &self.composer }) |document| {
@@ -56,6 +60,10 @@ pub fn actionVisible(self: *const Self) bool {
     return self.selected and self.file_action;
 }
 
+pub fn approvalReady(self: *const Self) bool {
+    return self.actionVisible() and self.preview_complete and self.approval_ready;
+}
+
 pub fn browse(self: *Self, down: bool) !void {
     if (!self.selected) {
         self.browsing = self.live;
@@ -66,7 +74,9 @@ pub fn browse(self: *Self, down: bool) !void {
 
 pub fn latest(self: *Self) !void {
     if (self.action_view) |action| {
+        const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
+        self.action_seen = seen;
     } else {
         self.selected = false;
         self.file_action = false;
@@ -89,11 +99,15 @@ pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void 
     self.browsing.top = 0;
     self.selected = true;
     self.file_action = action;
-    self.preview_complete = length <= Viewport.capacity;
+    self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
+    self.approval_ready = false;
+    if (action) self.action_seen = 0;
     if (action) self.action_view = .{ .io = io, .file = file };
 }
 
 pub fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
+    self.action_seen = 0;
+    self.approval_ready = false;
     self.action_view = .{ .io = io, .file = file };
     if (!self.selected) try self.showFile(io, file, true);
 }
@@ -105,23 +119,26 @@ pub fn releaseAction(self: *Self) void {
 }
 
 pub fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) !void {
-    if (size.row < 2 or size.col < 8) return error.TerminalTooSmall;
+    try Frame.validateGeometry(size.col, size.row);
     self.composer.clear();
     self.composer.width_method = self.vx.caps.unicode;
     try self.composer.append(bytes);
-    try self.composer.layout(size.col - 2);
+    try self.composer.layoutInput(size.col - 2);
 }
 
 pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live) !void {
     // The terminal reports untrusted geometry. Cell allocations (including
     // replacement grids during resize) share the same bounded allocator.
     // Snapshot before either resize or frame output can pump keyboard input.
+    const width_method = self.vx.caps.unicode;
     try self.prepareDraft(bytes, size);
     var frame: std.Io.Writer.Allocating = .init(self.memory.allocator());
     defer frame.deinit();
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         // Browsing resets on resize; draft bytes and its caret do not.
         self.browsing.top = 0;
+        self.action_seen = 0;
+        self.approval_ready = false;
         // A render failure retires this invocation; no old grid is needed for
         // rollback. Retire it before allocating replacements, rather than
         // charging both geometries at once (notably on 16-KiB-page macOS).
@@ -153,6 +170,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .selected = self.selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
+        .action_seen = self.action_seen,
         .preview_complete = self.preview_complete,
     });
     self.height = layout.height;
@@ -179,6 +197,12 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     try self.vx.render(&frame.writer);
     try out.writeAll(frame.written());
     try out.flush();
+    // Only delivered rows count as inspection; a partially written frame cannot
+    // certify unseen Action text or grant permission during output pumping.
+    if (self.vx.caps.unicode == width_method) {
+        self.action_seen = layout.action_seen;
+        self.approval_ready = layout.approval_ready;
+    }
 }
 
 fn drawRow(window: vaxis.Window, document: anytype, document_row: usize, row: u16, start: u16, colour: bool, plain_style: vaxis.Style) !void {
@@ -275,6 +299,11 @@ test "wide resize preserves a growing combining draft" {
     }
     const window = screen.vx.window();
     try std.testing.expectEqualStrings(&draft, window.readCell(2, screen.vx.screen.cursor.row).?.char.grapheme);
+    try std.testing.expectError(error.TerminalTooLarge, screen.render(&out.writer, .{ .row = 135, .col = 480, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{}));
+    screen.live.clear();
+    const dense: [Frame.max_cells]u8 = @splat('X');
+    try screen.append(&dense);
+    try screen.render(&out.writer, .{ .row = 192, .col = 256, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{});
 }
 
 test "compact conversation keeps the composer beside content without persistent chrome" {
@@ -366,7 +395,8 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     try screen.render(&out.writer, size, "", 0, "Idle", "› ", &live);
     try std.testing.expectEqualStrings("中", window.readCell(0, 2).?.char.grapheme);
     try std.testing.expectEqualStrings("Z", window.readCell(2, 2).?.char.grapheme);
-    try std.testing.expectError(error.UnrepresentableTerminalGrapheme, screen.render(&out.writer, size, "", 0, "́Z", "› ", &live));
+    try screen.render(&out.writer, size, "", 0, "́Z", "› ", &live);
+    try std.testing.expectEqualStrings("\\", window.readCell(0, 0).?.char.grapheme);
 }
 
 test "actual overflow yields wording before clipping required status" {
