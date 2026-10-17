@@ -181,13 +181,18 @@ class ShapedWorkTests(unittest.TestCase):
 
 class ManagedDescriptorTests(unittest.TestCase):
     def test_managed_transfer_cannot_renew_result_read_or_release_budget(self):
-        for observed in (False, True):
+        cases = ((platform, inherited, observed, intake)
+                 for platform, inherited in (("linux", 3), ("darwin", 3), ("darwin", 4))
+                 for observed, intake in ((False, 100), (True, 100), (False, 10)))
+        for platform, inherited, observed, intake in cases:
             for late in (None, "read", "release", "preparation_completed", "codex_transfer",
                          "preparation_completed_at_deadline", "codex_transfer_at_deadline"):
-                with self.subTest(observed=observed, late=late), tempfile.TemporaryDirectory() as temporary:
+                with self.subTest(platform=platform, inherited=inherited, observed=observed,
+                                  intake=intake, late=late), tempfile.TemporaryDirectory() as temporary:
                     root = pathlib.Path(temporary) / "managed"
                     root.mkdir()
                     clock = [0.0]
+                    launches = []
                     headers = {b":path": b"/responses", b"authorization": ("Bearer " + codex_h2.codex.ACCESS).encode(),
                                b"chatgpt-account-id": codex_h2.codex.ACCOUNT.encode(), b"originator": b"rui", b"session-id": b"a" * 32}
                     endpoint = SimpleNamespace(server_address=("localhost", 1), serve_forever=lambda: None,
@@ -232,11 +237,15 @@ class ManagedDescriptorTests(unittest.TestCase):
                         if args[0] == "openssl":
                             return SimpleNamespace(returncode=0)
                         if args[0] == "sh":
-                            fixed, authentication = (11, 10) if codex_h2.sys.platform == "darwin" else (9, 8)
-                            required = 3 + fixed + 403 + 10 + authentication + 2
+                            fixed, authentication = (11, 10) if platform == "darwin" else (9, 8)
+                            required = inherited + fixed + 403 + 10 + authentication + 2
+                            limit = int(args[4])
+                            launches.append(limit)
+                            if limit >= required - 360:
+                                return SimpleNamespace(returncode=0, stdout="ready ", stderr="")
                             return SimpleNamespace(returncode=1, stdout="", stderr=(
                                 "descriptor capacity insufficient: active_capacity=1 "
-                                f"required={required} soft_limit={required - 1} inherited=3 fixed_host={fixed} "
+                                f"required={required} soft_limit={limit} inherited={inherited} fixed_host={fixed} "
                                 f"clients=403 execution=10 authentication={authentication} self_wake=2"))
                         clock[0] += 5.2 if late == "read" else 4.95
                         key = args[-1]
@@ -244,52 +253,66 @@ class ManagedDescriptorTests(unittest.TestCase):
                         answer = "L" * 8192 + text if key == "message-1" else f"answer-{text}"
                         return SimpleNamespace(returncode=0, stdout=answer.encode(), stderr=b"")
 
+                    def start(args, **kwargs):
+                        # Derive the launch contract independently for all
+                        # three native inherited populations and both intakes.
+                        full = (435 if platform == "linux" else 439) + inherited - 3
+                        limit = full - (360 if intake == 10 else 0) + (2 if observed else 0)
+                        self.assertEqual(int(args[4]), limit)
+                        self.assertEqual(kwargs["required_fields"]["intake_capacity"], str(intake))
+                        self.assertEqual(kwargs["required_fields"]["descriptor_requirement"], str(limit))
+                        self.assertEqual(kwargs["required_fields"]["descriptor_limit"], str(limit))
+                        self.assertEqual(launches, [74 if platform == "linux" else 78] +
+                                         ([79] if inherited == 4 else []))
+                        return SimpleNamespace(pid=1), {}
+
                     with contextlib.ExitStack() as stack:
                         stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                         stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
                         stack.enter_context(patch.dict(codex_h2.os.environ))
+                        stack.enter_context(patch.object(codex_h2.sys, "platform", platform))
                         stack.enter_context(patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]))
                         stack.enter_context(patch.object(codex_h2.tempfile, "mkdtemp", return_value=str(root)))
                         stack.enter_context(patch.object(codex_h2.ssl, "SSLContext"))
                         stack.enter_context(patch.object(codex_h2.h2_fixture, "Endpoint", return_value=endpoint))
                         thread = stack.enter_context(patch.object(codex_h2.threading, "Thread"))
                         thread.return_value.is_alive.return_value = False
-                        stack.enter_context(patch.object(codex_h2, "start_ready_process", return_value=(SimpleNamespace(pid=1), {})))
+                        stack.enter_context(patch.object(codex_h2, "start_ready_process", side_effect=start))
                         stack.enter_context(patch.object(codex_h2, "HostDiagnostics", return_value=diagnostics))
                         stack.enter_context(patch.object(codex_h2.fixture, "command", side_effect=command))
                         stack.enter_context(patch.object(codex_h2.fixture, "message"))
                         stack.enter_context(patch.object(codex_h2.fixture, "stop_host"))
                         stack.enter_context(patch.object(codex_h2.subprocess, "run", side_effect=process))
                         if late is None or (not observed and late not in ("read", "release")):
-                            codex_h2.run(observed=observed)
+                            codex_h2.run(observed=observed, intake=intake)
                             if observed:
                                 self.assertEqual(forwarded, [entry for identity in identities for entry in (
                                     ("preparation_completed", identity), ("codex_transfer", {"operation": identity["operation"]}))])
                         else:
                             with self.assertRaisesRegex(AssertionError, "original deadline|preparation_completed|codex_transfer"):
-                                codex_h2.run(observed=observed)
+                                codex_h2.run(observed=observed, intake=intake)
 
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
         for inherited, required in ((3, 439), (4, 440)):
             with self.subTest(inherited=inherited):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
-                    f"required={required} soft_limit=438 inherited={inherited} "
+                    f"required={required} soft_limit=78 inherited={inherited} "
                     "fixed_host=11 clients=403 execution=10 authentication=10 self_wake=2\n"))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
-                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 438), required)
+                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 78), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
-                   "required=440 soft_limit=439 inherited=4 fixed_host=11 clients=403 "
+                   "required=440 soft_limit=79 inherited=4 fixed_host=11 clients=403 "
                    "execution=10 authentication=10 self_wake=2\n")
         for before, after in (("required=440", "required=439"), ("authentication=10", "authentication=9"),
-                              ("inherited=4", "inherited=5"), ("soft_limit=439", "soft_limit=438")):
+                              ("inherited=4", "inherited=5"), ("soft_limit=79", "soft_limit=78")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
                     with self.assertRaises(AssertionError):
-                        codex_h2.assert_managed_descriptor_rejection(rejected, 439)
+                        codex_h2.assert_managed_descriptor_rejection(rejected, 79)
 
 
 class H1ResponseBoundaryTests(unittest.TestCase):
