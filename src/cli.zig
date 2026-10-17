@@ -1614,6 +1614,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         var buffer: [0]u8 = .{};
         var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
         sessionInspect(init, requests_context, destination, reference, text, &writer.interface) catch |err| {
+            if (err == error.Cancelled) return err;
             TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
             return;
         };
