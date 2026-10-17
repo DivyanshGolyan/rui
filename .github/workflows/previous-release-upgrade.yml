@@ -1,13 +1,23 @@
 name: Previous installed-release upgrade
 on:
-  push:
-    branches: ['wip/host-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'src/**'
+      - 'build.zig*'
+      - 'install.sh'
+      - 'tests/integration/previous_release_upgrade.py'
+      - 'tests/integration/model_fixture.py'
+      - 'tests/integration/host_process.py'
+      - '.github/actions/setup/**'
+      - '.github/workflows/previous-release-upgrade.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Restore shared compilation inputs without competing with the selected suites.
+cache-mode: read
 
 concurrency:
   group: previous-release-upgrade-${{ github.ref }}
@@ -15,6 +25,7 @@ concurrency:
 
 jobs:
   upgrade:
+    if: ${{ !github.event.repository.private }}
     name: upgrade (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -42,5 +53,18 @@ jobs:
           uname -sm
           git rev-parse HEAD
           zig version
+          mkdir -p "$RUI_UPGRADE_FAILURES"
+          mv .amp/previous-release "$RUNNER_TEMP/previous-release"
           python3 -B tests/integration/previous_release_upgrade.py . .
-          python3 -B tests/integration/previous_release_upgrade.py .amp/previous-release .
+          python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .
+        env:
+          RUI_UPGRADE_FAILURES: ${{ runner.temp }}/rui-upgrade-data
+      - name: Retain failed synthetic Stores and Host diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-failure-${{ matrix.os }}
+          path: ${{ runner.temp }}/rui-upgrade-data/**/store/**
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: ignore

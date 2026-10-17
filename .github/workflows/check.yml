@@ -107,9 +107,9 @@ jobs:
         if: ${{ steps.cadence.outputs.run == 'true' }}
         run: |
           for workflow in .github/workflows/*.yml; do
-            if [ "$workflow" = .github/workflows/qualify-macos.yml ]; then
+            if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ]; then
               # 1.7.7 predates GitHub's scoped cache tokens. CI tests validate
-              # this one workflow's read-only value and reject job overrides.
+              # these workflows' read-only values and reject job overrides.
               actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
             else
               actionlint -shellcheck= "$workflow"

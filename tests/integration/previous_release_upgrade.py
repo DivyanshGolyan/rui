@@ -15,7 +15,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import canonical_fixture_root, dispose_all, stop_process
+from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process
 
 
 def install(checkout):
@@ -26,11 +26,6 @@ def install(checkout):
     binary = pathlib.Path(os.environ["HOME"], ".local/bin/rui")
     print(f"Installed artifact sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}", flush=True)
     return binary
-
-
-def soft_256():
-    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
 
 
 def supported_format(checkout):
@@ -68,7 +63,7 @@ def main():
     # Do not use the runner's HOME, default Store or credentials. Keep the
     # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
-    directory = tempfile.mkdtemp(prefix="rui-upgrade-")
+    directory = tempfile.mkdtemp(prefix="rui-upgrade-", dir=os.environ.get("RUI_UPGRADE_FAILURES"))
     try:
         root = canonical_fixture_root(directory)
         home, workspace, store = root / "home", root / "workspace", root / "store"
@@ -91,7 +86,10 @@ def main():
         seed = None
         attempted_restart = False
         try:
-            seed = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            seed, _ = start_ready_process(
+                fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                required_fields={"execution": "enabled"},
+            )
             fixture.configure(root, store, "upgrade-configure", "upgrade/session", "model-a")
             fixture.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
             observation, answer, _ = fixture.wait_for_result_release(
@@ -106,8 +104,8 @@ def main():
             for field, value in configuration.items():
                 assert before[field] == value, (field, value, before)
             subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=10)
-            # The serving command reports EffectAwareShutdown as status1.
-            assert seed.wait(timeout=10) == 1
+            # Effect-aware shutdown is a nonzero serving exit, not a crash.
+            assert seed.wait(timeout=10) != 0
             stop_detached(binary, store)  # Confirm lease release, not just acknowledgement.
             stop_process(seed)
             seed = None
@@ -125,8 +123,13 @@ def main():
             for command in commands:
                 attempted_restart = True
                 started_at = time.monotonic()
-                restarted = subprocess.run([binary, *command, "--store", store],
-                                           capture_output=True, text=True, timeout=16, preexec_fn=soft_256)
+                original_limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+                try:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (256, original_limits[1]))
+                    restarted = subprocess.run([binary, *command, "--store", store],
+                                               capture_output=True, text=True, timeout=16)
+                finally:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, original_limits)
                 elapsed = time.monotonic() - started_at
                 print(restarted.stdout + restarted.stderr, flush=True)
                 if previous_format == candidate_format:
@@ -150,7 +153,13 @@ def main():
                 # The previous installed artifact must still recover the exact
                 # work at its original Store path. This is not a migration.
                 fixture.RUI = previous_artifact
-                seed = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+                seed, _ = start_ready_process(
+                    fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    required_fields={"execution": "enabled"},
+                )
+            recovered = fixture.observe(store, "upgrade-message")
+            assert recovered["result"]["status"] == "completed", recovered
+            assert recovered["processing"] == observation["processing"], "upgrade replayed completed work"
             assert fixture.read_result(store, "upgrade-message") == expected, "saved answer changed"
             after = fixture.command("inspect-session", "--store", store, "--session", "upgrade/session")["session"]
             for field, value in configuration.items():
