@@ -137,18 +137,27 @@ class EvidenceTest(unittest.TestCase):
             previous = Path.cwd()
             self.addCleanup(os.chdir, previous)
             os.chdir(directory)
-            executable = Path('.zig-cache/o/0123/native-test')
+            executable = Path('.zig-cache/o/ci-compiled/native-test')
             executable.parent.mkdir(parents=True)
             executable.write_bytes(b'exact executable bytes')
+            executable.chmod(0o755)
+            bootstrap = Path('.zig-cache/o/worker-local/configurer')
+            bootstrap.parent.mkdir(parents=True)
+            bootstrap.write_bytes(b'worker-specific compiler bootstrap')
+            bootstrap.chmod(0o755)
             inputs = dict(tree='a' * 40, targets=['test'], part='all',
                           workflow='owner/repo/.github/workflows/check.yml',
                           event='push', branch='feature', tools='native-tools')
             run = dict(id=123, run_attempt=1, conclusion='success', event='push', head_sha='b' * 40,
                        path='.github/workflows/check.yml', head_branch='feature',
                        head_repository=dict(full_name='owner/repo'))
-            receipt = dict(inputs=inputs, run_id=123, run_attempt=1, verdict='passed',
-                           source_sha='b' * 40,
-                           executables={str(executable): hashlib.sha256(executable.read_bytes()).hexdigest()})
+            with patch.dict(os.environ, RUNNER_TEMP=directory, GITHUB_RUN_ID='123',
+                            GITHUB_RUN_ATTEMPT='1', GITHUB_OUTPUT=str(Path(directory) / 'outputs')), \
+                    patch.object(evidence, 'git', return_value='b' * 40):
+                evidence.record(inputs)
+            receipt = json.loads(Path('rui-evidence/evidence.json').read_text())
+            self.assertEqual(receipt['executables'],
+                             {str(executable): hashlib.sha256(executable.read_bytes()).hexdigest()})
 
             def archive_for(value):
                 stream = io.BytesIO()
@@ -162,6 +171,14 @@ class EvidenceTest(unittest.TestCase):
             archive, artifact = archive_for(receipt)
             with patch.dict(os.environ, GITHUB_REPOSITORY='owner/repo'), \
                     patch.object(evidence, 'api', return_value=dict(tree=dict(sha=inputs['tree']))):
+                self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
+                bootstrap.write_bytes(b'another worker-specific bootstrap')
+                self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
+                data, metadata = archive_for(dict(receipt,
+                    executables={str(bootstrap): evidence.digest(bootstrap)}))
+                with self.assertRaisesRegex(ValueError, 'Foreign executable path'):
+                    evidence.verify(data, metadata, run, inputs)
+                bootstrap.unlink()
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
                 self.assertEqual(evidence.verify(archive, artifact,
                     dict(run, path=run['path'] + '@refs/heads/feature'), inputs), receipt)
@@ -191,7 +208,10 @@ class EvidenceTest(unittest.TestCase):
                 executable.unlink()
                 with self.assertRaisesRegex(ValueError, 'executable missing or changed'):
                     evidence.verify(archive, artifact, run, inputs)
-                for invalid in ({}, {'../secret': 'ignored'}, {'/tmp/secret': 'ignored'}):
+                for invalid in ({}, {'../secret': 'ignored'}, {'/tmp/secret': 'ignored'},
+                                {str(bootstrap): 'ignored'},
+                                {'.zig-cache/o/ci-compiled-extra/test': 'ignored'},
+                                {'.zig-cache/o/ci-compiled/nested/test': 'ignored'}):
                     changed = copy.deepcopy(receipt)
                     changed['executables'] = invalid
                     data, metadata = archive_for(changed)
@@ -206,7 +226,7 @@ class EvidenceTest(unittest.TestCase):
             previous = Path.cwd()
             self.addCleanup(os.chdir, previous)
             os.chdir(directory)
-            binary = Path('.zig-cache/o/hash/test')
+            binary = Path('.zig-cache/o/ci-compiled/test')
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'original')
             receipt = dict(inputs=inputs, run_id=1, run_attempt=1, verdict='passed', source_sha='original',
@@ -251,7 +271,7 @@ class EvidenceTest(unittest.TestCase):
             # Fetch is real but local: both origin commits exist independently
             # of the artifact; no mock can supply the expected merge result.
             git('remote', 'add', 'origin', directory)
-            binary = Path('.zig-cache/o/hash/test')
+            binary = Path('.zig-cache/o/ci-compiled/test')
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'tested binary')
             inputs = dict(tree=tree, workflow='owner/repo/.github/workflows/check.yml',

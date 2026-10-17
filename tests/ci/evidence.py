@@ -92,9 +92,9 @@ def verify(archive, artifact, run, inputs):
         raise ValueError("No passing executable evidence")
     for executable, expected in receipt["executables"].items():
         path = Path(executable)
-        # Only hash cache artifacts; never follow an artifact-supplied path out
-        # of the build cache or execute downloaded content.
-        if path.is_absolute() or ".." in path.parts or path.parts[:2] != (".zig-cache", "o"):
+        # Hash only direct children of the verified handoff, never worker-local
+        # compiler bootstraps or artifact-supplied paths elsewhere in the cache.
+        if path.parent != Path(".zig-cache/o/ci-compiled"):
             raise ValueError("Foreign executable path")
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
             raise ValueError("Test executable missing or changed")
@@ -149,7 +149,9 @@ def restore(inputs):
 
 
 def record(inputs):
-    executables = {str(path): digest(path) for path in sorted(Path(".zig-cache/o").glob("*/*"))
+    # Native configurer binaries belong to each worker, not the portable handoff
+    # consumed by these gates. Their CPU-dependent hashes are not test identity.
+    executables = {str(path): digest(path) for path in sorted(Path(".zig-cache/o/ci-compiled").glob("*"))
                    if path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)}
     if not executables:
         return  # No artifact identity: never publish reusable acceptance.
