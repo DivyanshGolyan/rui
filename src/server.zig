@@ -312,7 +312,7 @@ const Intake = struct {
             // No successful header has left while preparation is fallible.
             reply.deinit();
             const status: u16 = switch (err) {
-                error.ClientCapacity => 503,
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => 503,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
@@ -320,13 +320,15 @@ const Intake = struct {
             };
             const code = switch (err) {
                 error.ClientCapacity => "ordinary_capacity_exhausted",
+                error.ControlCapacity => "control_capacity_exhausted",
+                error.DiscoveryCapacity => "discovery_capacity_exhausted",
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
                 error.RequestIdentityExhausted => "request_identity_exhausted",
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
                 else => @errorName(err),
             };
             const kind = switch (err) {
-                error.ClientCapacity => "busy",
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => "busy",
                 error.UnsupportedControl => "unsupported",
                 else => "invocation_error",
             };
@@ -357,16 +359,24 @@ const Intake = struct {
                     const header = self.header_bytes.items;
                     if (self.route == null and std.mem.endsWith(u8, header, "\r\n")) {
                         self.route = try HeaderReader.parseRoute(header[0 .. header.len - 2]);
-                        if (self.host.intake_capacity < descriptor_capacity.default_intake and
-                            !self.route.?.isControl() and self.route != .host_info)
-                        {
+                        if (self.host.intake_capacity < descriptor_capacity.default_intake) {
                             var ordinary: usize = 0;
+                            var control: usize = 0;
+                            var discovery: usize = 0;
                             for (self.host.intake.?.exchanges.items) |peer| {
                                 if (peer.route) |route| {
-                                    if (!route.isControl() and route != .host_info) ordinary += 1;
+                                    if (route.isControl()) {
+                                        control += 1;
+                                    } else if (route == .host_info) {
+                                        discovery += 1;
+                                    } else ordinary += 1;
                                 }
                             }
-                            if (ordinary > self.host.intake_capacity) return error.ClientCapacity;
+                            if (self.route.?.isControl()) {
+                                if (control > 2) return error.ControlCapacity;
+                            } else if (self.route == .host_info) {
+                                if (discovery > 1) return error.DiscoveryCapacity;
+                            } else if (ordinary > self.host.intake_capacity) return error.ClientCapacity;
                         }
                         if (!self.route.?.isControl() and self.route != .host_info)
                             traceSubject(self.host, "ordinary_classification_released", "route", @tagName(self.route.?));

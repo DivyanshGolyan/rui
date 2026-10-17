@@ -327,10 +327,65 @@ def startup_limits(root, env):
                         except BlockingIOError:
                             pass
                         peer.settimeout(3)
+                    for route in (b"/v1/control/session-stop", b"/v1/control/unknown"):
+                        with socket.socket(socket.AF_UNIX) as excess:
+                            excess.settimeout(3)
+                            excess.connect(socket_path)
+                            excess.sendall(b"POST " + route + b" HTTP/1.1\r\n")
+                            response = bytearray()
+                            while chunk := excess.recv(4096):
+                                response.extend(chunk)
+                            header, body = bytes(response).split(b"\r\n\r\n", 1)
+                            assert header.startswith(b"HTTP/1.1 503 "), response
+                            assert json.loads(body) == {
+                                "version": "1", "type": "busy", "code": "control_capacity_exhausted",
+                            }, response
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
                     peer.connect(socket_path)
                     assert "Host: ready" in status(store, env), "unknown route blocked reserved discovery"
+                    for _ in range(3):
+                        borrowers.pop().close()
+                    # One stalled discovery must not borrow either control
+                    # place. Exercise both request-line and body stalls.
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n"
+                    for tail in (b"", fields + b"{"):
+                        discovery = socket.socket(socket.AF_UNIX)
+                        borrowers.append(discovery)
+                        discovery.settimeout(3)
+                        discovery.connect(socket_path)
+                        discovery.sendall(b"POST /v1/host-info HTTP/1.1\r\n" + tail)
+                        with socket.socket(socket.AF_UNIX) as excess:
+                            excess.settimeout(3)
+                            excess.connect(socket_path)
+                            excess.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
+                            response = bytearray()
+                            while chunk := excess.recv(4096):
+                                response.extend(chunk)
+                            header, body = bytes(response).split(b"\r\n\r\n", 1)
+                            assert header.startswith(b"HTTP/1.1 503 "), response
+                            assert json.loads(body) == {
+                                "version": "1", "type": "busy", "code": "discovery_capacity_exhausted",
+                            }, response
+                        for _ in range(2):
+                            control = socket.socket(socket.AF_UNIX)
+                            borrowers.append(control)
+                            control.settimeout(3)
+                            control.connect(socket_path)
+                            control.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n" + tail)
+                        # Finish both controls independently while the discovery
+                        # body is still held. Their invalid envelopes must be
+                        # decoded, not rejected as capacity or left unaccepted.
+                        for control in borrowers[-2:]:
+                            control.sendall(fields + b"{}" if not tail else b"}")
+                            response = bytearray()
+                            while chunk := control.recv(4096):
+                                response.extend(chunk)
+                            assert bytes(response).startswith(b"HTTP/1.1 400 "), response
+                            assert json.loads(bytes(response).split(b"\r\n\r\n", 1)[1])["type"] == "invocation_error"
+                        for _ in range(3):
+                            borrowers.pop().close()
+                        assert "Host: ready" in status(store, env)
                     stopped = subprocess.run(
                         [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
                         env=env, text=True, capture_output=True, timeout=5,
