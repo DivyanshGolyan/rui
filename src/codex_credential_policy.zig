@@ -150,11 +150,10 @@ pub const LocalStatus = enum {
 
 /// Ready and renewal-due are locally usable, not remotely accepted. Applies
 /// the runtime's routing and expiry checks to a read-only snapshot.
-pub fn localStatus(record: ?*const Record, now_seconds: i64) !LocalStatus {
-    const current = record orelse return .missing;
-    if (current.state == .refresh_pending) return .refresh_required;
-    try validateSelected(current, false);
-    return if (refreshDue(current, now_seconds, 0)) .renewal_due else .configured;
+pub fn localStatus(record: *const Record, now_seconds: i64) !LocalStatus {
+    if (record.state == .refresh_pending) return .refresh_required;
+    try validateSelected(record, false);
+    return if (refreshDue(record, now_seconds, 0)) .renewal_due else .configured;
 }
 
 /// Credential failures the user can resolve by logging in again are
@@ -189,8 +188,6 @@ pub fn validateReplacement(record: *const Record) !void {
 /// existing record, including another account, and advances its generation.
 /// A non-null value completes the pending refresh at that generation and must
 /// preserve the account ID and FedRAMP routing claim.
-/// Returns the generation an installed replacement takes. Login passes no
-/// expected generation; refresh completion passes the one it claimed.
 pub fn admitReplacement(current: ?*const Record, replacement: *const Record, expected_generation: ?u64) !u64 {
     try validateReplacement(replacement);
     const expected = expected_generation orelse {
@@ -449,6 +446,8 @@ test "refresh is due at the expiry margin or eight days after an opaque exchange
     try std.testing.expect(refreshDue(&record, 940, launch_refresh_margin_seconds));
     try std.testing.expect(!refreshDue(&record, 999, 0));
     try std.testing.expect(refreshDue(&record, 1_000, 0));
+    // The margin saturates rather than overflowing at the end of time.
+    try std.testing.expect(refreshDue(&record, std.math.maxInt(i64), launch_refresh_margin_seconds));
     // Opaque tokens ignore the margin.
     record.expires_at = 0;
     for ([_]i64{ 0, launch_refresh_margin_seconds }) |margin| {
@@ -509,7 +508,6 @@ test "launch rejects a leased token that expired after selection" {
 test "local status reports renewal only at expiry, without the launch margin" {
     var record: Record = undefined;
     try fixtureRecord(&record);
-    try std.testing.expectEqual(LocalStatus.missing, try localStatus(null, 0));
     try std.testing.expectEqual(LocalStatus.configured, try localStatus(&record, fixture_expires_at - 1));
     try std.testing.expectEqual(LocalStatus.renewal_due, try localStatus(&record, fixture_expires_at));
     // Inside the launch margin, the runtime refreshes but local status is configured.

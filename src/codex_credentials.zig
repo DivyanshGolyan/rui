@@ -489,6 +489,10 @@ test "unsafe paths and credential aliases fail closed" {
     const path = try testPath(&tmp, "auth", &path_buffer);
     var record = try testRecord("acct", 0);
     try std.testing.expectError(error.PathMustBeAbsolute, install("relative", &record, null));
+    // An incomplete record is refused before the owner path is examined.
+    record.state = .refresh_pending;
+    try std.testing.expectError(error.InstallMustBeReady, install("relative", &record, null));
+    record.state = .ready;
     var private = try tmp.dir.openDir(io, "private", .{});
     defer private.close(io);
     try private.symLink(io, "missing", "auth", .{});

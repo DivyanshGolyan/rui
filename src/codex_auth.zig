@@ -6,9 +6,8 @@ const wire = @import("codex_token_wire.zig");
 
 const c = @import("curl");
 
-pub const issuer = "https://auth.openai.com";
+pub const issuer = wire.issuer;
 pub const client_id = wire.client_id;
-pub const redirect_uri = "https://auth.openai.com/deviceauth/callback";
 pub const upstream_pin = "968835997714baaff199cfed5f89a2c65d8ca77d";
 pub const fixture_access_token = policy.fixture_access_token;
 pub const fixture_id_token = policy.fixture_id_token;
@@ -31,7 +30,7 @@ fn nowSeconds(io: std.Io) i64 {
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
     var record: credentials.Record = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (!try credentials.readSnapshotInto(path, &record)) return policy.localStatus(null, now_seconds);
+    if (!try credentials.readSnapshotInto(path, &record)) return .missing;
     return policy.localStatus(&record, now_seconds);
 }
 
@@ -44,14 +43,9 @@ pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *cr
         _ = try credentials.exchangeRefresh(path, record.generation, Context{ .io = io, .fixture = fixture }, struct {
             fn exchange(context: Context, current: *const credentials.Record) !credentials.Record {
                 try policy.validateSelected(current, context.fixture);
-                var tokens: Tokens = undefined;
-                defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
-                try wire.tokensFromRecord(current, &tokens);
-                var refreshed = try refresh(&tokens);
-                defer std.crypto.secureZero(u8, std.mem.asBytes(&refreshed));
-                var replacement = current.*;
+                var replacement: credentials.Record = undefined;
                 defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-                try wire.applyRefresh(&replacement, &refreshed, nowSeconds(context.io));
+                try refresh(context.io, current, &replacement);
                 return replacement;
             }
         }.exchange);
@@ -79,18 +73,18 @@ fn writeCallback(data: [*c]u8, size: usize, count: usize, context: ?*anyopaque) 
     return length;
 }
 
-fn post(url: [:0]const u8, content_type: [*:0]const u8, body: []const u8, response: *Response, cancelled: ?*const fn () bool) !u16 {
+fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
     const easy = c.curl_easy_init() orelse return error.TransportInitializationFailed;
     defer c.curl_easy_cleanup(easy);
     response.* = .{};
     var headers: ?*c.curl_slist = null;
-    headers = c.curl_slist_append(headers, content_type) orelse return error.TransportInitializationFailed;
+    headers = c.curl_slist_append(headers, request.content_type) orelse return error.TransportInitializationFailed;
     defer c.curl_slist_free_all(headers);
-    try opt(easy, c.CURLOPT_URL, url.ptr);
+    try opt(easy, c.CURLOPT_URL, request.url.ptr);
     try opt(easy, c.CURLOPT_POST, @as(c_long, 1));
-    try opt(easy, c.CURLOPT_POSTFIELDS, body.ptr);
-    try opt(easy, c.CURLOPT_POSTFIELDSIZE_LARGE, @as(c.curl_off_t, @intCast(body.len)));
+    try opt(easy, c.CURLOPT_POSTFIELDS, request.body.ptr);
+    try opt(easy, c.CURLOPT_POSTFIELDSIZE_LARGE, @as(c.curl_off_t, @intCast(request.body.len)));
     try opt(easy, c.CURLOPT_HTTPHEADER, headers);
     try opt(easy, c.CURLOPT_WRITEFUNCTION, writeCallback);
     try opt(easy, c.CURLOPT_WRITEDATA, response);
@@ -142,7 +136,7 @@ fn opt(easy: *c.CURL, option: c.CURLoption, value: anytype) !void {
 pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Tokens {
     var begin: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&begin));
-    const begin_status = try post(issuer ++ "/api/accounts/deviceauth/usercode", "Content-Type: application/json", "{\"client_id\":\"" ++ client_id ++ "\"}", &begin, cancelled);
+    const begin_status = try post(wire.device_start, &begin, cancelled);
     var device: wire.DeviceStart = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&device));
     try wire.parseDeviceStart(begin_status, begin.bytes[0..begin.len], &device);
@@ -156,7 +150,7 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
         if (elapsed >= deadline_ns) return error.LoginExpired;
         var answer: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-        const answer_status = try post(issuer ++ "/api/accounts/deviceauth/token", "Content-Type: application/json", device.pollBody(), &answer, cancelled);
+        const answer_status = try post(device.pollRequest(), &answer, cancelled);
         if (try wire.classifyPoll(answer_status, answer.bytes[0..answer.len]) == .pending) {
             const remaining = deadline_ns - started.durationTo(std.Io.Clock.Timestamp.now(io, .boot)).raw.nanoseconds;
             if (remaining <= 0) return error.LoginExpired;
@@ -174,22 +168,22 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool) !Token
         }
         var form: [32 * 1024]u8 = undefined;
         defer std.crypto.secureZero(u8, &form);
-        const body = try wire.grantExchangeBody(answer.bytes[0..answer.len], &form);
+        const exchange = try wire.grantExchangeRequest(answer.bytes[0..answer.len], &form);
         var exchanged: Response = .{};
         defer std.crypto.secureZero(u8, std.mem.asBytes(&exchanged));
-        const exchange_status = try post(issuer ++ "/oauth/token", "Content-Type: application/x-www-form-urlencoded", body, &exchanged, cancelled);
+        const exchange_status = try post(exchange, &exchanged, cancelled);
         return wire.parseTokenResponse(exchange_status, exchanged.bytes[0..exchanged.len]);
     }
 }
 
-pub fn refresh(current: *const Tokens) !Tokens {
+/// Exchanges the claimed record's refresh token and builds its replacement.
+fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credentials.Record) !void {
     var body: [32 * 1024]u8 = undefined;
     defer std.crypto.secureZero(u8, &body);
-    const json = try wire.refreshRequestBody(current, &body);
     var answer: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-    const status = try post(issuer ++ "/oauth/token", "Content-Type: application/json", json, &answer, null);
-    return wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len]);
+    const status = try post(try wire.refreshRequest(current, &body), &answer, null);
+    try wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement);
 }
 
 test "local readiness reads a snapshot without creating a lock or mutating it" {
