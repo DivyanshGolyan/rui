@@ -14,6 +14,15 @@ import evidence
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_go_checks_cannot_reuse_unrelated_native_cache_artifacts(self):
+        with patch.dict(os.environ, RUNNER_TEMP="/tmp", GITHUB_WORKFLOW_REF="owner/repo/check.yml@feature",
+                        GITHUB_EVENT_NAME="push", GITHUB_REF="refs/heads/feature"), \
+                patch.object(evidence, "git", return_value=""), \
+                patch.object(evidence, "digest", return_value="cached-native-hash"), \
+                patch.object(evidence.subprocess, "check_output", return_value="go version go1.27.1"), \
+                self.assertRaisesRegex(ValueError, "fresh Go execution"):
+            evidence.identity(["measurement-check"], "all")
+
     def test_accepts_only_matching_inputs_origin_archive_and_executables(self):
         with tempfile.TemporaryDirectory() as directory:
             previous = Path.cwd()

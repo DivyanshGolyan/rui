@@ -21,6 +21,10 @@ def git(*args):
 
 
 def identity(targets, part):
+    # Go's test runner discards its executable. Unrelated restored Zig binaries
+    # cannot establish that test artifact's identity, so run these cheap checks.
+    if "measurement-check" in targets:
+        raise ValueError("measurement-check requires fresh Go execution")
     # The complete tree covers fixtures, policy, pins and workflow inputs, not
     # just production sources. Runner image and native tools cover SDK changes.
     if git("status", "--porcelain", "--untracked-files=no"):
@@ -31,9 +35,8 @@ def identity(targets, part):
                 tools=digest(Path(os.environ["RUNNER_TEMP"]) / "rui-native-tools.txt"),
                 compiler=digest(shutil.which("zig")),
                 python=platform.python_version(),
-                go=subprocess.check_output(["go", "version"], text=True).strip()
-                if "measurement-check" in targets else None,
-                h2=importlib.metadata.version("h2")
+                h2={package: importlib.metadata.version(package)
+                    for package in ("h2", "hpack", "hyperframe")}
                 if set(targets) & {"transport-h2-integration", "codex-h2-integration"} else None,
                 workflow=os.environ["GITHUB_WORKFLOW_REF"].split("@", 1)[0],
                 event=os.environ["GITHUB_EVENT_NAME"],
