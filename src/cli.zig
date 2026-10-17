@@ -2420,7 +2420,7 @@ fn result(init: std.process.Init, args: []const []const u8) !void {
     const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
-    if (!saved.kind.eql("message")) return error.NotMessageRequest;
+    if (!saved.isKind(.message)) return error.NotMessageRequest;
     const address = try client.MessageAddress.init(saved.store.slice(), saved.session.slice(), saved.key.slice());
     try showResult(init, .{ .io = init.io }, &address, if (json) .json else .human);
 }
@@ -2590,7 +2590,7 @@ fn follow(init: std.process.Init, args: []const []const u8) !void {
     const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
     if (args.len != 1 and !json) return usage();
     const saved = try savedRequest(init, args[0]);
-    if (!saved.kind.eql("message")) return error.NotMessageRequest;
+    if (!saved.isKind(.message)) return error.NotMessageRequest;
     const address = try client.MessageAddress.init(saved.store.slice(), saved.session.slice(), saved.key.slice());
     _ = try followMessage(init, &address, if (json) .json else .human, .follow_attention);
 }
