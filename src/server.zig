@@ -2302,7 +2302,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
         .abandon, .settle_authentication_failure => {
             request.deinit();
             if (decision == .settle_authentication_failure)
-                settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .terminal);
+                settleAttemptFailure(host, owner.token, owner.binding, .{ .code = model_adapter.authenticationFailureCode(result.?.failed) }, .terminal);
             finishCustodyNow(host, slot, owner.token);
         },
         else => unreachable,
@@ -2329,7 +2329,7 @@ fn finishModelPreparationFailure(
             return;
         },
         .fence => fenceDispatch(host, "canonical request read", err),
-        .settle_preparation_failure => settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal),
+        .settle_preparation_failure => settleAttemptFailure(host, owner.token, owner.binding, .{ .code = model_adapter.preparationFailureCode(err) }, .terminal),
         .abandon => {},
         else => unreachable,
     }
@@ -2357,7 +2357,7 @@ fn launchPreparedRequest(
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
-        settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
+        settleAttemptFailure(host, token, binding, .{ .code = "provider_transport_failure" }, .{ .retryable = .{
             .waits_ms = host.faults.retry_waits_ms,
         } });
         finishCustodyNow(host, slot, token);
@@ -2403,7 +2403,7 @@ fn launchPreparedRequest(
         }
         stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
-            settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
+            settleAttemptFailure(host, token, binding, .{ .code = "response_capture_failed" }, .terminal);
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
@@ -2490,7 +2490,7 @@ fn completeTransfer(
                 .write_failed => "response_write_failed",
                 .seal_failed => "response_seal_failed",
             };
-            settleAttemptFailure(host, owner.token, owner.binding, code, .terminal);
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = code }, .terminal);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
@@ -2524,13 +2524,13 @@ fn completeTransfer(
         };
         const overflow = overflow_result catch |err| {
             stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-            settleAttemptFailure(host, owner.token, owner.binding, "response_read_failed", .terminal);
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "response_read_failed" }, .terminal);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
         };
         if (overflow) {
-            settleAttemptFailure(host, owner.token, owner.binding, "provider_context_overflow", .context_overflow);
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "provider_context_overflow" }, .context_overflow);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
@@ -2562,7 +2562,7 @@ fn completeTransfer(
         host,
         owner.token,
         owner.binding,
-        code,
+        .{ .code = code },
         failure_disposition,
     );
     active.transfer.deinit();
@@ -2577,11 +2577,6 @@ const SuccessfulCompletion = union(enum) {
 fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
-    if (structured_output) {
-        settleAttemptFailure(host, owner.token, owner.binding, "unsupported_output_schema", .terminal);
-        active.transfer.deinit();
-        return .cleanup;
-    }
     var request_id: protocol.Bounded(256) = .{};
     request_id.set(active.transfer.requestId()) catch unreachable;
     var openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
@@ -2591,6 +2586,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
+    if (structured_output) {
+        const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "unsupported_output_schema",
+            .diagnostic = rejection.format(error.UnsupportedOutputSchema, &detail),
+            .request_id = request_id,
+        }, .terminal);
+        return .cleanup;
+    }
 
     var metadata_name_buffer: [96]u8 = undefined;
     const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
@@ -2612,30 +2617,44 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             return .{ .named_scratch = retained };
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
+        settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "response_metadata_exhausted", .request_id = request_id }, .terminal);
         return .cleanup;
     };
     defer metadata.deinit();
+    var rejection: model_adapter.Output.Rejection = .{};
     traceOperation(host, "validation_started", owner.binding);
     const operation = host.store.modelOperationKind(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, .{
+    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, &rejection, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
         stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), if (err == error.ContextOverflow) .context_overflow else .terminal);
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = model_adapter.Output.failureCode(err),
+            .diagnostic = rejection.format(err, &detail),
+            .request_id = request_id,
+        }, if (err == error.ContextOverflow) .context_overflow else .terminal);
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
+    // Cross-response and transactional envelope checks run after parsing the
+    // complete capture; their coordinate is its end, not the parser's last item.
+    rejection = .{ .stage = .response, .byte_offset = response.length };
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, owner.token, owner.binding, "contradictory_provider_output", .terminal);
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "contradictory_provider_output",
+            .diagnostic = rejection.format(error.ContradictoryProviderOutput, &detail),
+            .request_id = request_id,
+        }, .terminal);
         return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
@@ -2667,7 +2686,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            host.store.settleModelAttemptFailure(owner.binding, "contradictory_provider_output", .terminal, .{
+            var detail: [512]u8 = undefined;
+            host.store.settleModelAttemptFailure(owner.binding, .{
+                .code = "contradictory_provider_output",
+                .diagnostic = rejection.format(err, &detail),
+                .request_id = request_id,
+            }, .terminal, .{
                 .before_commit = host.faults.result_before_commit,
             }) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
@@ -2861,11 +2885,11 @@ fn settleAttemptFailure(
     host: *Host,
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
-    code: []const u8,
+    failure: store_module.ModelFailure,
     disposition: store_module.ModelFailureDisposition,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelAttemptFailure(binding, code, disposition, .{
+    host.store.settleModelAttemptFailure(binding, failure, disposition, .{
         .before_commit = host.faults.result_before_commit,
     }) catch |err| if (err != error.SupersededByControl)
         fenceDispatch(host, "model failure save", err);

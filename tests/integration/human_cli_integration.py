@@ -241,6 +241,43 @@ def terminal_redraw(output, composer):
     raise AssertionError(("no complete edited redraw", composer, output))
 
 
+def wait_for_held_exec_request(process, requests, count, description, failure_path, *, timeout=8):
+    """Retain pre-cleanup caller evidence, not just an absent provider request."""
+    def reached():
+        assert process.poll() is None, ("exec exited before held provider request", process.returncode)
+        return len(requests) == count
+
+    try:
+        fixture.wait_for(reached, description, timeout=timeout)
+    except BaseException as error:
+        def collect(error=error):
+            snapshot = {"description": description, "requests": len(requests),
+                        "expected_requests": count, "observed_at_ns": time.monotonic_ns()}
+            for name in ("stdout", "stderr"):
+                stream = getattr(process, name)
+                flags = fcntl.fcntl(stream, fcntl.F_GETFL)
+                output = bytearray()
+                try:
+                    fcntl.fcntl(stream, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    while len(output) < 16 * 1024:
+                        try:
+                            data = os.read(stream.fileno(), 16 * 1024 - len(output))
+                        except BlockingIOError:
+                            break
+                        if not data:
+                            break
+                        output.extend(data)
+                finally:
+                    fcntl.fcntl(stream, fcntl.F_SETFL, flags)
+                snapshot[name] = output.decode(errors="replace")
+                snapshot[name + "_at_limit"] = len(output) == 16 * 1024
+            snapshot["returncode_before_cleanup"] = process.poll()
+            error.add_note("exec request failure: " + json.dumps(snapshot))
+            return snapshot
+        preserve_failure_metadata(failure_path, collect)
+        raise
+
+
 def pipe_wait_oracles():
     reader, writer = os.pipe()
     with os.fdopen(reader, "rb", buffering=0) as stream:
@@ -277,6 +314,32 @@ def pipe_wait_oracles():
             assert error.args[0] == ("pipe record exceeds 16 KiB", b"x" * (16 * 1024)), error
         else:
             raise AssertionError("unbounded pipe record accepted")
+    with tempfile.TemporaryDirectory(prefix="rui-exec-wait-oracle.") as directory:
+        for exited in (True, False):
+            child = subprocess.Popen([sys.executable, "-u", "-c",
+                "import os,time; os.write(2,b'preflight sentinel'); os.write(1,b'!'); " +
+                ("raise SystemExit(23)" if exited else "time.sleep(60)")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                assert read_pipe_output(child.stdout, count=1) == b"!"
+                if exited:
+                    assert child.wait(timeout=5) == 23
+                failure_path = pathlib.Path(directory) / f"{exited}.json"
+                try:
+                    wait_for_held_exec_request(child, [], 1, "synthetic held request",
+                                              failure_path, timeout=0.05)
+                except AssertionError:
+                    assert failure_path.is_file(), "exec failure lost child evidence"
+                    retained = json.loads(failure_path.read_text())
+                    assert retained["stderr"] == "preflight sentinel", retained
+                    assert retained["returncode_before_cleanup"] == (23 if exited else None), retained
+                    assert retained["requests"] == 0 and retained["expected_requests"] == 1, retained
+                    assert not retained["stderr_at_limit"], retained
+                    assert failure_path.stat().st_mode & 0o777 == 0o600
+                else:
+                    raise AssertionError("absent provider request became ready")
+            finally:
+                dispose_all(lambda: stop_process(child, timeout=5), child.stdout.close, child.stderr.close)
     print("pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound", flush=True)
 
 
@@ -581,7 +644,8 @@ def command_entry_cases():
         env = {**os.environ, "HOME": str(home)}
         executor = subprocess.Popen([str(fixture.RUI), "exec", "held prompt"], cwd=workspace,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        fixture.wait_for(lambda: len(endpoint.requests) == 3, "exec provider request")
+        wait_for_held_exec_request(executor, endpoint.requests, 3, "exec provider request",
+                                  state / "exec-answer-request-failure.json")
         assert executor.poll() is None, "exec returned on Admission instead of waiting for the answer"
         assert not select.select([executor.stdout], [], [], 0)[0], "exec leaked receipts to stdout"
         exec_release.set()
@@ -614,7 +678,8 @@ def command_entry_cases():
         assert record.read_bytes() == original_record and len(endpoint.requests) == 6, "exec replaced uncertain input"
         executor = subprocess.Popen([str(fixture.RUI), "exec", "needs approval"], cwd=workspace,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        fixture.wait_for(lambda: len(endpoint.requests) == 7, "exec held tool request")
+        wait_for_held_exec_request(executor, endpoint.requests, 7, "exec held tool request",
+                                  state / "exec-tool-request-failure.json")
         pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
         selected = pages[-1]["sessions"][-1]["reference"]
         # Permission mode is selected at proposal admission, not dispatch.
