@@ -254,6 +254,20 @@ const Intake = struct {
             self.fd = -1;
         }
 
+        fn finishRetirement(self: *Exchange) void {
+            self.closeSocket();
+            if (self.route) |route| {
+                if (route.isControl() or route == .host_info) {
+                    // Reserved routes cannot capture files. Their bounded
+                    // memory and reply cleanup must not wait for either local
+                    // worker, keeping the total intake place as well as its
+                    // classification available to a successor.
+                    std.debug.assert(self.cleanup());
+                    self.state = .closed;
+                }
+            }
+        }
+
         fn cleanup(self: *Exchange) bool {
             const host = self.host;
             if (self.reply) |reply| {
@@ -366,6 +380,12 @@ const Intake = struct {
                             var discovery: usize = 0;
                             for (self.host.intake.?.exchanges.items) |peer| {
                                 if (peer.route) |route| {
+                                    // A prior reply can finish earlier in this
+                                    // same socket pass, before retirement is
+                                    // serviced. Ordinary scratch custody still
+                                    // counts until its worker releases it.
+                                    if ((route.isControl() or route == .host_info) and
+                                        (peer.state == .retired or peer.state == .closed)) continue;
                                     if (route.isControl()) {
                                         control += 1;
                                     } else if (route == .host_info) {
@@ -525,7 +545,7 @@ const Intake = struct {
     fn serviceWorkers(self: *Intake) void {
         // Retire peers even when both workers are busy or cleanup is not due.
         for (self.exchanges.items) |exchange| {
-            if (exchange.state == .retired) exchange.closeSocket();
+            if (exchange.state == .retired) exchange.finishRetirement();
         }
         for (&self.workers, 0..) |*worker, worker_index| {
             worker.mutex.lockUncancelable(self.host.io);
@@ -546,7 +566,7 @@ const Intake = struct {
                             exchange.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
                     }
                 }
-                if (exchange.state == .retired) exchange.closeSocket();
+                if (exchange.state == .retired) exchange.finishRetirement();
                 worker.failure = null;
                 worker.exchange = null;
                 worker.state = .idle;
@@ -6625,6 +6645,65 @@ test "control response variants fit exact worst-case JSON bounds" {
         interruption_rejected,
         protocol.max_model_interruption_rejected_observation_bytes,
     );
+}
+
+test "retired reserved exchanges cannot block their successors while workers are occupied" {
+    for (std.enums.values(Route)) |route| {
+        if (!route.isControl() and route != .host_info) continue;
+        for ([_]Intake.Exchange.State{ .retired, .closed }) |retired_state| {
+            var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+            var intake: Intake = .{ .host = &host };
+            host.intake = &intake;
+            defer intake.exchanges.deinit(host.allocator);
+            defer for (intake.exchanges.items) |exchange| {
+                std.debug.assert(exchange.destroy());
+            };
+            // Neither local-work lane can reclaim these entries for us.
+            for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+            const places: usize = if (route == .host_info) 1 else 2;
+            for (0..places) |_| {
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try intake.accept(sockets[0]);
+                const peer = intake.exchanges.items[intake.exchanges.items.len - 1];
+                peer.route = route;
+                peer.state = retired_state;
+                if (retired_state == .closed) peer.closeSocket();
+            }
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try intake.accept(sockets[0]);
+            const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
+            const path = switch (route) {
+                .host_info => "host-info",
+                .host_stop => "control/host-stop",
+                .session_stop => "control/session-stop",
+                .model_interruption => "control/model-interruption",
+                .permission_decision => "control/permission-decision",
+                .unsupported_control => "control/unknown",
+                else => unreachable,
+            };
+            var header: [128]u8 = undefined;
+            const line = try std.fmt.bufPrint(&header, "POST /v1/{s} HTTP/1.1\r\n", .{path});
+            try writeAll(host.io, sockets[1], line);
+            try successor.read();
+            try std.testing.expectEqual(.header, successor.state);
+            // A live reservation must still reject excess work.
+            for (intake.exchanges.items[0..places]) |peer| peer.state = .header;
+            successor.route = null;
+            try writeAll(host.io, sockets[1], line);
+            successor.header_bytes.clearRetainingCapacity();
+            try std.testing.expectError(if (route == .host_info) error.DiscoveryCapacity else error.ControlCapacity, successor.read());
+            for (intake.exchanges.items[0..places]) |peer| peer.state = .retired;
+            intake.serviceWorkers();
+            for (intake.exchanges.items[0..places]) |peer| {
+                try std.testing.expectEqual(.closed, peer.state);
+                try std.testing.expectEqual(@as(c_int, -1), peer.fd);
+            }
+        }
+    }
 }
 
 test "shutdown fences every unhanded route while preserving request and reply custody" {
