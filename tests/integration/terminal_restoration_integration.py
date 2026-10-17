@@ -2746,4 +2746,8 @@ def main(selected=None):
 
 
 if __name__ == "__main__":
-    main(sys.argv[2] if len(sys.argv) == 3 else None)
+    if os.environ.get("RUI_BACKPRESSURE_DIAG"):
+        import renderer_diagnostic
+        renderer_diagnostic.run(os.environ["RUI_BACKPRESSURE_DIAG"])
+    else:
+        main(sys.argv[2] if len(sys.argv) == 3 else None)

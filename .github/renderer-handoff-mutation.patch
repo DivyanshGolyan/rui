@@ -1,0 +1,15 @@
+diff --git a/src/SessionTerminal.zig b/src/SessionTerminal.zig
+--- a/src/SessionTerminal.zig
++++ b/src/SessionTerminal.zig
+@@ -241,7 +241,10 @@ fn write(self: *Self, bytes: []const u8) !void {
+         if (n < 0) switch (std.posix.errno(n)) {
+             .INTR => continue,
+             .AGAIN => {
+-                if (self.pump) |pump| try pump.step(pump.context) else return error.TerminalCleanupFailed;
++                if (self.pump) |pump| pump.step(pump.context) catch |err| switch (err) {
++                    error.CommandHandoff => return error.Cancelled,
++                    else => return err,
++                } else return error.TerminalCleanupFailed;
+                 continue;
+             },
+             else => return error.TerminalCleanupFailed,
