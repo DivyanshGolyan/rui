@@ -1562,23 +1562,12 @@ pub fn retry(
 ) !MutationReply {
     reply_buffer.len = 0;
     const paths = try platform.resolveClientPaths(io, store_path);
-    const route = if (std.mem.eql(u8, kind, "configure"))
-        "/v1/configure"
-    else if (std.mem.eql(u8, kind, "message"))
-        "/v1/message"
-    else if (std.mem.eql(u8, kind, "session-stop"))
-        "/v1/control/session-stop"
-    else if (std.mem.eql(u8, kind, "model-interruption"))
-        "/v1/control/model-interruption"
-    else if (std.mem.eql(u8, kind, "permission-decision"))
-        "/v1/control/permission-decision"
-    else
-        return error.InvalidRetryKind;
+    const selected = MutationKind.parseRetryName(kind) orelse return error.InvalidRetryKind;
     var file = try std.Io.Dir.cwd().openFile(io, record, .{});
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
-    if (!binding.saved.store.eql(paths.store.slice()) or !std.mem.eql(u8, route, binding.target.route())) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, route, try file.length(io), &file, null, null, null, reply_buffer, null);
+    if (!binding.saved.store.eql(paths.store.slice()) or binding.target != selected) return error.RequestBindingMismatch;
+    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), try file.length(io), &file, null, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
     result.context = binding.saved;
     return result;
@@ -1614,7 +1603,7 @@ pub const MessageAddress = struct {
 pub const CommandObservation = struct {
     key: protocol.Bounded(protocol.max_key_bytes),
     status: enum { absent, accepted, rejected },
-    kind: ?std.meta.Tag(MutationTarget) = null,
+    kind: ?MutationKind = null,
     target: ?protocol.Bounded(protocol.max_session_bytes) = null,
     code: ?protocol.Bounded(96) = null,
     revision: ?u64 = null,
@@ -1737,7 +1726,7 @@ pub const CommandObservation = struct {
         const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
         const Facts = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
-            kind: OmittableJson(JsonEnum(std.meta.Tag(MutationTarget))) = .{},
+            kind: OmittableJson(JsonEnum(MutationKind)) = .{},
             target: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
             code: OmittableJson(JsonString(96)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
@@ -1950,14 +1939,16 @@ fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
         !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
 }
 
-pub const MutationTarget = union(enum) {
+/// The five durable mutations. Tag names are the captured-record and
+/// observation spelling; `rui retry --kind` uses the hyphenated spelling.
+pub const MutationKind = enum {
     configure,
-    message: struct { bytes: u64, digest: [32]u8 },
+    message,
     session_stop,
-    model_interruption: struct { turn: u64, operation: u64 },
-    permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
+    model_interruption,
+    permission_decision,
 
-    fn route(self: MutationTarget) []const u8 {
+    fn route(self: MutationKind) []const u8 {
         return switch (self) {
             .configure => "/v1/configure",
             .message => "/v1/message",
@@ -1965,6 +1956,43 @@ pub const MutationTarget = union(enum) {
             .model_interruption => "/v1/control/model-interruption",
             .permission_decision => "/v1/control/permission-decision",
         };
+    }
+
+    /// Generated recovery (`requests`, `recover`, `follow`) reopens only these
+    /// records; controls retain the explicit retry route.
+    fn recoversGenerated(self: MutationKind) bool {
+        return switch (self) {
+            .configure, .message, .permission_decision => true,
+            .session_stop, .model_interruption => false,
+        };
+    }
+
+    fn parseRetryName(name: []const u8) ?MutationKind {
+        inline for (comptime std.enums.values(MutationKind)) |kind| {
+            if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
+        }
+        return null;
+    }
+
+    fn retryName(comptime kind: MutationKind) []const u8 {
+        comptime {
+            var name = @tagName(kind)[0..@tagName(kind).len].*;
+            std.mem.replaceScalar(u8, &name, '_', '-');
+            const final = name;
+            return &final;
+        }
+    }
+};
+
+pub const MutationTarget = union(MutationKind) {
+    configure,
+    message: struct { bytes: u64, digest: [32]u8 },
+    session_stop,
+    model_interruption: struct { turn: u64, operation: u64 },
+    permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
+
+    fn route(self: MutationTarget) []const u8 {
+        return std.meta.activeTag(self).route();
     }
 };
 
@@ -2456,6 +2484,10 @@ pub const CapturedIdentity = struct {
     key: protocol.Bounded(protocol.max_key_bytes) = .{},
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
     kind: protocol.Bounded(32) = .{},
+
+    pub fn isKind(self: *const CapturedIdentity, kind: MutationKind) bool {
+        return self.kind.eql(@tagName(kind));
+    }
 };
 
 pub const CaptureTarget = union(enum) {
@@ -2519,16 +2551,13 @@ fn requestPath(directory: []const u8, handle: []const u8, buffer: []u8) ![]const
     return std.fmt.bufPrint(buffer, "{s}/{s}.json", .{ directory, handle });
 }
 
-// Generated recovery still supports configure/message/permission decisions;
-// controls retain the explicit retry route.
 pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedRecord {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(directory, handle, &path_buffer);
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
     const binding = try readCapturedBinding(io, &file);
-    if (!binding.saved.key.eql(handle)) return error.InvalidRequestRecord;
-    _ = try capturedRoute(&binding.saved);
+    if (!binding.saved.key.eql(handle) or !std.meta.activeTag(binding.target).recoversGenerated()) return error.InvalidRequestRecord;
     return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
 }
 
@@ -2539,15 +2568,9 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !C
     var file = try std.Io.Dir.cwd().openFile(io, try requestPath(directory, handle, &path_buffer), .{});
     defer file.close(io);
     const saved = try readCapturedIdentity(io, &file, handle);
-    _ = try capturedRoute(&saved);
+    const kind = std.meta.stringToEnum(MutationKind, saved.kind.slice()) orelse return error.InvalidRequestRecord;
+    if (!kind.recoversGenerated()) return error.InvalidRequestRecord;
     return saved;
-}
-
-fn capturedRoute(saved: *const CapturedIdentity) ![]const u8 {
-    if (saved.kind.eql("configure")) return "/v1/configure";
-    if (saved.kind.eql("message")) return "/v1/message";
-    if (saved.kind.eql("permission_decision")) return "/v1/control/permission-decision";
-    return error.InvalidRequestRecord;
 }
 
 pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
@@ -2619,7 +2642,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
     if (!fields.version.eql("1")) return error.InvalidRequestRecord;
-    const kind = std.meta.stringToEnum(std.meta.Tag(MutationTarget), fields.kind.slice()) orelse return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(MutationKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: CapturedIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = fields.kind.value };
     if (kind == .model_interruption) {
         if (fields.session != null) return error.InvalidRequestRecord;
@@ -2698,7 +2721,7 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"configure\",\"store\":");
+    try capture.writeHeader(.configure);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
     try capture.writeJsonString(location.key);
@@ -2723,7 +2746,7 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     try capture.write(",\"output_reservation\":");
     try capture.writeOptionalPolicy(input.output_reservation);
     try capture.write(if (input.require_model) "},\"require_model\":true}" else "}}");
-    return finishCapture(io, &capture, paths.store.slice(), location.key, session, "configure");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
 }
 
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !CapturedRecord {
@@ -2735,7 +2758,7 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"message\",\"store\":");
+    try capture.writeHeader(.message);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
     try capture.writeJsonString(location.key);
@@ -2747,21 +2770,21 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
         try capture.writeJsonString(value);
     } else try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "message");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
 fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":");
+    try capture.writeHeader(.session_stop);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
     try capture.writeJsonString(input.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write("}");
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "session_stop");
+    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, .session_stop);
 }
 
 fn captureModelInterruption(
@@ -2772,7 +2795,7 @@ fn captureModelInterruption(
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, input.record, &output_buffer);
     errdefer capture.abort();
-    try capture.write("{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":");
+    try capture.writeHeader(.model_interruption);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
     try capture.writeJsonString(input.key);
@@ -2784,7 +2807,7 @@ fn captureModelInterruption(
         input.operation_id,
     });
     try capture.write(suffix);
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, "model_interruption");
+    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, .model_interruption);
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -2798,15 +2821,15 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writePermissionDecision(paths.store.slice(), location.key, input);
-    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, "permission_decision");
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .permission_decision);
 }
 
-fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: []const u8) !CapturedRecord {
+fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: MutationKind) !CapturedRecord {
     var saved: CapturedIdentity = .{};
     try saved.store.set(store);
     try saved.key.set(key);
     try saved.session.set(session);
-    try saved.kind.set(kind);
+    try saved.kind.set(@tagName(kind));
     // Pin the temporary inode under capture custody, before exposing its name.
     // This reader observes the final flush, not a later public-path replacement.
     var file = try capture.parent.openFile(io, capture.temporary_name.slice(), .{});
@@ -2816,7 +2839,7 @@ fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const 
     try capture.commit();
     const length = try file.length(io);
     const binding = try readCapturedBinding(io, &file);
-    if (!binding.saved.store.eql(store) or !binding.saved.key.eql(key) or !binding.saved.session.eql(session) or !binding.saved.kind.eql(kind)) return error.InvalidRequestRecord;
+    if (!binding.saved.store.eql(store) or !binding.saved.key.eql(key) or !binding.saved.session.eql(session) or binding.target != kind) return error.InvalidRequestRecord;
     return .{ .file = file, .length = length, .saved = saved, .target = binding.target };
 }
 
@@ -2921,8 +2944,12 @@ const Capture = struct {
             return self.writer.err orelse error.WriteFailed;
     }
 
+    fn writeHeader(self: *Capture, comptime kind: MutationKind) !void {
+        try self.write("{\"version\":\"1\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"store\":");
+    }
+
     fn writePermissionDecision(self: *Capture, store: []const u8, key: []const u8, input: PermissionDecisionInput) !void {
-        try self.write("{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":");
+        try self.writeHeader(.permission_decision);
         try self.writeJsonString(store);
         try self.write(",\"key\":");
         try self.writeJsonString(key);
@@ -3862,6 +3889,43 @@ test "capture mutation binding streams complete escaped input and rejects late a
     try file.writePositionalAll(io, " trailing", try file.length(io));
     try std.testing.expectEqualStrings("s/µ", (try inspectCaptured(io, root, saved.key.slice())).session.slice());
     try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, saved.key.slice()));
+}
+
+test "retry and generated recovery select captured mutations by kind" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const paths = try platform.resolveClientPaths(io, root);
+    const stop_key = "00000000-0000-4000-8000-000000000001";
+    var stop_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const stop_record = try requestPath(root, stop_key, &stop_path);
+    var stop = try captureSessionStop(io, &paths, .{ .store = root, .record = stop_record, .key = stop_key, .session = "s" });
+    stop.close(io);
+    var message = try captureMessage(io, .{ .store = root, .session = "s", .text = "m", .text_path = "" }, .{ .generated = root });
+    const message_key = message.saved.key;
+    message.close(io);
+    var message_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const message_record = try requestPath(root, message_key.slice(), &message_path);
+
+    // Controls are retried explicitly; generated recovery reopens only
+    // configure, message and permission-decision records.
+    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, stop_key));
+    try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, stop_key));
+    var recovered = try openCaptured(io, root, message_key.slice());
+    recovered.close(io);
+    try std.testing.expect((try inspectCaptured(io, root, message_key.slice())).isKind(.message));
+
+    // Retry accepts only the hyphenated command spelling of the record's own
+    // kind. A matching kind reaches transmission, which fails without a Host.
+    var reply: ReplyBuffer = .{};
+    try std.testing.expectError(error.InvalidRetryKind, retry(io, root, stop_record, "session_stop", &reply));
+    try std.testing.expectError(error.RequestBindingMismatch, retry(io, root, stop_record, "model-interruption", &reply));
+    try std.testing.expectError(error.FileNotFound, retry(io, root, stop_record, "session-stop", &reply));
+    try std.testing.expectError(error.RequestBindingMismatch, retry(io, root, message_record, "permission-decision", &reply));
+    try std.testing.expectError(error.FileNotFound, retry(io, root, message_record, "message", &reply));
 }
 
 test "capture returns original identity before send and preserves empty explicit keys" {
