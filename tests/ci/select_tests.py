@@ -151,7 +151,8 @@ def select(paths, phase, available):
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             continue
-        if path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml":
+        if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
+                or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: selector and workflow checks")
             targets.add("test-logic")
             native_targets.add("test-logic")
