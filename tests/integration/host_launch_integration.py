@@ -195,7 +195,7 @@ def matching_processes(store):
             try:
                 argv = (entry / "cmdline").read_bytes().split(b"\0")
                 candidates.append((int(entry.name), [part.decode() for part in argv if part]))
-            except (FileNotFoundError, PermissionError, UnicodeDecodeError):
+            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeDecodeError):
                 continue
     else:
         listing = subprocess.run(
@@ -500,7 +500,8 @@ def wait_for_terminal_exit(caller, master, output, deadline):
 
 def main():
     assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits]"
-    from host_launch_exit_test import check_exit_reader
+    from host_launch_exit_test import check_exit_reader, check_process_discovery
+    check_process_discovery(forced_crash_cleanup)
     check_exit_reader(wait_for_terminal_exit)
     with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
