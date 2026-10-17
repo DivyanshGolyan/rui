@@ -11,7 +11,8 @@ import subprocess
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
-    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
+    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig",
+      "src/ResponseTiming.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),

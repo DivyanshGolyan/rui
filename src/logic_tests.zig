@@ -9,6 +9,7 @@ test {
     _ = @import("named_scratch.zig");
     _ = @import("new_session_selection.zig");
     _ = @import("request_encoding.zig");
+    _ = @import("ResponseTiming.zig");
     _ = @import("session_consent.zig");
     _ = @import("session_departure.zig");
     _ = @import("ConversationViewport.zig");
