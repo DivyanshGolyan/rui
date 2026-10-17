@@ -1,4 +1,5 @@
 const std = @import("std");
+const deadline = @import("deadline.zig");
 
 pub const control_reconciliation_interval_ms = 100;
 pub const retained_cleanup_retry_ms = 100;
@@ -29,15 +30,8 @@ pub const State = struct {
     capacity_was_full: bool = false,
 };
 
-fn due(deadline: ?std.Io.Clock.Timestamp, now: std.Io.Clock.Timestamp) bool {
-    return if (deadline) |value| value.compare(.lte, now) else true;
-}
-
-fn addMs(now: std.Io.Clock.Timestamp, milliseconds: u64) std.Io.Clock.Timestamp {
-    return now.addDuration(.{
-        .raw = .fromMilliseconds(@intCast(milliseconds)),
-        .clock = .awake,
-    });
+fn due(at: ?std.Io.Clock.Timestamp, now: std.Io.Clock.Timestamp) bool {
+    return if (at) |value| deadline.reached(now, value) else true;
 }
 
 pub fn serviceLifecycle(state: *State, context: anytype) bool {
@@ -47,7 +41,7 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     var made_progress = false;
     if (hint or due(state.next_control_reconciliation, now)) {
         context.reconcileControls();
-        state.next_control_reconciliation = addMs(now, control_reconciliation_interval_ms);
+        state.next_control_reconciliation = deadline.after(now, control_reconciliation_interval_ms);
         made_progress = hint;
     }
     if (context.advanceBashPreparation()) made_progress = true;

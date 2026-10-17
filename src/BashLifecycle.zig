@@ -8,13 +8,14 @@
 //! them aligned with these transitions. See ARCHITECTURE.md, "Bash lifecycle
 //! and capture".
 const std = @import("std");
+const deadline = @import("deadline.zig");
 
 const Self = @This();
 
 pub const termination_grace_ms: u64 = 100;
 pub const cleanup_observation_ms: u64 = 5_000;
 
-pub const Timestamp = std.Io.Clock.Timestamp;
+pub const Timestamp = deadline.Timestamp;
 
 pub const Term = union(enum) {
     exited: u8,
@@ -102,18 +103,7 @@ signal_failure: bool = false,
 group_permission_denied: bool = false,
 
 pub fn start(started: Timestamp, timeout_ms: u64) Self {
-    return .{ .process = .{ .running = .{ .deadline = addMilliseconds(started, timeout_ms) } } };
-}
-
-pub fn addMilliseconds(timestamp: Timestamp, milliseconds: u64) Timestamp {
-    return timestamp.addDuration(.{
-        .raw = .fromMilliseconds(@intCast(milliseconds)),
-        .clock = .awake,
-    });
-}
-
-pub fn reached(now: Timestamp, deadline: Timestamp) bool {
-    return now.raw.nanoseconds >= deadline.raw.nanoseconds;
+    return .{ .process = .{ .running = .{ .deadline = deadline.after(started, timeout_ms) } } };
 }
 
 /// Records why termination began. The first reason and the first grace
@@ -126,10 +116,10 @@ pub fn requestTermination(self: *Self, reason: StopReason, now: Timestamp) ?Sign
 
 /// Starts termination when the total budget elapsed by `now`.
 pub fn expireDeadline(self: *Self, now: Timestamp) ?Expiry {
-    if (self.process != .running or !reached(now, self.process.running.deadline)) return null;
-    const deadline = self.process.running.deadline;
+    if (self.process != .running or !deadline.reached(now, self.process.running.deadline)) return null;
+    const expired = self.process.running.deadline;
     if (self.stop_reason == .none) self.stop_reason = .timed_out;
-    return .{ .deadline = deadline, .signal = self.beginGrace(now).? };
+    return .{ .deadline = expired, .signal = self.beginGrace(now).? };
 }
 
 /// True while the direct child's terminal status is still unobserved.
@@ -158,15 +148,15 @@ fn beginGrace(self: *Self, now: Timestamp) ?Signal {
     // Copy before assigning: the new union is constructed in place.
     const observed = self.process.running.observed;
     self.process = .{ .grace = .{
-        .kill_at = addMilliseconds(now, termination_grace_ms),
-        .cleanup_deadline = addMilliseconds(now, cleanup_observation_ms),
+        .kill_at = deadline.after(now, termination_grace_ms),
+        .cleanup_deadline = deadline.after(now, cleanup_observation_ms),
         .observed = observed,
     } };
     return .terminate_group;
 }
 
 pub fn expireGrace(self: *Self, now: Timestamp) ?Signal {
-    if (self.process != .grace or !reached(now, self.process.grace.kill_at)) return null;
+    if (self.process != .grace or !deadline.reached(now, self.process.grace.kill_at)) return null;
     const grace = self.process.grace;
     self.process = .{ .reaping = .{
         .cleanup_deadline = grace.cleanup_deadline,
@@ -191,7 +181,7 @@ pub fn recordSignal(self: *Self, result: SignalResult) void {
 /// The reap found no exited child. Unconfirmed after the watchdog.
 pub fn reapPending(self: *const Self, now: Timestamp) error{BashCleanupUnconfirmed}!void {
     std.debug.assert(self.process == .reaping);
-    if (reached(now, self.process.reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
+    if (deadline.reached(now, self.process.reaping.cleanup_deadline)) return error.BashCleanupUnconfirmed;
 }
 
 /// Consumes the direct child's status. An earlier observation remains the
@@ -220,9 +210,9 @@ pub fn groupAbsent(self: *Self) void {
 /// the watchdog expiry remains a fact, not a one-time event.
 pub fn cutoff(self: *const Self, now: Timestamp) ?Cutoff {
     const expired = switch (self.process) {
-        .grace => |value| reached(now, value.cleanup_deadline),
-        .reaping => |value| reached(now, value.cleanup_deadline),
-        .checking_group => |value| reached(now, value.cleanup_deadline),
+        .grace => |value| deadline.reached(now, value.cleanup_deadline),
+        .reaping => |value| deadline.reached(now, value.cleanup_deadline),
+        .checking_group => |value| deadline.reached(now, value.cleanup_deadline),
         .running, .gone => false,
     };
     if (self.process != .gone and !expired) return null;
@@ -329,12 +319,12 @@ pub fn resolution(self: *const Self) Resolution {
 }
 
 fn at(milliseconds: u64) Timestamp {
-    return addMilliseconds(std.Io.Timestamp.fromNanoseconds(0).withClock(.awake), milliseconds);
+    return deadline.after(std.Io.Timestamp.fromNanoseconds(0).withClock(.awake), milliseconds);
 }
 
 fn retire(self: *Self, term: Term, now: Timestamp) !void {
     if (self.awaitsLeader()) _ = self.observeLeader(term, now);
-    _ = self.expireGrace(addMilliseconds(now, termination_grace_ms));
+    _ = self.expireGrace(deadline.after(now, termination_grace_ms));
     try self.reaped(term);
     self.groupAbsent();
     for (std.enums.values(Stream)) |stream| {

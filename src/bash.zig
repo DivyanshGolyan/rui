@@ -3,6 +3,7 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const BashLifecycle = @import("BashLifecycle.zig");
+const deadline = @import("deadline.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const store = @import("store.zig");
 const tools = @import("tools.zig");
@@ -640,7 +641,7 @@ pub const Execution = struct {
             .failed => return error.BashObserveFailed,
             .live => live: {
                 if (self.lifecycleFaultActive(.observe) and
-                    BashLifecycle.reached(now, BashLifecycle.addMilliseconds(self.started, fault_observation_delay_ms)))
+                    deadline.reached(now, deadline.after(self.started, fault_observation_delay_ms)))
                 {
                     return error.InjectedBashObserveFailure;
                 }
@@ -995,7 +996,7 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
     return .{
         .io = std.testing.io,
         .lifecycle = .{
-            .process = .{ .running = .{ .deadline = BashLifecycle.addMilliseconds(started, timeout_ms) } },
+            .process = .{ .running = .{ .deadline = deadline.after(started, timeout_ms) } },
             .pipes = .initFill(.{ .closed = .eof }),
         },
         .leader = 1,
@@ -1014,20 +1015,20 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
 
 test "service acts on its service-time observation rather than an earlier one" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    const deadline = BashLifecycle.addMilliseconds(started, 20);
+    const timeout_at = deadline.after(started, 20);
     // A pre-work observation is before the deadline: no timeout.
-    const before = BashLifecycle.addMilliseconds(started, 1);
+    const before = deadline.after(started, 1);
     var execution = runningWithDeadline(started, 20);
     try std.testing.expect(execution.applyDueDeadline(before) == null);
     try std.testing.expect(execution.lifecycle.process == .running);
     // The service-time observation is after the deadline: the real owner
     // requests termination through the production service path. No clock is
     // sampled and no syscall runs; both observations are explicit inputs.
-    const after = BashLifecycle.addMilliseconds(started, 21);
+    const after = deadline.after(started, 21);
     var window: [copy_window_bytes]u8 = undefined;
     const result = execution.serviceAt(&window, after, .none);
     const timeout = result.timeout_action orelse return error.TestExpectedResult;
-    try std.testing.expectEqual(@as(u64, @intCast(deadline.raw.nanoseconds)), timeout.deadline_ns);
+    try std.testing.expectEqual(@as(u64, @intCast(timeout_at.raw.nanoseconds)), timeout.deadline_ns);
     // The faulted TERM is reported with the timeout that sent it.
     try std.testing.expect(timeout.signal_failed);
     try std.testing.expect(result.fault == null);
@@ -1058,7 +1059,7 @@ test "service acts on its service-time observation rather than an earlier one" {
         grace.cleanup_deadline.raw.nanoseconds,
     );
     // A later stop is acknowledged without a new TERM or deadlines.
-    const stop = unobservable.requestStop(BashLifecycle.addMilliseconds(before, 50));
+    const stop = unobservable.requestStop(deadline.after(before, 50));
     try std.testing.expect(!stop.attempted);
     try std.testing.expectEqual(BashLifecycle.StopReason.infrastructure_shutdown, unobservable.lifecycle.stop_reason);
     try std.testing.expectEqual(grace.kill_at.raw.nanoseconds, unobservable.lifecycle.process.grace.kill_at.raw.nanoseconds);
@@ -1074,13 +1075,13 @@ test "service acts on its service-time observation rather than an earlier one" {
 
 test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
-    const deadline = BashLifecycle.addMilliseconds(started, 100);
-    const before = BashLifecycle.addMilliseconds(started, 99);
-    const after = BashLifecycle.addMilliseconds(started, 101);
+    const cleanup_at = deadline.after(started, 100);
+    const before = deadline.after(started, 99);
+    const after = deadline.after(started, 101);
     const phases = [_]enum { grace, reaping, checking_group }{ .grace, .reaping, .checking_group };
     const observations = [_]struct { now: std.Io.Clock.Timestamp, cutoff: bool }{
         .{ .now = before, .cutoff = false },
-        .{ .now = deadline, .cutoff = true },
+        .{ .now = cleanup_at, .cutoff = true },
         .{ .now = after, .cutoff = true },
     };
     var tmp = std.testing.tmpDir(.{});
@@ -1143,13 +1144,13 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             .grace => {
                 execution.leader = 1;
                 execution.lifecycle.process = .{ .grace = .{
-                    .kill_at = BashLifecycle.addMilliseconds(after, 1),
-                    .cleanup_deadline = deadline,
+                    .kill_at = deadline.after(after, 1),
+                    .cleanup_deadline = cleanup_at,
                     .observed = null,
                 } };
             },
             .reaping => {
-                execution.lifecycle.process = .{ .reaping = .{ .cleanup_deadline = deadline, .observed = null } };
+                execution.lifecycle.process = .{ .reaping = .{ .cleanup_deadline = cleanup_at, .observed = null } };
                 // The reap gate suppresses the syscall, not reading its PID.
                 execution.leader = 1;
                 execution.faults.lifecycle = .reap_watchdog;
@@ -1157,7 +1158,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             .checking_group => {
                 execution.lifecycle.process = .{ .checking_group = .{
                     .term = .{ .exited = 0 },
-                    .cleanup_deadline = deadline,
+                    .cleanup_deadline = cleanup_at,
                 } };
                 execution.faults.lifecycle = .cleanup_watchdog;
             },
