@@ -254,17 +254,24 @@ const Intake = struct {
             self.fd = -1;
         }
 
+        fn canCleanupOnIntake(self: *const Exchange) bool {
+            if (self.retained_scratch != null) return false;
+            if (self.reply) |reply| {
+                if (reply.body != .none and reply.body != .json) return false;
+            }
+            if (self.ingress == null and self.request == null) return true;
+            // Reserved routes can own metadata, but cannot capture files.
+            const route = self.route orelse return false;
+            return route.isControl() or route == .host_info;
+        }
+
         fn finishRetirement(self: *Exchange) void {
             self.closeSocket();
-            if (self.route) |route| {
-                if (route.isControl() or route == .host_info) {
-                    // Reserved routes cannot capture files. Their bounded
-                    // memory and reply cleanup must not wait for either local
-                    // worker, keeping the total intake place as well as its
-                    // classification available to a successor.
-                    std.debug.assert(self.cleanup());
-                    self.state = .closed;
-                }
+            // File-free retirement must not wait for a local worker while
+            // holding either a classification or a total intake place.
+            if (self.canCleanupOnIntake()) {
+                std.debug.assert(self.cleanup());
+                self.state = .closed;
             }
         }
 
@@ -384,8 +391,8 @@ const Intake = struct {
                                     // same socket pass, before retirement is
                                     // serviced. Ordinary scratch custody still
                                     // counts until its worker releases it.
-                                    if ((route.isControl() or route == .host_info) and
-                                        (peer.state == .retired or peer.state == .closed)) continue;
+                                    if (peer.state == .closed or
+                                        (peer.state == .retired and peer.canCleanupOnIntake())) continue;
                                     if (route.isControl()) {
                                         control += 1;
                                     } else if (route == .host_info) {
@@ -685,16 +692,7 @@ const Intake = struct {
                     else => {},
                 }
             }
-            var index: usize = 0;
-            while (index < self.exchanges.items.len) {
-                if (self.exchanges.items[index].state != .closed) {
-                    index += 1;
-                    continue;
-                }
-                if (self.exchanges.items[index].destroy()) {
-                    _ = self.exchanges.orderedRemove(index);
-                } else index += 1;
-            }
+            self.retireExchanges();
             if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             // Accept a bounded batch, then return to existing exchanges.
@@ -746,6 +744,23 @@ const Intake = struct {
                 if (self.host.intake_capacity < descriptor_capacity.default_intake and
                     self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
+        }
+    }
+
+    fn retireExchanges(self: *Intake) void {
+        var index: usize = 0;
+        while (index < self.exchanges.items.len) {
+            const exchange = self.exchanges.items[index];
+            // Finish this socket pass's retirements before considering the
+            // listener. No unclassified peer needs evicting for a freed place.
+            if (exchange.state == .retired) exchange.finishRetirement();
+            if (exchange.state != .closed) {
+                index += 1;
+                continue;
+            }
+            if (exchange.destroy()) {
+                _ = self.exchanges.orderedRemove(index);
+            } else index += 1;
         }
     }
 
@@ -6706,6 +6721,89 @@ test "retired reserved exchanges cannot block their successors while workers are
     }
 }
 
+test "file-free retirement releases intake places before acceptance with occupied workers" {
+    for ([_]?Route{ null, .host_info, .host_stop, .configure, .inspect }) |route| {
+        for ([_]bool{ false, true }) |service_workers| {
+            var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+            var intake: Intake = .{ .host = &host };
+            defer intake.exchanges.deinit(host.allocator);
+            defer for (intake.exchanges.items) |exchange| {
+                std.debug.assert(exchange.destroy());
+            };
+            for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[1]);
+            try intake.accept(sockets[0]);
+            const peer = intake.exchanges.items[0];
+            peer.route = route;
+            peer.fail(error.ClientCapacity);
+            // Complete a real bounded error reply, as the socket pass does.
+            while (!try peer.reply.?.advance(peer.fd)) {}
+            peer.state = .retired;
+            if (service_workers) intake.serviceWorkers();
+            // This is the same owner transition used between poll and accept.
+            intake.retireExchanges();
+            try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
+            var byte: [1024]u8 = undefined;
+            while (try std.posix.read(sockets[1], &byte) != 0) {}
+        }
+    }
+}
+
+test "retired ordinary capture still consumes its intake classification and resource place" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+    var intake: Intake = .{ .host = &host };
+    host.intake = &intake;
+    defer intake.exchanges.deinit(host.allocator);
+    defer {
+        for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
+        std.debug.assert(host.scratch_used.load(.acquire) == 0);
+    }
+    for (0..host.intake_capacity) |_| {
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        try intake.accept(sockets[0]);
+        intake.exchanges.items[intake.exchanges.items.len - 1].route = .message;
+    }
+    const retained = intake.exchanges.items[0];
+    const ingress = try host.allocator.create(protocol.Ingress);
+    ingress.* = protocol.Ingress.init(host.allocator, .{
+        .io = host.io,
+        .fd = retained.fd,
+        .content_length = 4096,
+        .scratch_path = root,
+        .request_number = 7,
+        .retained_scratch = &retained.retained_scratch,
+        .scratch_budget = .{ .used = &host.scratch_used, .limit = 9000 },
+        .expected_kind = .message,
+    });
+    retained.ingress = ingress;
+    // Seal the content file, but leave request framing incomplete.
+    try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+    retained.state = .retired;
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[1]);
+    try intake.accept(sockets[0]);
+    const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
+    try writeAll(host.io, sockets[1], "POST /v1/message HTTP/1.1\r\n");
+    try std.testing.expectError(error.ClientCapacity, successor.read());
+    intake.retireExchanges();
+    try std.testing.expectEqual(host.intake_capacity + 1, intake.exchanges.items.len);
+    try std.testing.expectEqual(.retired, retained.state);
+    try std.testing.expectEqual(@as(u64, 3), host.scratch_used.load(.acquire));
+}
+
 test "shutdown fences every unhanded route while preserving request and reply custody" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
     var exchange = Intake.Exchange{ .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
@@ -6735,6 +6833,9 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     try intake.exchanges.append(std.testing.allocator, &exchange);
     exchange.route = .configure;
     exchange.state = .ready;
+    exchange.request = try std.testing.allocator.create(protocol.Request);
+    exchange.request.?.* = .{ .configure = .{} };
+    defer exchange.releaseRequest();
     host.effect_shutdown.store(true, .release);
     intake.serviceWorkers();
     try std.testing.expectEqual(.retired, exchange.state);
