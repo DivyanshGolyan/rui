@@ -9,6 +9,7 @@ import time
 import unittest
 
 from select_tests import execution_batches, select, setup_requirements
+from qualification import NATIVE, RESOURCES, qualification, shards
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
@@ -254,6 +255,38 @@ class SelectionTest(unittest.TestCase):
         for target in ("transport-h2-integration", "codex-h2-integration"):
             self.assertEqual(setup_requirements([target, "measurement-check"]),
                              {"go": True, "h2": True})
+
+    def test_shards_keep_every_selected_target_and_both_full_parts(self):
+        targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]
+        rows = shards(targets)["include"]
+        self.assertEqual(len({row["name"] for row in rows}), len(rows))
+        self.assertEqual([row["targets"] for row in rows],
+                         [["check-full"], ["check-full"], ["codex-credential-integration"],
+                          ["test-full"], ["measurement-check"]])
+        self.assertEqual([batch for row in rows for batch in execution_batches(row["targets"], row["part"])],
+                         [["check-full", "-Dcheck-part=execution"], ["check-full", "-Dcheck-part=callers"],
+                          ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
+        self.assertEqual(shards([]), {"include": []})
+
+    def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
+        for platform in ("linux", "macos"):
+            rows = qualification("all", platform)["include"]
+            targets = {row["targets"][0] for row in rows}
+            self.assertTrue(targets <= AVAILABLE)
+            self.assertTrue(set(NATIVE) | set(RESOURCES) <= targets)
+            self.assertEqual("login-signal-integration" in targets, platform == "linux")
+            self.assertEqual({row["name"] for row in rows if row["resource"]}, set(RESOURCES))
+            self.assertTrue(all(len(row["targets"]) == 1 for row in rows))
+        self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
+        self.assertFalse(any(row["resource"] for row in qualification("native", "linux")["include"]))
+
+    def test_requested_ref_cannot_publish_shared_caches(self):
+        workflow = Path(".github/workflows/qualify-macos.yml").read_text()
+        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
+        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
+                         'a job override could restore cache-write authority')
+        self.assertIn('workflow_call:', workflow)
+        self.assertIn('persist-credentials: false', workflow)
 
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",

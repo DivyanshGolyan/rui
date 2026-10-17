@@ -1,0 +1,33 @@
+name: Linux qualification
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to qualify
+        type: string
+        default: main
+        required: true
+      suite:
+        description: Existing native gates, resource workloads, or both
+        type: choice
+        options: [native, resources, all, footprint]
+        default: native
+        required: true
+  schedule:
+    - cron: '13 6 * * *'
+  pull_request:
+    # Exercise the actual qualification wiring when it changes, not every edit.
+    paths:
+      - '.github/workflows/qualify-linux.yml'
+      - '.github/workflows/qualify-macos.yml'
+      - 'tests/ci/qualification.py'
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: ${{ !github.event.repository.private }}
+    uses: ./.github/workflows/qualify-macos.yml
+    with:
+      platform: linux
+      ref: ${{ inputs.ref || github.sha }}
+      suite: ${{ inputs.suite || 'all' }}
