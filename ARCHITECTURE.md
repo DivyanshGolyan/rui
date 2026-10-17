@@ -513,6 +513,8 @@ Canonical relations are the source of truth, not a second lifecycle image. Relat
 
 One meaningful mutation owns one cohesive function. It validates bounded syntax/content, reserves custody if admitting execution, then enters `BEGIN IMMEDIATE`. Inside the transaction it performs bounded current-state checks and guarded writes, then verifies affected rows. State-dependent checks stay inside. Only after commit may it release the consequence. Rollback releases unused reservation and grants no dispatch. Private helpers may simplify calculation/query mechanics without a mandatory classifier framework.
 
+Every Store entry point runs its locked body through one canonical access that declares the body's ordinary outcomes, such as a missing Session, a stale binding or a superseding control; a declared outcome the body cannot return fails to compile. The Store returns ordinary outcomes unchanged and fences itself on every other error from the body, including a failed SQLite step, before the caller sees it. Argument checks before the lock return without fencing. A caller may still escalate an ordinary outcome, such as a stale settlement, to a dispatch fence.
+
 Unreleased databases/fixtures are recreated: no migration, compatibility reader, dual-write or alias layer. Schema version 24 adds nullable Session compaction overrides and frozen Operation policy; earlier development Stores and associated configure captures must be recreated. The unreleased wire label remains `1`, with one canonical configure shape including the omission-aware provider field; pre-provider captures are not accepted or defaulted to Codex.
 
 ### Admitting an attempt

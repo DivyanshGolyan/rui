@@ -692,6 +692,40 @@ def permission_read_cases(state):
     print("automatic permission read: canonical/ordinary/invalid failures retain classification, restore terminal and never consent or mutate", flush=True)
 
 
+def store_read_cases(state):
+    """A canonical read fault in the Host fences it; it is never an ordinary miss."""
+    home = state / "store-read"
+    home.mkdir(mode=0o700)
+    store = home / "store"
+    host = fixture.start_host(store, None)
+    try:
+        fixture.configure(home, store, "store-read-configure", "s", "model-a")
+        fixture.message(home, store, "store-read-message", "s", "queued work")
+        before = invoke(home, "read-result", "--store", store, "--key", "store-read-message")
+        assert json.loads(before.stdout)["error"]["code"] == "result_not_ready", before
+        # The statement still compiles; SQLite fails it at the first step,
+        # as for an I/O or corruption fault after preparation.
+        database = sqlite3.connect(store / "rui.sqlite3")
+        try:
+            with database:
+                database.execute("ALTER TABLE core_command RENAME TO core_command_unreadable")
+                database.execute("CREATE VIEW core_command AS SELECT * FROM core_command_unreadable "
+                    "WHERE abs(-9223372036854775808) IS NOT NULL")
+        finally:
+            database.close()
+        result = invoke(home, "read-result", "--store", store, "--key", "store-read-message")
+        expect_fatal(result)
+        assert json.loads(result.stdout) == {"key": "store-read-message",
+            "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}, result
+        fixture.wait_for(lambda: host.poll() is not None, "canonical read fault fences the Host")
+        assert host.returncode == 1, host.returncode
+        failure = host.stderr.read()
+        assert b"dispatch fenced after result observation failure: ResultReadFailed" in failure, failure
+    finally:
+        fixture.stop_host(host)
+    print("canonical Store read: step fault fences the Host instead of reporting result_not_found", flush=True)
+
+
 def keyed_observation_cases(state, only="keyed"):
     home = state / only
     home.mkdir(mode=0o700)
@@ -768,10 +802,10 @@ def main(selected="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output"), selected
+        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output", "store-read"), selected
         if selected in ("keyed-bindings", "keyed-output"):
             keyed_observation_cases(state, selected)
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
+        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("store-read", store_read_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True
