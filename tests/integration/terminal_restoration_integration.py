@@ -265,6 +265,16 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         errno = EAGAIN;
         return -1;
     }
+    const char *pressure_arm = getenv("RUI_TERMINAL_BACKPRESSURE_ARM");
+    static int pressure_stopped = 0;
+    if (fd == 1 && fault && !strcmp(fault, "renderer-backpressure") &&
+        pressure_arm && !access(pressure_arm, F_OK) && !pressure_stopped) {
+        /* Stop the real PTY before a bounded repaint, independently of input
+           queue pressure. The syscall must encounter actual kernel EAGAIN. */
+        if (tcflow(fd, TCOOFF)) _exit(92);
+        pressure_stopped = 1;
+        record("output-stopped\n");
+    }
     ssize_t result = real_write(fd, bytes, count);
     int saved_errno = errno;
     if (stream && result > 0 && !visible) {
@@ -1016,31 +1026,38 @@ def renderer_backpressure_case(state, library, home, store):
     fcntl.ioctl(output_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
     log = state / "renderer-backpressure.log"
     release = state / "renderer-backpressure-release"
+    arm = state / "renderer-backpressure-arm"
     records = home / ".config/rui/requests"
     before = set(records.glob("*.json"))
-    caller = writer = None
-    stop = threading.Event()
-    failures = []
+    caller = None
     output, errors = bytearray(), bytearray()
+    echo_bytes = 0
 
     def drain_until(predicate, description, timeout=15):
+        nonlocal echo_bytes
         deadline = time.monotonic() + timeout
         while not predicate():
             remaining = deadline - time.monotonic()
             assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
-            ready = select.select([output_master, caller.stderr], [], [], remaining)[0]
+            ready = select.select([master, output_master, caller.stderr], [], [], remaining)[0]
             assert ready, (description, caller.poll(), bytes(errors))
             for fd in ready:
                 chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
                 assert chunk, (description, caller.poll(), bytes(errors))
-                (output if fd == output_master else errors).extend(chunk)
-            assert len(output) + len(errors) < 1024 * 1024, "unbounded renderer witness"
+                if fd == master:
+                    # Fresh Enter echoes on the separate input PTY after
+                    # restoration. Darwin's next TCSAFLUSH waits for its peer.
+                    echo_bytes += len(chunk)
+                else:
+                    (output if fd == output_master else errors).extend(chunk)
+            assert len(output) + len(errors) + echo_bytes < 1024 * 1024, "unbounded renderer witness"
 
     try:
         environment = {**os.environ, "HOME": str(home), "TERM": "xterm-256color",
             "RUI_RENDERER": "vaxis", "RUI_TERMINAL_FAULT": "renderer-backpressure",
             "RUI_TERMINAL_PROBE": str(log),
             "RUI_TERMINAL_HANDOFF_RELEASE": str(release),
+            "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm),
             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library)}
         caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
             "--", session], env=environment,
@@ -1053,33 +1070,15 @@ def renderer_backpressure_case(state, library, home, store):
             consumed = len(output)
             return screen.draft("", 2)
         drain_until(composer_ready, "opening alternate-screen composer")
-        # No newline/paste: each bounded input batch changes the live composer,
-        # never admits a Message. Varied cells defeat repeated-cell compression.
-        draft = bytes(33 + ((index * 37 + index // 71) % 94) for index in range(60000))
-        fcntl.fcntl(master, fcntl.F_SETFL, os.O_NONBLOCK)
-        def write_draft():
-            deadline = time.monotonic() + 15
-            offset = 0
-            try:
-                while offset < len(draft) and not stop.is_set():
-                    assert time.monotonic() < deadline, "draft input deadline"
-                    if select.select([], [master], [], 0.05)[1]:
-                        try:
-                            offset += os.write(master, draft[offset:offset + 256])
-                        except BlockingIOError:
-                            pass  # Real input credit, bounded by the original deadline.
-            except BaseException as error:
-                failures.append(error)
-        writer = threading.Thread(target=write_draft)
-        writer.start()
+        arm.touch()
+        assert os.write(master, b"x") == 1
         fixture.wait_for(lambda: log.exists() and "output-blocked\n" in log.read_text(),
             "renderer actual kernel EAGAIN")
-        writer.join(timeout=15)
-        assert not writer.is_alive(), "draft writer did not finish"
-        assert not failures, failures
-        os.write(master, b"\x15/configure --permission-mode ask\n")
+        command = b"\x15/configure --permission-mode ask\n"
+        assert os.write(master, command) == len(command)
         fixture.wait_for(lambda: "handoff-cleanup-entered\n" in log.read_text(),
             "command unwound blocked renderer before restoring output credit")
+        termios.tcflow(output_slave, termios.TCOON)
         while select.select([output_master], [], [], 0)[0]:
             output.extend(os.read(output_master, 65536))
         release.touch()
@@ -1112,7 +1111,7 @@ def renderer_backpressure_case(state, library, home, store):
         assert bytes(output[main_start:]) == main_output, "main-screen output changed without fresh Enter"
         assert caller.poll() is None
         refresh_start = len(output)
-        os.write(master, b"\n")
+        assert os.write(master, b"\n") == 1
         refreshed = ScreenCapture()
         refresh_consumed = refresh_start
         def refreshed_composer():
@@ -1126,7 +1125,7 @@ def renderer_backpressure_case(state, library, home, store):
             return refreshed.draft("", 2)
         drain_until(refreshed_composer, "refreshed alternate-screen composer")
         assert b"\x1b[?1049h" in output[refresh_start:]
-        os.write(master, b"\x03")
+        assert os.write(master, b"\x03") == 1
         drain_until(lambda: b"\x1b[?1049l" in output[refresh_start:], "final alternate-screen exit")
         assert caller.wait(timeout=5) == 0, caller.stderr.read()
         assert not errors and not caller.stderr.read(), bytes(errors)
@@ -1145,10 +1144,9 @@ def renderer_backpressure_case(state, library, home, store):
         assert log.read_text().count("handoff-cleanup-entered\n") == 1
         print("renderer backpressure: actual EAGAIN; one accepted Configure/capture; main screen held until fresh Enter; refreshed composer; exact termios/fd restoration", flush=True)
     finally:
-        stop.set()
         dispose_all(
+            lambda: termios.tcflow(output_slave, termios.TCOON),
             release.touch,
-            lambda: writer.join(timeout=2) if writer is not None else None,
             lambda: stop_process(caller, timeout=5) if caller is not None else None,
             lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
             lambda: termios.tcflush(slave, termios.TCIFLUSH),
