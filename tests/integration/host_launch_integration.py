@@ -312,6 +312,25 @@ def startup_limits(root, env):
                         peer.settimeout(3)
                         peer.connect(socket_path)
                     assert "Host: ready" in status(store, env), "unknown routes blocked discovery"
+                    for _ in range(3):
+                        borrowers.pop().close()
+                    for _ in range(2):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n")
+                        assert "Host: ready" in status(store, env)
+                        peer.setblocking(False)
+                        try:
+                            assert peer.recv(1, socket.MSG_PEEK) != b"", "classified control was evicted"
+                        except BlockingIOError:
+                            pass
+                        peer.settimeout(3)
+                    peer = socket.socket(socket.AF_UNIX)
+                    borrowers.append(peer)
+                    peer.connect(socket_path)
+                    assert "Host: ready" in status(store, env), "unknown route blocked reserved discovery"
                     stopped = subprocess.run(
                         [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
                         env=env, text=True, capture_output=True, timeout=5,
@@ -349,6 +368,20 @@ def startup_limits(root, env):
     assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+    for wire in (None, "future"):
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA user_version=24")
+            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            if wire is not None:
+                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+        original = hashlib.sha256(database.read_bytes()).digest()
+        before = time.monotonic()
+        failed = run_start(store, env)
+        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert "wire metadata" in failed.stderr and "wire 1" in failed.stderr, failed.stderr
+        assert "unsupported Store format" not in failed.stderr, failed.stderr
+        assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
+        assert hashlib.sha256(database.read_bytes()).digest() == original
     print("startup limits passed: soft raise, hard-limit fallback, below-minimum and unsupported-version fast failure", flush=True)
 
 

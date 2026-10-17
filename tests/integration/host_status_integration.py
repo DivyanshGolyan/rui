@@ -592,6 +592,7 @@ def main():
             assert json.loads(body) == {
                 "version": "1", "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
+                "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

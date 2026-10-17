@@ -710,6 +710,10 @@ const Intake = struct {
                     self.host.launch_mutex.unlock(self.host.io);
                     break;
                 }
+                // Give a newly acquired reserved place a classification turn
+                // before considering it for pressure-driven turnover.
+                if (self.host.intake_capacity < descriptor_capacity.default_intake and
+                    self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
         }
     }
@@ -856,8 +860,12 @@ pub fn serve(
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
             var message: [protocol.max_store_bytes + 512]u8 = undefined;
-            const text = try std.fmt.bufPrint(&message, "rui: unsupported Store format at {s}: found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
-                lease.paths.store.slice(), found_schema_version, store_module.schema_version, protocol.wire_version,
+            const reason = if (found_schema_version == store_module.schema_version)
+                "unsupported or missing Store wire metadata"
+            else
+                "unsupported Store format";
+            const text = try std.fmt.bufPrint(&message, "rui: {s} at {s}: found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
+                reason, lease.paths.store.slice(), found_schema_version, store_module.schema_version, protocol.wire_version,
             });
             _ = rui_write_readiness(2, text.ptr, text.len);
             if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
