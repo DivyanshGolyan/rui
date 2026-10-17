@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
@@ -869,14 +870,20 @@ pub fn serve(
         .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
-            var message: [protocol.max_store_bytes + 512]u8 = undefined;
+            var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+            var output = std.Io.Writer.fixed(&message);
             const reason = if (found_schema_version == store_module.schema_version)
                 "unsupported or missing Store wire metadata"
             else
                 "unsupported Store format";
-            const text = try std.fmt.bufPrint(&message, "rui: {s} at {s}: found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
-                reason, lease.paths.store.slice(), found_schema_version, store_module.schema_version, protocol.wire_version,
+            try output.print("rui: {s} at ", .{reason});
+            var path_text: TerminalText = .{ .mode = .line };
+            try path_text.feed(&output, lease.paths.store.slice());
+            try path_text.finish(&output);
+            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
+                found_schema_version, store_module.schema_version, protocol.wire_version,
             });
+            const text = output.buffered();
             _ = rui_write_readiness(2, text.ptr, text.len);
             if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
         }

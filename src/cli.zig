@@ -378,7 +378,14 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
         {
             // A competing candidate may have lost the lease to a ready Host.
             if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
-                TerminalText.diagnostic("rui: detached Host startup failed for Store {s}:\n", .{paths.store.slice()});
+                var header_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
+                var header = std.Io.Writer.fixed(&header_bytes);
+                try header.writeAll("\nrui: detached Host startup failed for Store ");
+                var path_text: TerminalText = .{ .mode = .line };
+                try path_text.feed(&header, paths.store.slice());
+                try path_text.finish(&header);
+                try header.writeAll(":\n");
+                _ = @import("stderr.zig").write(header.buffered());
                 _ = @import("stderr.zig").write(startup);
                 if (startup_length == 0) TerminalText.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {

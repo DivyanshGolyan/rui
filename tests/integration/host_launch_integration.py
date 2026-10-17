@@ -437,6 +437,40 @@ def startup_limits(root, env):
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
+
+    # Existing paths may contain controls. Their human presentation must be
+    # safe, complete even beyond stderr.print's 1-KiB buffer, and remain data.
+    parent = root / ("\x01" * 150)
+    parent.mkdir(mode=0o700)
+    hostile = parent / ("\x01" * 150 + "\nforged\x1b[2J\r\u202e\\\"")
+    hostile.mkdir(mode=0o700)
+    escaped = (str(hostile).replace("\\", "\\\\").replace('"', '\\"')
+               .replace("\x01", "\\x01").replace("\n", "\\n").replace("\r", "\\r")
+               .replace("\x1b", "\\x1b").replace("\u202e", "\\u202e"))
+    failed = run_start(hostile, env, preexec_fn=lower_descriptor_limit)
+    assert failed.returncode != 0 and "DescriptorCapacityInsufficient" in failed.stderr, failed
+    assert f"startup failed for Store {escaped}:\n" in failed.stderr, failed.stderr
+    assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
+    # Clone only the stopped fixture DB. Version validation precedes selector
+    # identity, so no relocation or metadata rebinding is needed for refusal.
+    hostile_database = hostile / database.name
+    with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
+        source.backup(destination)
+    hostile_database.chmod(0o600)
+    for schema, wire in ((21, "1"), (24, None), (24, "future")):
+        with sqlite3.connect(hostile_database) as connection:
+            connection.execute(f"PRAGMA user_version={schema}")
+            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            if wire is not None:
+                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+        original = hashlib.sha256(hostile_database.read_bytes()).digest()
+        before = time.monotonic()
+        failed = run_start(hostile, env)
+        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert f" at {escaped}: found schema {schema}" in failed.stderr, failed.stderr
+        assert "back up" in failed.stderr and "No migration" in failed.stderr and "exit status 1" in failed.stderr
+        assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
+        assert hashlib.sha256(hostile_database.read_bytes()).digest() == original
     print("startup limits passed: soft raise, hard-limit fallback, below-minimum and unsupported-version fast failure", flush=True)
 
 
