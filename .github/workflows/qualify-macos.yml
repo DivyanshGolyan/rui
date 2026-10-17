@@ -129,6 +129,7 @@ jobs:
           TARGETS: ${{ toJSON(matrix.targets) }}
           PART: ${{ matrix.part }}
           RESOURCE: ${{ matrix.resource }}
+          ARGS: ${{ toJSON(matrix.args) }}
         run: |
           set -euo pipefail
           if [ "$RESOURCE" = true ]; then
@@ -139,7 +140,13 @@ jobs:
             if [ "$target" = measure-execution-service ]; then
               zig build "$target" -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
             else
-              zig build "$target" -j2 --summary all 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
+              python3 - <<'PY' 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
+          import json, os, subprocess
+          target = json.loads(os.environ['TARGETS'])[0]
+          args = json.loads(os.environ['ARGS'])
+          command = ['zig', 'build', target, '-j2', '--summary', 'all']
+          raise SystemExit(subprocess.call(command + (['--', *args] if args else [])))
+          PY
             fi
           else
             python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" 2>&1 | tee "$EVIDENCE/gates.log"

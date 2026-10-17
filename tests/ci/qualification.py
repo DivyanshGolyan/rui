@@ -21,17 +21,30 @@ NATIVE = (
 def shards(targets):
     rows = []
     for target in targets:
+        if target == "measure-model-output":
+            # Preserve both rounds at every capacity, plus all growth/spill cases.
+            # Eight minutes of offer work alone does not fit one short CI job.
+            for scenario in ("growth", "1", "8", "16", "100"):
+                args = ["--growth-only"] if scenario == "growth" else ["--capacity", scenario]
+                rows.append(dict(name=f"{target}-{scenario}", targets=[target],
+                                 part="all", resource=True, args=args))
+            continue
         parts = ("execution", "callers") if target == "check-full" else ("all",)
         for part in parts:
             rows.append(dict(name=target if part == "all" else f"full-{part}",
-                             targets=[target], part=part, resource=target in RESOURCES))
+                             targets=[target], part=part, resource=target in RESOURCES, args=[]))
     return {"include": rows}
 
 
 def qualification(suite, platform):
     targets = []
     if suite in ("footprint", "resources", "all"):
-        targets.extend(RESOURCES[:1] if suite == "footprint" else RESOURCES)
+        resources = RESOURCES[:1] if suite == "footprint" else RESOURCES
+        # These four entry points call RequireRuntime, which rejects Linux.
+        macos_only = {"measure-admission", "measure-message-admission",
+                      "measure-model-dispatch", "measure-model-retry"}
+        targets.extend(target for target in resources
+                       if platform == "macos" or target not in macos_only)
     if suite in ("native", "all"):
         targets.extend(NATIVE)
         if platform == "linux":

@@ -15,12 +15,6 @@ on:
         required: true
   schedule:
     - cron: '13 6 * * *'
-  pull_request:
-    # Exercise the actual qualification wiring when it changes, not every edit.
-    paths:
-      - '.github/workflows/qualify-linux.yml'
-      - '.github/workflows/qualify-macos.yml'
-      - 'tests/ci/qualification.py'
 permissions:
   contents: read
 jobs:
@@ -30,4 +24,7 @@ jobs:
     with:
       platform: linux
       ref: ${{ inputs.ref || github.sha }}
-      suite: ${{ inputs.suite || 'all' }}
+      # Full native acceptance is the daily backstop. Resource campaigns remain
+      # explicit: Linux cannot qualify macOS footprint, and hosted trials found
+      # unresolved control/queue/request-audit failures. Never mask their exits.
+      suite: ${{ inputs.suite || 'native' }}

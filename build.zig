@@ -620,6 +620,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_output.setCwd(b.path("tests/qualification"));
     measure_output.setEnvironmentVariable("GOTOOLCHAIN", "local");
+    measure_output.addPassthruArgs();
     measure_output.addArtifactArg(release);
     const measure_output_step = b.step(
         "measure-model-output",

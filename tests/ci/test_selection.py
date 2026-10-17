@@ -273,12 +273,25 @@ class SelectionTest(unittest.TestCase):
             rows = qualification("all", platform)["include"]
             targets = {row["targets"][0] for row in rows}
             self.assertTrue(targets <= AVAILABLE)
-            self.assertTrue(set(NATIVE) | set(RESOURCES) <= targets)
+            resources = set(RESOURCES) if platform == "macos" else {
+                "measure-repeat-work", "measure-model-output", "measure-model-queue",
+                "measure-model-control", "measure-call-classification", "measure-execution-service",
+            }
+            self.assertTrue(set(NATIVE) | resources <= targets)
             self.assertEqual("login-signal-integration" in targets, platform == "linux")
-            self.assertEqual({row["name"] for row in rows if row["resource"]}, set(RESOURCES))
+            self.assertEqual({row["targets"][0] for row in rows if row["resource"]}, resources)
             self.assertTrue(all(len(row["targets"]) == 1 for row in rows))
         self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
         self.assertFalse(any(row["resource"] for row in qualification("native", "linux")["include"]))
+
+    def test_output_shards_retain_growth_spill_and_every_two_round_capacity(self):
+        rows = shards(["measure-model-output"])["include"]
+        self.assertEqual([row["args"] for row in rows], [
+            ["--growth-only"], ["--capacity", "1"], ["--capacity", "8"],
+            ["--capacity", "16"], ["--capacity", "100"],
+        ])
+        self.assertEqual(len({row["name"] for row in rows}), 5)
+        self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         workflow = Path(".github/workflows/qualify-macos.yml").read_text()
