@@ -7,8 +7,8 @@ module.exports = async function pruneCaches({github, context, core}) {
   const candidates = [];
   const states = new Map();
   for (const cache of caches) {
-    const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.16\.0-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-(all|execution|callers|baseline)$/.exec(cache.key);
-    const compiler = /^rui-compiler-(Linux-X64|macOS-ARM64)-0\.16\.0$/.test(cache.key);
+    const build = /^rui-build-v2-(Linux-X64|macOS-ARM64)-0\.(?:16|17)\.0-[a-f0-9]{64}-[a-f0-9]{64}-[a-f0-9]{64}-([a-z][a-z0-9-]*)$/.exec(cache.key);
+    const compiler = /^rui-compiler-(Linux-X64|macOS-ARM64)-0\.(?:16|17)\.0$/.test(cache.key);
     const pull = /^refs\/pull\/([1-9][0-9]*)\/merge$/.exec(cache.ref);
     if ((!build && !compiler) || (!pull && cache.ref !== 'refs/heads/main')) continue;
     if (pull && !states.has(cache.ref)) {

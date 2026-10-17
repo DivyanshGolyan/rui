@@ -3699,7 +3699,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
-            if (result == .infrastructure_failure and host.store.isFenced()) {
+            if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
@@ -3718,7 +3718,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
             });
-            if (result == .infrastructure_failure and host.store.isFenced()) {
+            if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
@@ -3737,7 +3737,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
             });
-            if (result == .infrastructure_failure and host.store.isFenced()) {
+            if (result == .infrastructure_failure) {
                 fenceDispatch(host, "Session stop save", error.CanonicalStoreFailure);
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
@@ -3758,7 +3758,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
             });
-            if (result == .infrastructure_failure and host.store.isFenced()) {
+            if (result == .infrastructure_failure) {
                 fenceDispatch(host, "model interruption save", error.CanonicalStoreFailure);
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
@@ -3779,7 +3779,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
             });
-            if (result == .infrastructure_failure and host.store.isFenced()) {
+            if (result == .infrastructure_failure) {
                 fenceDispatch(host, "permission decision save", error.CanonicalStoreFailure);
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
