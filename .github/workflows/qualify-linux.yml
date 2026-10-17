@@ -1,0 +1,31 @@
+name: Linux qualification
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to qualify
+        type: string
+        default: main
+        required: true
+      suite:
+        description: Existing native gates, resource workloads, or both
+        type: choice
+        options: [native, resources, all, footprint]
+        default: native
+        required: true
+  schedule:
+    - cron: '13 6 * * *'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  qualify:
+    if: ${{ !github.event.repository.private }}
+    uses: ./.github/workflows/qualify-macos.yml
+    with:
+      platform: linux
+      ref: ${{ inputs.ref || github.sha }}
+      # Full native acceptance is the daily backstop. Resource campaigns remain
+      # explicit until platform counters and shared-runner behavior qualify.
+      # Linux cannot qualify macOS footprint. Never mask a resource gate's exit.
+      suite: ${{ inputs.suite || 'native' }}

@@ -101,8 +101,15 @@ exit {int(failed)}
     def test_native_workflow_uploads_each_failed_part_with_short_retention(self):
         workflow = Path(".github/workflows/check.yml").read_text()
         self.assertEqual(workflow.count("RUI_FAILURE_ARTIFACTS:"), 2)
-        self.assertEqual(workflow.count("retention-days: 3"), 2)
         self.assertEqual(workflow.count("if: ${{ failure() }}"), 2)
+        # Acceptance receipts are separate artifacts. Check the failure upload
+        # contract itself, not the total count of all short-lived uploads.
+        blocks = workflow.split("      - name: Retain bounded failed-fixture diagnostics\n")[1:]
+        self.assertEqual(len(blocks), 2)
+        for block in blocks:
+            upload = block.split("      - name:", 1)[0]
+            self.assertIn("path: ${{ runner.temp }}/rui-failure-artifacts", upload)
+            self.assertIn("retention-days: 3", upload)
 
 
 if __name__ == "__main__":

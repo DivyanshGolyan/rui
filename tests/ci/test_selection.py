@@ -1,17 +1,25 @@
+import ast
 import json
 import re
 import os
 from contextlib import ExitStack
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from textwrap import dedent
 from unittest.mock import patch
 
 from select_tests import execution_batches, select, setup_requirements
+from qualification import NATIVE, RESOURCES, qualification, shards
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+from host_process import dispose_all
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
@@ -51,6 +59,52 @@ class SelectionTest(unittest.TestCase):
 
     def test_docs_are_not_runtime_acceptance(self):
         self.assertEqual(select(["VERIFICATION.md"], "review", AVAILABLE)["targets"], [])
+
+    def test_linux_status_requires_policy_even_without_native_work(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
+        expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
+        expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
+        script = dedent(job.split('run: |\n', 1)[1])
+        cases = []
+        for targets in ('[]', ''):  # Documentation and duplicate-push suppression.
+            cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
+            for result in ('failure', 'cancelled', 'skipped'):
+                cases.extend([
+                    (targets, 'success', result, 'skipped', 'skipped', False, 'failure'),
+                    (targets, result, 'success', 'skipped', 'skipped', False, 'failure'),
+                ])
+            for result in ('success', 'failure', 'cancelled'):
+                cases.extend([
+                    (targets, 'success', 'success', result, 'skipped', False, 'failure'),
+                    (targets, 'success', 'success', 'skipped', result, False, 'failure'),
+                ])
+        cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, 'success'))
+        for result in ('failure', 'cancelled', 'skipped'):
+            cases.extend([
+                ('["test-logic"]', 'success', result, 'success', 'success', False, 'failure'),
+                ('["test-logic"]', 'success', 'success', result, 'success', False, 'failure'),
+                ('["test-logic"]', 'success', 'success', 'success', result, False, 'failure'),
+            ])
+        cases.append(('[]', 'skipped', 'skipped', 'skipped', 'skipped', True, 'skipped'))
+        for targets, plan, policy, build, native, private, expected in cases:
+            with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private):
+                needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
+                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+                admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
+                                             'needs': needs, 'github': github})
+                # Actions implicitly adds success() unless a status-check
+                # function appears; a skipped dependency otherwise skips us.
+                if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):
+                    admitted = admitted and all(value == 'success' for value in (plan, policy, build, native))
+                actual = 'skipped'
+                if admitted:
+                    result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                            env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                                 'POLICY_RESULT': policy, 'BUILD_RESULT': build,
+                                                 'NATIVE_RESULT': native})
+                    actual = 'success' if result.returncode == 0 else 'failure'
+                self.assertEqual(actual, expected)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/store.zig", "src/future_owner.zig", "tests/integration/future_case.py"):
@@ -291,6 +345,76 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(setup_requirements([target, "measurement-check"]),
                              {"go": True, "h2": True})
 
+    def test_shards_keep_every_selected_target_and_both_full_parts(self):
+        targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]
+        rows = shards(targets)["include"]
+        self.assertEqual(len({row["name"] for row in rows}), len(rows))
+        self.assertEqual([row["targets"] for row in rows],
+                         [["check-full"], ["check-full"], ["codex-credential-integration"],
+                          ["test-full"], ["measurement-check"]])
+        self.assertEqual([batch for row in rows for batch in execution_batches(row["targets"], row["part"])],
+                         [["check-full", "-Dcheck-part=execution"], ["check-full", "-Dcheck-part=callers"],
+                          ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
+        self.assertEqual(shards([]), {"include": []})
+
+    def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
+        rows = qualification("native", "macos")["include"]
+        self.assertEqual(len(rows), 3, "avoid queuing twelve setup/build copies on three Mac workers")
+        execution = next(row for row in rows if row["part"] == "execution")
+        self.assertEqual(execution["targets"], ["check-full", "test-logic"])
+        self.assertEqual(execution_batches(execution["targets"], execution["part"]),
+                         [["check-full", "-Dcheck-part=execution"], ["test-logic"]])
+        callers = next(row for row in rows if row["part"] == "callers")
+        self.assertEqual(callers["targets"], ["check-full"])
+        batches = [batch for row in rows for batch in execution_batches(row["targets"], row["part"])]
+        selected = [target for batch in batches for target in batch if not target.startswith("-")]
+        self.assertCountEqual(selected, [*NATIVE, "check-full"])
+        self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
+        self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
+
+    def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
+        for platform in ("linux", "macos"):
+            rows = qualification("all", platform)["include"]
+            targets = {target for row in rows for target in row["targets"]}
+            self.assertTrue(targets <= AVAILABLE)
+            resources = set(RESOURCES) if platform == "macos" else {
+                "measure-repeat-work", "measure-model-output", "measure-model-queue",
+                "measure-model-control", "measure-call-classification", "measure-execution-service",
+            }
+            self.assertTrue(set(NATIVE) | resources <= targets)
+            self.assertEqual("login-signal-integration" in targets, platform == "linux")
+            self.assertEqual({row["targets"][0] for row in rows if row["resource"]}, resources)
+            self.assertTrue(all(len(row["targets"]) == 1 for row in rows if row["resource"] or platform == "linux"))
+        self.assertEqual(qualification("footprint", "macos"), shards(["measure-repeat-work"]))
+        self.assertFalse(any(row["resource"] for row in qualification("native", "linux")["include"]))
+
+    def test_output_shards_retain_growth_spill_and_every_two_round_capacity(self):
+        rows = shards(["measure-model-output"])["include"]
+        self.assertEqual([row["args"] for row in rows], [
+            ["--growth-only"], ["--capacity", "1"], ["--capacity", "8"],
+            ["--capacity", "16"], ["--capacity", "100"],
+        ])
+        self.assertEqual(len({row["name"] for row in rows}), 5)
+        self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
+
+    def test_requested_ref_cannot_publish_shared_caches(self):
+        workflow = Path(".github/workflows/qualify-macos.yml").read_text()
+        # The server's scoped token, not requested-ref setup code, owns access.
+        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
+        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
+                         'a job override could restore cache-write authority')
+        self.assertIn('workflow_call:', workflow)
+        self.assertEqual(workflow.count('persist-credentials: false'),
+                         workflow.count('uses: actions/checkout@'))
+
+    def test_ci_test_methods_cannot_silently_replace_another_check(self):
+        for path in Path('tests/ci').glob('test_*.py'):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ClassDef):
+                    methods = [method.name for method in node.body
+                               if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                    self.assertEqual(len(methods), len(set(methods)), (str(path), node.name))
+
     def test_batches_share_builds_but_isolate_timing_witnesses(self):
         targets = ["test", "dispatch-integration", "transport-h2-integration",
                    "test-full", "evaluator-churn", "admission-debug-integration",
@@ -304,14 +428,6 @@ class SelectionTest(unittest.TestCase):
             ["host-launch-integration"], ["check-full"],
         ])
         self.assertEqual(execution_batches([]), [])
-
-    def test_requested_ref_cannot_publish_shared_caches(self):
-        workflow = Path('.github/workflows/qualify-macos.yml').read_text()
-        # Dispatch may run on main while executing an unreviewed source SHA.
-        # The server's scoped token, not requested-ref setup code, owns access.
-        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
-        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
-                         'a job override could restore cache-write authority')
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
@@ -328,7 +444,8 @@ class SelectionTest(unittest.TestCase):
     def test_isolated_full_check_parts_keep_other_selected_work_once(self):
         targets = ["admission-debug-integration", "check-full", "evaluator-churn", "test-full"]
         self.assertEqual(execution_batches(targets, "execution"),
-                         [["check-full", "-Dcheck-part=execution"]])
+                         [["check-full", "-Dcheck-part=execution"],
+                          ["admission-debug-integration"], ["evaluator-churn"], ["test-full"]])
         self.assertEqual(execution_batches(targets, "callers"), [
             ["admission-debug-integration"], ["check-full", "-Dcheck-part=callers"],
             ["evaluator-churn"], ["test-full"],
@@ -367,10 +484,48 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
+    @staticmethod
+    def wait_for_group_retirement(group, deadline):
+        # A delivered signal, leader reap and pipe EOF do not retire private
+        # peers with redirected captures. Zombies cannot create more files.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"live driver group {group} did not retire")
+            census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                                    text=True, check=True, timeout=remaining)
+            live = False
+            for row in census.stdout.splitlines():
+                pgid, state = row.split()
+                if int(pgid) == group and not state.startswith("Z"):
+                    live = True
+            if not live:
+                return
+            time.sleep(min(.005, max(0, deadline - time.monotonic())))
+
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
                  timeout=60, python_delay=0, fail_at=""):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with ExitStack() as owner:
+            root = Path(tempfile.mkdtemp())
+            process = None
+            retired = False
+            disposal_deadline = None
+
+            def dispose_root(kind, failure, traceback):
+                try:
+                    if process is not None and not retired:
+                        self.wait_for_group_retirement(
+                            process.pid, disposal_deadline if disposal_deadline is not None
+                            else time.monotonic() + 5)
+                    shutil.rmtree(root)
+                except BaseException as cleanup:
+                    if failure is None:
+                        cleanup.add_note(f"retained driver root: {root}")
+                        raise
+                    failure.add_note(f"driver root disposal failed: {cleanup!r}")
+                    failure.add_note(f"retained driver root: {root}")
+
+            owner.push(dispose_root)
             # Exercise the shell gate's public commands without launching product
             # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
@@ -473,8 +628,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 with ExitStack() as streams:
                     process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, start_new_session=True)
-                    streams.callback(process.stdout.close)
-                    streams.callback(process.stderr.close)
+                    streams.push(lambda *exc: dispose_all(process.stdout.close, process.stderr.close))
                     try:
                         try:
                             if timing:
@@ -543,6 +697,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                             failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver disposal failed: {cleanup!r}")
+                        try:
+                            self.wait_for_group_retirement(process.pid, disposal_deadline)
+                            retired = True
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
                         failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
                         try:
                             peers = root / "peer-pids"
@@ -553,8 +712,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         raise
                     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
             finally:
-                for release in releases:
-                    os.close(release)
+                dispose_all(*(lambda fd=fd: os.close(fd) for fd in releases))
             return result, invocations.read_text().splitlines()
 
     def records(self, result):
@@ -646,6 +804,122 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                             killpg(pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+                        self.wait_for_group_retirement(pid, time.monotonic() + 5)
+                        for note in rejected.exception.__notes__:
+                            if note.startswith("retained driver root: "):
+                                shutil.rmtree(note.removeprefix("retained driver root: "))
+
+    def test_root_disposal_requires_the_whole_group_to_retire(self):
+        run, killpg, rmtree = subprocess.run, os.killpg, shutil.rmtree
+        mkdtemp = tempfile.mkdtemp
+        for delivery in ("delayed", "lost"):
+            with self.subTest(delivery=delivery):
+                group = None
+                root = None
+                observed_live = False
+
+                def make_root(*args, **kwargs):
+                    nonlocal root
+                    directory = mkdtemp(*args, **kwargs)
+                    root = Path(directory)
+                    return directory
+
+                def live_members():
+                    census = run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                                 text=True, check=True, timeout=5)
+                    return [row for row in census.stdout.splitlines()
+                            if int(row.split()[0]) == group and not row.split()[1].startswith("Z")]
+
+                def leader_only(pgid, sig):
+                    nonlocal group
+                    group = pgid
+                    # The held descendant has private log captures. Leader
+                    # reap and caller pipe EOF must not authorize root deletion.
+                    peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
+                    held = int(peers["dispatch_integration.py.release"])
+                    census = run(["ps", "-axo", "pid=,pgid="], capture_output=True,
+                                 text=True, check=True, timeout=5)
+                    for row in census.stdout.splitlines():
+                        pid, member_group = map(int, row.split())
+                        if member_group == group and pid != held:
+                            try:
+                                os.kill(pid, sig)
+                            except ProcessLookupError:
+                                pass
+
+                def census_then_deliver(*args, **kwargs):
+                    nonlocal observed_live
+                    result = run(*args, **kwargs)
+                    if group is not None and live_members():
+                        observed_live = True
+                        if delivery == "delayed":
+                            killpg(group, signal.SIGKILL)
+                    return result
+
+                def delete_after_retirement(path, *args, **kwargs):
+                    nonlocal root
+                    root = Path(path)
+                    self.assertFalse(live_members(), "root deleted while a descendant can still write")
+                    return rmtree(path, *args, **kwargs)
+
+                try:
+                    with patch("tempfile.mkdtemp", side_effect=make_root), patch(
+                            "os.killpg", side_effect=leader_only), patch(
+                            "subprocess.run", side_effect=census_then_deliver), patch(
+                            "shutil.rmtree", side_effect=delete_after_retirement):
+                        with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
+                            self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
+                                          fail_at="held_ready")
+                    self.assertTrue(observed_live, "the counterexample must contain a live descendant")
+                    notes = rejected.exception.__notes__
+                    self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)
+                    retained = [note.removeprefix("retained driver root: ") for note in notes
+                                if note.startswith("retained driver root: ")]
+                    if delivery == "lost":
+                        self.assertEqual(len(retained), 1, notes)
+                        root = Path(retained[0])
+                        self.assertTrue(root.is_dir())
+                        self.assertTrue(any("driver group retirement unconfirmed" in note for note in notes), notes)
+                    else:
+                        self.assertFalse(retained, notes)
+                        self.assertIsNotNone(root)
+                        self.assertFalse(root.exists())
+                finally:
+                    if group is not None:
+                        try:
+                            killpg(group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        deadline = time.monotonic() + 5
+                        while live_members():
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(.005)
+                    if root is not None and root.exists():
+                        rmtree(root)
+
+    def test_root_cleanup_failure_is_secondary_only_when_the_body_failed(self):
+        rmtree = shutil.rmtree
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                root = None
+
+                def refuse_cleanup(path):
+                    nonlocal root
+                    root = Path(path)
+                    raise OSError("injected root cleanup failure")
+
+                try:
+                    with patch("shutil.rmtree", side_effect=refuse_cleanup):
+                        with self.assertRaisesRegex(
+                                AssertionError if failed else OSError,
+                                "injected failure at held_ready" if failed else "injected root cleanup failure") as rejected:
+                            self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
+                                          fail_at="held_ready" if failed else "")
+                    self.assertTrue(root.is_dir())
+                    self.assertIn(f"retained driver root: {root}", rejected.exception.__notes__)
+                finally:
+                    if root is not None:
+                        rmtree(root)
 
     def test_elapsed_belongs_to_invocation_not_inventory_wait(self):
         for part in ("callers", "parallel"):

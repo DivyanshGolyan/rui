@@ -110,13 +110,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("targets", help="JSON array from the selector")
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
+    parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
+    parser.add_argument("--reuse-evidence", action="store_true",
+                        help="Verify identical-tree Actions evidence; never use for qualification")
     args = parser.parse_args()
-    for batch in execution_batches(json.loads(args.targets), args.check_part):
+    targets = json.loads(args.targets)
+    inputs = None
+    if args.reuse_evidence:
+        import evidence
+        try:
+            inputs = evidence.identity(targets, args.check_part)
+            if evidence.restore(inputs):
+                return
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            print(f"Evidence unavailable; executing selected gates: {error}", flush=True)
+    for batch in execution_batches(targets, args.check_part):
         print("Executing: " + " ".join(batch), flush=True)
         start = time.monotonic()
         states = []
         published_output = bytearray()
-        with subprocess.Popen(["zig", "build", *batch, "--summary", "all"],
+        artifacts = ["-Dci-artifacts=" + args.ci_artifacts] if args.ci_artifacts else []
+        with subprocess.Popen(["zig", "build", *batch, *artifacts, "--summary", "all"],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as result:
             for line in iter(lambda: result.stdout.readline(65536), b""):
                 sys.stdout.buffer.write(line)
@@ -141,7 +155,16 @@ def main():
                     retain_failure_logs(states, Path(destination), bytes(published_output or b""))
                 except OSError as error:
                     print(f"Failure diagnostic retention unavailable: {error}", file=sys.stderr)
+            if os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                    print(f"Executed {' '.join(batch)}: failed (exit {result.returncode}). "
+                          "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.", file=summary)
             raise SystemExit(result.returncode)
+    if inputs is not None and evidence.identity(targets, args.check_part) == inputs:
+        evidence.record(inputs)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            print(f"Executed {', '.join(targets)} (partition {args.check_part}): passed. Fresh execution.", file=summary)
 
 
 if __name__ == "__main__":
