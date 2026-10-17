@@ -412,9 +412,16 @@ def main():
             try:
                 first_lock = proposal_milestones.wait("control_lock_acquired", subject=first_key)[0]
                 assert first_process.poll() is None, "first control did not remain held at the Store owner"
+                second_phase = "connection_request_" + ("session_stop" if order == "denial-first" else "permission_decision")
+                preceding = len(proposal_milestones.matching(second_phase))
                 second_process = start_command(*(stop_args if order == "denial-first" else deny_args))
-                second_request = proposal_milestones.wait("control_store_queued", subject=second_key)[0]
-                assert second_process.poll() is None, "second control did not remain queued at the Store owner"
+                routed = proposal_milestones.wait(second_phase, count=preceding + 1)
+                assert len(routed) == preceding + 1, routed
+                second_request = routed[-1]
+                assert second_request["subject_kind"] == "request_number", second_request
+                assert second_request["process"] == first_lock["process"] and second_request["run"] == first_lock["run"], second_request
+                assert int(second_request["sequence"]) > int(first_lock["sequence"]), second_request
+                assert second_process.poll() is None, "second control did not remain awaiting control service"
                 with control_gate.open("wb", buffering=0) as release:
                     release.write(b"x")
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
@@ -473,6 +480,15 @@ def main():
 
         stop_host(proposal_host)
         processes.remove(proposal_host)
+        starts = [record for record in proposal_milestones.records
+                  if record["rui_test_phase"].startswith("connection_request_")]
+        assert [record["rui_test_phase"] for record in starts] == [
+            "connection_request_permission_decision", "connection_request_session_stop",
+            "connection_request_permission_decision", "connection_request_permission_decision",
+            "connection_request_session_stop", "connection_request_session_stop",
+            "connection_request_permission_decision"], starts
+        assert all(record["subject_kind"] == "request_number" for record in starts), starts
+        assert len({record["subject"] for record in starts}) == 7, starts
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None

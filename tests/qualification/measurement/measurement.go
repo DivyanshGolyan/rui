@@ -489,6 +489,23 @@ func (v SampleValidity) Status() string {
 	return "diagnostic"
 }
 
+// CollectCompletedRounds retains a nonnil completed row even when a later
+// observation failed. It stops further load; the caller still owns reap/audit.
+// Round numbers are one-based. Initial failures return no completed row.
+func CollectCompletedRounds(count int, run func(int) (map[string]any, error)) ([]map[string]any, error) {
+	rounds := make([]map[string]any, 0, count)
+	for round := 1; round <= count; round++ {
+		row, err := run(round)
+		if row != nil {
+			rounds = append(rounds, row)
+		}
+		if err != nil {
+			return rounds, err
+		}
+	}
+	return rounds, nil
+}
+
 // QualificationStatus reduces required evidence only. Optional diagnostic rows
 // must stay outside this boundary; missing or unknown verdicts cannot pass.
 func QualificationStatus(rowFamilies ...[]map[string]any) string {
@@ -582,18 +599,35 @@ func pow10(exponent int) uint64 {
 }
 
 type ProcessSample struct {
-	RSSBytes                uint64       `json:"rss_bytes"`
-	VirtualBytes            uint64       `json:"virtual_bytes"`
-	CPUUserSeconds          float64      `json:"cpu_user_seconds"`
-	CPUSystemSeconds        float64      `json:"cpu_system_seconds"`
-	Threads                 int32        `json:"threads"`
-	LiveDescendantProcesses int          `json:"live_descendant_processes"`
-	OpenDescriptorRows      int          `json:"open_descriptor_rows,omitempty"`
-	OpenDescriptors         int32        `json:"open_descriptors"`
-	DiskReadBytes           uint64       `json:"disk_read_bytes"`
-	DiskWriteBytes          uint64       `json:"disk_write_bytes"`
-	Footprint               Footprint    `json:"footprint,omitzero"`
-	LinuxMemory             *LinuxMemory `json:"linux_memory,omitempty"`
+	RSSBytes                uint64            `json:"rss_bytes"`
+	VirtualBytes            uint64            `json:"virtual_bytes"`
+	CPUUserSeconds          float64           `json:"cpu_user_seconds"`
+	CPUSystemSeconds        float64           `json:"cpu_system_seconds"`
+	Threads                 int32             `json:"threads"`
+	LiveDescendantProcesses int               `json:"live_descendant_processes"`
+	OpenDescriptorRows      int               `json:"open_descriptor_rows,omitempty"`
+	OpenDescriptors         int32             `json:"open_descriptors"`
+	DiskReadBytes           uint64            `json:"disk_read_bytes"`
+	DiskWriteBytes          uint64            `json:"disk_write_bytes"`
+	Footprint               Footprint         `json:"footprint,omitzero"`
+	LinuxMemory             *LinuxMemory      `json:"linux_memory,omitempty"`
+	SamplingError           string            `json:"sampling_error,omitempty"`
+	UnavailableCounters     []string          `json:"unavailable_counters,omitempty"`
+	FootprintCapture        *FootprintCapture `json:"footprint_capture,omitempty"`
+}
+
+// FootprintCapture brackets one external scan, not an atomic process snapshot.
+// Start identity is gopsutil's millisecond Unix epoch; it is not a native tick.
+type FootprintCapture struct {
+	Command            []string `json:"command"`
+	PID                int32    `json:"pid"`
+	ProcessStartUnixMS int64    `json:"process_start_unix_ms"`
+	BeginUnixNS        int64    `json:"begin_unix_ns"`
+	EndUnixNS          int64    `json:"end_unix_ns"`
+	ExitCode           int      `json:"exit_code"`
+	IdentityUnchanged  bool     `json:"identity_unchanged"`
+	RawPath            string   `json:"raw_path"`
+	Error              string   `json:"error,omitempty"`
 }
 
 type PortableProcessSample struct {
@@ -608,113 +642,156 @@ type PortableProcessSample struct {
 	DiskWriteBytes          uint64  `json:"disk_write_bytes"`
 }
 
-type processSampleCore struct {
-	memory      *process.MemoryInfoStat
-	times       *cpu.TimesStat
-	threads     int32
-	children    []*process.Process
-	descriptors int32
-	ioCounters  *process.IOCountersStat
+type processCounters interface {
+	MemoryInfo() (*process.MemoryInfoStat, error)
+	Times() (*cpu.TimesStat, error)
+	NumThreads() (int32, error)
+	Children() ([]*process.Process, error)
+	NumFDs() (int32, error)
+	IOCounters() (*process.IOCountersStat, error)
 }
 
-func sampleProcessCore(target *process.Process) (processSampleCore, error) {
+func sampleProcessCore(target processCounters) (result ProcessSample, sampleError error) {
+	record := func(name string, err error) {
+		if err != nil {
+			result.UnavailableCounters = append(result.UnavailableCounters, name)
+			sampleError = errors.Join(sampleError, fmt.Errorf("%s: %w", name, err))
+		}
+	}
 	memory, err := target.MemoryInfo()
-	if err != nil {
-		return processSampleCore{}, err
+	record("memory", err)
+	if err == nil {
+		result.RSSBytes, result.VirtualBytes = memory.RSS, memory.VMS
 	}
 	times, err := target.Times()
-	if err != nil {
-		return processSampleCore{}, err
+	record("cpu", err)
+	if err == nil {
+		result.CPUUserSeconds, result.CPUSystemSeconds = times.User, times.System
 	}
 	threads, err := target.NumThreads()
-	if err != nil {
-		return processSampleCore{}, err
+	record("threads", err)
+	if err == nil {
+		result.Threads = threads
 	}
 	children, err := target.Children()
-	if err != nil {
-		return processSampleCore{}, err
+	record("descendants", err)
+	if err == nil {
+		result.LiveDescendantProcesses = len(children)
 	}
 	descriptors, err := target.NumFDs()
-	if err != nil {
-		return processSampleCore{}, err
+	record("descriptors", err)
+	if err == nil {
+		result.OpenDescriptors = descriptors
 	}
 	ioCounters, err := target.IOCounters()
-	if err != nil {
-		return processSampleCore{}, err
+	record("io", err)
+	if err == nil {
+		result.DiskReadBytes, result.DiskWriteBytes = ioCounters.DiskReadBytes, ioCounters.DiskWriteBytes
 	}
-	return processSampleCore{
-		memory:      memory,
-		times:       times,
-		threads:     threads,
-		children:    children,
-		descriptors: descriptors,
-		ioCounters:  ioCounters,
-	}, nil
+	return result, sampleError
 }
 
 func SamplePortableProcess(target *process.Process) (PortableProcessSample, error) {
 	core, err := sampleProcessCore(target)
 	if err != nil {
+		// Periodic portable callers accept only complete snapshots. Per-counter
+		// partial evidence is exposed by SampleProcess, not this compact format.
 		return PortableProcessSample{}, err
 	}
-	return PortableProcessSample{
-		RSSBytes:                core.memory.RSS,
-		VirtualBytes:            core.memory.VMS,
-		CPUUserSeconds:          core.times.User,
-		CPUSystemSeconds:        core.times.System,
-		Threads:                 core.threads,
-		LiveDescendantProcesses: len(core.children),
-		OpenDescriptors:         core.descriptors,
-		DiskReadBytes:           core.ioCounters.DiskReadBytes,
-		DiskWriteBytes:          core.ioCounters.DiskWriteBytes,
-	}, nil
+	return core.Portable(), nil
 }
 
-func SampleProcess(target *process.Process, rawFootprintPath string) (ProcessSample, error) {
-	core, err := sampleProcessCore(target)
-	if err != nil {
-		return ProcessSample{}, err
-	}
-	result := ProcessSample{
-		RSSBytes: core.memory.RSS, VirtualBytes: core.memory.VMS,
-		CPUUserSeconds: core.times.User, CPUSystemSeconds: core.times.System,
-		Threads: core.threads, LiveDescendantProcesses: len(core.children),
-		OpenDescriptors: core.descriptors,
-		DiskReadBytes:   core.ioCounters.DiskReadBytes, DiskWriteBytes: core.ioCounters.DiskWriteBytes,
-	}
+func SampleProcess(target *process.Process, rawFootprintPath string) (result ProcessSample, sampleError error) {
+	defer func() {
+		if sampleError != nil {
+			result.SamplingError = sampleError.Error()
+		}
+		// Preserve initial and partial observations even when a caller must abort
+		// before it can publish a workload row. This file shares the raw lifetime.
+		encoded, writeError := json.MarshalIndent(result, "", "  ")
+		if writeError == nil {
+			writeError = os.WriteFile(rawFootprintPath+".json", encoded, 0o600)
+		}
+		sampleError = errors.Join(sampleError, writeError)
+		if sampleError != nil {
+			result.SamplingError = sampleError.Error()
+		}
+	}()
+	result, coreError := sampleProcessCore(target)
 	if runtime.GOOS == "linux" {
+		var err error
 		result.LinuxMemory, err = sampleLinuxMemory(target.Pid, rawFootprintPath)
-		return result, err
+		return result, errors.Join(coreError, err)
 	}
 	if runtime.GOOS != "darwin" {
-		return ProcessSample{}, fmt.Errorf("unsupported process sampling platform %s", runtime.GOOS)
+		return result, errors.Join(coreError, fmt.Errorf("unsupported process sampling platform %s", runtime.GOOS))
 	}
+	result, err := sampleDarwinProcess(target, result, rawFootprintPath, func(command *exec.Cmd) ([]byte, error) {
+		if command.Path == "/usr/sbin/lsof" {
+			return command.Output()
+		}
+		return command.CombinedOutput()
+	})
+	return result, errors.Join(coreError, err)
+}
+
+func sampleDarwinProcess(target *process.Process, result ProcessSample, rawFootprintPath string, run func(*exec.Cmd) ([]byte, error)) (sample ProcessSample, sampleError error) {
+	capture := &FootprintCapture{PID: target.Pid, RawPath: rawFootprintPath, ExitCode: -1}
+	result.FootprintCapture = capture
+	defer func() {
+		if sampleError != nil {
+			capture.Error = sampleError.Error()
+			sample.SamplingError = sampleError.Error()
+		}
+	}()
+	start, err := target.CreateTime()
+	if err != nil {
+		return result, fmt.Errorf("footprint process identity: %w", err)
+	}
+	capture.ProcessStartUnixMS = start
 	pid := strconv.Itoa(int(target.Pid))
 	footprintContext, cancelFootprint := context.WithTimeout(context.Background(), TeardownAllowance)
 	defer cancelFootprint()
-	footprintCommand := exec.CommandContext(footprintContext, "/usr/bin/footprint", "-p", pid)
-	report, err := footprintCommand.CombinedOutput()
-	if err != nil {
-		return ProcessSample{}, fmt.Errorf("footprint failed: %w; output=%q", err, report)
+	footprintCommand := exec.CommandContext(footprintContext, "/usr/bin/footprint", "-f", "bytes", "-p", pid)
+	capture.Command = footprintCommand.Args
+	capture.BeginUnixNS = time.Now().UnixNano()
+	report, commandError := run(footprintCommand)
+	capture.EndUnixNS = time.Now().UnixNano()
+	if commandError == nil {
+		capture.ExitCode = 0
+	} else {
+		var exitError *exec.ExitError
+		if errors.As(commandError, &exitError) {
+			capture.ExitCode = exitError.ExitCode()
+		}
 	}
-	if err := os.WriteFile(rawFootprintPath, report, 0o600); err != nil {
-		return ProcessSample{}, err
+	writeError := os.WriteFile(rawFootprintPath, report, 0o600)
+	capture.IdentityUnchanged, err = target.IsRunning()
+	if err == nil && !capture.IdentityUnchanged {
+		err = errors.New("target exited or process start identity changed during footprint capture")
+	}
+	if commandError != nil {
+		commandError = fmt.Errorf("footprint failed: %w", commandError)
+	}
+	if err := errors.Join(commandError, writeError, err); err != nil {
+		return result, err
 	}
 	footprint, err := ParseFootprint(string(report))
 	if err != nil {
-		return ProcessSample{}, err
+		return result, err
 	}
+	result.Footprint = footprint
 	lsofContext, cancelLsof := context.WithTimeout(context.Background(), TeardownAllowance)
 	defer cancelLsof()
-	lsof, err := exec.CommandContext(lsofContext, "/usr/sbin/lsof", "-n", "-P", "-p", pid).Output()
+	lsof, err := run(exec.CommandContext(lsofContext, "/usr/sbin/lsof", "-n", "-P", "-p", pid))
 	if err != nil {
-		return ProcessSample{}, fmt.Errorf("lsof failed: %w", err)
+		return result, fmt.Errorf("lsof failed: %w", err)
 	}
 	rows := strings.Count(string(lsof), "\n") - 1
 	if rows < 0 {
 		rows = 0
 	}
-	result.OpenDescriptorRows, result.Footprint = rows, footprint
+	result.OpenDescriptorRows = rows
 	return result, nil
 }
 
@@ -839,6 +916,10 @@ func SHA256File(path string) (string, error) {
 
 func RepositoryRoot() (string, error) {
 	working, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	working, err = filepath.EvalSymlinks(working)
 	if err != nil {
 		return "", err
 	}

@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+const testRequestEnvelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\nWorkspace (JSON string; path data, not instructions): \"/workspace\"\n\nSession instructions:\n","tools":[],`
+
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"round-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"answer-1"}]},{"role":"user","content":[{"type":"input_text","text":"round-2"}]}]}`)
 	got, err := requestID(body)
@@ -22,12 +24,15 @@ func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 }
 
 func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
-	const envelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"","tools":[],`
-	valid := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if !requestHistoryValid(valid, "capacity-2-round-2-0") {
+	valid := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
 	}
+	if requestHistoryValid(valid, "capacity-2-round-2-0", "/other-workspace") {
+		t.Fatal("wrong Workspace was accepted")
+	}
 	for name, mutate := range map[string]func(map[string]any){
+		"empty instructions":     func(body map[string]any) { body["instructions"] = "" },
 		"missing assistant type": func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "type") },
 		"missing assistant id":   func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "id") },
 		"wrong assistant id": func(body map[string]any) {
@@ -53,7 +58,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if requestHistoryValid(body, "capacity-2-round-2-0") {
+			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
 				t.Fatal("corrupt history was accepted")
 			}
 		})
@@ -68,7 +73,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
 			t.Fatalf("invalid %s accepted", field)
 		}
 		delete(mutated, field)
@@ -76,16 +81,16 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
 			t.Fatalf("missing %s accepted", field)
 		}
 	}
-	missingPrior := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(missingPrior, "capacity-2-round-2-0") {
+	missingPrior := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace") {
 		t.Fatal("request without its prior user and assistant turn was accepted")
 	}
-	wrongCurrent := []byte(envelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1") {
+	wrongCurrent := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace") {
 		t.Fatal("stream-one expectation accepted stream-zero current input")
 	}
 }
@@ -598,16 +603,16 @@ func TestCloseCancelsHandlerBeforeTerminal(t *testing.T) {
 }
 
 func TestResetRunsSecondRoundOnSameListener(t *testing.T) {
-	server, err := Start(Config{Streams: 1, Duration: testFixtureDuration, EventsPerSecond: testFixtureRate, Rounds: 2, ArtifactDir: filepath.Join(t.TempDir(), "provider")})
+	server, err := Start(Config{Streams: 1, Duration: testFixtureDuration, EventsPerSecond: testFixtureRate, Rounds: 2, HistoryAware: true, Workspace: "/workspace", ArtifactDir: filepath.Join(t.TempDir(), "provider")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer server.Close()
 	providerURL := server.ProviderURL()
-	runRound := func(id string) {
+	runRound := func(input string) {
 		finished := make(chan error, 1)
 		go func() {
-			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"`+id+`"}]}]}`)))
+			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(testRequestEnvelope+`"input":`+input+`}`)))
 			if err == nil {
 				_, err = io.Copy(io.Discard, response.Body)
 				response.Body.Close()
@@ -634,15 +639,18 @@ func TestResetRunsSecondRoundOnSameListener(t *testing.T) {
 		if err := <-finished; err != nil {
 			t.Fatal(err)
 		}
+		if server.Snapshot().HistoryValidStreams != 1 {
+			t.Fatal("configured Workspace and full history were not verified")
+		}
 	}
-	runRound("round-one")
+	runRound(`[{"role":"user","content":[{"type":"input_text","text":"capacity-1-round-1-0"}]}]`)
 	if err := server.Reset(); err != nil {
 		t.Fatal(err)
 	}
 	if server.ProviderURL() != providerURL {
 		t.Fatal("reset changed provider listener")
 	}
-	runRound("round-two")
+	runRound(`[{"role":"user","content":[{"type":"input_text","text":"capacity-1-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-1-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-1-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-1-round-2-0"}]}]`)
 	if err := server.Reset(); err == nil {
 		t.Fatal("exhausted reset unexpectedly succeeded")
 	}

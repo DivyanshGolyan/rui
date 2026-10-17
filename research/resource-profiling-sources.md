@@ -1,6 +1,6 @@
 # Resource profiling evidence and reusable collection
 
-Research date: 2026-09-15. Recommendations, not an accepted contract or runtime qualification. This note examines native profiling; ARCHITECTURE.md and VERIFICATION.md remain the behavior and proof owners. No profiler was attached, provider called, package installed or benchmark run for this research.
+Research date: 2026-09-15, with a native-counter investigation added on 2026-10-17. Recommendations, not an accepted contract or runtime qualification. ARCHITECTURE.md and VERIFICATION.md remain the behavior and proof owners. The original research ran no workloads; the dated addendum identifies its bounded native control separately.
 
 ## What the investment should answer
 
@@ -137,3 +137,58 @@ For presentation, use Perfetto for phase/counter correlation and optionally Spee
 ## Smallest useful sequence
 
 First: a reproducible bundle and metric definitions extending existing collectors; phase-aligned resource account for one representative fixture and its drain cycle. Second: independent scaling curves over active work, payload bytes, item count and history. Third: targeted native profiles for unexplained CPU, retained memory or waits. Later: Linux collectors and evaluator/Bash/Edit attribution as those capabilities need qualification. Each new collector should answer an unanswered question, not become an always-on observability platform.
+
+## macOS current-versus-peak investigation, 2026-10-17
+
+### Observed failure and control
+
+The [PR508](https://github.com/DivyanshGolyan/rui/pull/508) repeat-work run at exact source [`c4224bb`](https://github.com/DivyanshGolyan/rui/commit/c4224bbbb8f33743f430be07e349933e42f3423a) failed on macOS 15.7.7 (24G720), Apple M1 Pro, kernel `xnu-11417.140.69.710.16`. The retained `/usr/bin/footprint -p 17459` report contains auxiliary counters `phys_footprint: 5201 KB` and `phys_footprint_peak: 5057 KB`. The 144 KiB inversion exceeds the collector's rounding tolerance. Both saved Host reports identify PID 17459; the inconsistency is in the raw auxiliary fields, not the parser's unit conversion or a mistaken headline total.
+
+The command exited 1 after 77.39 seconds; collector execution lasted 20.18 seconds. First-wave controller facts record 100 history-valid and terminal-finished streams, 60,000 events, 15,600,000 offered bytes, and zero final Host custody/scratch. The final rounds array is empty. Offline audits, composition snapshots and the remaining 19 waves did not run. This is failed qualification, not a demonstrated 25,000,000-byte target miss or a passing first round.
+
+A separate owned C process allocated and touched up to 8 MiB, waited for two external reports, then freed the mapping and exited. The 0.506-second control used Apple Clang 17, checked successful `TASK_VM_INFO` return and revision capacity, and recorded PID/start identity. All five queries requested and returned 93 words, matching SDK revision 7. Selected results:
+
+| Phase | Direct current bytes | Direct lifetime peak bytes |
+| --- | ---: | ---: |
+| Baseline | 1,131,264 | 1,164,032 |
+| After touching 8 MiB | 9,519,872 | 9,519,872 |
+| After freeing the mapping | 1,131,264 | 9,519,872 |
+
+Both external reports agreed at the held plateau: default output gave 9297 KB for each auxiliary counter; `-f bytes` gave 9,519,872 B for each. The inversion was not reproduced. This small idle control does not reproduce Rui's concurrent workload or explain the original failure. There was no direct kernel sample at that failure; historical PID reuse is not independently excluded. C and Python monotonic timestamps in the control use different absolute epochs and cannot be cross-subtracted.
+
+The [intake evidence thread](https://ampcode.com/threads/T-01a13a9b-f479-7237-9c52-0aefe95d63c9) retains the independently checked nonsecret packets. The failed-run packet SHA-256 is `4ff9464b8ad10017ef50b4a879145577116ce90a7197b25644f68efb3370c92a` (71 regular members, 70 payload hashes). The control packet SHA-256 is `10c05698b2f5e03e7009fa9d311ea82105521e8d0f7c1ed2dd16fc14d3bf3989` (55 regular members, 54 payload hashes). Sources, raw reports, commands, native tool/header identities, cleanup and source manifests are retained. Neither packet turns the failed run into acceptance.
+
+### What Apple's sources establish
+
+- Apple's installed `footprint(1)` manual describes current `phys_footprint` as the kernel ledger's dirty-memory charge and `phys_footprint_peak` as its lifetime maximum. It documents `-f bytes` and optional JSON output. The captured manual and successful byte-format control establish these options on this machine, rather than assuming an online manual matches the installed tool.
+- [XNU's `TASK_VM_INFO` implementation](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/task.c#L6040-L6060) reads current footprint and stored lifetime maximum separately. [Ledger credits](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ledger.c#L1133-L1185) change the balance before checking it; [the check updates the maximum](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ledger.c#L1015-L1029), while [the getter copies that stored maximum](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ledger.c#L1418-L1443). These paths do not establish an atomic current/peak pair. Update ordering is a plausible mechanism, not the proven cause of Rui's report. This published tag is related source, not verified correspondence with the installed `.710.16` kernel or the closed `footprint` implementation.
+- [Apple's footprint guidance](https://developer.apple.com/documentation/xcode/analyzing-the-memory-usage-of-your-metal-app) distinguishes allocations and resident size from footprint. Dirty compressed/swapped memory remains charged at its original size. RSS, live heap bytes and sums of VM regions are therefore not interchangeable substitutes for this target.
+- [Apple's memory tools guide](https://developer.apple.com/documentation/xcode/gathering-information-about-memory-use) distinguishes allocation history from snapshots. Its Xcode report shows current use and the highest value seen; that wording does not promise a kernel lifetime bound. A maximum over periodic current samples can miss intervening peaks. A later low reading cannot repair missing earlier evidence.
+
+### Gaps in the current collector
+
+Inspection applies to the exact source above, not later revisions. The owning code is [measurement.go](../tests/qualification/measurement/measurement.go) and [model-output/main.go](../tests/qualification/model-output/main.go).
+
+1. `SampleProcess` uses formatted text, sequential gopsutil calls, an external `footprint` scan and `lsof`. It records neither per-query capture brackets nor a before/after process start identity. These observations are not one atomic process snapshot. Byte format removes rounding uncertainty but would not itself fix this 144 KiB inversion.
+2. The footprint parser returns an error for the inconsistent pair. `measureCapacityRound` propagates it after the `host_complete` fact but before returning a row. `measureCapacity` then returns before appending that row, collecting composition or reaching post-reap durable audits. Required resource evidence must remain nonpassing, but independent completed-work observations could still be retained and audited after safe cleanup. Fail-closed acceptance does not require discarding independent evidence.
+3. A failed external footprint command returns before its raw output is written to the report file. The error includes output, but a separate original stdout/stderr/exit record would preserve stronger diagnostic evidence.
+4. Full VM/heap scans and phase tracing can affect the experiment. The failed Host log contains 76,709 `trace_lost`-flagged records among 77,365 records. That is a count of flagged records, not a dropped-event count, and cannot establish a complete allocation/lifecycle history. No observer-effect comparison explains the current/peak inversion.
+5. The repeat-work target measures the Host, not representative peer collaboration's aggregate Host, overlapping Rui CLI/helpers and routing shells. Even a valid Host-only result cannot complete the aggregate 25 MB or live-collaboration requirements. Retained allocation growth also needs attribution before claiming stable churn.
+
+### Recommended next steps
+
+These are proposed measurement corrections and diagnostics, not a changed acceptance policy:
+
+1. Preserve raw current and peak independently, with exact byte output, command exit, sample brackets and stable process identity. Report contradictory lifetime evidence as unavailable/nonpassing. Do not clamp peak to current or substitute sampled maxima for lifetime high-water evidence.
+2. Separate workload observations and post-reap durable audits from memory-sample validity in the existing runner. Publish completed facts even if a required metric fails; keep the final result nonzero and the unperformed work explicit. Continue only operations whose safety and prerequisites remain established, not arbitrary later load after a failure.
+3. Diagnose the actual Rui phase with a bounded, explicitly diagnostic comparison of byte-format tool output and a supported native counter path, recording return codes and structure revisions. The idle control does not justify changing the parser or retrying until green. Two interfaces backed by the same ledger are corroboration, not independent memory accounting.
+4. Keep optimized low-instrumentation qualification separate from allocation/VM/stack diagnosis. Use Allocations or VM Tracker to explain retention, with matching binary identity and observer costs stated. Confirm tool availability; do not install or switch developer tools merely to make a report look complete.
+5. After a demonstrated correction, run the affected regression controls and canonical qualification again. Preserve the original failure. The 25,000,000-byte target, required audits, cleanup and full-work populations remain unchanged.
+
+### Collector corrections and limits
+
+The follow-up changes the collector, not Rui's runtime or resource target. `SampleProcess` retains independent core counters, names unavailable groups, and writes a full JSON receipt even when an initial sample fails. Mac captures request exact bytes and record command, exit, timestamps, and process-start identity. Valid footprint values survive a later descriptor-query failure, but the required sample remains nonpassing. The compact periodic `SamplePortableProcess` interface retains its existing all-or-nothing contract.
+
+Capacity and retry/churn now share completed-round retention. A later observation error stops further load, preserves completed rows, and permits independent audits only after confirmed Host stop and reap. Earlier successful audits survive a later audit failure. The original observation, audit, and cleanup failures remain in the final nonzero result.
+
+Focused regressions first reproduced lost samples and audits. Targeted mutations also demonstrated that the core-counter and completed-row tests reject their old failure mechanisms. Bounded Linux runs injected real retained-report write failures into capacity and retry/churn. Capacity kept one delivered, drained, and audited round; churn kept two rounds and audited 40 terminal operations after 80 requests. Neither launched its next wave. The first capacity control failed before workload because its temporary test executable did not dispatch provider-child mode; the corrected control passed. These checks establish evidence retention, not Mac memory correctness. The original Mac contradiction still needs an actual-Rui diagnostic, and full repeated-work qualification remains open.

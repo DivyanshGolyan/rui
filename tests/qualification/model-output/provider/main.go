@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"rui.local/qualification/measurement"
 )
 
 const (
@@ -58,6 +60,7 @@ type fixture struct {
 	totalWork        workExpectation
 	artifactDir      string
 	historyAware     bool
+	workspace        string
 	round            int
 	facts            *os.File
 	streams          map[string]*stream
@@ -87,6 +90,7 @@ type Config struct {
 	Rounds          int
 	TLS             bool
 	HistoryAware    bool
+	Workspace       string
 }
 
 type Server struct {
@@ -498,7 +502,7 @@ func requestID(body []byte) (string, error) {
 	return result, nil
 }
 
-func requestHistoryValid(body []byte, current string) bool {
+func requestHistoryValid(body []byte, current, workspace string) bool {
 	var capacity, round, index int
 	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &capacity, &round, &index); err != nil || capacity < 1 || round < 1 || index < 0 || index >= capacity {
 		return false
@@ -522,7 +526,7 @@ func requestHistoryValid(body []byte, current string) bool {
 	}
 	expected := map[string]any{
 		"model": "model-a", "store": false, "stream": true,
-		"include": []any{"reasoning.encrypted_content"}, "instructions": "", "tools": []any{},
+		"include": []any{"reasoning.encrypted_content"}, "instructions": measurement.ModelInstructions(workspace), "tools": []any{},
 		"input": expectedInput,
 	}
 	var observed any
@@ -666,7 +670,7 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := sha256.Sum256(body)
-	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id)}
+	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id, f.workspace)}
 	f.mu.Lock()
 	if f.started || len(f.streams) >= f.expected || f.streams[id] != nil {
 		f.mu.Unlock()
@@ -1080,6 +1084,7 @@ func (s *Server) Reset() error {
 		return err
 	}
 	prepared.round = nextRound
+	prepared.workspace = s.config.Workspace
 	s.fixtureMu.Lock()
 	defer s.fixtureMu.Unlock()
 	old.handlers.Wait()
@@ -1121,6 +1126,7 @@ func Start(config Config) (*Server, error) {
 		return nil, err
 	}
 	fixture.round = 1
+	fixture.workspace = config.Workspace
 	mux := http.NewServeMux()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

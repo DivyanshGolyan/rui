@@ -41,7 +41,7 @@ pub const Removal = union(enum) {
 pub const Owner = struct {
     io: std.Io,
     resources: ?Resources,
-    budget: protocol.ScratchBudget,
+    budget: ?protocol.ScratchBudget,
 
     const Resources = struct {
         primary: std.Io.File,
@@ -56,7 +56,7 @@ pub const Owner = struct {
         primary: std.Io.File,
         secondary: ?std.Io.File,
         name: []const u8,
-        budget: protocol.ScratchBudget,
+        budget: ?protocol.ScratchBudget,
         charged: u64,
         removal: Removal,
     ) Owner {
@@ -81,7 +81,7 @@ pub const Owner = struct {
         );
         resources.primary.close(self.io);
         if (resources.secondary) |secondary| secondary.close(self.io);
-        self.budget.release(resources.charged);
+        if (self.budget) |budget| budget.release(resources.charged);
         self.resources = null;
         return result;
     }
