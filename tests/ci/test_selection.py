@@ -279,7 +279,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_cache_proof_tracks_cache_policy_not_every_runtime_edit(self):
         for path in ("build.zig", ".github/actions/setup/action.yml", "tests/ci/cache_execution.py",
-                     ".github/workflows/cache-maintenance.yml", ".github/scripts/prune-caches.cjs"):
+                     ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml",
+                     ".github/scripts/prune-caches.cjs"):
             self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
         self.assertFalse(select(["src/store.zig"], "review", AVAILABLE)["cache_execution_checks"])
 
