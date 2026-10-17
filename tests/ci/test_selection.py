@@ -50,7 +50,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
-                      "src/request_encoding.zig", "src/execution_turn.zig"):
+                      "src/request_encoding.zig", "src/execution_turn.zig",
+                      "src/ResponseTiming.zig"):
             for composed in ("src/server.zig", "src/store.zig", "build.zig"):
                 with self.subTest(logic=logic, composed=composed):
                     result = select([logic, composed], "review", AVAILABLE)
