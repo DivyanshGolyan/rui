@@ -14,6 +14,22 @@ pub const Evidence = struct {
     served_model: protocol.Bounded(protocol.max_model_bytes) = .{},
 };
 
+pub const Rejection = struct {
+    stage: enum { stream, event, item, response } = .stream,
+    byte_offset: u64 = 0,
+    output_index: ?u64 = null,
+
+    // Only local error names and structural coordinates. Never copy provider
+    // strings, IDs, text, arguments or private continuation into this detail.
+    pub fn format(self: Rejection, err: anyerror, buffer: *[512]u8) []const u8 {
+        return std.fmt.bufPrint(
+            buffer,
+            "{{\"reason\":\"{s}\",\"stage\":\"{s}\",\"byte_offset\":\"{d}\",\"output_index\":{?d}}}",
+            .{ @errorName(err), @tagName(self.stage), self.byte_offset, self.output_index },
+        ) catch unreachable;
+    }
+};
+
 pub const Validated = struct {
     item_count: u64,
     call_count: u64,
@@ -429,7 +445,7 @@ fn optionalCompleted(io: std.Io, file: std.Io.File, status_range: ?Range) !void 
     const status = status_range orelse return;
     var value: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, status, &value);
-    if (!value.eql("completed")) return error.UnsupportedProviderOutput;
+    if (!value.eql("completed")) return error.UnsupportedItemStatus;
 }
 
 fn optionalFalse(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
@@ -441,7 +457,7 @@ fn optionalFalse(io: std.Io, file: std.Io.File, value_range: ?Range) !void {
     } else if (try source.peek() == 't') {
         try literal(&source, "true");
         try source.expectEnd();
-        return error.UnsupportedProviderOutput;
+        return error.UnsupportedAsyncCall;
     } else {
         try literal(&source, "false");
     }
@@ -459,7 +475,7 @@ fn optionalEmptyString(io: std.Io, file: std.Io.File, value_range: ?Range) !void
     }
     const parsed = try parseString(&source, null);
     try source.expectEnd();
-    if (parsed.decoded_length != 0) return error.UnsupportedProviderOutput;
+    if (parsed.decoded_length != 0) return error.UnsupportedCallControl;
 }
 
 fn validateCaller(io: std.Io, file: std.Io.File, caller_range: ?Range) !void {
@@ -472,10 +488,10 @@ fn validateCaller(io: std.Io, file: std.Io.File, caller_range: ?Range) !void {
         return;
     }
     const fields = try collectFields(&source, &.{"type"});
-    const type_range = try fields.get("type") orelse return error.UnsupportedProviderOutput;
+    const type_range = try fields.get("type") orelse return error.UnsupportedCaller;
     var caller_type: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, type_range, &caller_type);
-    if (!caller_type.eql("direct")) return error.UnsupportedProviderOutput;
+    if (!caller_type.eql("direct")) return error.UnsupportedCaller;
 }
 
 fn validateFunctionCallControls(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
@@ -489,7 +505,7 @@ fn validateMetadataAuthority(io: std.Io, file: std.Io.File, metadata_range: ?Ran
     const metadata = metadata_range orelse return;
     const fields = try readFields(io, file, metadata, &.{ "cell_id", "executed_tool_calls", "tool_calls_complete" });
     inline for (.{ "cell_id", "executed_tool_calls", "tool_calls_complete" }) |field| {
-        if (try fields.get(field) != null) return error.UnsupportedProviderOutput;
+        if (try fields.get(field) != null) return error.UnsupportedMetadataAuthority;
     }
 }
 
@@ -498,7 +514,7 @@ const ItemFields = Fields(item_field_names);
 
 fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
     try optionalCompleted(io, file, try fields.get("status"));
-    if (try fields.get("text") != null) return error.UnsupportedProviderOutput;
+    if (try fields.get("text") != null) return error.UnsupportedReasoningText;
     const encrypted = (try fields.get("encrypted_content")) orelse return error.ContinuationUnavailable;
     var source = try FileSource.init(io, file, encrypted);
     const parsed = try parseString(&source, null);
@@ -513,7 +529,7 @@ fn validateReasoning(io: std.Io, file: std.Io.File, fields: ItemFields) !void {
                 const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
                 var kind: protocol.Bounded(max_evidence_bytes) = .{};
                 _ = try readString(io, file, try block_fields.required("type"), &kind);
-                if (!kind.eql(type_name)) return error.UnsupportedProviderOutput;
+                if (!kind.eql(type_name)) return error.UnsupportedReasoningBlock;
                 var text = try FileSource.init(io, file, try block_fields.required("text"));
                 _ = try parseString(&text, null);
                 try text.expectEnd();
@@ -530,7 +546,7 @@ fn validateAnnotations(io: std.Io, file: std.Io.File, annotations_range: ?Range)
         const fields = try readFields(io, file, annotation, &.{"type"});
         var kind: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, try fields.required("type"), &kind);
-        if (!kind.eql("url_citation")) return error.UnsupportedProviderOutput;
+        if (!kind.eql("url_citation")) return error.UnsupportedAnnotation;
     }
 }
 
@@ -584,15 +600,15 @@ fn validateItem(
         }
         return .{ .kind = .function_call, .id_digest = id_digest };
     }
-    if (!kind_name.eql("message")) return error.UnsupportedProviderOutput;
+    if (!kind_name.eql("message")) return error.UnsupportedItemType;
     try optionalCompleted(io, file, try fields.get("status"));
     var role: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, try fields.required("role"), &role);
-    if (!role.eql("assistant")) return error.UnsupportedProviderOutput;
+    if (!role.eql("assistant")) return error.UnsupportedMessageRole;
     if (try fields.get("phase")) |phase_range| {
         var phase: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, phase_range, &phase);
-        if (!phase.eql("commentary") and !phase.eql("final_answer")) return error.UnsupportedProviderOutput;
+        if (!phase.eql("commentary") and !phase.eql("final_answer")) return error.UnsupportedMessagePhase;
     }
     try validateMetadataAuthority(io, file, try fields.get("internal_chat_message_metadata_passthrough"));
     const content = try fields.required("content");
@@ -602,7 +618,7 @@ fn validateItem(
         const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
         var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, try block_fields.required("type"), &block_kind);
-        if (!block_kind.eql("output_text")) return error.UnsupportedProviderOutput;
+        if (!block_kind.eql("output_text")) return error.UnsupportedContentBlock;
         try validateAnnotations(io, file, try block_fields.get("annotations"));
         const text_value = try block_fields.required("text");
         var source = try FileSource.init(io, file, text_value);
@@ -643,7 +659,7 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
     else if (kind_name.eql("function_call"))
         .function_call
     else
-        return error.UnsupportedProviderOutput;
+        return error.UnsupportedItemType;
     return .{
         .kind = kind,
         .id_digest = try stringDigest(io, file, try fields.required("id")),
@@ -661,7 +677,7 @@ fn validateCompleted(
     const fields = try readFields(io, file, response, &.{ "status", "id", "model", "output", "usage" });
     var status: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, try fields.required("status"), &status);
-    if (!status.eql("completed")) return error.UnsupportedProviderOutput;
+    if (!status.eql("completed")) return error.UnsupportedResponseStatus;
     _ = try readString(io, file, try fields.required("id"), &evidence.response_id);
     if (evidence.response_id.len == 0) return error.EmptyProviderIdentity;
     if (try fields.get("model")) |model| {
@@ -703,6 +719,7 @@ fn knownNonterminal(kind: []const u8) bool {
     const values = [_][]const u8{
         "response.created",
         "response.in_progress",
+        "response.metadata",
         "response.output_text.delta",
         "response.output_text.done",
         "response.reasoning_summary_part.added",
@@ -734,7 +751,9 @@ fn processEvent(
     answer_length: *u64,
     answer_hash: *std.crypto.hash.sha2.Sha256,
     evidence: *Evidence,
+    rejection: *Rejection,
 ) !void {
+    rejection.* = .{ .stage = .event, .byte_offset = event.start };
     if (completed.*) return error.LateProviderOutput;
     var kind: protocol.Bounded(max_evidence_bytes) = .{};
     const fields = try readFields(io, file, event, &.{ "type", "output_index", "item", "response" });
@@ -742,6 +761,7 @@ fn processEvent(
     if (kind.eql("response.output_item.added")) {
         if (added.active) return error.ContradictoryProviderOutput;
         const index = try readIndex(io, file, try fields.required("output_index"));
+        rejection.output_index = index;
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const identity = try itemIdentity(io, file, try fields.required("item"));
         added.* = .{ .active = true, .index = index, .kind = identity.kind, .id_digest = identity.id_digest };
@@ -749,6 +769,8 @@ fn processEvent(
     }
     if (kind.eql("response.output_item.done")) {
         const index = try readIndex(io, file, try fields.required("output_index"));
+        rejection.stage = .item;
+        rejection.output_index = index;
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
         const validation = try validateItem(io, file, item, index, metadata, answer_hash);
@@ -756,7 +778,7 @@ fn processEvent(
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
         if (validation.kind == .message) {
-            if (saw_action.*) return error.UnsupportedProviderOutput;
+            if (saw_action.*) return error.UnsupportedMessageAfterAction;
             message_count.* += 1;
         }
         if (validation.kind == .function_call) {
@@ -777,6 +799,7 @@ fn processEvent(
         return;
     }
     if (kind.eql("response.completed")) {
+        rejection.stage = .response;
         if (added.active or item_count.* == 0 or message_count.* > 1 or
             (message_count.* == 0 and call_count.* == 0)) return error.IncompleteProviderOutput;
         try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
@@ -787,7 +810,7 @@ fn processEvent(
     if (kind.eql("error") or kind.eql("response.failed") or kind.eql("response.incomplete")) {
         return error.IncompleteProviderOutput;
     }
-    if (!knownNonterminal(kind.slice())) return error.UnsupportedProviderOutput;
+    if (!knownNonterminal(kind.slice())) return error.UnsupportedEventType;
 }
 
 fn linePrefix(io: std.Io, file: std.Io.File, line: Range, prefix: []const u8) !bool {
@@ -827,6 +850,7 @@ pub fn validate(
     source_file: std.Io.File,
     source_length: u64,
     metadata: *store.OutputMetadataWriter,
+    rejection: *Rejection,
     faults: Faults,
 ) !Validated {
     if (faults.metadata) metadata.fail_writes = true;
@@ -843,6 +867,7 @@ pub fn validate(
     var evidence: Evidence = .{};
     var added: Added = .{};
     while (source.offset() < source.end) {
+        rejection.* = .{ .byte_offset = source.offset() };
         const line_start = source.offset();
         while (try source.peek()) |byte| {
             _ = try source.take();
@@ -880,6 +905,7 @@ pub fn validate(
                         &answer_length,
                         &answer_hash,
                         &evidence,
+                        rejection,
                     );
                 }
                 data = null;
@@ -922,7 +948,22 @@ pub fn validate(
 
 pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
-        error.UnsupportedProviderOutput => "unsupported_provider_output",
+        error.UnsupportedItemStatus,
+        error.UnsupportedAsyncCall,
+        error.UnsupportedCallControl,
+        error.UnsupportedCaller,
+        error.UnsupportedMetadataAuthority,
+        error.UnsupportedReasoningText,
+        error.UnsupportedReasoningBlock,
+        error.UnsupportedAnnotation,
+        error.UnsupportedItemType,
+        error.UnsupportedMessageRole,
+        error.UnsupportedMessagePhase,
+        error.UnsupportedContentBlock,
+        error.UnsupportedResponseStatus,
+        error.UnsupportedMessageAfterAction,
+        error.UnsupportedEventType,
+        => "unsupported_provider_output",
         error.ContinuationUnavailable => "continuation_unavailable",
         error.MetadataScratchExhausted => "response_metadata_exhausted",
         error.InjectedMetadataFailure => "response_metadata_failed",
@@ -957,7 +998,8 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
         &retained,
     );
     errdefer metadata.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, .{});
+    var rejection: Rejection = .{};
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &rejection, .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try store.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
@@ -1029,13 +1071,13 @@ test "provider reasoning validation rejects wrong types duplicates and malformed
         .{ "\"encrypted_content\":null", error.ExpectedJsonString },
         .{ "\"encrypted_content\":17", error.ExpectedJsonString },
         .{ "\"encrypted_content\":{}", error.ExpectedJsonString },
-        .{ "\"encrypted_content\":\"opaque\",\"text\":null", error.UnsupportedProviderOutput },
-        .{ "\"encrypted_content\":\"opaque\",\"status\":\"in_progress\"", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"text\":null", error.UnsupportedReasoningText },
+        .{ "\"encrypted_content\":\"opaque\",\"status\":\"in_progress\"", error.UnsupportedItemStatus },
         .{ "\"encrypted_content\":\"opaque\",\"encr\\u0079pted_content\":\"second\"", error.DuplicateJsonField },
         .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\",\"text\":null}]", error.ExpectedJsonString },
         .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":{}}]", error.ExpectedJsonString },
-        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"reasoning_text\",\"text\":\"x\"}]", error.UnsupportedProviderOutput },
-        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"x\"}]", error.UnsupportedProviderOutput },
+        .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"reasoning_text\",\"text\":\"x\"}]", error.UnsupportedReasoningBlock },
+        .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"summary_text\",\"text\":\"x\"}]", error.UnsupportedReasoningBlock },
         .{ "\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"summary_text\"}]", error.MissingProviderField },
         .{ "\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"a\",\"te\\u0078t\":\"b\"}]", error.DuplicateJsonField },
         .{ "\"encrypted_content\":\"" ++ prefix ++ "\\q\"", error.InvalidJsonEscape },
@@ -1135,7 +1177,7 @@ test "provider preserves ordered trustworthy function call envelopes" {
         "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ message ++ "}\n\n";
     var order_tmp = std.testing.tmpDir(.{});
     defer order_tmp.cleanup();
-    try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+    try std.testing.expectError(error.UnsupportedMessageAfterAction, validateTestingSse(&order_tmp, late_message, 64 * 1024));
 }
 
 test "empty terminal output uses complete streamed items but partial terminal output contradicts them" {
@@ -1201,12 +1243,40 @@ test "provider rejects unsupported consequential function call controls" {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         if (case[1]) {
-            try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingSse(&tmp, sse, 64 * 1024));
+            if (validateTestingSse(&tmp, sse, 64 * 1024)) |_| {
+                return error.ExpectedRejection;
+            } else |err| {
+                try std.testing.expectEqualStrings("unsupported_provider_output", failureCode(err));
+            }
         } else {
             const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
             try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
         }
     }
+}
+
+test "metadata notification is not output or completion authority" {
+    // Minimized from the authorized 2026-10-17 Codex probe. Metadata arrived
+    // before the completed message; only the done item supplied its answer.
+    const notification = "data: {\"type\":\"response.metadata\",\"sequence_number\":5,\"response_id\":\"synthetic\",\"metadata\":{\"openai_chatgpt_moderation_metadata\":{\"prompt\":{},\"generation\":{},\"tool_call\":{},\"tool_response\":{}}}}\n\n";
+    const item = "{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK\",\"annotations\":[]}],\"phase\":\"final_answer\"}";
+    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
+    const terminal = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}\n\n";
+    for ([_][]const u8{ notification ++ done ++ terminal, done ++ notification ++ terminal }) |sse| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const accepted = try validateTestingSse(&tmp, sse, 4096);
+        try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+        try std.testing.expectEqual(@as(u64, 2), accepted.output.answer_length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("OK"), &accepted.output.answer_digest);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, notification, 4096));
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, notification ++ terminal, 4096));
+    try std.testing.expectError(error.LateProviderOutput, validateTestingSse(&tmp, done ++ terminal ++ notification, 4096));
+    try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.metadata.future\"}\n\n" ++ done ++ terminal, 4096));
 }
 
 test "Bash proposal metadata growth is linear and disk-backed" {
@@ -1307,7 +1377,7 @@ test "provider field collection cannot grant authority through escaped metadata 
     defer tmp.cleanup();
     var source = try testingObject(&tmp, "{\"cell_\\u0069d\":null,\"unknown\":{\"nested\":[1,true]}}");
     defer source.file.close(std.testing.io);
-    try std.testing.expectError(error.UnsupportedProviderOutput, validateMetadataAuthority(
+    try std.testing.expectError(error.UnsupportedMetadataAuthority, validateMetadataAuthority(
         std.testing.io,
         source.file,
         .{ .start = 0, .length = source.end },

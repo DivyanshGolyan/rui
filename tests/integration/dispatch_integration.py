@@ -1362,7 +1362,7 @@ def main():
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, None)
+        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, "contradictory-request")
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1591,6 +1591,15 @@ def main():
         encrypted_cases.append(encode_sse([
             {"type": "response.output_item.done", "output_index": 0, "item": missing}
         ], done=False))
+        private_sentinel = "PRIVATE-CONTINUATION-MUST-NOT-APPEAR"
+        unsupported_message = dict(invalid_message)
+        unsupported_message["phase"] = "future_phase"
+        unsupported_message["content"] = [{"type": "output_text", "text": private_sentinel}]
+        unsupported_cases = [
+            encode_sse([{"type": "response.output_item.done", "output_index": 0,
+                         "item": unsupported_message}], done=False),
+            encode_sse([{"type": "response.future_event", "private": private_sentinel}], done=False),
+        ]
         invalid_endpoint = SuccessEndpoint(
             [
                 first_sse[:-1],
@@ -1600,6 +1609,7 @@ def main():
                 late_malformed,
                 incomplete_tool,
                 *encrypted_cases,
+                *unsupported_cases,
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
@@ -1620,6 +1630,8 @@ def main():
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "continuation_unavailable",
+                "unsupported_provider_output",
+                "unsupported_provider_output",
             )
         ):
             invalid_store = state / f"invalid-output-{index}"
@@ -1648,9 +1660,35 @@ def main():
             assert database.execute(
                 "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
             ).fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == f"request-{index + 1}"
             database.close()
             stop_host(invalid_host)
             processes.remove(invalid_host)
+            # Rejection evidence must survive scratch disposal and Host restart,
+            # without turning a diagnostic into an answer or continuation.
+            reopened = start_host(invalid_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )
+            resolution = report["full"]["model_operations"][0]["resolution"]
+            assert resolution["code"] == expected_code, resolution
+            assert resolution["content"] is not None, resolution
+            detail = json.loads(resolution["content"]["text"])
+            assert detail["reason"] and detail["stage"], detail
+            assert len(resolution["content"]["text"].encode()) <= 512
+            assert private_sentinel not in json.dumps(report), report
+            if index == 13:
+                assert detail["reason"] == "UnsupportedMessagePhase", detail
+                assert detail["stage"] == "item" and detail["output_index"] == 0, detail
+            if index == 14:
+                assert detail["reason"] == "UnsupportedEventType", detail
+                assert detail["stage"] == "event" and detail["output_index"] is None, detail
+            assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+            stop_host(reopened)
+            processes.remove(reopened)
         stop_endpoint(invalid_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
