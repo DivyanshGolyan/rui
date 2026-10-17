@@ -568,6 +568,7 @@ def prove_accept_pressure(state):
         root = state / label
         root.mkdir(mode=0o700)
         store, arm, log = root / "store", root / "arm", root / "accept.log"
+        backlog_hold, backlog_ready, backlog_release = (root / name for name in ("hold", "ready", "release"))
         endpoint = HeldEndpoint()
         worker = threading.Thread(target=endpoint.serve_forever)
         worker.start()
@@ -583,7 +584,9 @@ def prove_accept_pressure(state):
 
         try:
             env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                   "RUI_ACCEPT_LOG": str(log), "RUI_ACCEPT_ARM": str(arm), "RUI_ACCEPT_ERRNO": str(injected or 0)}
+                   "RUI_ACCEPT_LOG": str(log), "RUI_ACCEPT_ARM": str(arm), "RUI_ACCEPT_ERRNO": str(injected or 0),
+                   "RUI_ACCEPT_HOLD": str(backlog_hold), "RUI_ACCEPT_READY": str(backlog_ready),
+                   "RUI_ACCEPT_RELEASE": str(backlog_release)}
             # A system shell on macOS can strip DYLD_INSERT_LIBRARIES. Use
             # the selected fixture Python to set this child's limit and exec.
             host, ready = start_ready_process([sys.executable, "-c",
@@ -610,21 +613,26 @@ def prove_accept_pressure(state):
             else:
                 # Real per-process exhaustion, isolated to this 512-FD Host.
                 # Incomplete headers require sockets but no content handles.
-                # A full listen backlog blocks connect on Linux until the Host
-                # stops accepting, but macOS refuses it at once while the Host
-                # is still accepting; retry those refusals until EMFILE.
+                # Hold one real accept so backlog pressure occurs before FD
+                # exhaustion, independently of scheduler load. A failed connect
+                # alone must not be mistaken for the required EMFILE receipt.
+                backlog_hold.touch()
+                pending = connect(ready["socket"])
+                wait_for(backlog_ready.exists, "held accept before backlog fill")
                 attempts, deadline = 0, time.monotonic() + 10
                 while attempts < 600 and time.monotonic() < deadline:
                     try:
                         pending = connect(ready["socket"])
                         attempts += 1
-                    except (TimeoutError, BlockingIOError):
-                        break
-                    except ConnectionRefusedError:
+                    except (TimeoutError, BlockingIOError, ConnectionRefusedError):
+                        # Linux may report EAGAIN/timeout and Darwin refuses a
+                        # full queue. Neither means Host descriptors ran out.
                         connections.pop().close()
+                        backlog_release.touch()
                         time.sleep(0.01)
                     if any(code == errno.EMFILE for code, _ in accept_records(log)):
                         break
+                assert backlog_release.exists(), "real listener backlog was not exercised"
             expected = injected or errno.EMFILE
             wait_for(lambda: any(code == expected for code, _ in accept_records(log)), "accept resource exhaustion")
             # Existing accepted peers still progress during pressure.
@@ -669,6 +677,7 @@ def prove_accept_pressure(state):
             assert host.poll() is None, diagnostics.tail()
             print(f"accept pressure: {label}, existing peer, admitted work, same-Host recovery and bounded retry passed", flush=True)
         finally:
+            backlog_release.touch()
             endpoint.release.set()
             dispose_all(*(peer.close for peer in connections),
                         lambda: stop_process(host) if host is not None else None,

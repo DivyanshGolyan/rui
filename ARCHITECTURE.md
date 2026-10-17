@@ -1272,7 +1272,7 @@ For configured Active Capacity \(C\), the supported-burst requirement is \(I + F
 | \(I\) | Inherited open descriptors. |
 | \(F\) | 7 for Store lease, database, journal, temporary storage, directory sync and listener ownership. |
 | \(T\) | 0 without transport; 2 Linux eventfds or 4 descriptors for two macOS curl pipes. |
-| 403 | 100 ordinary exchanges at four descriptors each, plus two controls and one discovery socket. These are workload populations, not admission quotas. |
+| 403 | 100 ordinary exchanges at four descriptors each, plus two controls and one discovery socket. Default mode treats these as workload populations, not admission quotas. |
 | 2 | Intake wake socket pair. |
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 8 on Linux or 10 on macOS for the independent authentication worker. |
