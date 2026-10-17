@@ -249,7 +249,8 @@ class SelectionTest(unittest.TestCase):
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",
                      ".github/workflows/cache-maintenance.yml", ".github/scripts/prune-caches.cjs",
-                     "tests/ci/select_tests.py", "tests/ci/run_selected.py"):
+                     "tests/ci/select_tests.py", "tests/ci/run_selected.py",
+                     "tests/integration/previous_release_upgrade.py"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["test-logic"])
             self.assertEqual(result["native_targets"], ["test-logic"])
@@ -391,14 +392,17 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(all(row["targets"] == ["measure-model-output"] for row in rows))
 
     def test_requested_ref_cannot_publish_shared_caches(self):
-        workflow = Path(".github/workflows/qualify-macos.yml").read_text()
         # The server's scoped token, not requested-ref setup code, owns access.
-        self.assertRegex(workflow, r'(?m)^cache-mode: read$')
-        self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
-                         'a job override could restore cache-write authority')
-        self.assertIn('workflow_call:', workflow)
-        self.assertEqual(workflow.count('persist-credentials: false'),
-                         workflow.count('uses: actions/checkout@'))
+        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml'):
+            with self.subTest(workflow=name):
+                workflow = Path('.github/workflows', name).read_text()
+                self.assertRegex(workflow, r'(?m)^cache-mode: read$')
+                self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
+                                 'a job override could restore cache-write authority')
+                self.assertEqual(workflow.count('persist-credentials: false'),
+                                 workflow.count('uses: actions/checkout@'))
+                if name == 'qualify-macos.yml':
+                    self.assertIn('workflow_call:', workflow)
 
     def test_ci_test_methods_cannot_silently_replace_another_check(self):
         for path in Path('tests/ci').glob('test_*.py'):
