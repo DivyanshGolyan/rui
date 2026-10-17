@@ -1508,6 +1508,7 @@ def main():
             "must not publish",
             served_model="model-body",
         )
+        contradictory_request_id = 'contradictory-"quoted"\\path'
         contradictory_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(
@@ -1515,7 +1516,7 @@ def main():
                     {
                         "OpenAI-Model": "model-openai-header",
                         "X-OpenAI-Model": "model-x-openai-header",
-                        "X-Request-Id": "contradictory-request",
+                        "X-Request-Id": contradictory_request_id,
                     },
                 )
             ]
@@ -1560,7 +1561,7 @@ def main():
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, None)
+        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, contradictory_request_id)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1577,6 +1578,21 @@ def main():
             "status": "failed",
             "code": "contradictory_provider_output",
         }, restarted_failure
+        report = command(
+            "inspect-session", "--store", contradictory_store,
+            "--session", "direct/contradictory-evidence", "--profile", "full",
+        )
+        operation = report["full"]["model_operations"][0]
+        assert operation["request_id"] == contradictory_request_id, operation
+        resolution = operation["resolution"]
+        assert resolution["content"] is not None, resolution
+        assert json.loads(resolution["content"]["text"]) == {
+            "reason": "ContradictoryProviderOutput", "stage": "response",
+            "byte_offset": str(len(contradictory_sse)), "output_index": None,
+        }, resolution
+        assert len(resolution["content"]["text"].encode()) <= 512
+        assert "must not publish" not in json.dumps(report), report
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         unreadable_result = subprocess.run(
             [
                 str(RUI),
@@ -1661,50 +1677,80 @@ def main():
         # surface. Even a complete 2xx text response cannot be published under
         # a frozen object schema without schema validation.
         schema_candidate = sse_answer(
-            "schema-response", "schema-reasoning", "schema-message", "not a JSON object"
+            "schema-response", "schema-reasoning", "schema-message", "private schema answer"
         )[0]
-        schema_endpoint = SuccessEndpoint([schema_candidate])
+        schema_request_ids = ('schema-"quoted\\request', None)
+        schema_endpoint = SuccessEndpoint([
+            ResponseSpec(schema_candidate, {"X-Request-Id": request_id} if request_id else {})
+            for request_id in schema_request_ids
+        ])
         schema_thread = threading.Thread(target=schema_endpoint.serve_forever, daemon=True)
         endpoints[schema_endpoint] = schema_thread
         schema_thread.start()
-        schema_store = state / "unsupported-schema-store"
-        schema_host = start_host(
-            schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
-        )
-        processes.append(schema_host)
-        configure(
-            state,
-            schema_store,
-            "schema-config",
-            "direct/unsupported-schema",
-            "model-a",
-            {"type": "object"},
-        )
-        message(
-            state,
-            schema_store,
-            "schema-message",
-            "direct/unsupported-schema",
-            "return an object",
-        )
-        schema_failure = wait_for(
-            lambda: (value := observe(schema_store, "schema-message")).get("result", {}).get("code")
-            and value,
-            "unsupported structured output rejection",
-        )
-        assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
-        assert len(schema_endpoint.requests) == 1
-        database = sqlite3.connect(schema_store / "rui.sqlite3")
-        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
-        assert database.execute(
-            "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
-        ).fetchone()[0] == 0
-        assert database.execute(
-            "SELECT outcome_content_id FROM turn"
-        ).fetchone()[0] is None
-        database.close()
-        stop_host(schema_host)
-        processes.remove(schema_host)
+        for index, request_id in enumerate(schema_request_ids):
+            schema_store = state / f"unsupported-schema-store-{index}"
+            schema_host = start_host(
+                schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
+            )
+            processes.append(schema_host)
+            configure(
+                state,
+                schema_store,
+                f"schema-config-{index}",
+                "direct/unsupported-schema",
+                "model-a",
+                {"type": "object"},
+            )
+            message(
+                state,
+                schema_store,
+                f"schema-message-{index}",
+                "direct/unsupported-schema",
+                "return an object",
+            )
+            schema_failure = wait_for(
+                lambda: (value := observe(schema_store, f"schema-message-{index}")).get("result", {}).get("code")
+                and value,
+                "unsupported structured output rejection",
+            )
+            assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
+            with sqlite3.connect(schema_store / "rui.sqlite3") as database:
+                assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+                assert database.execute(
+                    "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+                ).fetchone()[0] == 0
+                assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
+            before_operation = command(
+                "inspect-session", "--store", schema_store,
+                "--session", "direct/unsupported-schema", "--profile", "full",
+            )["full"]["model_operations"][0]
+            stop_host(schema_host)
+            processes.remove(schema_host)
+            reopened = start_host(schema_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", schema_store,
+                "--session", "direct/unsupported-schema", "--profile", "full",
+            )
+            operation = report["full"]["model_operations"][0]
+            assert operation == before_operation, operation
+            resolution = operation["resolution"]
+            assert resolution["code"] == "unsupported_output_schema", resolution
+            assert resolution["content"] is not None, resolution
+            assert json.loads(resolution["content"]["text"]) == {
+                "reason": "UnsupportedOutputSchema", "stage": "response",
+                "byte_offset": str(len(schema_candidate)), "output_index": None,
+            }, resolution
+            assert len(resolution["content"]["text"].encode()) <= 512
+            assert operation["request_id"] == request_id, operation
+            assert "private schema answer" not in json.dumps(report), report
+            assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+            assert observe(schema_store, f"schema-message-{index}")["result"] == schema_failure["result"]
+            assert len(schema_endpoint.requests) == index + 1
+            stop_host(reopened)
+            processes.remove(reopened)
         stop_endpoint(schema_endpoint, endpoints)
 
         # Completed transport is not success: the whole SSE candidate must be
@@ -1789,15 +1835,34 @@ def main():
         encrypted_cases.append(encode_sse([
             {"type": "response.output_item.done", "output_index": 0, "item": missing}
         ], done=False))
+        private_sentinel = "PRIVATE-CONTINUATION-MUST-NOT-APPEAR"
+        unsupported_message = dict(invalid_message)
+        unsupported_message["phase"] = "future_phase"
+        unsupported_message["content"] = [{"type": "output_text", "text": private_sentinel}]
+        unsupported_cases = [
+            encode_sse([{"type": "response.output_item.done", "output_index": 0,
+                         "item": unsupported_message}], done=False),
+            encode_sse([{"type": "response.future_event", "private": private_sentinel}], done=False),
+        ]
+        # Distinct output item identities pass parsing, but the decoded call
+        # identity must remain unique when Store imports the complete envelope.
+        duplicate_calls = sse_tool_calls("duplicate-calls", [
+            ("bash", "same-call", json.dumps({
+                "description": f"Print duplicate marker {index}",
+                "cmd": "true", "timeout_ms": None,
+            })) for index in range(2)
+        ])
         invalid_endpoint = SuccessEndpoint(
             [
-                first_sse[:-1],
+                ResponseSpec(first_sse[:-1], {}),
                 contradictory,
                 changed_terminal,
                 duplicate_identity,
                 late_malformed,
                 incomplete_tool,
                 *encrypted_cases,
+                *unsupported_cases,
+                duplicate_calls,
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
@@ -1818,6 +1883,9 @@ def main():
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "continuation_unavailable",
+                "unsupported_provider_output",
+                "unsupported_provider_output",
+                "contradictory_provider_output",
             )
         ):
             invalid_store = state / f"invalid-output-{index}"
@@ -1846,9 +1914,51 @@ def main():
             assert database.execute(
                 "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
             ).fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+            expected_request_id = None if index == 0 else f"request-{index + 1}"
+            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
             database.close()
+            before_operation = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )["full"]["model_operations"][0]
+            assert before_operation["request_id"] == expected_request_id, before_operation
             stop_host(invalid_host)
             processes.remove(invalid_host)
+            # Rejection evidence must survive scratch disposal and Host restart,
+            # without turning a diagnostic into an answer or continuation.
+            reopened = start_host(invalid_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )
+            operation = report["full"]["model_operations"][0]
+            assert operation["operation"] == before_operation["operation"], operation
+            assert operation["request_id"] == expected_request_id, operation
+            resolution = operation["resolution"]
+            assert resolution["code"] == expected_code, resolution
+            assert resolution["content"] is not None, resolution
+            detail = json.loads(resolution["content"]["text"])
+            assert detail["reason"] and detail["stage"], detail
+            assert len(resolution["content"]["text"].encode()) <= 512
+            assert private_sentinel not in json.dumps(report), report
+            if index == 13:
+                assert detail["reason"] == "UnsupportedMessagePhase", detail
+                assert detail["stage"] == "item" and detail["output_index"] == 0, detail
+            if index == 14:
+                assert detail["reason"] == "UnsupportedEventType", detail
+                assert detail["stage"] == "event" and detail["output_index"] is None, detail
+            if index == 15:
+                assert detail == {
+                    "reason": "InvalidProviderEnvelope", "stage": "response",
+                    "byte_offset": str(len(duplicate_calls)), "output_index": None,
+                }, detail
+            assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+            stop_host(reopened)
+            processes.remove(reopened)
+        assert len(invalid_endpoint.requests) == 16
         stop_endpoint(invalid_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
