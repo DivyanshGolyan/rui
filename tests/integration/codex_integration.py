@@ -122,6 +122,16 @@ def run():
         fixture.stop_host(host)
         host = None
 
+        # The fixture flag must reach credential selection: a real-looking
+        # credential is refused before any request to the fixture endpoint.
+        credentials(credential_file, access="e30.eyJleHAiOjQxMDI0NDQ4MDB9.b3RoZXI")
+        host = start(store, url)
+        fixture.message(state, store, "other-credential", "managed/session", "reject another credential")
+        fixture.wait_for(lambda: fixture.observe(store, "other-credential").get("result"), "synthetic-only fixture rejection")
+        assert not endpoint.requests, "a non-canary credential reached the test endpoint"
+        fixture.stop_host(host)
+        host = None
+
         credentials(credential_file)
         host = start(store, url)
         diagnostics = HostDiagnostics(host)
