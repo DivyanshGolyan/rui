@@ -23,6 +23,7 @@ pub const std_options: std.Options = .{
 };
 
 extern "c" fn rui_launch_detached(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize) c_int;
+extern "c" fn rui_launch_detached_observed(executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, startup_read: *c_int) c_int;
 
 test "detached launcher reports exec failure before claiming Host readiness" {
     const argv = [_:null]?[*:0]const u8{"/rui-no-such-executable"};
@@ -31,7 +32,7 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
-        TerminalText.diagnostic("error: {s}\n", .{@errorName(err)});
+        TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -272,6 +273,9 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
             var line: [160]u8 = undefined;
             const instance = std.fmt.bytesToHex(ready.instance, .lower);
             try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Wire: {s}\nActive capacity: {d}\nBash: {s}\nModel: {s}\nManaged authentication: {s}\nInstance: {s}\n", .{ protocol.wire_version, ready.active_capacity, if (ready.capabilities.bash) "enabled" else "disabled", if (ready.capabilities.model) "enabled" else "disabled", if (ready.capabilities.managed_authentication) "enabled" else "disabled", &instance }));
+            try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Concurrent intake: {d} ordinary clients (default 100, minimum 10){s}\n", .{ ready.intake_capacity, if (ready.intake_capacity < 100) " — reduced by descriptor limit" else "" }));
+            if (ready.descriptor_limit) |limit|
+                try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "Descriptor soft limit: {d}\n", .{limit}));
         },
         .unavailable => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: unavailable (no current Store owner established)\n"),
         .owned_unavailable => try std.Io.File.stdout().writeStreamingAll(init.io, "Host: owned but unavailable (starting or draining; completion unconfirmed)\n"),
@@ -346,7 +350,11 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
         @ptrCast(&executable_buffer), "serve", "--store", store_z.ptr,
         "--active-capacity",          "8",     "--codex",
     };
-    const launched = rui_launch_detached(argv[0].?, &argv, argv.len);
+    var startup_read: c_int = -1;
+    const launched = rui_launch_detached_observed(argv[0].?, &argv, argv.len, &startup_read);
+    defer if (startup_read >= 0) {
+        _ = std.c.close(startup_read);
+    };
     if (launched != 0) {
         notice: {
             var bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
@@ -359,7 +367,34 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
         return error.HostLaunchFailed;
     }
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    var startup_bytes: [8192]u8 = undefined;
+    var startup_length: usize = 0;
     while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
+        const count = std.c.read(startup_read, startup_bytes[startup_length..].ptr, startup_bytes.len - startup_length);
+        if (count > 0) startup_length += @intCast(count);
+        const startup = startup_bytes[0..startup_length];
+        if ((std.mem.indexOf(u8, startup, "(exit status 1)\n") != null or count == 0 or startup_length == startup_bytes.len) and
+            std.mem.indexOf(u8, startup, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+        {
+            // A competing candidate may have lost the lease to a ready Host.
+            if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
+                var header_bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
+                var header = std.Io.Writer.fixed(&header_bytes);
+                try header.writeAll("\nrui: detached Host startup failed for Store ");
+                var path_text: TerminalText = .{ .mode = .line };
+                try path_text.feed(&header, paths.store.slice());
+                try path_text.finish(&header);
+                try header.writeAll(":\n");
+                _ = @import("stderr.zig").write(header.buffered());
+                _ = @import("stderr.zig").write(startup);
+                if (startup_length == 0) TerminalText.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
+                if (startup_length == startup_bytes.len) {
+                    TerminalText.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
+                    return error.HostReadinessUnconfirmed;
+                }
+                return error.HostStartupFailed;
+            }
+        }
         switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
             .ready => |ready| {
                 if (!quiet) {
@@ -376,6 +411,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
+    if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
     TerminalText.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }

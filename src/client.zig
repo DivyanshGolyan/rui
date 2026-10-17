@@ -663,6 +663,8 @@ pub const HostStatus = union(enum) {
         store: protocol.Bounded(protocol.max_store_bytes),
         instance: protocol.InstanceId,
         active_capacity: usize,
+        intake_capacity: usize = 100,
+        descriptor_limit: ?usize = null,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -789,19 +791,27 @@ fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     });
     if (!std.mem.eql(u8, info.version, protocol.wire_version) or
         !std.mem.eql(u8, info.type, "host_info") or
-        !std.mem.eql(u8, info.store, store) or
-        info.active_capacity.len == 0 or info.active_capacity.len > 20 or
-        (info.active_capacity.len > 1 and info.active_capacity[0] == '0'))
+        !std.mem.eql(u8, info.store, store))
         return error.InvalidHostInfo;
-    for (info.active_capacity) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
+    const finite_limit: ?[]const u8 = if (std.mem.eql(u8, info.descriptor_limit, "unlimited")) null else info.descriptor_limit;
+    for ([_]?[]const u8{ info.active_capacity, info.intake_capacity, finite_limit }) |field| {
+        const text = field orelse continue;
+        if (text.len == 0 or text.len > 20 or (text.len > 1 and text[0] == '0')) return error.InvalidHostInfo;
+        for (text) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
+    }
     const instance = protocol.parseInstanceId(info.instance) catch return error.InvalidHostInfo;
     const capacity = std.fmt.parseInt(usize, info.active_capacity, 10) catch return error.InvalidHostInfo;
+    const intake_capacity = std.fmt.parseInt(usize, info.intake_capacity, 10) catch return error.InvalidHostInfo;
+    if (intake_capacity < 10 or intake_capacity > 100) return error.InvalidHostInfo;
+    const descriptor_limit = if (finite_limit) |text| std.fmt.parseInt(usize, text, 10) catch return error.InvalidHostInfo else null;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
     try identity.set(info.store);
     return .{ .ready = .{
         .store = identity,
         .instance = instance,
         .active_capacity = capacity,
+        .intake_capacity = intake_capacity,
+        .descriptor_limit = descriptor_limit,
         .capabilities = info.capabilities,
     } };
 }
@@ -827,6 +837,22 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         "{\"version\":\"1\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"capabilities\":{\"bash\":true,\"model\":false,\"managed_authentication\":false}}",
         "/one",
     ));
+    for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
+        for ([_][]const u8{ "010", "+10", "1_0", "", "18446744073709551616" }) |value| {
+            const extra = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\",\"capabilities\":", .{ field, value });
+            defer std.testing.allocator.free(extra);
+            const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, golden, "\"capabilities\":", extra);
+            defer std.testing.allocator.free(malformed);
+            try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(malformed, "/one"));
+        }
+    }
+    const reduced = try std.mem.replaceOwned(u8, std.testing.allocator, golden, "\"capabilities\":", "\"intake_capacity\":\"10\",\"descriptor_limit\":\"0\",\"capabilities\":");
+    defer std.testing.allocator.free(reduced);
+    const reduced_info = try parseHostInfo(reduced, "/one");
+    try std.testing.expectEqual(@as(usize, 10), reduced_info.ready.intake_capacity);
+    try std.testing.expectEqual(@as(?usize, 0), reduced_info.ready.descriptor_limit);
+    try std.testing.expectEqual(@as(usize, 100), result.ready.intake_capacity);
+    try std.testing.expectEqual(@as(?usize, null), result.ready.descriptor_limit);
     for ([_]struct { needle: []const u8, replacement: []const u8 }{
         .{ .needle = "\"store\":\"/one\"", .replacement = "\"store\":\"/other\",\"store\":\"/one\"" },
         .{ .needle = "\"bash\":true", .replacement = "\"bash\":false,\"bash\":true" },
