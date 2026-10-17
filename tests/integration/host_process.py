@@ -3,6 +3,7 @@
 import atexit
 import http.server
 import ctypes
+import errno
 import functools
 import json
 import mmap
@@ -335,6 +336,12 @@ def preserve_failure_metadata(path, collect):
 def canonical_fixture_root(path):
     """Resolve a newly created private root before deriving fixture identities."""
     return pathlib.Path(path).resolve(strict=True)
+
+
+def is_peer_disconnect(error):
+    """Classify socket closure; callers decide whether closure is expected."""
+    return isinstance(error, (BrokenPipeError, ConnectionResetError)) or (
+        isinstance(error, OSError) and error.errno == errno.ENOTCONN)
 
 
 def wait_for_execution_release(inspect, deadline):

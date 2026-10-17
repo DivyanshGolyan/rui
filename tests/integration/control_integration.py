@@ -3,6 +3,7 @@
 
 import http.server
 import concurrent.futures
+import errno
 import hashlib
 import json
 import os
@@ -18,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -91,7 +92,9 @@ class StreamingHandler(http.server.BaseHTTPRequestHandler):
             try:
                 self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError as error:
+                if not is_peer_disconnect(error):
+                    raise
                 with self.server.condition:
                     self.server.disconnects += 1
                     self.server.condition.notify_all()
@@ -210,8 +213,9 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(chunk[:written])
                     remaining -= written
             self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        except OSError as error:
+            if not is_peer_disconnect(error):
+                raise
         self.close_connection = True
 
     def log_message(self, _format, *_args):
@@ -1746,18 +1750,20 @@ def prove_partial_setup_cleanup():
     from unittest.mock import Mock, patch
 
     for complete_headers in (False, True):
-        for stage in (None, "settimeout", "connect", "sendall", "broken-pipe", "reset"):
+        for stage in (None, "settimeout", "connect", "sendall", "broken-pipe", "reset", "not-connected"):
             connection = Mock()
             if stage is not None:
-                getattr(connection, "sendall" if stage in ("broken-pipe", "reset") else stage).side_effect = (
+                failure = (
                     BrokenPipeError("setup failed") if stage == "broken-pipe" else
+                    OSError(errno.ENOTCONN, "setup failed") if stage == "not-connected" else
                     ConnectionResetError("setup failed") if stage == "reset" else TimeoutError("setup failed")
                 )
+                getattr(connection, "sendall" if stage in ("broken-pipe", "reset", "not-connected") else stage).side_effect = failure
             with patch.object(socket, "socket", return_value=connection):
                 try:
                     candidate = open_partial("unused", "/v1/inspect-session", complete_headers=complete_headers)
-                except (TimeoutError, BrokenPipeError, ConnectionResetError):
-                    assert stage is not None
+                except OSError as error:
+                    assert stage is not None and error is failure
                     connection.close.assert_called_once()
                 else:
                     assert stage is None and candidate is connection

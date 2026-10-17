@@ -14,7 +14,7 @@ import threading
 
 import bash_integration as bash_fixture
 import model_fixture as fixture
-from host_process import canonical_fixture_root
+from host_process import canonical_fixture_root, is_peer_disconnect
 
 
 def prove_pid_publication(root):
@@ -398,8 +398,9 @@ def main():
             )
             try:
                 assert draining.recv(1) == b"", "unhanded upload produced a reply"
-            except ConnectionResetError:
-                pass
+            except OSError as error:
+                if not is_peer_disconnect(error):
+                    raise
             fixture.wait_for(
                 lambda: not list((store / "scratch").glob("request-*-*.tmp")),
                 "unhanded upload released ingress scratch while Bash cleanup is held",

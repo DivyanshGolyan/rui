@@ -16,7 +16,7 @@ import time
 
 import bash_integration as bash_fixture
 import model_fixture as fixture
-from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, stop_process
+from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, is_peer_disconnect, stop_process
 from host_status_integration import socket_path, status
 
 
@@ -92,12 +92,17 @@ def request(sock, store, identity=None, *, extra=b""):
 
 
 def finish(stream, body):
+    response = bytearray()
     with stream:
-        stream.sendall(body)
-        response = bytearray()
-        while chunk := stream.recv(4096):
-            response.extend(chunk)
-            assert len(response) < 8192
+        try:
+            stream.sendall(body)
+            while chunk := stream.recv(4096):
+                response.extend(chunk)
+                assert len(response) < 8192
+        except OSError as error:
+            if not is_peer_disconnect(error):
+                raise
+            # A late reset must not erase a captured acceptance prefix.
     return bytes(response)
 
 
@@ -336,10 +341,7 @@ def main():
             pending.close()
             pending = None
             for upload, remainder in uploads:
-                try:
-                    response = finish(upload, remainder)
-                except (BrokenPipeError, ConnectionResetError):
-                    response = b""
+                response = finish(upload, remainder)
                 assert b'"status":"accepted"' not in response, ("admitted after Host stop", response)
             fixture.wait_for(lambda: not sock.exists(), "listener closure before cleanup")
             with socket.socket(socket.AF_UNIX) as newcomer:

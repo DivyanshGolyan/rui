@@ -212,7 +212,7 @@ done
 drain_socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$drain_ready")
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_socket" "$drain_store" "$root" "$state" <<'PY'
 import json, os, pathlib, socket, subprocess, sys, time
-from host_process import preserve_failure_metadata, stop_process
+from host_process import is_peer_disconnect, preserve_failure_metadata, stop_process
 rui, socket_path, store, workspace, state = sys.argv[1:]
 state = pathlib.Path(state)
 body = json.dumps({
@@ -248,8 +248,10 @@ try:
         while chunk := client.recv(4096):
             response.extend(chunk)
             assert len(response) <= 16384, "drain response exceeded fixture bound"
-    except (BrokenPipeError, ConnectionResetError):
-        pass  # Intake shutdown may win before or after the first upload byte.
+    except OSError as error:
+        if not is_peer_disconnect(error):
+            raise
+        # Intake shutdown may win before or after the first upload byte.
     (state / "drain-response.bin").write_bytes(response)
     assert b'"status":"accepted"' not in response, response
 finally:

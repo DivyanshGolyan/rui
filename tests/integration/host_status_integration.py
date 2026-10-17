@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
+from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process
 
 
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
@@ -124,7 +124,9 @@ def complete_response(stream):
     while True:
         try:
             chunk = stream.recv(4096)
-        except ConnectionResetError:
+        except OSError as error:
+            if not is_peer_disconnect(error):
+                raise
             # Early route/kind rejection leaves hostile bytes unread. Reset
             # can terminate a complete reply, but never certify a prefix.
             break
@@ -246,8 +248,9 @@ def protected_saturation(root):
             stream.settimeout(remaining)
             try:
                 assert stream.recv(1) == b"", "unhanded intake produced a reply"
-            except ConnectionResetError:
-                pass
+            except OSError as error:
+                if not is_peer_disconnect(error):
+                    raise
         host.wait(timeout=5)
         stop_process(host)
         assert host.returncode != 0, diagnostics.tail()  # EffectAwareShutdown, not a forced kill.
@@ -336,7 +339,9 @@ def discovery_body_deadline(root):
                     assert len(response) < 8192, response
                 except socket.timeout:
                     continue
-                except (BrokenPipeError, ConnectionResetError):
+                except OSError as error:
+                    if not is_peer_disconnect(error):
+                        raise
                     closed = True
                     break
             elapsed = time.monotonic() - accepted
