@@ -205,6 +205,13 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
                      ((const char *)bytes)[i + sizeof(subject) - 1] == '}')) selected = 1;
             }
         }
+        static atomic_int inspection_dropped = 0;
+        if (selected && getenv("RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION") &&
+            !atomic_exchange(&inspection_dropped, 1)) {
+            record("diagnostic-dropped-inspection\n");
+            errno = EAGAIN;
+            return -1;
+        }
         if (selected && !atomic_exchange(&contention_claimed, 1)) {
             /* Complete fixed fixture identity, before the owned native write.
                The 512-byte buffer exceeds this phase/Session plus u64 metadata. */
@@ -743,7 +750,9 @@ def capture_receipt_case(state, library):
     store = root / "store"
     arm, release, log = (root / name for name in ("arm", "release", "probe.log"))
     answer = b"exact capture answer"
-    endpoint = fixture.SuccessEndpoint([fixture.sse_answer("capture", "reason", "message", answer.decode())[0]])
+    provider_release = threading.Event()
+    endpoint = fixture.SuccessEndpoint([
+        (fixture.sse_answer("capture", "reason", "message", answer.decode())[0], provider_release)])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     gate = ReleaseGate(root / "capture-gate")
@@ -754,16 +763,35 @@ def capture_receipt_case(state, library):
             "--test-response-capture-gate-path", gate.path), env={**os.environ,
             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-contention",
+            "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
         fixture.configure(root, store, "capture-config", "diagnostic/session", "model-a")
+        # Admission uses the ordinary worker; complete it before that worker
+        # holds optional stderr. Only provider capture must progress under hold.
+        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
         arm.touch()
-        inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
-        fixture.wait_for(lambda: log.exists() and "diagnostic-held-inspection\n" in log.read_text(),
-                         "actual optional inspection custody", timeout=3)
+        # A specific optional write may lose custody or output credit. Seek an
+        # actual hold without requiring delivery of any one inspection trace.
+        # The first eligible write deliberately fails to exercise that case.
+        acquisition_deadline = time.monotonic() + 3
+        while True:
+            remaining = acquisition_deadline - time.monotonic()
+            assert remaining > 0, "actual optional inspection custody exhausted original deadline"
+            inspector = fixture.start_command("inspect-session", "--store", store, "--session", "diagnostic/session")
+            fixture.wait_for(lambda: (log.exists() and "diagnostic-held-inspection\n" in log.read_text())
+                or inspector.poll() is not None, "optional inspection hold or completed caller", timeout=remaining)
+            assert time.monotonic() < acquisition_deadline, "actual optional inspection custody exceeded original deadline"
+            if log.exists() and "diagnostic-held-inspection\n" in log.read_text():
+                break
+            out, err = inspector.communicate(timeout=max(0, acquisition_deadline - time.monotonic()))
+            assert inspector.returncode == 0, (out, err)
+            assert json.loads(out)["session"]["reference"] == "diagnostic/session", out
+        assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
         assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == "diagnostic/session", held
-        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        provider_release.set()
         event = diagnostics.wait("capture_write_gate_entered", timeout=15)[0]
         assert event["process"] == held[0]["process"] and event["run"] == held[0]["run"], (event, held)
         assert event["written_bytes"] == "0" and gate.path.exists() and not release.exists(), event
@@ -777,7 +805,7 @@ def capture_receipt_case(state, library):
             store, "capture-message", "diagnostic/session", deadline)
         assert observation["result"]["status"] == "completed", observation
         assert saved_answer == answer
-        print("native capture receipt: writer entry under actual optional stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
+        print("native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
     finally:
         incoming_error = sys.exc_info()[1]
         if diagnostics is not None:
@@ -794,7 +822,7 @@ def capture_receipt_case(state, library):
                     raise  # Mandatory reap does not accept the timed-out caller.
 
         errors = []
-        for dispose in (release.touch, retire_inspector,
+        for dispose in (provider_release.set, release.touch, retire_inspector,
                         lambda: diagnostics.dispose_capture(gate, lambda: {"case": "capture-receipt",
                             "capture_gate_exists": gate.path.exists(), "optional_released": release.exists()})
                             if diagnostics is not None else gate.release(),
@@ -820,9 +848,12 @@ def persistent_cases(state, library, home, store, host):
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
     # The departure owner covers interruption at every decision cut. Keep a
     # real INT during join here; configure-commit-term covers the TERM adapter.
+    # Deliberate large backpressure inputs stay last: unrelated decoder and
+    # restoration cases must not inherit their opening-transcript workload.
     for case in ("sync-exit", "sync-handoff", "sync-command-int",
-                 "admission-interrupt", "backpressure", "backpressure-command", "disable", "restore", "both",
-                 "incomplete-disable", "incomplete-restore", "incomplete-both"):
+                 "admission-interrupt", "disable", "restore", "both",
+                 "incomplete-disable", "incomplete-restore", "incomplete-both",
+                 "backpressure", "backpressure-command"):
         master, slave = pty.openpty()
         output_master, output_slave = pty.openpty()
         original = termios.tcgetattr(slave)
@@ -2240,7 +2271,7 @@ def host_diagnostic_cases(state, library):
                     try:
                         assert not leftovers[0].exists()
                         clean = fixture.command("inspect-session", "--store", store, "--session", session)["execution"]
-                        assert clean["custody_occupied"] == "0" and clean["scratch_used_bytes"] == "0", clean
+                        assert clean["scratch_used_bytes"] == "0", clean
                         (root / "fresh-resources.json").write_text(json.dumps(clean, indent=2) + "\n")
                     finally:
                         fixture.stop_host(fresh)

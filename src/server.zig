@@ -24,16 +24,9 @@ pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const default_retention_entry_capacity =
     output_retention.orchestration_bytes / @sizeOf(output_retention.Entry);
-pub const max_clients = 12;
-pub const max_ordinary_clients = 10;
-pub const control_headroom = 2;
 // The complete Debug request -> SQLite -> response path exceeds 512 KiB.
-// One MiB is the next fixed tested bound; at 12 clients the maximum virtual
-// stack reservation is therefore 12 MiB, while physical use remains on the
-// production resource-measurement path.
-pub const connection_stack_bytes = 1024 * 1024;
-pub const maximum_connection_stack_reservation_bytes = max_clients * connection_stack_bytes;
-pub const maximum_result_delivery_buffers_bytes = max_ordinary_clients * store_module.ContentReader.content_window_bytes;
+// Only the two shared workers reserve these stacks, independent of exchanges.
+const intake_worker_stack_bytes = 1024 * 1024;
 
 pub const Faults = struct {
     content_acquire: bool = false,
@@ -117,56 +110,6 @@ const TestTransition = enum {
     action_result_committed,
 };
 
-// Host serializes these value transitions with the drain mutex. A place
-// remains owned through socket close, including failed classification.
-const Admission = struct {
-    const Place = enum { classification, ordinary, control, discovery };
-    total: usize = 0,
-    headroom: usize = 0,
-    ordinary: usize = 0,
-    discovery: usize = 0,
-
-    fn reserve(self: *Admission) !Place {
-        if (self.total == max_clients) return error.ConnectionCapacityExhausted;
-        if (self.headroom == control_headroom) return error.ClassificationCapacityExhausted;
-        self.total += 1;
-        self.headroom += 1;
-        return .classification;
-    }
-
-    fn classify(self: *Admission, place: *Place, route: Route) !void {
-        std.debug.assert(place.* == .classification);
-        if (route == .host_info) {
-            if (self.discovery == 1) return error.DiscoveryCapacityExhausted;
-            self.discovery += 1;
-            place.* = .discovery;
-        } else if (route.isControl()) {
-            place.* = .control;
-        } else {
-            if (self.ordinary == max_ordinary_clients) return error.OrdinaryCapacityExhausted;
-            self.ordinary += 1;
-            self.headroom -= 1;
-            place.* = .ordinary;
-        }
-    }
-
-    fn release(self: *Admission, place: Place) void {
-        std.debug.assert(self.total > 0);
-        self.total -= 1;
-        if (place == .ordinary) {
-            std.debug.assert(self.ordinary > 0);
-            self.ordinary -= 1;
-        } else {
-            std.debug.assert(self.headroom > 0);
-            self.headroom -= 1;
-            if (place == .discovery) {
-                std.debug.assert(self.discovery == 1);
-                self.discovery = 0;
-            }
-        }
-    }
-};
-
 const Host = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -189,7 +132,7 @@ const Host = struct {
     controls_changed: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
-    admission: Admission = .{},
+    intake: ?*Intake = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
@@ -197,8 +140,6 @@ const Host = struct {
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
-    drain_mutex: std.Io.Mutex = .init,
-    drain_condition: std.Io.Condition = .init,
 
     // Canonical permission belongs to Store; process-local permission belongs
     // to Host. The Store handoff must enter this gate, in that lock order, for
@@ -215,46 +156,562 @@ const Host = struct {
         if (!self.launchAllowed()) return error.HostDispatchSuppressed;
         try launch(context);
     }
+};
 
-    fn reserveClient(self: *Host) !Admission.Place {
-        self.drain_mutex.lockUncancelable(self.io);
-        defer self.drain_mutex.unlock(self.io);
-        return self.admission.reserve();
-    }
+// One socket owner and one ordinary/one control local-work stack replace
+// per-exchange threads. Workers never wait on peers. Complete requests waiting
+// for Store access remain transient exchanges, not another pending authority.
+const Intake = struct {
+    host: *Host,
+    wake: [2]std.posix.fd_t = undefined,
+    exchanges: std.ArrayList(*Exchange) = .empty,
+    polls: std.ArrayList(std.c.pollfd) = .empty,
+    workers: [2]Worker = undefined,
+    threads: [2]std.Thread = undefined,
+    started: usize = 0,
 
-    fn classifyClient(self: *Host, place: *Admission.Place, route: Route) !void {
-        self.drain_mutex.lockUncancelable(self.io);
-        defer self.drain_mutex.unlock(self.io);
-        try self.admission.classify(place, route);
-    }
+    const Worker = struct {
+        owner: *Intake,
+        mutex: std.Io.Mutex = .init,
+        condition: std.Io.Condition = .init,
+        state: enum { idle, requested, running, done } = .idle,
+        exchange: ?*Exchange = null,
+        stopping: bool = false,
+        failure: ?anyerror = null,
+        next_state: Exchange.State = .reply,
 
-    fn clientFinished(self: *Host, place: Admission.Place, trace_request_number: ?u64) void {
-        self.drain_mutex.lockUncancelable(self.io);
-        self.admission.release(place);
-        // Test-only census witness before final drain unlock, not thread exit.
-        if (trace_request_number) |request_number|
-            traceRequest(self, "connection_resources_released", request_number, self.scratch_used.load(.acquire))
-        else
-            traceSubject(self, "connection_place_released", "place", @tagName(place));
-        self.drain_condition.broadcast(self.io);
-        self.drain_mutex.unlock(self.io);
-    }
+        fn run(self: *Worker) void {
+            const io = self.owner.host.io;
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            while (true) {
+                while (self.state != .requested and !self.stopping)
+                    self.condition.waitUncancelable(io, &self.mutex);
+                if (self.stopping) return;
+                const exchange = self.exchange.?;
+                self.state = .running;
+                self.mutex.unlock(io);
+                self.next_state = exchange.work() catch |err| blk: {
+                    self.failure = err;
+                    break :blk .retired;
+                };
+                self.mutex.lockUncancelable(io);
+                self.state = .done;
+                self.owner.notify();
+            }
+        }
+    };
 
-    fn drain(self: *Host) void {
-        self.drain_mutex.lockUncancelable(self.io);
-        defer self.drain_mutex.unlock(self.io);
-        while (self.admission.total != 0) {
-            self.drain_condition.waitUncancelable(self.io, &self.drain_mutex);
+    const Exchange = struct {
+        const State = enum { header, body, ready, working, reply, retired, closed };
+
+        host: *Host,
+        fd: std.posix.fd_t,
+        accepted_at_ns: u64,
+        deadline: i128,
+        state: State = .header,
+        job: enum { receive, prepare, fill, cleanup } = .prepare,
+        header_bytes: std.ArrayList(u8) = .empty,
+        input: std.ArrayList(u8) = .empty,
+        route: ?Route = null,
+        header: Header = undefined,
+        number: ?u64 = null,
+        ingress: ?*protocol.Ingress = null,
+        request: ?*protocol.Request = null,
+        reply: ?*Reply = null,
+        retained_scratch: ?named_scratch.Owner = null,
+        cleanup_retry_at: i128 = 0,
+
+        fn retireUnhanded(self: *Exchange) void {
+            // Capture handoff retains files, but grants no admission authority.
+            if (self.job == .fill or self.job == .cleanup) return;
+            switch (self.state) {
+                .header, .body => self.state = .retired,
+                // Only complete stop retries can still earn their guarded ack.
+                .ready => if (self.route != .host_stop) {
+                    self.state = .retired;
+                },
+                .working, .reply, .retired, .closed => {},
+            }
+        }
+
+        fn releaseRequest(self: *Exchange) void {
+            if (self.request) |request| {
+                request.removeTemporaryContent(self.host.io) catch unreachable;
+                self.host.allocator.destroy(request);
+                self.request = null;
+            }
+        }
+
+        fn closeSocket(self: *Exchange) void {
+            // Only intake invalidates this descriptor, after local borrowers
+            // finish. Reclamation retries retain scratch, not a finished peer.
+            if (self.fd < 0) return;
+            _ = std.c.close(self.fd);
+            self.fd = -1;
+        }
+
+        fn cleanup(self: *Exchange) bool {
+            const host = self.host;
+            if (self.reply) |reply| {
+                reply.deinit();
+                host.allocator.destroy(reply);
+                self.reply = null;
+            }
+            self.releaseRequest();
+            if (self.ingress) |ingress| {
+                ingress.deinit();
+                host.allocator.destroy(ingress);
+                self.ingress = null;
+            }
+            self.input.deinit(host.allocator);
+            self.input = .empty;
+            if (self.retained_scratch) |*retained| {
+                const now: i128 = nowNs(host);
+                if (now < self.cleanup_retry_at) return false;
+                _ = retained.reclaim(host.lease.paths.scratch.slice()) catch {
+                    self.cleanup_retry_at = now + execution_turn.retained_cleanup_retry_ms * std.time.ns_per_ms;
+                    return false;
+                };
+                self.retained_scratch = null;
+            }
+            return true;
+        }
+
+        fn destroy(self: *Exchange) bool {
+            const host = self.host;
+            std.debug.assert(self.state != .working);
+            self.closeSocket();
+            if (!self.cleanup()) return false;
+            self.header_bytes.deinit(host.allocator);
+            if (self.number) |number|
+                traceRequest(host, "connection_resources_released", number, host.scratch_used.load(.acquire))
+            else
+                traceSubject(host, "connection_place_released", "place", "classification");
+            host.allocator.destroy(self);
+            return true;
+        }
+
+        fn ensureReply(self: *Exchange) !*Reply {
+            if (self.reply) |reply| return reply;
+            const reply = try self.host.allocator.create(Reply);
+            reply.* = .{ .io = self.host.io, .allocator = self.host.allocator };
+            if (self.state == .header or self.route == .host_info)
+                reply.absolute_deadline = @as(i128, self.accepted_at_ns) + 10 * std.time.ns_per_s;
+            self.reply = reply;
+            return reply;
+        }
+
+        fn fail(self: *Exchange, err: anyerror) void {
+            const reply = self.ensureReply() catch {
+                self.state = .retired;
+                return;
+            };
+            // No successful header has left while preparation is fallible.
+            reply.deinit();
+            const status: u16 = switch (err) {
+                error.ScratchCapacityExhausted => 507,
+                error.UnsupportedControl => 501,
+                error.RequestIdentityExhausted => 500,
+                else => 400,
+            };
+            const code = switch (err) {
+                error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
+                error.RequestIdentityExhausted => "request_identity_exhausted",
+                error.UnsupportedControl => "control_surface_enters_in_later_slice",
+                else => @errorName(err),
+            };
+            respondStatic(self.host.io, reply, status, if (err == error.UnsupportedControl) "unsupported" else "invocation_error", code);
+            self.state = .reply;
+        }
+
+        fn read(self: *Exchange) !void {
+            var buffer: [protocol.content_window_bytes]u8 = undefined;
+            const wanted = if (self.ingress) |ingress|
+                @min(buffer.len, ingress.options.content_length - ingress.received)
+            else
+                buffer.len;
+            if (@as(i128, nowNs(self.host)) >= self.deadline) return error.TransferInactive;
+            const result = std.c.read(self.fd, &buffer, @intCast(wanted));
+            if (result < 0) switch (std.posix.errno(result)) {
+                .AGAIN, .INTR => return,
+                else => return error.ReadFailed,
+            };
+            if (result == 0) return error.UnexpectedEndOfBody;
+            const bytes = buffer[0..@intCast(result)];
+            var consumed: usize = 0;
+            if (self.state == .header) {
+                for (bytes) |byte| {
+                    if (self.header_bytes.items.len == protocol.max_header_bytes) return error.HeaderTooLarge;
+                    try self.header_bytes.append(self.host.allocator, byte);
+                    consumed += 1;
+                    const header = self.header_bytes.items;
+                    if (self.route == null and std.mem.endsWith(u8, header, "\r\n")) {
+                        self.route = try HeaderReader.parseRoute(header[0 .. header.len - 2]);
+                        if (!self.route.?.isControl() and self.route != .host_info)
+                            traceSubject(self.host, "ordinary_classification_released", "route", @tagName(self.route.?));
+                    }
+                    if (!std.mem.endsWith(u8, header, "\r\n\r\n")) continue;
+                    self.header = try HeaderReader.parseFields(header, self.route.?);
+                    if (self.route == .unsupported_control) return error.UnsupportedControl;
+                    self.number = try nextRequestNumber(self.host);
+                    switch (self.route.?) {
+                        inline else => |route| traceRequest(self.host, "connection_request_" ++ @tagName(route), self.number.?, null),
+                    }
+                    const limit: u64 = switch (self.route.?) {
+                        .host_info => protocol.max_host_info_request_bytes,
+                        .host_stop => protocol.max_host_stop_request_bytes,
+                        .session_stop => protocol.max_session_stop_request_bytes,
+                        .model_interruption => protocol.max_model_interruption_request_bytes,
+                        .permission_decision => protocol.max_permission_decision_request_bytes,
+                        else => std.math.maxInt(u64),
+                    };
+                    if (self.header.content_length > limit) return error.RequestTooLarge;
+                    const ingress = try self.host.allocator.create(protocol.Ingress);
+                    ingress.* = protocol.Ingress.init(self.host.allocator, .{
+                        .io = self.host.io,
+                        .fd = self.fd,
+                        .content_length = self.header.content_length,
+                        .scratch_path = self.host.lease.paths.scratch.slice(),
+                        .request_number = self.number.?,
+                        .fault_content_acquire = self.host.faults.content_acquire,
+                        .fault_content_write = self.host.faults.content_write,
+                        .fault_content_seal = self.host.faults.content_seal,
+                        .retained_scratch = &self.retained_scratch,
+                        .scratch_budget = self.host.retention.sharedBudget(),
+                        .expected_kind = self.route.?.kind(),
+                    });
+                    self.ingress = ingress;
+                    self.state = .body;
+                    self.header_bytes.deinit(self.host.allocator);
+                    self.header_bytes = .empty;
+                    break;
+                }
+            }
+            if (self.state != .body) return;
+            if (self.route != .host_info)
+                self.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
+            if (self.route == .configure or self.route == .message) {
+                // One bounded window is borrowed by local capture work. No
+                // socket read or peer wait runs on those shared stacks.
+                try self.input.appendSlice(self.host.allocator, bytes[consumed..]);
+                self.job = .receive;
+                self.state = .ready;
+            } else self.state = try self.receive(bytes[consumed..]);
+        }
+
+        fn receive(self: *Exchange, bytes: []const u8) !State {
+            const ingress = self.ingress.?;
+            try ingress.feed(bytes);
+            if (ingress.received == ingress.options.content_length) {
+                const request = try self.host.allocator.create(protocol.Request);
+                errdefer self.host.allocator.destroy(request);
+                request.* = try ingress.finish();
+                self.request = request;
+                ingress.deinit();
+                self.host.allocator.destroy(ingress);
+                self.ingress = null;
+                self.input.deinit(self.host.allocator);
+                self.input = .empty;
+                return .ready;
+            }
+            return .body;
+        }
+
+        fn prepare(self: *Exchange) !void {
+            // Reply owns all prepared bytes/readers. Imported ingress is no
+            // longer borrowed, even when a peer holds acknowledgment delivery.
+            defer self.releaseRequest();
+            const reply = try self.ensureReply();
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?);
+        }
+
+        fn work(self: *Exchange) !State {
+            return switch (self.job) {
+                .receive => {
+                    const state = try self.receive(self.input.items);
+                    self.input.clearRetainingCapacity();
+                    return state;
+                },
+                .prepare => blk: {
+                    try self.prepare();
+                    break :blk .reply;
+                },
+                .fill => blk: {
+                    try self.reply.?.fill();
+                    break :blk .reply;
+                },
+                .cleanup => if (self.cleanup()) .closed else .retired,
+            };
+        }
+    };
+
+    fn init(self: *Intake, host: *Host) !void {
+        self.* = .{ .host = host };
+        if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &self.wake) != 0) return error.IntakeWakeFailed;
+        errdefer {
+            _ = std.c.close(self.wake[0]);
+            _ = std.c.close(self.wake[1]);
+        }
+        for (self.wake) |fd| try setNonblocking(fd);
+        errdefer self.stopWorkers();
+        for (&self.workers, &self.threads) |*worker, *thread| {
+            worker.* = .{ .owner = self };
+            thread.* = try std.Thread.spawn(.{ .stack_size = intake_worker_stack_bytes }, Worker.run, .{worker});
+            self.started += 1;
         }
     }
+
+    fn stopWorkers(self: *Intake) void {
+        for (self.workers[0..self.started]) |*worker| {
+            worker.mutex.lockUncancelable(self.host.io);
+            worker.stopping = true;
+            worker.condition.signal(self.host.io);
+            worker.mutex.unlock(self.host.io);
+        }
+        for (self.threads[0..self.started]) |thread| thread.join();
+        self.started = 0;
+    }
+
+    fn deinit(self: *Intake) void {
+        self.stopWorkers();
+        for (self.exchanges.items) |exchange| {
+            // Joining workers, not response delivery, ends their borrowing.
+            exchange.state = .retired;
+            while (!exchange.destroy())
+                self.host.io.sleep(.fromMilliseconds(execution_turn.retained_cleanup_retry_ms), .awake) catch {};
+        }
+        self.exchanges.deinit(self.host.allocator);
+        self.polls.deinit(self.host.allocator);
+        for (self.wake) |fd| _ = std.c.close(fd);
+    }
+
+    fn notify(self: *Intake) void {
+        // Coalesced hints: a full nonblocking socket is already readable.
+        _ = std.c.write(self.wake[1], "x", 1);
+    }
+
+    fn serviceWorkers(self: *Intake) void {
+        // Retire peers even when both workers are busy or cleanup is not due.
+        for (self.exchanges.items) |exchange| {
+            if (exchange.state == .retired) exchange.closeSocket();
+        }
+        for (&self.workers, 0..) |*worker, worker_index| {
+            worker.mutex.lockUncancelable(self.host.io);
+            defer worker.mutex.unlock(self.host.io);
+            if (worker.state == .done) {
+                const exchange = worker.exchange.?;
+                if (worker.failure) |err| {
+                    if (exchange.job != .fill) exchange.fail(err) else {
+                        // Delivery already began. Never append a second reply.
+                        if (self.host.store.isFenced()) fenceDispatch(self.host, "reply content", err);
+                        exchange.state = .retired;
+                    }
+                } else {
+                    exchange.state = worker.next_state;
+                    if (exchange.job == .receive) {
+                        if (exchange.state == .ready) exchange.job = .prepare;
+                        if (exchange.state == .body)
+                            exchange.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
+                    }
+                }
+                if (exchange.state == .retired) exchange.closeSocket();
+                worker.failure = null;
+                worker.exchange = null;
+                worker.state = .idle;
+            }
+            if (worker.state != .idle) continue;
+            // Ordinary capture, fill and cleanup cannot exhaust control work.
+            // Neither lane can preempt a canonical Store operation.
+            var next: ?*Exchange = null;
+            for (self.exchanges.items) |exchange| {
+                const control = if (exchange.route) |route| route.isControl() else false;
+                if (control != (worker_index == 1)) continue;
+                if (exchange.state == .retired and nowNs(self.host) >= exchange.cleanup_retry_at) {
+                    if (next == null) next = exchange;
+                    continue;
+                }
+                if (exchange.state != .ready) continue;
+                if (exchange.route == .host_info or exchange.route == .host_stop) continue;
+                if (next == null) next = exchange;
+            }
+            if (next) |exchange| {
+                // Share the shutdown/launch gate only through handoff. Never
+                // hold it across Store I/O or draining an already-owned reply.
+                self.host.launch_mutex.lockUncancelable(self.host.io);
+                defer self.host.launch_mutex.unlock(self.host.io);
+                if (exchange.state == .retired) {
+                    exchange.job = .cleanup;
+                } else {
+                    if (self.host.effect_shutdown.load(.acquire)) exchange.retireUnhanded();
+                    if (exchange.state == .retired) continue;
+                }
+                exchange.state = .working;
+                worker.exchange = exchange;
+                worker.state = .requested;
+                worker.condition.signal(self.host.io);
+            }
+        }
+    }
+
+    fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
+        try setNonblocking(listener.socket.handle);
+        var failure: ?anyerror = null;
+        var accept_retry_at: i128 = 0;
+        while (true) {
+            if (self.host.effect_shutdown.load(.acquire)) {
+                for (self.exchanges.items) |exchange| exchange.retireUnhanded();
+            }
+            self.serviceWorkers();
+            if (self.host.effect_shutdown.load(.acquire) and listener_open.*) {
+                listener.deinit(self.host.io);
+                listener_open.* = false;
+                std.Io.Dir.deleteFileAbsolute(self.host.io, self.host.lease.paths.socket.slice()) catch |err|
+                    stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
+                socket_owned.* = false;
+            }
+            const now: i128 = nowNs(self.host);
+            self.polls.clearRetainingCapacity();
+            // A readable backlog stays readable when accept cannot acquire a
+            // descriptor or kernel memory. Pause only acquisition, not peers,
+            // workers or shutdown, and avoid spinning on that same readiness.
+            try self.polls.append(self.host.allocator, .{ .fd = if (listener_open.* and now >= accept_retry_at) listener.socket.handle else -1, .events = std.posix.POLL.IN, .revents = 0 });
+            try self.polls.append(self.host.allocator, .{ .fd = self.wake[0], .events = std.posix.POLL.IN, .revents = 0 });
+            for (self.exchanges.items) |exchange| {
+                var fd: std.posix.fd_t = -1;
+                var events: i16 = std.posix.POLL.IN;
+                switch (exchange.state) {
+                    .header, .body => {
+                        if (now >= exchange.deadline) exchange.fail(error.TransferInactive) else fd = exchange.fd;
+                    },
+                    .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
+                        exchange.prepare() catch |err| exchange.fail(err);
+                        exchange.state = .reply;
+                    },
+                    .reply => {
+                        if (exchange.reply) |reply| {
+                            if (reply.body == .none or now >= reply.deadline()) {
+                                exchange.state = .retired;
+                            } else if (reply.deliveryReady() catch false) {
+                                if (reply.needsFill()) {
+                                    exchange.job = .fill;
+                                    exchange.state = .ready;
+                                } else {
+                                    fd = exchange.fd;
+                                    events = std.posix.POLL.OUT;
+                                }
+                            }
+                        } else exchange.state = .retired;
+                    },
+                    .working, .retired, .closed => {},
+                }
+                try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
+            }
+            // Bounded wait also services deadline-only and test-gate states.
+            self.serviceWorkers();
+            const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), 20);
+            if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
+            if (self.polls.items[1].revents != 0) {
+                var bytes: [256]u8 = undefined;
+                while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            }
+            for (self.exchanges.items, self.polls.items[2..]) |exchange, poll| {
+                if (poll.revents == 0) continue;
+                switch (exchange.state) {
+                    .header, .body => exchange.read() catch |err| exchange.fail(err),
+                    .reply => {
+                        const reply = exchange.reply.?;
+                        const complete = reply.advance(exchange.fd) catch |err| {
+                            if (self.host.store.isFenced()) fenceDispatch(self.host, "reply content", err);
+                            exchange.state = .retired;
+                            continue;
+                        };
+                        if (complete) {
+                            if (reply.timing) |*timing| timing.replyComplete();
+                            exchange.state = .retired;
+                        }
+                    },
+                    else => {},
+                }
+            }
+            var index: usize = 0;
+            while (index < self.exchanges.items.len) {
+                if (self.exchanges.items[index].state != .closed) {
+                    index += 1;
+                    continue;
+                }
+                if (self.exchanges.items[index].destroy()) {
+                    _ = self.exchanges.orderedRemove(index);
+                } else index += 1;
+            }
+            if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
+            if (!listener_open.* or self.polls.items[0].revents == 0) continue;
+            // Accept a bounded batch, then return to existing exchanges.
+            for (0..16) |_| {
+                const fd = self.acceptSocket(listener.socket.handle) catch |err| switch (err) {
+                    error.NoClient => break,
+                    error.AcceptCapacity => {
+                        accept_retry_at = @as(i128, nowNs(self.host)) + 100 * std.time.ns_per_ms;
+                        break;
+                    },
+                    error.SocketFlagsFailed => {
+                        stderr.print("rui: intake unavailable: SocketFlagsFailed; recover original request\n", .{});
+                        continue;
+                    },
+                    else => return err,
+                };
+                self.accept(fd) catch |err| {
+                    _ = std.c.close(fd);
+                    stderr.print("rui: intake unavailable: {s}; recover original request\n", .{@errorName(err)});
+                };
+                if (self.host.faults.shutdown_after_accept) {
+                    failure = error.InjectedListenerFailure;
+                    self.host.launch_mutex.lockUncancelable(self.host.io);
+                    self.host.effect_shutdown.store(true, .release);
+                    self.host.dispatch_fenced.store(true, .release);
+                    self.host.launch_mutex.unlock(self.host.io);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn acceptSocket(self: *Intake, listener: std.posix.fd_t) !std.posix.fd_t {
+        // A child must never copy a socket before CLOEXEC is installed. Keep
+        // only native acquisition/flagging (and failure-close) under the same
+        // gate as Prepared.launch, not exchange allocation or peer service.
+        self.host.launch_mutex.lockUncancelable(self.host.io);
+        defer self.host.launch_mutex.unlock(self.host.io);
+        const fd = std.c.accept(listener, null, null);
+        if (fd < 0) return switch (std.posix.errno(fd)) {
+            .AGAIN, .INTR, .CONNABORTED => error.NoClient,
+            .MFILE, .NFILE, .NOBUFS, .NOMEM => error.AcceptCapacity,
+            else => error.IntakeAcceptFailed,
+        };
+        errdefer _ = std.c.close(fd);
+        try setNonblocking(fd);
+        return fd;
+    }
+
+    fn accept(self: *Intake, fd: std.posix.fd_t) !void {
+        if (self.host.faults.client_send_buffer_bytes) |bytes| {
+            var value: c_int = @intCast(bytes);
+            try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&value));
+        }
+        const exchange = try self.host.allocator.create(Exchange);
+        errdefer self.host.allocator.destroy(exchange);
+        const accepted_at_ns = nowNs(self.host);
+        exchange.* = .{ .host = self.host, .fd = fd, .accepted_at_ns = accepted_at_ns, .deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s };
+        try self.exchanges.append(self.host.allocator, exchange);
+    }
 };
 
-const Connection = struct {
-    host: *Host,
-    stream: std.Io.net.Stream,
-    accepted_at_ns: u64,
-    place: Admission.Place,
-};
+fn setNonblocking(fd: std.posix.fd_t) !void {
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
+    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+    if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0 or
+        std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SocketFlagsFailed;
+}
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
@@ -282,8 +739,8 @@ pub fn serve(
     const descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
         active_capacity,
-        max_ordinary_clients,
-        control_headroom,
+        100, // Supported burst, not an admission cap.
+        3, // Two controls and concurrent discovery.
         provider_endpoint != null,
         authentication != null,
         builtin.os.tag,
@@ -336,7 +793,7 @@ pub fn serve(
     try lease.prepareForServing(faults.startup_cleanup);
 
     const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
-    var listener = try address.listen(io, .{ .kernel_backlog = max_clients });
+    var listener = try address.listen(io, .{ .kernel_backlog = 128 });
     var listener_open = true;
     var socket_owned = true;
     errdefer {
@@ -397,14 +854,18 @@ pub fn serve(
     }
     errdefer if (provider_initialization_owned) provider.deinitialize();
     try std.Io.randomSecure(io, &host.instance);
+    var intake: Intake = undefined;
+    try intake.init(&host);
+    defer intake.deinit();
+    host.intake = &intake;
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
         // Stop admitting new connections before releasing any Host-owned
         // execution or request custody. Store and lease outlive both drains.
-        listener.deinit(io);
+        if (listener_open) listener.deinit(io);
         listener_open = false;
-        std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
@@ -415,7 +876,6 @@ pub fn serve(
         host.launch_mutex.unlock(host.io);
         execution_thread.join();
         if (provider_endpoint != null) provider.deinitialize();
-        host.drain();
     }
     var ready: protocol.ResponseBuffer = .{};
     var descriptor_limit_buffer: [32]u8 = undefined;
@@ -454,57 +914,7 @@ pub fn serve(
         diagnostics = null;
     }
 
-    while (true) {
-        const stream = listener.accept(io) catch |err| switch (err) {
-            error.ConnectionAborted => continue,
-            error.SocketNotListening => if (host.effect_shutdown.load(.acquire))
-                return error.EffectAwareShutdown
-            else
-                return err,
-            else => return err,
-        };
-        const accepted_at_ns = nowNs(&host);
-        if (host.effect_shutdown.load(.acquire)) {
-            stream.close(io);
-            return error.EffectAwareShutdown;
-        }
-        if (host.faults.client_send_buffer_bytes) |bytes| {
-            var value: c_int = @intCast(bytes);
-            std.posix.setsockopt(
-                stream.socket.handle,
-                std.posix.SOL.SOCKET,
-                std.posix.SO.SNDBUF,
-                std.mem.asBytes(&value),
-            ) catch |err| {
-                stream.close(io);
-                return err;
-            };
-        }
-        const place = host.reserveClient() catch |err| {
-            sendStaticUntil(io, stream.socket.handle, 503, "busy", admissionCode(err), @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s) catch {};
-            stream.close(io);
-            continue;
-        };
-        const connection = allocator.create(Connection) catch {
-            stream.close(io);
-            host.clientFinished(place, null);
-            continue;
-        };
-        connection.* = .{
-            .host = &host,
-            .stream = stream,
-            .accepted_at_ns = accepted_at_ns,
-            .place = place,
-        };
-        const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch {
-            allocator.destroy(connection);
-            stream.close(io);
-            host.clientFinished(place, null);
-            continue;
-        };
-        thread.detach();
-        if (host.faults.shutdown_after_accept) return error.InjectedListenerFailure;
-    }
+    return intake.run(&listener, &listener_open, &socket_owned);
 }
 
 const AttemptOwner = struct {
@@ -828,12 +1238,14 @@ fn executionMain(host: *Host) void {
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
+    var next_receive_slot: usize = 0;
     while (!host.execution_shutdown.load(.acquire) and !host.effect_shutdown.load(.acquire)) {
         var bash_window: [bash.copy_window_bytes]u8 = undefined;
         var native = NativeTurn{
             .host = host,
             .reactor = if (reactor) |*active| active else null,
             .slots = slots,
+            .next_receive_slot = &next_receive_slot,
             .bash_preparation = &bash_preparation,
             .model_preparation = &model_preparation,
             .bash_window = &bash_window,
@@ -879,6 +1291,7 @@ const NativeTurn = struct {
     host: *Host,
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
+    next_receive_slot: *usize,
     bash_preparation: *?bash.Preparation,
     model_preparation: *model_adapter.Preparation,
     bash_window: []u8,
@@ -1042,10 +1455,19 @@ const NativeTurn = struct {
     }
 
     pub fn admitNewModel(self: *NativeTurn) execution_turn.Admission {
+        return self.admitModel(.message);
+    }
+
+    pub fn admitToolContinuation(self: *NativeTurn) execution_turn.Admission {
+        return self.admitModel(.tool_continuation);
+    }
+
+    fn admitModel(self: *NativeTurn, kind: store_module.ModelAdmissionKind) execution_turn.Admission {
         const slot = self.firstFreeSlot() orelse return .no_work;
         return switch (admitNewAttempt(
             self.host,
             slot,
+            kind,
             self.model_preparation,
         )) {
             .admitted => .admitted,
@@ -1064,7 +1486,7 @@ const NativeTurn = struct {
     }
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
-        return callServiceOneCompletion(self.host, self.reactor, self.slots);
+        return callServiceOneCompletion(self.host, self.reactor, self.slots, self.next_receive_slot);
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -1093,7 +1515,7 @@ const callAdvanceRetainedCleanup = advanceRetainedCleanup;
 const slotsHaveTransport = hasTransport;
 const slotsHaveBash = hasBash;
 
-fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot) bool {
+fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
     const active_reactor = reactor orelse return false;
     for (slots) |*slot| switch (slot.*) {
         .provider => if (advanceModelFinalization(host, slot, host.faults.response_seal)) return true,
@@ -1108,24 +1530,88 @@ fn serviceOneCompletion(host: *Host, reactor: ?*provider.Reactor, slots: []Execu
         return false;
     };
     if (completed) return true;
-    for (slots) |*slot| switch (slot.*) {
-        .provider => |*active| {
-            const progress = active_reactor.advance(&active.transfer, &host.faults.response_write_on_resume) catch |err| {
-                fenceDispatch(host, "transport advance", err);
-                return false;
-            };
-            switch (progress) {
-                .progressed => return true,
-                .resume_capture_failure => {
-                    traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
-                    return true;
-                },
-                .not_ready => {},
-            }
-        },
-        else => {},
-    };
+    return advanceOneTransfer(host, active_reactor, slots, next_receive_slot);
+}
+
+fn advanceOneTransfer(host: *Host, reactor: anytype, slots: []ExecutionSlot, next_receive_slot: *usize) bool {
+    // This thread is the sole producer. Freeze readiness for the scan so a
+    // worker drain cannot let a later slot bypass an earlier paused one.
+    const resume_allowed = host.capture_writer.?.hasRoom();
+    for (0..slots.len) |offset| {
+        const index = (next_receive_slot.* + offset) % slots.len;
+        const slot = &slots[index];
+        switch (slot.*) {
+            .provider => |*active| {
+                const progress = reactor.advance(&active.transfer, resume_allowed, &host.faults.response_write_on_resume) catch |err| {
+                    fenceDispatch(host, "transport advance", err);
+                    return false;
+                };
+                switch (progress) {
+                    .progressed, .resume_capture_failure => {
+                        next_receive_slot.* = (index + 1) % slots.len;
+                        if (progress == .resume_capture_failure)
+                            traceSubject(host, "transport_resume_capture_failure", "cause", "local_capture");
+                        return true;
+                    },
+                    .not_ready => {},
+                }
+            },
+            else => {},
+        }
+    }
     return false;
+}
+
+test "receive advancement serves paused siblings across recurring queue pressure" {
+    const RecordingReactor = struct {
+        slots: []ExecutionSlot,
+        writer: *provider.CaptureWriter,
+        selected: ?usize = null,
+        drain_during_scan: bool = false,
+
+        fn advance(self: *@This(), transfer: *provider.Transfer, resume_allowed: bool, _: *bool) error{}!provider.Reactor.Advance {
+            // A worker may release space just after a paused candidate was
+            // examined. That must not let a later candidate bypass it.
+            if (self.drain_during_scan) {
+                self.writer.count = 0;
+                self.drain_during_scan = false;
+            }
+            if (!resume_allowed) return .not_ready;
+            for (self.slots, 0..) |*slot, index| {
+                if (slot.* == .provider and &slot.provider.transfer == transfer) {
+                    self.selected = index;
+                    self.writer.count = 16;
+                    return .progressed;
+                }
+            }
+            unreachable;
+        }
+    };
+    var writer = provider.CaptureWriter{ .io = std.testing.io };
+    var host: Host = undefined;
+    host.capture_writer = &writer;
+    host.faults = .{};
+    var slots = [_]ExecutionSlot{ .{ .provider = .{ .owner = .{} } }, .free, .{ .provider = .{ .owner = .{} } } };
+    var reactor = RecordingReactor{ .slots = &slots, .writer = &writer };
+    var next: usize = 0;
+    for ([_]usize{ 0, 2, 0, 2 }) |expected| {
+        writer.count = 0;
+        try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+        try std.testing.expectEqual(expected, reactor.selected.?);
+    }
+    next = 2;
+    reactor.selected = null;
+    reactor.drain_during_scan = true;
+    try std.testing.expectEqual(false, advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(?usize, null), reactor.selected);
+    try std.testing.expectEqual(@as(usize, 2), next);
+    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(usize, 2), reactor.selected.?);
+    slots[2] = .free;
+    writer.count = 0;
+    try std.testing.expect(advanceOneTransfer(&host, &reactor, &slots, &next));
+    try std.testing.expectEqual(@as(usize, 0), reactor.selected.?);
+    try std.testing.expect(!advanceOneTransfer(&host, &reactor, &.{}, &next));
 }
 
 fn advanceModelFinalization(host: *Host, slot: *ExecutionSlot, fail_seal: bool) bool {
@@ -1651,10 +2137,11 @@ fn findActiveTransfer(
 fn admitNewAttempt(
     host: *Host,
     slot: *ExecutionSlot,
+    kind: store_module.ModelAdmissionKind,
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitNextModelAttempt(.{
+    var admission = host.store.admitModelAttempt(kind, .{
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
@@ -1815,7 +2302,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
         .abandon, .settle_authentication_failure => {
             request.deinit();
             if (decision == .settle_authentication_failure)
-                settleAttemptFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .terminal);
+                settleAttemptFailure(host, owner.token, owner.binding, .{ .code = model_adapter.authenticationFailureCode(result.?.failed) }, .terminal);
             finishCustodyNow(host, slot, owner.token);
         },
         else => unreachable,
@@ -1842,7 +2329,7 @@ fn finishModelPreparationFailure(
             return;
         },
         .fence => fenceDispatch(host, "canonical request read", err),
-        .settle_preparation_failure => settleAttemptFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal),
+        .settle_preparation_failure => settleAttemptFailure(host, owner.token, owner.binding, .{ .code = model_adapter.preparationFailureCode(err) }, .terminal),
         .abandon => {},
         else => unreachable,
     }
@@ -1870,7 +2357,7 @@ fn launchPreparedRequest(
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
-        settleAttemptFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
+        settleAttemptFailure(host, token, binding, .{ .code = "provider_transport_failure" }, .{ .retryable = .{
             .waits_ms = host.faults.retry_waits_ms,
         } });
         finishCustodyNow(host, slot, token);
@@ -1916,7 +2403,7 @@ fn launchPreparedRequest(
         }
         stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
-            settleAttemptFailure(host, token, binding, "response_capture_failed", .terminal);
+            settleAttemptFailure(host, token, binding, .{ .code = "response_capture_failed" }, .terminal);
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
@@ -2003,7 +2490,7 @@ fn completeTransfer(
                 .write_failed => "response_write_failed",
                 .seal_failed => "response_seal_failed",
             };
-            settleAttemptFailure(host, owner.token, owner.binding, code, .terminal);
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = code }, .terminal);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
@@ -2028,6 +2515,26 @@ fn completeTransfer(
             },
         }
         return;
+    }
+    if (evidence.disposition == .permanent_http or evidence.disposition == .temporary_http) {
+        const overflow_result = classify: {
+            var response = active.transfer.takeResponse();
+            defer response.deinit();
+            break :classify model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status);
+        };
+        const overflow = overflow_result catch |err| {
+            stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "response_read_failed" }, .terminal);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        };
+        if (overflow) {
+            settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "provider_context_overflow" }, .context_overflow);
+            active.transfer.deinit();
+            beginCleanup(host, slot, owner);
+            return;
+        }
     }
     var code_buffer: [96]u8 = undefined;
     const code = switch (evidence.disposition) {
@@ -2055,7 +2562,7 @@ fn completeTransfer(
         host,
         owner.token,
         owner.binding,
-        code,
+        .{ .code = code },
         failure_disposition,
     );
     active.transfer.deinit();
@@ -2070,11 +2577,6 @@ const SuccessfulCompletion = union(enum) {
 fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
-    if (structured_output) {
-        settleAttemptFailure(host, owner.token, owner.binding, "unsupported_output_schema", .terminal);
-        active.transfer.deinit();
-        return .cleanup;
-    }
     var request_id: protocol.Bounded(256) = .{};
     request_id.set(active.transfer.requestId()) catch unreachable;
     var openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
@@ -2084,6 +2586,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
+    if (structured_output) {
+        const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "unsupported_output_schema",
+            .diagnostic = rejection.format(error.UnsupportedOutputSchema, &detail),
+            .request_id = request_id,
+        }, .terminal);
+        return .cleanup;
+    }
 
     var metadata_name_buffer: [96]u8 = undefined;
     const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
@@ -2105,26 +2617,44 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             return .{ .named_scratch = retained };
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, "response_metadata_exhausted", .terminal);
+        settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "response_metadata_exhausted", .request_id = request_id }, .terminal);
         return .cleanup;
     };
     defer metadata.deinit();
+    var rejection: model_adapter.Output.Rejection = .{};
     traceOperation(host, "validation_started", owner.binding);
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, .{
+    const operation = host.store.modelOperationKind(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
+        return .cleanup;
+    };
+    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, &rejection, .{
         .metadata = host.faults.response_metadata,
     }) catch |err| {
         traceOperation(host, "validation_failed", owner.binding);
         stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        settleAttemptFailure(host, owner.token, owner.binding, model_adapter.Output.failureCode(err), .terminal);
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = model_adapter.Output.failureCode(err),
+            .diagnostic = rejection.format(err, &detail),
+            .request_id = request_id,
+        }, if (err == error.ContextOverflow) .context_overflow else .terminal);
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
+    // Cross-response and transactional envelope checks run after parsing the
+    // complete capture; their coordinate is its end, not the parser's last item.
+    rejection = .{ .stage = .response, .byte_offset = response.length };
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, owner.token, owner.binding, "contradictory_provider_output", .terminal);
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "contradictory_provider_output",
+            .diagnostic = rejection.format(error.ContradictoryProviderOutput, &detail),
+            .request_id = request_id,
+        }, .terminal);
         return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
@@ -2156,7 +2686,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            host.store.settleModelAttemptFailure(owner.binding, "contradictory_provider_output", .terminal, .{
+            var detail: [512]u8 = undefined;
+            host.store.settleModelAttemptFailure(owner.binding, .{
+                .code = "contradictory_provider_output",
+                .diagnostic = rejection.format(err, &detail),
+                .request_id = request_id,
+            }, .terminal, .{
                 .before_commit = host.faults.result_before_commit,
             }) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
@@ -2350,11 +2885,11 @@ fn settleAttemptFailure(
     host: *Host,
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
-    code: []const u8,
+    failure: store_module.ModelFailure,
     disposition: store_module.ModelFailureDisposition,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelAttemptFailure(binding, code, disposition, .{
+    host.store.settleModelAttemptFailure(binding, failure, disposition, .{
         .before_commit = host.faults.result_before_commit,
     }) catch |err| if (err != error.SupersededByControl)
         fenceDispatch(host, "model failure save", err);
@@ -2389,18 +2924,7 @@ fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 }
 
 fn wakeListener(host: *Host) void {
-    // Waking accept transfers shutdown to serve's owner. That owner stops new
-    // connections, joins the execution thread (which detaches any active
-    // effects under custody), drains existing clients, then releases Store.
-    const address = std.Io.net.UnixAddress.init(host.lease.paths.socket.slice()) catch |address_err| {
-        stderr.print("rui: listener wake address after dispatch fence failed: {s}\n", .{@errorName(address_err)});
-        return;
-    };
-    const wake = address.connect(host.io) catch |connect_err| {
-        stderr.print("rui: listener wake after dispatch fence failed: {s}\n", .{@errorName(connect_err)});
-        return;
-    };
-    wake.close(host.io);
+    if (host.intake) |intake| intake.notify();
 }
 
 fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {
@@ -2838,14 +3362,14 @@ fn publishControlHint(host: *Host, command_key: []const u8) void {
 
 const ControlTiming = struct {
     host: *Host,
-    command_key: []const u8,
+    command_key: protocol.Bounded(protocol.max_key_bytes),
     kind: []const u8,
     accepted_at_ns: u64,
     store_queued_ns: u64 = 0,
     lock_acquired_ns: u64 = 0,
     store_complete_ns: u64 = 0,
 
-    fn init(host: *Host, command_key: []const u8, kind: []const u8, accepted_at_ns: u64) ControlTiming {
+    fn init(host: *Host, command_key: protocol.Bounded(protocol.max_key_bytes), kind: []const u8, accepted_at_ns: u64) ControlTiming {
         return .{
             .host = host,
             .command_key = command_key,
@@ -2864,19 +3388,19 @@ const ControlTiming = struct {
         switch (phase) {
             .lock_requested => {
                 self.store_queued_ns = nowNs(self.host);
-                traceSubject(self.host, "control_store_queued", "command_key", self.command_key);
+                traceSubject(self.host, "control_store_queued", "command_key", self.command_key.slice());
             },
             .lock_acquired => {
                 self.lock_acquired_ns = nowNs(self.host);
-                traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key);
+                traceSubject(self.host, "control_lock_acquired", "command_key", self.command_key.slice());
                 self.waitAtTestGate();
             },
             .durable_acceptance => {
-                traceSubject(self.host, "control_durable_acceptance", "command_key", self.command_key);
+                traceSubject(self.host, "control_durable_acceptance", "command_key", self.command_key.slice());
             },
             .store_complete => {
                 self.store_complete_ns = nowNs(self.host);
-                traceSubject(self.host, "control_store_complete", "command_key", self.command_key);
+                traceSubject(self.host, "control_store_complete", "command_key", self.command_key.slice());
             },
         }
     }
@@ -2886,16 +3410,16 @@ const ControlTiming = struct {
         const path = self.host.faults.control_gate_path orelse return;
         var candidates = std.mem.splitScalar(u8, keys, ',');
         while (candidates.next()) |candidate| {
-            if (!std.mem.eql(u8, candidate, self.command_key)) continue;
+            if (!std.mem.eql(u8, candidate, self.command_key.slice())) continue;
             // Integration tests deliberately hold this acquired Store mutex
-            // until a competing control reaches lock_requested. Their keeper
+            // until intake routes a competing control. Their keeper
             // descriptor prevents FIFO-open deadlock; process teardown bounds
             // a missing release without granting this gate semantic authority.
             var gate = std.Io.Dir.cwd().openFile(self.host.io, path, .{}) catch return;
             defer gate.close(self.host.io);
             var release: [1]u8 = undefined;
             const count = gate.readStreaming(self.host.io, &.{&release}) catch return;
-            if (count == 1) traceSubject(self.host, "control_gate_released", "command_key", self.command_key);
+            if (count == 1) traceSubject(self.host, "control_gate_released", "command_key", self.command_key.slice());
             return;
         }
     }
@@ -2908,7 +3432,7 @@ const ControlTiming = struct {
         defer if (publication) |*value| value.finish();
         var trace: protocol.ResponseBuffer = .{};
         trace.append("{\"rui_test_phase\":\"control_timing\",\"command_key\":") catch return;
-        trace.appendJsonString(self.command_key) catch return;
+        trace.appendJsonString(self.command_key.slice()) catch return;
         trace.append(",\"kind\":") catch return;
         trace.appendJsonString(self.kind) catch return;
         trace.appendFmt(",\"store_queued_at_ns\":\"{d}\",\"lock_acquired_at_ns\":\"{d}\",\"store_complete_at_ns\":\"{d}\",\"reply_complete_at_ns\":\"{d}\",\"queue_wait_ns\":\"{d}\",\"store_lock_wait_ns\":\"{d}\",\"store_service_ns\":\"{d}\",\"post_commit_reply_ns\":\"{d}\",\"host_total_ns\":\"{d}\"}}", .{
@@ -2949,39 +3473,6 @@ const SettlementTrace = struct {
         }, self.binding);
     }
 };
-
-fn connectionMain(connection: *Connection) void {
-    const host = connection.host;
-    const stream = connection.stream;
-    const accepted_at_ns = connection.accepted_at_ns;
-    // Owned here through handler defers and connection-resource release.
-    var trace_request_number: ?u64 = null;
-    defer {
-        stream.close(host.io);
-        const place = connection.place;
-        host.allocator.destroy(connection);
-        // This is the last Host access: drain may release the stack owner as
-        // soon as the active population reaches zero.
-        host.clientFinished(place, trace_request_number);
-    }
-    handleConnection(host, stream.socket.handle, accepted_at_ns, &connection.place, &trace_request_number) catch |err| {
-        const deadline: ?i128 = if (connection.place == .discovery or connection.place == .classification)
-            @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s
-        else
-            null;
-        sendStaticUntil(host.io, stream.socket.handle, 400, "invocation_error", @errorName(err), deadline) catch {};
-    };
-}
-
-fn admissionCode(err: anyerror) []const u8 {
-    return switch (err) {
-        error.ConnectionCapacityExhausted => "connection_capacity_exhausted",
-        error.ClassificationCapacityExhausted => "classification_capacity_exhausted",
-        error.DiscoveryCapacityExhausted => "discovery_capacity_exhausted",
-        error.OrdinaryCapacityExhausted => "ordinary_capacity_exhausted",
-        else => unreachable,
-    };
-}
 
 const Route = enum {
     host_info,
@@ -3027,62 +3518,7 @@ const Header = struct {
     instance: ?protocol.InstanceId = null,
 };
 
-fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place: *Admission.Place, trace_request_number: *?u64) !void {
-    const header_deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s;
-    var header_reader = HeaderReader.init(host.io, fd, header_deadline);
-    const route = try header_reader.readRoute();
-    host.classifyClient(place, route) catch |err| {
-        sendStaticUntil(host.io, fd, 503, "busy", admissionCode(err), header_deadline) catch {};
-        return;
-    };
-    if (place.* == .ordinary) {
-        traceSubject(host, "ordinary_classification_released", "route", @tagName(route));
-    }
-    const header = try header_reader.finish(route);
-    if (header.route == .unsupported_control) {
-        return respondStatic(host.io, fd, 501, "unsupported", "control_surface_enters_in_later_slice");
-    }
-    const control_limit: u64 = switch (header.route) {
-        .host_stop => protocol.max_host_stop_request_bytes,
-        .session_stop => protocol.max_session_stop_request_bytes,
-        .model_interruption => protocol.max_model_interruption_request_bytes,
-        .permission_decision => protocol.max_permission_decision_request_bytes,
-        else => 0,
-    };
-    if (header.route.isControl() and header.content_length > control_limit) {
-        return respondStatic(host.io, fd, 400, "invocation_error", "control_request_too_large");
-    }
-    const request_number = nextRequestNumber(host) catch {
-        sendStaticUntil(host.io, fd, 500, "invocation_error", "request_identity_exhausted", if (route == .host_info) header_deadline else null) catch {};
-        return;
-    };
-    if (host.faults.test_phase_trace) {
-        trace_request_number.* = request_number;
-        switch (header.route) {
-            inline else => |selected_route| traceRequest(host, "connection_request_" ++ @tagName(selected_route), request_number, null),
-        }
-    }
-    if (route == .host_info) return handleHostInfo(host, fd, header, header_deadline);
-    var cleanup_failed = false;
-    var request = protocol.parseRequest(.{
-        .io = host.io,
-        .fd = fd,
-        .content_length = header.content_length,
-        .scratch_path = host.lease.paths.scratch.slice(),
-        .request_number = request_number,
-        .fault_content_acquire = host.faults.content_acquire,
-        .fault_content_write = host.faults.content_write,
-        .fault_content_seal = host.faults.content_seal,
-        .cleanup_failed = &cleanup_failed,
-        .scratch_budget = host.retention.sharedBudget(),
-        .expected_kind = route.kind(),
-    }) catch |err| {
-        if (cleanup_failed) stderr.print("rui: retained ingress file and charge after cleanup failure\n", .{});
-        return respondStatic(host.io, fd, if (err == error.ScratchCapacityExhausted) @as(u16, 507) else 400, "invocation_error", @errorName(err));
-    };
-    defer request.removeTemporaryContent(host.io) catch |err| {
-        stderr.print("rui: retained scratch charge after cleanup failure: {s}\n", .{@errorName(err)});
-    };
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(host.io, fd, 409, "invocation_error", "wrong_store_identity");
     }
@@ -3095,12 +3531,26 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
         return respondStatic(host.io, fd, 400, "invocation_error", "host_instance_required");
     }
     if (header.drop == .before_admission) return;
-    if (header.drop == .during_admission and std.c.shutdown(fd, std.c.SHUT.RDWR) != 0) {
+    if (header.drop == .during_admission and std.c.shutdown(socket, std.c.SHUT.RDWR) != 0) {
         return error.InjectedDisconnectFailed;
     }
 
-    switch (request) {
-        .host_info => unreachable, // Discovery owns its bounded exchange.
+    switch (request.*) {
+        .host_info => {
+            if (!host.launchAllowed()) return respondStatic(host.io, fd, 503, "host_unavailable", "dispatch_fenced");
+            var response: protocol.ResponseBuffer = .{};
+            try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
+            try response.appendJsonString(host.lease.paths.store.slice());
+            try response.append(",\"instance\":\"");
+            try response.append(&std.fmt.bytesToHex(host.instance, .lower));
+            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
+                host.custody.records.len,
+                if (host.provider_endpoint != null) "true" else "false",
+                if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
+            });
+            std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
+            try fd.setJson(200, response.slice());
+        },
         .host_stop => {
             host.launch_mutex.lockUncancelable(host.io);
             const first = !host.effect_shutdown.swap(true, .acq_rel);
@@ -3149,7 +3599,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             deliverResponse(host.io, fd, status, response.slice());
         },
         .session_stop => |*command| {
-            var timing = ControlTiming.init(host, command.key.slice(), "session_stop", accepted_at_ns);
+            var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
             const result = host.store.stopSession(command, .{
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
@@ -3167,10 +3617,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
-            timing.replyComplete();
+            fd.timing = timing;
         },
         .model_interruption => |*command| {
-            var timing = ControlTiming.init(host, command.key.slice(), "model_interruption", accepted_at_ns);
+            var timing = ControlTiming.init(host, command.key, "model_interruption", accepted_at_ns);
             const result = host.store.interruptModel(command, .{
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
@@ -3188,10 +3638,10 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
-            timing.replyComplete();
+            fd.timing = timing;
         },
         .permission_decision => |*command| {
-            var timing = ControlTiming.init(host, command.key.slice(), "permission_decision", accepted_at_ns);
+            var timing = ControlTiming.init(host, command.key, "permission_decision", accepted_at_ns);
             const result = host.store.decidePermission(command, .{
                 .before_commit = host.faults.before_commit,
                 .control_trace = timing.storeTrace(),
@@ -3209,7 +3659,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
-            timing.replyComplete();
+            fd.timing = timing;
         },
         .observe_command => |command| {
             const observation = host.store.observeCommand(command.key.slice()) catch |err| {
@@ -3230,17 +3680,16 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                     return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
                 },
             };
-            var reader = host.store.openContent(reference) catch |err| {
+            const reader = host.store.openContent(reference) catch |err| {
                 fenceDispatch(host, "result content read", err);
                 return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
             };
-            defer reader.close();
-            deliverContent(host.io, fd, &reader) catch {};
+            try fd.setContent(reader, 0, true, false);
         },
         .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
-            var report = host.store.captureSessionReport(request_value.session.slice(), .{
+            const report = host.store.captureSessionReport(request_value.session.slice(), .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
                 .request_number = request_number,
@@ -3268,17 +3717,14 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                     @errorName(err),
                 );
             };
-            defer report.deinit();
+            try fd.setReport(report);
             traceSubject(host, "inspection_captured", "session", request_value.session.slice());
             traceSqliteDiagnostic(host, request_value.session.slice());
-            if (host.faults.inspection_reply_gate_path) |path| waitAtTestGate(host, path);
-            if (host.faults.inspection_reply_delay_ms != 0) {
-                _ = host.io.sleep(.fromMilliseconds(host.faults.inspection_reply_delay_ms), .awake) catch {};
-            }
-            deliverReport(host.io, fd, &report) catch {};
+            try fd.holdDelivery(host.faults.inspection_reply_gate_path, host.faults.inspection_reply_delay_ms);
+            if (fd.gate != null) traceSubject(host, "test_gate_waiting", "path", host.faults.inspection_reply_gate_path.?);
         },
         .list_sessions => |request_value| {
-            var page = host.store.captureSessionList(request_value, .{
+            const page = host.store.captureSessionList(request_value, .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
                 .request_number = request_number,
@@ -3294,8 +3740,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
                 }
                 return respondStatic(host.io, fd, if (err == error.ReportScratchExhausted) 507 else 500, "observation_error", @errorName(err));
             };
-            defer page.deinit();
-            deliverReport(host.io, fd, &page) catch {};
+            try fd.setReport(page);
         },
         .conversation_page => |command| {
             const page = host.store.publicConversationPage(command) catch |err| switch (err) {
@@ -3329,7 +3774,7 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             try response.append("}");
             deliverResponse(host.io, fd, 200, response.slice());
         },
-        .conversation_content => |command| try deliverConversationContent(host, fd, command),
+        .conversation_content => |command| try prepareConversationContent(host, fd, command),
         .proposal_page => |command| {
             const page = host.store.proposalPage(command) catch |err| switch (err) {
                 error.SessionNotFound, error.InvalidCursor => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
@@ -3358,15 +3803,14 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             deliverResponse(host.io, fd, 200, response.slice());
         },
         .proposal_field => |command| {
-            var reader = host.store.openProposalField(command) catch |err| switch (err) {
+            const reader = host.store.openProposalField(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, "proposal_unavailable", @errorName(err)),
                 else => {
                     fenceDispatch(host, "proposal field", err);
                     return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
                 },
             };
-            defer reader.close();
-            try deliverPublicContent(host, fd, &reader, 0, true);
+            try deliverPublicContent(host, fd, reader, 0, true);
         },
         .activity_page => |command| {
             const page = host.store.activityPage(command) catch |err| switch (err) {
@@ -3382,69 +3826,47 @@ fn handleConnection(host: *Host, fd: std.posix.fd_t, accepted_at_ns: u64, place:
             deliverResponse(host.io, fd, 200, out.buffered());
         },
         .activity_content => |command| {
-            var reader = host.store.openActivityContent(command) catch |err| switch (err) {
+            const reader = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(host.io, fd, 409, "activity_unavailable", @errorName(err)),
                 else => {
                     fenceDispatch(host, "activity content", err);
                     return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
                 },
             };
-            defer reader.close();
-            try deliverPublicContent(host, fd, &reader, 0, true);
+            try deliverPublicContent(host, fd, reader, 0, true);
         },
     }
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
-    var reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
+    var reply = Reply{ .io = host.io, .allocator = host.allocator };
+    defer reply.deinit();
+    try prepareConversationContent(host, &reply, command);
+    reply.deliver(fd) catch |err| {
+        if (host.store.isFenced()) fenceDispatch(host, "public content", err);
+    };
+}
+
+fn prepareConversationContent(host: *Host, fd: *Reply, command: protocol.ConversationContent) !void {
+    const reader = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(host.io, fd, 409, "conversation_unavailable", @errorName(err)),
         else => {
             fenceDispatch(host, "conversation content", err);
             return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
         },
     };
-    defer reader.close();
-    return deliverPublicContent(host, fd, &reader, command.start, command.stream);
+    return deliverPublicContent(host, fd, reader, command.start, command.stream);
 }
 
-fn deliverPublicContent(host: *Host, fd: std.posix.fd_t, reader: *store_module.ContentReader, start: u64, stream: bool) !void {
-    // One reader, fixed window, no Store lock/BLOB over socket delivery.
-    const delivered = if (stream) reader.reference.length else @min(reader.reference.length - start, protocol.content_window_bytes);
-    const end = start + delivered;
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    const first: usize = @intCast(@min(delivered, buffer.len));
-    const count = reader.readRange(start, buffer[0..@max(first, 1)]) catch |err| {
+fn deliverPublicContent(host: *Host, fd: *Reply, reader: store_module.ContentReader, start: u64, stream: bool) !void {
+    fd.setContent(reader, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
+        fd.deinit();
         return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
     };
-    if (count != first) {
-        fenceDispatch(host, "public content", error.ShortCanonicalRead);
-        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
-    }
-    // Even empty/one-window projections validate EOF before successful headers.
-    var header_buffer: [320]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ delivered, reader.reference.length, end });
-    writeAll(host.io, fd, header) catch return;
-    writeAll(host.io, fd, buffer[0..first]) catch return;
-    var offset = start + first;
-    while (offset < end) {
-        const wanted: usize = @intCast(@min(end - offset, buffer.len));
-        const next = reader.readRange(offset, buffer[0..wanted]) catch |err| {
-            // After headers: close an incomplete advertised body, never append
-            // another response or send bytes from the failed final window.
-            fenceDispatch(host, "public content", err);
-            return;
-        };
-        if (next != wanted) {
-            fenceDispatch(host, "public content", error.ShortCanonicalRead);
-            return;
-        }
-        writeAll(host.io, fd, buffer[0..next]) catch return;
-        offset += next;
-    }
 }
 
-fn deliverActionContent(host: *Host, fd: std.posix.fd_t, command: anytype, comptime call_id: bool) void {
+fn deliverActionContent(host: *Host, fd: *Reply, command: anytype, comptime call_id: bool) void {
     const phase = if (call_id) "Action call identity observation" else "Action argument observation";
     const reference = if (call_id)
         host.store.actionCallId(command.session.slice(), command.action_id)
@@ -3457,12 +3879,11 @@ fn deliverActionContent(host: *Host, fd: std.posix.fd_t, command: anytype, compt
             return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
         },
     };
-    var reader = host.store.openContent(resolved) catch |err| {
+    const reader = host.store.openContent(resolved) catch |err| {
         fenceDispatch(host, phase, err);
         return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
     };
-    defer reader.close();
-    deliverContent(host.io, fd, &reader) catch {};
+    fd.setContent(reader, 0, true, false) catch {};
 }
 
 fn nextRequestNumber(host: *Host) !u64 {
@@ -3474,66 +3895,8 @@ fn nextRequestNumber(host: *Host) !u64 {
     }
 }
 
-fn handleHostInfo(host: *Host, fd: std.posix.fd_t, header: Header, deadline: i128) !void {
-    if (header.content_length > protocol.max_host_info_request_bytes) return error.DiscoveryRequestTooLarge;
-    var cleanup_failed = false;
-    const request = try protocol.parseRequest(.{
-        .io = host.io,
-        .fd = fd,
-        .content_length = header.content_length,
-        .scratch_path = "", // Kind validation rejects before any content capture.
-        .request_number = 0,
-        .cleanup_failed = &cleanup_failed,
-        .expected_kind = .host_info,
-        .deadline = deadline,
-    });
-    if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
-        sendStaticUntil(host.io, fd, 409, "invocation_error", "wrong_store_identity", deadline) catch {};
-        return;
-    }
-    if (header.instance) |instance| {
-        if (!std.mem.eql(u8, &instance, &host.instance)) {
-            sendStaticUntil(host.io, fd, 409, "invocation_error", "host_instance_changed", deadline) catch {};
-            return;
-        }
-    }
-    if (header.drop == .before_admission) return;
-    if (!host.launchAllowed()) {
-        sendStaticUntil(host.io, fd, 503, "host_unavailable", "dispatch_fenced", deadline) catch {};
-        return;
-    }
-    var response: protocol.ResponseBuffer = .{};
-    try response.append("{\"version\":\"1\",\"type\":\"host_info\",\"store\":");
-    try response.appendJsonString(host.lease.paths.store.slice());
-    try response.append(",\"instance\":\"");
-    try response.append(&std.fmt.bytesToHex(host.instance, .lower));
-    try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
-        host.custody.records.len,
-        if (host.provider_endpoint != null) "true" else "false",
-        if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
-    });
-    std.debug.assert(response.len <= protocol.max_host_info_response_bytes);
-    // Never append an error to a partially delivered response.
-    writeHttpUntil(host.io, fd, 200, response.slice(), deadline) catch {};
-}
-
 const HeaderReader = struct {
-    io: std.Io,
-    fd: std.posix.fd_t,
-    buffer: [protocol.max_header_bytes]u8 = undefined,
-    used: usize = 0,
-    deadline: i128,
-
-    fn init(io: std.Io, fd: std.posix.fd_t, deadline: i128) HeaderReader {
-        return .{ .io = io, .fd = fd, .deadline = deadline };
-    }
-
-    fn readRoute(self: *HeaderReader) !Route {
-        while (self.used < self.buffer.len) {
-            try self.readByte();
-            if (self.used >= 2 and std.mem.eql(u8, self.buffer[self.used - 2 .. self.used], "\r\n")) break;
-        } else return error.HeaderTooLarge;
-        const request_line = self.buffer[0 .. self.used - 2];
+    fn parseRoute(request_line: []const u8) !Route {
         var request_parts = std.mem.splitScalar(u8, request_line, ' ');
         if (!std.mem.eql(u8, request_parts.next() orelse return error.InvalidRequestLine, "POST")) {
             return error.InvalidMethod;
@@ -3588,13 +3951,8 @@ const HeaderReader = struct {
             error.UnknownRoute;
     }
 
-    fn finish(self: *HeaderReader, route: Route) !Header {
-        while (self.used < self.buffer.len) {
-            try self.readByte();
-            if (self.used >= 4 and std.mem.eql(u8, self.buffer[self.used - 4 .. self.used], "\r\n\r\n")) break;
-        } else return error.HeaderTooLarge;
-
-        var lines = std.mem.splitSequence(u8, self.buffer[0..self.used], "\r\n");
+    fn parseFields(bytes: []const u8, route: Route) !Header {
+        var lines = std.mem.splitSequence(u8, bytes, "\r\n");
         _ = lines.next() orelse return error.InvalidRequestLine;
         var content_length: ?u64 = null;
         var wire_ok = false;
@@ -3637,15 +3995,6 @@ const HeaderReader = struct {
             .drop = drop,
             .instance = instance,
         };
-    }
-
-    fn readByte(self: *HeaderReader) !void {
-        protocol.pollExchange(self.io, self.fd, std.posix.POLL.IN, self.deadline) catch |err| {
-            return if (err == error.ExchangeDeadlineExceeded) error.HeaderDeadlineExceeded else err;
-        };
-        const count = try std.posix.read(self.fd, self.buffer[self.used .. self.used + 1]);
-        if (count == 0) return error.IncompleteHeader;
-        self.used += count;
     }
 };
 
@@ -3756,7 +4105,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }, 0..) |render, index| {
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
-        const Reply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
+        const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         var command: Command = .{};
         try command.session.set(session);
         if (index == 3) {
@@ -3772,18 +4121,18 @@ test "mutation decoder validates all five actual producers and preserved domain 
             4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
             else => unreachable,
         };
-        const accepted: Reply = switch (index) {
+        const accepted: MutationReply = switch (index) {
             0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false } },
             1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content } },
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
             else => unreachable,
         };
-        const rejected: Reply = if (index == 1)
+        const rejected: MutationReply = if (index == 1)
             .{ .rejected = .{ .replayed = true, .code = .unknown_session, .content = content } }
         else
             .{ .rejected = .{ .replayed = true, .code = .invalid_session_reference } };
-        for ([_]Reply{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
+        for ([_]MutationReply{ accepted, rejected, .conflict, .infrastructure_failure }) |initial| {
             for ([_]bool{ false, true }) |replayed| {
                 var result = initial;
                 switch (result) {
@@ -4091,16 +4440,6 @@ fn appendHex(response: *protocol.ResponseBuffer, bytes: *const [32]u8) !void {
     try response.append(&std.fmt.bytesToHex(bytes.*, .lower));
 }
 
-fn sendStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) !void {
-    return sendStaticUntil(io, fd, status, kind, code, null);
-}
-
-fn sendStaticUntil(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8, deadline: ?i128) !void {
-    var response: protocol.ResponseBuffer = .{};
-    try renderStatic(&response, kind, code);
-    try writeHttpUntil(io, fd, status, response.slice(), deadline);
-}
-
 fn renderStatic(response: *protocol.ResponseBuffer, kind: []const u8, code: []const u8) !void {
     try response.append("{\"version\":\"1\",\"type\":");
     try response.appendJsonString(kind);
@@ -4109,52 +4448,203 @@ fn renderStatic(response: *protocol.ResponseBuffer, kind: []const u8, code: []co
     try response.append("}");
 }
 
-fn respondStatic(io: std.Io, fd: std.posix.fd_t, status: u16, kind: []const u8, code: []const u8) void {
-    sendStatic(io, fd, status, kind, code) catch {};
+fn respondStatic(io: std.Io, reply: *Reply, status: u16, kind: []const u8, code: []const u8) void {
+    var response: protocol.ResponseBuffer = .{};
+    renderStatic(&response, kind, code) catch return;
+    deliverResponse(io, reply, status, response.slice());
 }
 
-fn deliverResponse(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) void {
-    // A delivery failure leaves the saved semantic answer recoverable. Never
-    // append a second HTTP message to an already-started response.
-    writeHttp(io, fd, status, body) catch {};
+fn deliverResponse(_: std.Io, reply: *Reply, status: u16, body: []const u8) void {
+    // Allocation failure cannot revoke an already saved semantic answer.
+    reply.setJson(status, body) catch {};
 }
 
-fn deliverContent(io: std.Io, fd: std.posix.fd_t, reader: *store_module.ContentReader) !void {
-    var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{reader.reference.length});
-    try writeAll(io, fd, header);
-    var buffer: [store_module.ContentReader.content_window_bytes]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < reader.reference.length) {
-        const wanted: usize = @intCast(@min(reader.reference.length - offset, buffer.len));
-        const count = try reader.read(offset, buffer[0..wanted]);
+// A reply retains its reader, not a handler stack or a complete content copy.
+// The exchange owner calls advance only when the socket is writable and keeps
+// this value alive through physical socket retirement, even after the last byte.
+const Reply = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    header: [320]u8 = undefined,
+    header_length: usize = 0,
+    header_sent: usize = 0,
+    window: [protocol.content_window_bytes]u8 = undefined,
+    window_length: usize = 0,
+    window_sent: usize = 0,
+    offset: u64 = 0,
+    end: u64 = 0,
+    body: union(enum) {
+        none,
+        json: []u8,
+        report: store_module.SessionReport,
+        content: struct { reader: store_module.ContentReader, public: bool },
+    } = .none,
+    absolute_deadline: ?i128 = null,
+    inactivity_deadline: i128 = 0,
+    timing: ?ControlTiming = null,
+    gate: ?std.posix.fd_t = null,
+    not_before_ns: i128 = 0,
+
+    fn deinit(self: *Reply) void {
+        if (self.gate) |gate| _ = std.c.close(gate);
+        switch (self.body) {
+            .none => {},
+            .json => |bytes| self.allocator.free(bytes),
+            .report => |*report| report.deinit(),
+            .content => |*content| content.reader.close(),
+        }
+        self.* = .{ .io = self.io, .allocator = self.allocator, .absolute_deadline = self.absolute_deadline };
+    }
+
+    fn holdDelivery(self: *Reply, path: ?[]const u8, delay_ms: i64) !void {
+        self.not_before_ns = std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds + @as(i128, delay_ms) * std.time.ns_per_ms;
+        if (path) |value| {
+            self.gate = std.posix.openat(std.posix.AT.FDCWD, value, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+                error.FileNotFound => return, // The fixture already released it.
+                else => return err,
+            };
+        }
+    }
+
+    fn deliveryReady(self: *Reply) !bool {
+        if (std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds < self.not_before_ns) return false;
+        if (self.gate) |gate| {
+            var byte: [1]u8 = undefined;
+            const count = std.c.read(gate, &byte, 1);
+            if (count < 0) switch (std.posix.errno(count)) {
+                .AGAIN, .INTR => return false,
+                else => return error.DeliveryGateReadFailed,
+            };
+            // ReleaseGate publishes persistent EOF for all existing readers.
+            _ = std.c.close(gate);
+            self.gate = null;
+        }
+        return true;
+    }
+
+    fn prepareHeader(self: *Reply, status: u16, content_type: []const u8, length: u64) !void {
+        const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 {d} {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, httpReason(status), content_type, length });
+        self.header_length = header.len;
+        self.renew();
+    }
+
+    fn setJson(self: *Reply, status: u16, bytes: []const u8) !void {
+        std.debug.assert(self.body == .none);
+        self.body = .{ .json = try self.allocator.dupe(u8, bytes) };
+        self.end = bytes.len;
+        try self.prepareHeader(status, "application/json", bytes.len);
+    }
+
+    /// Moves a report, including its scratch charge, into delivery custody.
+    fn setReport(self: *Reply, value: store_module.SessionReport) !void {
+        std.debug.assert(self.body == .none);
+        self.body = .{ .report = value };
+        self.end = value.length;
+        try self.prepareHeader(200, "application/json", value.length);
+    }
+
+    /// Moves one canonical reader; public reads verify their first window and
+    /// empty/one-window EOF before any successful header can leave the Host.
+    fn setContent(self: *Reply, reader: store_module.ContentReader, start: u64, stream: bool, public: bool) !void {
+        std.debug.assert(self.body == .none);
+        self.body = .{ .content = .{ .reader = reader, .public = public } };
+        self.offset = start;
+        const length = if (stream) reader.reference.length - start else @min(reader.reference.length - start, protocol.content_window_bytes);
+        self.end = start + length;
+        if (public) {
+            try self.fill();
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ length, reader.reference.length, self.end });
+            self.header_length = header.len;
+            self.renew();
+        } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);
+    }
+
+    fn fill(self: *Reply) !void {
+        const wanted: usize = @intCast(@min(self.end - self.offset, self.window.len));
+        const count = switch (self.body) {
+            .content => |*value| if (value.public)
+                try value.reader.readRange(self.offset, self.window[0..@max(wanted, 1)])
+            else
+                try value.reader.read(self.offset, self.window[0..wanted]),
+            .report => |*value| try value.read(self.offset, self.window[0..wanted]),
+            .none, .json => unreachable,
+        };
         if (count != wanted) return error.ShortCanonicalRead;
-        try writeAll(io, fd, buffer[0..count]);
-        offset += count;
+        self.window_length = count;
+        self.window_sent = 0;
+        // Local production is not socket inactivity. Discovery, in contrast,
+        // retains its original absolute budget regardless of local progress.
+        self.renew();
     }
-}
 
-fn deliverReport(io: std.Io, fd: std.posix.fd_t, report: *store_module.SessionReport) !void {
-    var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{report.length});
-    try writeAll(io, fd, header);
-    var buffer: [store_module.SessionReport.read_window_bytes]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < report.length) {
-        const wanted: usize = @intCast(@min(report.length - offset, buffer.len));
-        const count = try report.read(offset, buffer[0..wanted]);
-        if (count != wanted) return error.ShortReportRead;
-        try writeAll(io, fd, buffer[0..count]);
-        offset += count;
+    fn renew(self: *Reply) void {
+        self.inactivity_deadline = std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
     }
-}
 
-fn writeHttp(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8) !void {
-    return writeHttpUntil(io, fd, status, body, null);
-}
+    fn deadline(self: *const Reply) i128 {
+        return self.absolute_deadline orelse self.inactivity_deadline;
+    }
 
-fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
-    const reason = switch (status) {
+    fn needsFill(self: *const Reply) bool {
+        return self.header_sent == self.header_length and self.offset != self.end and
+            self.body != .json and self.window_sent == self.window_length;
+    }
+
+    /// One nonblocking write, or one bounded production window, per turn.
+    /// false means more delivery remains; readiness alone never renews time.
+    fn advance(self: *Reply, fd: std.posix.fd_t) !bool {
+        if (std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds >= self.deadline())
+            return if (self.absolute_deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
+        if (self.header_sent < self.header_length) {
+            self.header_sent += try self.write(fd, self.header[self.header_sent..self.header_length]);
+            return false;
+        }
+        if (self.offset == self.end) return true;
+        if (self.body == .json) {
+            const start: usize = @intCast(self.offset);
+            const end = @min(self.body.json.len, start + protocol.content_window_bytes);
+            self.offset += try self.write(fd, self.body.json[start..end]);
+        } else {
+            if (self.window_sent == self.window_length) {
+                try self.fill();
+                return false;
+            }
+            const count = try self.write(fd, self.window[self.window_sent..self.window_length]);
+            self.window_sent += count;
+            self.offset += count;
+        }
+        return self.offset == self.end;
+    }
+
+    fn write(self: *Reply, fd: std.posix.fd_t, bytes: []const u8) !usize {
+        const count = std.c.write(fd, bytes.ptr, bytes.len);
+        if (count < 0) switch (std.posix.errno(count)) {
+            .AGAIN, .INTR => return 0,
+            else => return error.WriteFailed,
+        };
+        if (count == 0) return error.ConnectionClosed;
+        self.renew();
+        return @intCast(count);
+    }
+
+    fn deliver(self: *Reply, fd: std.posix.fd_t) !void {
+        const flags = std.c.fcntl(fd, std.c.F.GETFL);
+        const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
+        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0) return error.WriteFailed;
+        self.renew();
+        while (true) {
+            protocol.pollExchange(self.io, fd, std.posix.POLL.OUT, self.deadline()) catch |err|
+                return if (err == error.ExchangeDeadlineExceeded and self.absolute_deadline == null) error.TransferInactive else err;
+            if (try self.advance(fd)) {
+                if (self.timing) |*timing| timing.replyComplete();
+                return;
+            }
+        }
+    }
+};
+
+fn httpReason(status: u16) []const u8 {
+    return switch (status) {
         200 => "OK",
         400 => "Bad Request",
         409 => "Conflict",
@@ -4164,54 +4654,21 @@ fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8,
         507 => "Insufficient Storage",
         else => "Error",
     };
-    var header_buffer: [256]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n", .{ status, reason, body.len });
-    try writeAllUntil(io, fd, header, deadline);
-    try writeAllUntil(io, fd, body, deadline);
+}
+
+fn writeHttpUntil(io: std.Io, fd: std.posix.fd_t, status: u16, body: []const u8, deadline: ?i128) !void {
+    var reply = Reply{ .io = io, .allocator = std.testing.allocator, .absolute_deadline = deadline };
+    defer reply.deinit();
+    try reply.setJson(status, body);
+    try reply.deliver(fd);
 }
 
 fn writeAll(io: std.Io, fd: std.posix.fd_t, bytes: []const u8) !void {
-    return writeAllUntil(io, fd, bytes, null);
-}
-
-fn writeAllUntil(io: std.Io, fd: std.posix.fd_t, bytes: []const u8, deadline: ?i128) !void {
-    // Reply delivery is terminal for this connection. Change mode here, not
-    // at accept: request ingress retains its existing blocking policy.
-    const flags = std.c.fcntl(fd, std.c.F.GETFL);
-    const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
-    if (flags < 0 or (flags & nonblocking == 0 and std.c.fcntl(fd, std.c.F.SETFL, flags | nonblocking) < 0)) return error.WriteFailed;
-
-    // Each available window starts its own inactivity budget. Store/report
-    // production between windows is not socket inactivity; only positive
-    // writes renew this budget, never readiness, AGAIN or INTR.
-    var end = deadline orelse (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const remaining = end - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return if (deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
-        const milliseconds: c_int = @intCast(@divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms));
-        var poll_fd = [_]std.c.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        // Unlike posix.poll's EINTR retry, recompute the remaining budget.
-        const ready = std.c.poll(&poll_fd, poll_fd.len, milliseconds);
-        switch (std.posix.errno(ready)) {
-            .SUCCESS => if (ready == 0) continue,
-            .INTR => continue,
-            else => return error.PollFailed,
-        }
-        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= end) return if (deadline != null) error.ExchangeDeadlineExceeded else error.TransferInactive;
-        const count = std.c.write(fd, bytes[offset..].ptr, bytes.len - offset);
-        if (count < 0) switch (std.posix.errno(count)) {
-            .AGAIN, .INTR => continue,
-            else => return error.WriteFailed,
-        };
-        if (count == 0) return error.ConnectionClosed;
-        offset += @intCast(count);
-        if (deadline == null) end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s;
-    }
+    var reply = Reply{ .io = io, .allocator = std.testing.allocator };
+    defer reply.deinit();
+    reply.body = .{ .json = try std.testing.allocator.dupe(u8, bytes) };
+    reply.end = bytes.len;
+    try reply.deliver(fd);
 }
 
 test "Conversation stream native delivery decodes once and closes on failed handoff" {
@@ -4310,7 +4767,6 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     };
     var sockets: [2]std.posix.fd_t = undefined;
     try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
-    defer _ = std.c.close(sockets[0]);
     defer _ = std.c.close(sockets[1]);
     const header = "POST /v1/host-info HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 0\r\n\r\n";
     try writeAll(std.testing.io, sockets[1], header);
@@ -4320,11 +4776,12 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
     host.request_counter.store(std.math.maxInt(u64), .release);
-    var place = try host.reserveClient();
-    defer host.clientFinished(place, null);
-    var trace_request_number: ?u64 = null;
-    try handleConnection(&host, sockets[0], 0, &place, &trace_request_number);
-    try std.testing.expectEqual(Admission.Place.discovery, place);
+    const exchange = try host.allocator.create(Intake.Exchange);
+    exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
+    defer std.debug.assert(exchange.destroy());
+    try std.testing.expectError(error.RequestIdentityExhausted, exchange.read());
+    exchange.fail(error.RequestIdentityExhausted);
+    try std.testing.expectError(error.ExchangeDeadlineExceeded, exchange.reply.?.advance(sockets[0]));
     const nonblocking: c_int = @intCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
     try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(sockets[1], std.c.F.SETFL, nonblocking));
     var response: [512]u8 = undefined;
@@ -4531,71 +4988,6 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
     try std.testing.expect(Interrupt.hits.load(.monotonic) >= 3);
 }
 
-test "connection populations preserve two control places" {
-    try std.testing.expectEqual(max_clients, max_ordinary_clients + control_headroom);
-    try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), maximum_connection_stack_reservation_bytes);
-    try std.testing.expectEqual(@as(usize, 10 * 64 * 1024), maximum_result_delivery_buffers_bytes);
-}
-
-test "connection admission exhausts reachable reservation classification and release transitions" {
-    for (0..11) |ordinary| for (0..3) |controls| for (0..2) |discovery| for (0..3) |classification| {
-        const headroom = controls + discovery + classification;
-        if (headroom > 2) continue;
-        const original = Admission{ .total = ordinary + headroom, .ordinary = ordinary, .headroom = headroom, .discovery = discovery };
-        var admission = original;
-        if (original.total == 12) {
-            try std.testing.expectError(error.ConnectionCapacityExhausted, admission.reserve());
-            try std.testing.expectEqualDeep(original, admission);
-        } else if (headroom == 2) {
-            try std.testing.expectError(error.ClassificationCapacityExhausted, admission.reserve());
-            try std.testing.expectEqualDeep(original, admission);
-        } else {
-            inline for (std.meta.tags(Route)) |route| {
-                admission = original;
-                var place = try admission.reserve();
-                try std.testing.expectEqual(Admission.Place.classification, place);
-                if (route == .host_info and discovery == 1) {
-                    try std.testing.expectError(error.DiscoveryCapacityExhausted, admission.classify(&place, route));
-                    try std.testing.expectEqual(Admission.Place.classification, place);
-                } else if (route != .host_info and !route.isControl() and ordinary == 10) {
-                    try std.testing.expectError(error.OrdinaryCapacityExhausted, admission.classify(&place, route));
-                    try std.testing.expectEqual(Admission.Place.classification, place);
-                } else {
-                    try admission.classify(&place, route);
-                    const expected: Admission.Place = if (route == .host_info) .discovery else if (route.isControl()) .control else .ordinary;
-                    try std.testing.expectEqual(expected, place);
-                    try std.testing.expectEqual(original.total + 1, admission.total);
-                    try std.testing.expectEqual(ordinary + @intFromBool(expected == .ordinary), admission.ordinary);
-                    try std.testing.expectEqual(headroom + @intFromBool(expected != .ordinary), admission.headroom);
-                    try std.testing.expectEqual(discovery + @intFromBool(expected == .discovery), admission.discovery);
-                }
-                admission.release(place);
-                try std.testing.expectEqualDeep(original, admission);
-            }
-            // Allocation/spawn failure returns the original unclassified place.
-            admission = original;
-            admission.release(try admission.reserve());
-            try std.testing.expectEqualDeep(original, admission);
-        }
-        inline for (std.meta.tags(Admission.Place)) |place| {
-            const population = switch (place) {
-                .ordinary => ordinary,
-                .control => controls,
-                .discovery => discovery,
-                .classification => classification,
-            };
-            if (population > 0) {
-                admission = original;
-                admission.release(place);
-                try std.testing.expectEqual(original.total - 1, admission.total);
-                try std.testing.expectEqual(ordinary - @intFromBool(place == .ordinary), admission.ordinary);
-                try std.testing.expectEqual(headroom - @intFromBool(place != .ordinary), admission.headroom);
-                try std.testing.expectEqual(discovery - @intFromBool(place == .discovery), admission.discovery);
-            }
-        }
-    };
-}
-
 test "model retry and inactivity defaults match the owning resource contract" {
     try std.testing.expectEqual([3]u64{ 2_000, 4_000, 8_000 }, default_retry_waits_ms);
     try std.testing.expectEqual(@as(i64, 5 * 60), (Faults{}).provider_inactivity_seconds);
@@ -4779,6 +5171,56 @@ test "cleanup delay follows elapsed time and preserves custody reuse" {
     try std.testing.expect(slots[0] == .free);
 }
 
+test "delayed control replies retain command identity after request storage reuse" {
+    const native = @import("posix");
+    inline for (.{ "session_stop", "model_interruption", "permission_decision" }) |kind| {
+        var descriptors: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
+        defer _ = native.close(descriptors[0]);
+        for (descriptors) |fd| {
+            try std.testing.expectEqual(@as(c_int, 0), native.fcntl(fd, native.F_SETFL, @as(c_int, native.O_NONBLOCK)));
+        }
+        const backing = native.tmpfile() orelse return error.TestUnexpectedResult;
+        defer _ = native.fclose(backing);
+        try std.testing.expectEqual(@as(c_int, 0), native.ftruncate(native.fileno(backing), TestObservation.state_bytes));
+        var observation = try TestObservation.init(descriptors[1], native.dup(native.fileno(backing)), .control, 37);
+        defer observation.close();
+        var host = Host{
+            .io = std.testing.io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{ .test_phase_trace = true },
+            .test_observation = &observation,
+        };
+        var original: [protocol.max_key_bytes]u8 = undefined;
+        for (&original, 0..) |*byte, index| byte.* = @intCast('a' + index % 26);
+        var request_key = protocol.Bounded(protocol.max_key_bytes){ .bytes = original, .len = original.len };
+        var reply = Reply{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer reply.deinit();
+        reply.timing = ControlTiming.init(&host, request_key, kind, 1);
+        reply.timing.?.store_queued_ns = 2;
+        reply.timing.?.lock_acquired_ns = 3;
+        reply.timing.?.store_complete_ns = 4;
+        // The request is retired before the reply's physical delivery.
+        @memset(&request_key.bytes, 'X');
+        var sockets: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[0]);
+        defer _ = std.c.close(sockets[1]);
+        try reply.setJson(200, "{\"accepted\":true}");
+        try reply.deliver(sockets[0]);
+        var bytes: [TestObservation.record_bytes]u8 = undefined;
+        const length = native.read(descriptors[0], &bytes, bytes.len);
+        try std.testing.expect(length >= 28);
+        const frame = bytes[0..@intCast(length)];
+        try std.testing.expect(std.mem.indexOf(u8, frame, "control_timing") != null);
+        try std.testing.expect(std.mem.indexOf(u8, frame, &original) != null);
+        try std.testing.expect(std.mem.indexOf(u8, frame, kind) != null);
+        try std.testing.expectEqual(@as(u64, 2), observation.shared.state.load(.acquire));
+    }
+}
+
 test "required Bash observations publish while optional stderr custody is held" {
     const native = @import("posix");
     inline for (.{ TestObservation.Plan.bash_cleanup, TestObservation.Plan.bash_pipes }) |plan| {
@@ -4830,6 +5272,118 @@ test "required Bash observations publish while optional stderr custody is held" 
             try std.testing.expectEqual(@as(u64, 0), observation.shared.active.load(.acquire));
         }
         try std.testing.expect(host.trace_lost.load(.acquire));
+    }
+}
+
+test "HTTP error capture retires before execution custody" {
+    const Boundary = struct {
+        var slot: *ExecutionSlot = undefined;
+        var custody: *execution.CustodyPool = undefined;
+        var used: *std.atomic.Value(u64) = undefined;
+        var response_fd: std.Io.File.Handle = -1;
+        var closes: usize = 0;
+        var retirement_observed: bool = false;
+
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            for (files) |file| if (file.handle == response_fd) {
+                // Observe the real descriptor while close still owns it,
+                // including a close that suspends before retiring the handle.
+                std.debug.assert(slot.* == .provider);
+                std.debug.assert(custody.occupied() == 1);
+                closes += 1;
+            };
+            std.testing.io.vtable.fileClose(userdata, files);
+        }
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (slot.* == .free) {
+                std.debug.assert(closes == 1);
+                std.debug.assert(std.c.fcntl(response_fd, std.c.F.GETFD) < 0);
+                std.debug.assert(used.load(.acquire) == 17);
+                retirement_observed = true;
+            }
+            return std.testing.io.vtable.now(userdata, clock);
+        }
+    };
+    try provider.initialize();
+    defer provider.deinitialize();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var vtable = std.testing.io.vtable.*;
+    vtable.fileClose = Boundary.close;
+    vtable.now = Boundary.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for (0..3) |kind| {
+        var used: std.atomic.Value(u64) = .init(17);
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
+        var records: [1]execution.CustodyRecord = undefined;
+        var host = Host{
+            .io = io,
+            .allocator = std.testing.allocator,
+            .lease = undefined,
+            .store = undefined,
+            .faults = .{ .test_phase_trace = true },
+            .custody = execution.CustodyPool.initialize(&records),
+        };
+        const token = host.custody.reserve().?;
+        var permit = store_module.DispatchPermit{ .binding = .{
+            .turn_id = 3,
+            .operation_id = 7,
+            .attempt_ordinal = 2,
+        } };
+        const binding = try host.custody.attach(token, &permit);
+        // Delivery already claimed: this owner regression exercises physical
+        // retirement without fabricating a Store settlement. Dispatch integration
+        // separately verifies the durable HTTP overflow/failure meanings.
+        try std.testing.expect(host.custody.claimTerminalDelivery(token));
+        var slot: ExecutionSlot = .{ .provider = .{ .owner = .{ .token = token, .binding = binding } } };
+        Boundary.slot = &slot;
+        Boundary.custody = &host.custody;
+        Boundary.used = &used;
+        Boundary.response_fd = -1;
+        Boundary.closes = 0;
+        Boundary.retirement_observed = false;
+        const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
+        try request_file.writeStreamingAll(io, "{}");
+        try std.testing.expect(budget.reserve(2));
+        var writer = provider.CaptureWriter{ .io = io };
+        var retained: ?named_scratch.Owner = null;
+        try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
+            .io = io,
+            .file = request_file,
+            .length = 2,
+            .charged = 2,
+            .budget = budget,
+            .structured_output = false,
+            .session_affinity = @splat(0),
+        }, binding, .{}, &writer, root, budget, &retained);
+        errdefer if (slot == .provider) slot.provider.transfer.deinit();
+        const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
+        const response = &slot.provider.transfer.response;
+        try response.file.writeStreamingAll(io, body);
+        try std.testing.expect(budget.reserve(body.len));
+        response.charged = body.len;
+        response.length = body.len;
+        try response.seal(false);
+        Boundary.response_fd = response.file.handle;
+        if (kind == 1) {
+            // A short sealed read is a real classifier error, not malformed
+            // JSON's negative-overflow result.
+            response.length += 1;
+            try std.testing.expectError(error.ShortSealedRead, model_adapter.Output.contextOverflow(io, response.file, response.length, 400));
+        }
+        completeTransfer(&host, &slot, .{
+            .outcome = .{ .transport_finished = .{ .disposition = .permanent_http, .http_status = 400 } },
+            .queued_after = 0,
+        });
+        try std.testing.expect(Boundary.retirement_observed);
+        try std.testing.expectEqual(@as(usize, 1), Boundary.closes);
+        try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
+        try std.testing.expectEqual(@as(u64, 17), used.load(.acquire));
+        try std.testing.expect(slot == .free);
+        try std.testing.expect(host.custody.reserve() != null);
     }
 }
 
@@ -5221,6 +5775,75 @@ test "execution slots agree with custody across the complete population" {
     try checkSlotCustodyAgreement(&current, &custody);
     try custody.detach(reused);
     try custody.cleanupComplete(reused);
+}
+
+test "no-work admission restores only its temporary custody reservation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    var storage = try store_module.Store.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+
+    // Every call has genuinely free capacity and a real Store with no eligible
+    // work. A represented sibling must survive release of the new reservation.
+    const Kind = enum { bash, retry, message, tool_continuation };
+    inline for (std.meta.tags(Kind)) |kind| {
+        for ([_]bool{ false, true }) |with_sibling| {
+            var records: [3]execution.CustodyRecord = undefined;
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = undefined,
+                .store = &storage,
+                .faults = .{},
+                .custody = execution.CustodyPool.initialize(&records),
+            };
+            var slots = [_]ExecutionSlot{ .free, .free, .free };
+            const sibling = if (with_sibling) host.custody.reserve().? else null;
+            if (sibling) |token| {
+                var permit = store_module.DispatchPermit{ .binding = .{
+                    .turn_id = 17,
+                    .operation_id = 23,
+                    .attempt_ordinal = 2,
+                } };
+                const binding = try host.custody.attach(token, &permit);
+                slots[1] = .{ .model_preparing = .{ .token = token, .binding = binding } };
+            }
+            defer if (sibling) |token| {
+                host.custody.detach(token) catch unreachable;
+                host.custody.cleanupComplete(token) catch unreachable;
+            };
+            const baseline: usize = if (with_sibling) 1 else 0;
+            var model_preparation: model_adapter.Preparation = undefined;
+            var bash_preparation: ?bash.Preparation = null;
+            const progress = switch (kind) {
+                .bash => admitBashAttempt(&host, &slots[0], &bash_preparation),
+                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation),
+                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
+                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
+            };
+            try std.testing.expectEqual(AdmissionProgress.no_work, progress);
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expect(bash_preparation == null);
+            try std.testing.expect(!host.dispatch_fenced.load(.acquire));
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+            try checkSlotCustodyAgreement(&slots, &host.custody);
+            try std.testing.expect(!(try storage.inspectSession("direct/no-work")).found);
+
+            // Restored accounting must mean immediately reusable capacity,
+            // not just a corrected counter or accidental sibling release.
+            var reused: [records.len]execution.CustodyToken = undefined;
+            const free = records.len - baseline;
+            for (reused[0..free]) |*token| token.* = host.custody.reserve() orelse return error.TestExpectedCapacity;
+            try std.testing.expect(host.custody.reserve() == null);
+            for (reused[0..free]) |token| try host.custody.releaseUnused(token);
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+            try checkSlotCustodyAgreement(&slots, &host.custody);
+        }
+    }
 }
 
 test "closed Bash delivery retains its payload with detached custody" {
@@ -5901,93 +6524,549 @@ test "control response variants fit exact worst-case JSON bounds" {
     );
 }
 
-fn finishTestClient(host: *Host, release: *std.atomic.Value(bool), completed: *std.atomic.Value(bool)) void {
-    while (!release.load(.acquire)) std.atomic.spinLoopHint();
-    completed.store(true, .release);
-    host.clientFinished(.classification, null);
-}
-
-test "rejected discovery joins connection cleanup and restores control headroom" {
+test "shutdown fences every unhanded route while preserving request and reply custody" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
-    var ordinary_places: [10]Admission.Place = undefined;
-    var ordinary_count: usize = 0;
-    defer for (ordinary_places[0..ordinary_count]) |place| host.clientFinished(place, null);
-    for (&ordinary_places) |*place| {
-        place.* = try host.reserveClient();
-        ordinary_count += 1;
-        try host.classifyClient(place, .observe);
+    var exchange = Intake.Exchange{ .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
+    const State = @TypeOf(exchange.state);
+    for (std.enums.values(Route)) |route| {
+        for ([_][2]State{
+            .{ .header, .retired },  .{ .body, .retired }, .{ .ready, .retired },
+            .{ .working, .working }, .{ .reply, .reply },  .{ .retired, .retired },
+            .{ .closed, .closed },
+        }) |states| {
+            exchange.route = route;
+            exchange.state = states[0];
+            exchange.retireUnhanded();
+            try std.testing.expectEqual(if (route == .host_stop and states[0] == .ready) .ready else states[1], exchange.state);
+        }
     }
-    var discovery = try host.reserveClient();
-    defer host.clientFinished(discovery, null);
-    try host.classifyClient(&discovery, .host_info);
-    var sockets: [2]std.posix.fd_t = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
-    var server_owned = true;
-    defer if (server_owned) {
-        _ = std.c.close(sockets[0]);
-    };
-    defer _ = std.c.close(sockets[1]);
-    const place = try host.reserveClient();
-    const connection = host.allocator.create(Connection) catch |err| {
-        host.clientFinished(place, null);
-        return err;
-    };
-    connection.* = .{ .host = &host, .stream = .{ .socket = .{ .handle = sockets[0], .address = undefined } }, .accepted_at_ns = nowNs(&host), .place = place };
-    const thread = std.Thread.spawn(.{ .stack_size = connection_stack_bytes }, connectionMain, .{connection}) catch |err| {
-        host.allocator.destroy(connection);
-        host.clientFinished(place, null);
-        return err;
-    };
-    server_owned = false;
-    var joined = false;
-    defer {
-        if (!joined) thread.join();
-        // Reclaim the descriptor even when the no-close negative control fails.
-        if (std.c.fcntl(sockets[0], std.c.F.GETFL) >= 0) _ = std.c.close(sockets[0]);
+    exchange.route = null;
+    exchange.state = .header;
+    exchange.retireUnhanded();
+    try std.testing.expectEqual(.retired, exchange.state);
+
+    // Exercise actual worker handoff, including the race where shutdown wins
+    // after the socket owner's earlier preflight. No worker may touch Store.
+    var intake: Intake = .{ .host = &host };
+    defer intake.exchanges.deinit(std.testing.allocator);
+    for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+    try intake.exchanges.append(std.testing.allocator, &exchange);
+    exchange.route = .configure;
+    exchange.state = .ready;
+    host.effect_shutdown.store(true, .release);
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.retired, exchange.state);
+    try std.testing.expectEqual(.prepare, exchange.job);
+    for (&intake.workers) |*worker| {
+        try std.testing.expectEqual(.idle, worker.state);
+        try std.testing.expectEqual(null, worker.exchange);
     }
-    try writeAll(std.testing.io, sockets[1], "POST /v1/host-info HTTP/1.1\r\n");
-    const body = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"discovery_capacity_exhausted\"}";
-    var expected_buffer: [512]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n\r\n{s}", .{ body.len, body });
-    var reply: [512]u8 = undefined;
-    var received: usize = 0;
-    const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 5 * std.time.ns_per_s;
-    while (received < expected.len) {
-        try protocol.pollExchange(std.testing.io, sockets[1], std.posix.POLL.IN, deadline);
-        const count = try std.posix.read(sockets[1], reply[received..expected.len]);
-        try std.testing.expect(count > 0);
-        received += count;
+    // The next owner pass schedules reclamation in the ordinary lane;
+    // control cannot borrow that job merely because shutdown won handoff.
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.cleanup, exchange.job);
+    for (&intake.workers) |*worker| {
+        if (worker.exchange) |owned| {
+            try std.testing.expectEqual(.cleanup, owned.job);
+            worker.next_state = try owned.work();
+            worker.state = .done;
+        }
     }
-    try std.testing.expectEqualStrings(expected, reply[0..received]);
-    // A complete response does not prove release. Join the actual handler.
-    thread.join();
-    joined = true;
-    try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
-    try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
-    try std.testing.expectEqualDeep(Admission{ .total = 11, .ordinary = 10, .headroom = 1, .discovery = 1 }, host.admission);
-    var control = try host.reserveClient();
-    defer host.clientFinished(control, null);
-    try host.classifyClient(&control, .host_stop);
-    try std.testing.expectEqual(Admission.Place.control, control);
-    std.debug.print("admission storage: Host={d} Connection={d} Admission={d} header={d} stacks={d} delivery={d}\n", .{ @sizeOf(Host), @sizeOf(Connection), @sizeOf(Admission), protocol.max_header_bytes, maximum_connection_stack_reservation_bytes, maximum_result_delivery_buffers_bytes });
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.closed, exchange.state);
+    exchange.job = .fill;
+    exchange.state = .ready;
+    exchange.retireUnhanded();
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.working, exchange.state);
+    try std.testing.expectEqual(.requested, intake.workers[0].state);
+    try std.testing.expectEqual(&exchange, intake.workers[0].exchange.?);
+
+    // Complete retries already in intake must still validate their instance
+    // and deliver the same acknowledgment after the shutdown fence.
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store.set("s");
+    host.lease = &lease;
+    host.instance = @splat(17);
+    for ([_]?protocol.InstanceId{ @splat(0), host.instance, host.instance, null }, [_][]const u8{
+        "host_instance_changed", protocol.host_stop_ack, protocol.host_stop_ack, "host_instance_required",
+    }) |instance_id, expected| {
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[0]);
+        defer _ = std.c.close(sockets[1]);
+        var retry = Intake.Exchange{
+            .host = &host,
+            .fd = sockets[0],
+            .accepted_at_ns = nowNs(&host),
+            .deadline = 0,
+            .route = .host_stop,
+            .state = .ready,
+            .number = 1,
+            .header = .{ .route = .host_stop, .content_length = 0, .instance = instance_id },
+        };
+        defer std.debug.assert(retry.cleanup());
+        retry.request = try std.testing.allocator.create(protocol.Request);
+        retry.request.?.* = .{ .host_stop = .{ .store = lease.paths.store } };
+        retry.retireUnhanded();
+        try std.testing.expectEqual(.ready, retry.state);
+        try retry.prepare();
+        try retry.reply.?.deliver(sockets[0]);
+        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[0], std.c.SHUT.WR));
+        var response: [1024]u8 = undefined;
+        var length: usize = 0;
+        while (true) {
+            try std.testing.expect(length < response.len);
+            const count = std.c.read(sockets[1], response[length..].ptr, response.len - length);
+            try std.testing.expect(count >= 0);
+            if (count == 0) break;
+            length += @intCast(count);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, response[0..length], expected) != null);
+    }
 }
 
-test "shutdown drain retains stack-owned Host until active clients finish" {
+test "intake accepts and physically retires a hundred incomplete exchanges" {
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+    var intake: Intake = undefined;
+    try intake.init(&host);
+    var intake_owned = true;
+    defer if (intake_owned) intake.deinit();
+    var sockets: [100][2]std.posix.fd_t = undefined;
+    var count: usize = 0;
+    defer {
+        for (sockets[0..count]) |pair| {
+            _ = std.c.close(pair[1]);
+            // Retain cleanup even for a mutant that omits physical close.
+            if (!intake_owned and std.c.fcntl(pair[0], std.c.F.GETFL) >= 0) _ = std.c.close(pair[0]);
+        }
+    }
+    for (&sockets) |*pair| {
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair));
+        errdefer {
+            _ = std.c.close(pair[0]);
+            _ = std.c.close(pair[1]);
+        }
+        try setNonblocking(pair[0]);
+        try intake.accept(pair[0]);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), intake.exchanges.items.len);
+    intake.deinit();
+    intake_owned = false;
+    for (sockets) |pair| {
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(pair[0], std.c.F.GETFL));
+        try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    }
+}
+
+test "blocked ingress file work leaves controls discovery and shutdown responsive" {
+    const Probe = struct {
+        const Phase = enum { write, sync, cleanup };
+        var entered = std.atomic.Value(bool).init(false);
+        var released = std.atomic.Value(bool).init(false);
+        var phase: Phase = .write;
+
+        fn hold() void {
+            entered.store(true, .release);
+            while (!released.load(.acquire)) std.testing.io.sleep(.fromMilliseconds(1), .awake) catch {};
+        }
+
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (phase == .write and operation == .file_write_streaming) hold();
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+
+        fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            if (phase == .sync) hold();
+            return std.testing.io.vtable.fileSync(userdata, file);
+        }
+
+        fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
+            if (phase == .cleanup and (std.mem.startsWith(u8, path, "request-") or std.mem.indexOf(u8, path, "/request-") != null)) hold();
+            return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
+        }
+
+        fn run(intake: *Intake, listener: *std.Io.net.Server) void {
+            var open = true;
+            var owned = true;
+            intake.run(listener, &open, &owned) catch {};
+            if (open) listener.deinit(std.testing.io);
+        }
+
+        fn send(fd: c_int, route: []const u8, body: []const u8, identity: bool) !void {
+            var header: [512]u8 = undefined;
+            const bytes = try std.fmt.bufPrint(&header, "POST {s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\n{s}Content-Length: {d}\r\n\r\n", .{ route, if (identity) "X-Rui-Host-Instance: 00000000000000000000000000000000\r\n" else "", body.len });
+            try writeAll(std.testing.io, fd, bytes);
+            if (phase == .cleanup and std.mem.eql(u8, route, "/v1/message")) {
+                try writeAll(std.testing.io, fd, body[0 .. body.len - 3]);
+                try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(fd, std.c.SHUT.WR));
+            } else try writeAll(std.testing.io, fd, body);
+        }
+
+        fn response(fd: c_int) !void {
+            var polls = [_]std.c.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            var bytes: [1024]u8 = undefined;
+            var used: usize = 0;
+            const deadline = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 3 * std.time.ns_per_s;
+            while (true) {
+                const remaining = deadline - std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds;
+                try std.testing.expect(remaining > 0);
+                try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&polls, 1, @intCast(@divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms))));
+                try std.testing.expect(used < bytes.len);
+                const count = std.c.read(fd, bytes[used..].ptr, bytes.len - used);
+                try std.testing.expect(count >= 0);
+                if (count == 0) break;
+                used += @intCast(count);
+            }
+            const response_bytes = bytes[0..used];
+            try std.testing.expect(std.mem.startsWith(u8, response_bytes, "HTTP/1.1 200 "));
+            const header_end = std.mem.indexOf(u8, response_bytes, "\r\n\r\n") orelse return error.IncompleteReply;
+            const length_start = (std.mem.indexOf(u8, response_bytes[0..header_end], "Content-Length: ") orelse return error.MissingReplyLength) + "Content-Length: ".len;
+            const length_end = std.mem.indexOfPos(u8, response_bytes, length_start, "\r\n").?;
+            const length = try std.fmt.parseInt(usize, response_bytes[length_start..length_end], 10);
+            try std.testing.expectEqual(length, used - header_end - 4);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var socket_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
+    defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++
+        @as([4097]u8, @splat('x')) ++ "\"}}";
+    for (std.enums.values(Probe.Phase)) |phase| {
+        Probe.phase = phase;
+        Probe.entered.store(false, .release);
+        Probe.released.store(false, .release);
+        var vtable = std.testing.io.vtable.*;
+        vtable.operate = Probe.operate;
+        vtable.fileSync = Probe.sync;
+        vtable.dirDeleteFile = Probe.delete;
+        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.store.set("s");
+        try lease.paths.scratch.set(root);
+        try lease.paths.socket.set(socket_path);
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/{s}.sqlite", .{ root, @tagName(phase) });
+        var storage = try store_module.Store.open(std.testing.io, database, root);
+        defer storage.close() catch unreachable;
+        var configure: protocol.ConfigureCommand = .{};
+        try configure.key.set("config");
+        try configure.session.set("peer");
+        configure.configuration.workspace.state = .value;
+        try configure.configuration.workspace.value.set(root);
+        configure.configuration.provider.state = .value;
+        try configure.configuration.provider.value.set("codex");
+        configure.configuration.model.state = .value;
+        try configure.configuration.model.value.set("model-a");
+        try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .instance = @splat(0), .faults = .{} };
+        var retention = output_retention.Queue.initialize(io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+        host.retention = &retention;
+        var intake: Intake = undefined;
+        try intake.init(&host);
+        defer intake.deinit();
+        host.intake = &intake;
+        var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 8 });
+        const partial_header = try address.connect(std.testing.io);
+        defer partial_header.socket.close(std.testing.io);
+        const partial_body = try address.connect(std.testing.io);
+        defer partial_body.socket.close(std.testing.io);
+        // Establish both actual owner states before the reactor starts, so
+        // EOF later proves retirement rather than unconsumed input.
+        for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }, [_][]const u8{
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\n",
+            "POST /v1/control/host-stop HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 1024\r\n\r\n{",
+        }, [_]Intake.Exchange.State{ .header, .body }) |peer, bytes, state| {
+            try writeAll(std.testing.io, peer, bytes);
+            const accepted = try intake.acceptSocket(listener.socket.handle);
+            intake.accept(accepted) catch |err| {
+                _ = std.c.close(accepted);
+                return err;
+            };
+            const exchange = intake.exchanges.items[intake.exchanges.items.len - 1];
+            try exchange.read();
+            try std.testing.expectEqual(state, exchange.state);
+            try std.testing.expectEqual(.host_stop, exchange.route.?);
+        }
+        const before_uploads = host.request_counter.load(.acquire);
+        const thread = try std.Thread.spawn(.{}, Probe.run, .{ &intake, &listener });
+        var joined = false;
+        defer if (!joined) {
+            Probe.released.store(true, .release);
+            host.effect_shutdown.store(true, .release);
+            intake.notify();
+            thread.join();
+        };
+        const upload = try address.connect(std.testing.io);
+        defer upload.socket.close(std.testing.io);
+        try Probe.send(upload.socket.handle, "/v1/message", message, false);
+        const deadline = nowNs(&host) + 3 * std.time.ns_per_s;
+        while (!Probe.entered.load(.acquire) and nowNs(&host) < deadline)
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        try std.testing.expect(Probe.entered.load(.acquire));
+        const sibling = try address.connect(std.testing.io);
+        defer sibling.socket.close(std.testing.io);
+        try Probe.send(sibling.socket.handle, "/v1/message", message, false);
+        // Classification occurs in the socket pass before its worker handoff
+        // and before that pass can read a subsequently issued control.
+        while (host.request_counter.load(.acquire) < before_uploads + 2 and nowNs(&host) < deadline)
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
+        for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: store_module.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
+            .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
+            .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
+            .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"1\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
+        }) |control| {
+            const peer = try address.connect(std.testing.io);
+            defer peer.socket.close(std.testing.io);
+            try Probe.send(peer.socket.handle, control.route, control.body, false);
+            try Probe.response(peer.socket.handle);
+            const saved = try storage.observeCommand(control.key);
+            try std.testing.expectEqual(control.kind, saved.kind);
+            try std.testing.expectEqual(control.status, saved.status);
+            try std.testing.expect(!Probe.released.load(.acquire));
+        }
+        const discovery = try address.connect(std.testing.io);
+        defer discovery.socket.close(std.testing.io);
+        try Probe.send(discovery.socket.handle, "/v1/host-info", "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":\"s\"}", false);
+        try Probe.response(discovery.socket.handle);
+        const stop = try address.connect(std.testing.io);
+        defer stop.socket.close(std.testing.io);
+        try Probe.send(stop.socket.handle, "/v1/control/host-stop", "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":\"s\"}", true);
+        try Probe.response(stop.socket.handle);
+        try std.testing.expect(host.effect_shutdown.load(.acquire));
+        try std.testing.expect(!Probe.released.load(.acquire));
+        for ([_]c_int{ partial_header.socket.handle, partial_body.socket.handle }) |peer| {
+            var polls = [_]std.c.pollfd{.{ .fd = peer, .events = std.posix.POLL.IN, .revents = 0 }};
+            try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&polls, 1, 3000));
+            var byte: [1]u8 = undefined;
+            try std.testing.expectEqual(@as(isize, 0), std.c.read(peer, &byte, 1));
+        }
+        Probe.released.store(true, .release);
+        thread.join();
+        joined = true;
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+    }
+}
+
+test "readable ingress cannot cross its header or body deadline" {
+    const Clock = struct {
+        var nanoseconds: i96 = std.time.ns_per_s;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = nanoseconds };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    var host = Host{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{} };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    for ([_]Route{ .host_stop, .host_info }) |route| {
+        for ([_]bool{ false, true }) |body_only| {
+            for ([_]i96{ -1, 0, 1 }) |offset| {
+                Clock.nanoseconds = std.time.ns_per_s;
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try setNonblocking(sockets[0]);
+                const exchange = try std.testing.allocator.create(Intake.Exchange);
+                exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
+                defer std.debug.assert(exchange.destroy());
+                var body_buffer: [128]u8 = undefined;
+                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"1\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
+                var header_buffer: [256]u8 = undefined;
+                const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/{s} HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{ if (route == .host_stop) "control/host-stop" else "host-info", body.len });
+                if (body_only) {
+                    try writeAll(std.testing.io, sockets[1], header);
+                    try exchange.read();
+                    try std.testing.expectEqual(.body, exchange.state);
+                }
+                const deadline = exchange.deadline;
+                Clock.nanoseconds = @intCast(deadline + offset);
+                var wire_buffer: [384]u8 = undefined;
+                const wire = try std.fmt.bufPrint(&wire_buffer, "{s}{s}", .{ if (body_only) "" else header, body });
+                try writeAll(std.testing.io, sockets[1], wire);
+                // Readiness is real, but cannot authorize bytes after expiry.
+                var poll = [_]std.c.pollfd{.{ .fd = sockets[0], .events = std.posix.POLL.IN, .revents = 0 }};
+                try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&poll, poll.len, 0));
+                if (offset >= 0) {
+                    try std.testing.expectError(error.TransferInactive, exchange.read());
+                    try std.testing.expectEqual(deadline, exchange.deadline);
+                    try std.testing.expectEqual(null, exchange.request);
+                    var remaining: [384]u8 = undefined;
+                    const count = std.c.read(sockets[0], &remaining, remaining.len);
+                    try std.testing.expectEqual(@as(isize, @intCast(wire.len)), count);
+                    try std.testing.expectEqualStrings(wire, remaining[0..@intCast(count)]);
+                } else {
+                    try exchange.read();
+                    try std.testing.expectEqual(.ready, exchange.state);
+                    try std.testing.expectEqual(route.kind(), std.meta.activeTag(exchange.request.?.*));
+                    const expected = if (route == .host_info) deadline else Clock.nanoseconds + 60 * std.time.ns_per_s;
+                    try std.testing.expectEqual(@as(i128, expected), exchange.deadline);
+                }
+            }
+        }
+    }
+}
+
+test "ingress resumes its peer wait after local capture completion" {
+    const Clock = struct {
+        var nanoseconds: i96 = std.time.ns_per_s;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = nanoseconds };
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    Clock.nanoseconds = std.time.ns_per_s;
+    var host = Host{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{} };
+    var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+    host.retention = &retention;
+    var sockets: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+    defer _ = std.c.close(sockets[1]);
+    try setNonblocking(sockets[0]);
+    const payload = @as([4097]u8, @splat('x'));
+    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    var header_buffer: [256]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{body.len});
+    try writeAll(std.testing.io, sockets[1], header);
+    try writeAll(std.testing.io, sockets[1], body);
+    const exchange = try std.testing.allocator.create(Intake.Exchange);
+    exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = std.time.ns_per_s, .deadline = 10 * std.time.ns_per_s };
+    defer std.debug.assert(exchange.destroy());
+    var intake: Intake = .{ .host = &host };
+    defer intake.exchanges.deinit(std.testing.allocator);
+    for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+    try intake.exchanges.append(std.testing.allocator, exchange);
+    try exchange.read();
+    intake.serviceWorkers();
+    const worker = &intake.workers[0];
+    try std.testing.expectEqual(.working, exchange.state);
+    Clock.nanoseconds = 70 * std.time.ns_per_s;
+    worker.next_state = try exchange.work();
+    worker.state = .done;
+    intake.serviceWorkers();
+    try std.testing.expectEqual(.body, exchange.state);
+    try std.testing.expectEqual(@as(i128, 130 * std.time.ns_per_s), exchange.deadline);
+    // The remaining bytes were already queued during local capture. Consume
+    // them through the same receive owner without expiring the peer first.
+    while (exchange.state == .body) {
+        try exchange.read();
+        exchange.state = try exchange.work();
+    }
+    try std.testing.expectEqual(.ready, exchange.state);
+    try std.testing.expectEqual(@as(u64, payload.len), exchange.request.?.message.text.length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(&payload), &exchange.request.?.message.text.digest);
+}
+
+test "exchange retirement retains failed ingress cleanup through retry" {
+    const FailDelete = struct {
+        fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
+            return error.AccessDenied;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var paths: platform.Paths = .{};
+    try paths.scratch.set(root);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = paths;
     var host = Host{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
+        .lease = &lease,
+        .store = undefined, // Failed/incomplete captures never reach admission.
         .faults = .{},
     };
-    _ = try host.reserveClient();
-    var release: std.atomic.Value(bool) = .init(false);
-    var completed: std.atomic.Value(bool) = .init(false);
-    const thread = try std.Thread.spawn(.{}, finishTestClient, .{ &host, &release, &completed });
-    release.store(true, .release);
-    host.drain();
-    try std.testing.expect(completed.load(.acquire));
-    thread.join();
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"";
+    const payload = @as([8192]u8, @splat('x'));
+    const suffix = "\"}}";
+    for ([_]bool{ false, true }) |seal| {
+        var vtable = std.testing.io.vtable.*;
+        vtable.dirDeleteFile = FailDelete.delete;
+        const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        const exchange = try std.testing.allocator.create(Intake.Exchange);
+        exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
+        const ingress = try std.testing.allocator.create(protocol.Ingress);
+        ingress.* = protocol.Ingress.init(std.testing.allocator, .{
+            .io = io,
+            .fd = sockets[0],
+            .content_length = prefix.len + payload.len + suffix.len,
+            .scratch_path = root,
+            .request_number = 7,
+            .retained_scratch = &exchange.retained_scratch,
+            .scratch_budget = .{ .used = &host.scratch_used, .limit = 9000 },
+            .expected_kind = .message,
+        });
+        exchange.ingress = ingress;
+        var destroyed = false;
+        defer if (!destroyed) {
+            vtable.dirDeleteFile = std.testing.io.vtable.dirDeleteFile;
+            exchange.cleanup_retry_at = 0;
+            std.debug.assert(exchange.destroy());
+        };
+        host.scratch_used.store(23, .release);
+        try ingress.feed(prefix ++ payload);
+        if (seal) try std.testing.expectError(error.AccessDenied, ingress.feed(suffix));
+        var intake: Intake = .{ .host = &host };
+        defer intake.exchanges.deinit(std.testing.allocator);
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+        try intake.exchanges.append(std.testing.allocator, exchange);
+        exchange.cleanup_retry_at = @as(i128, nowNs(&host)) + std.time.ns_per_s;
+        intake.serviceWorkers();
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expectEqual(@as(u64, 8215), host.scratch_used.load(.acquire));
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(sockets[0], std.c.F.GETFL));
+        var byte: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, 0), std.c.read(sockets[1], &byte, 1));
+        const retained_fd = exchange.retained_scratch.?.resources.?.primary.handle;
+        try std.testing.expect(std.c.fcntl(retained_fd, std.c.F.GETFL) >= 0);
+        // A later cleanup retry must not close a new owner's reused fd.
+        const recycled = @import("posix").dup2(sockets[1], sockets[0]);
+        try std.testing.expectEqual(sockets[0], recycled);
+        defer _ = std.c.close(recycled);
+        exchange.cleanup_retry_at = 0;
+        try std.testing.expect(!exchange.destroy());
+        try std.testing.expect(std.c.fcntl(recycled, std.c.F.GETFL) >= 0);
+        vtable.dirDeleteFile = std.testing.io.vtable.dirDeleteFile;
+        exchange.cleanup_retry_at = 0;
+        try std.testing.expect(exchange.destroy());
+        destroyed = true;
+        try std.testing.expectEqual(@as(u64, 23), host.scratch_used.load(.acquire));
+        try std.testing.expect(std.c.fcntl(recycled, std.c.F.GETFL) >= 0);
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
+    }
 }
 
 test "Host fences dispose admitted preparation without touching canonical state" {

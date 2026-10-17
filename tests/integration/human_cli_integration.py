@@ -55,12 +55,77 @@ def help_case():
             assert "rui [PROMPT]" in result.stdout, result.stdout
             assert not result.stderr, result.stderr
             assert list(home.iterdir()) == [], "help created runtime state"
+        for command in ("configure", "inspect-session"):
+            for flag in ("--help", "-h"):
+                output = run(home, command, flag)
+                assert f"Usage: rui {command}" in output, output
+                if command == "configure":
+                    for phrase in ("Omission preserves", "default resets", "Unknown models",
+                                   "/status", "extra compaction headroom",
+                                   "Changes apply to new model requests.",
+                                   "Requests already accepted keep their original settings, even when retried."):
+                        assert phrase in output, output
+                assert list(home.iterdir()) == [], "scoped help created runtime state"
+        for flag in ("--compaction-trigger", "--output-reservation"):
+            for args in ((flag, "10", flag, "20"), ("--model", "--help"),
+                         ("--session", "-h")):
+                output = run(home, "configure", *args, success=False)
+                assert "Usage: rui configure" not in output, output
+                assert list(home.iterdir()) == [], "invalid configuration captured a request"
         result = subprocess.run(
             [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
+
+
+def compaction_settings_case(home, store, workspace):
+    session = "human/compaction-settings"
+    run(home, "configure", "--store", store, "--session", session,
+        "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", session], env={**os.environ, "HOME": str(home)}) as (entered, master):
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status", "Work: ", composer=True)
+        assert "244800 tokens (model default)" in status, status
+        assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
+        usage = terminal_step(master, "/configure --bogus", "Omission preserves", composer=True)
+        assert "Unknown models have no automatic threshold" in usage, usage
+        assert "Changes apply to new model requests." in usage, usage
+        assert "Requests already accepted keep their original settings, even when retried." in usage, usage
+        for flags, trigger, headroom in (
+            ("--compaction-trigger 12345 --output-reservation 234", "12345 tokens (Session override)", "234 tokens (Session override)"),
+            ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)"),
+            ("--compaction-trigger default --output-reservation default", "244800 tokens (model default)", "0 tokens (model default)"),
+        ):
+            configured = terminal_step(master, "/configure " + flags, "Configured.", composer=True)
+            assert "revision:" not in configured and "request:" not in configured, configured
+            status = terminal_step(master, "/status", "Work: ", composer=True)
+            assert trigger in status and "Extra compaction headroom: " + headroom in status, status
+            assert "Output reservation:" not in status and "source unknown" not in status, status
+            assert "not a guaranteed output budget" in status, status
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
+    records = set((home / ".config/rui/requests").glob("*.json"))
+    for flag in ("--compaction-trigger", "--output-reservation"):
+        run(home, "configure", "--store", store, "--session", session,
+            flag, "10", flag, "20", success=False)
+        assert set((home / ".config/rui/requests").glob("*.json")) == records
+    report = json.loads(run(home, "inspect-session", "--store", store, "--session", session))
+    assert report["session"]["model"] == "gpt-6-luna", report
+    unknown = "human/compaction-unknown-model"
+    run(home, "configure", "--store", store, "--session", unknown,
+        "--workspace", workspace, "--provider", "codex", "--model", "unknown-model")
+    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
+        read_terminal(master, "› ")
+        status = terminal_step(master, "/status", "Work: ", composer=True)
+        assert "no automatic threshold (model default)" in status, status
+        assert "Use /configure --compaction-trigger TOKENS to enable a threshold." in status, status
+        assert "Provider context-overflow recovery still applies." in status, status
+        terminal_step(master, "/exit", "Detached.")
+        assert entered.wait(timeout=5) == 0
 
 
 def preference_edits(home, store):
@@ -176,6 +241,43 @@ def terminal_redraw(output, composer):
     raise AssertionError(("no complete edited redraw", composer, output))
 
 
+def wait_for_held_exec_request(process, requests, count, description, failure_path, *, timeout=8):
+    """Retain pre-cleanup caller evidence, not just an absent provider request."""
+    def reached():
+        assert process.poll() is None, ("exec exited before held provider request", process.returncode)
+        return len(requests) == count
+
+    try:
+        fixture.wait_for(reached, description, timeout=timeout)
+    except BaseException as error:
+        def collect(error=error):
+            snapshot = {"description": description, "requests": len(requests),
+                        "expected_requests": count, "observed_at_ns": time.monotonic_ns()}
+            for name in ("stdout", "stderr"):
+                stream = getattr(process, name)
+                flags = fcntl.fcntl(stream, fcntl.F_GETFL)
+                output = bytearray()
+                try:
+                    fcntl.fcntl(stream, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                    while len(output) < 16 * 1024:
+                        try:
+                            data = os.read(stream.fileno(), 16 * 1024 - len(output))
+                        except BlockingIOError:
+                            break
+                        if not data:
+                            break
+                        output.extend(data)
+                finally:
+                    fcntl.fcntl(stream, fcntl.F_SETFL, flags)
+                snapshot[name] = output.decode(errors="replace")
+                snapshot[name + "_at_limit"] = len(output) == 16 * 1024
+            snapshot["returncode_before_cleanup"] = process.poll()
+            error.add_note("exec request failure: " + json.dumps(snapshot))
+            return snapshot
+        preserve_failure_metadata(failure_path, collect)
+        raise
+
+
 def pipe_wait_oracles():
     reader, writer = os.pipe()
     with os.fdopen(reader, "rb", buffering=0) as stream:
@@ -212,6 +314,32 @@ def pipe_wait_oracles():
             assert error.args[0] == ("pipe record exceeds 16 KiB", b"x" * (16 * 1024)), error
         else:
             raise AssertionError("unbounded pipe record accepted")
+    with tempfile.TemporaryDirectory(prefix="rui-exec-wait-oracle.") as directory:
+        for exited in (True, False):
+            child = subprocess.Popen([sys.executable, "-u", "-c",
+                "import os,time; os.write(2,b'preflight sentinel'); os.write(1,b'!'); " +
+                ("raise SystemExit(23)" if exited else "time.sleep(60)")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                assert read_pipe_output(child.stdout, count=1) == b"!"
+                if exited:
+                    assert child.wait(timeout=5) == 23
+                failure_path = pathlib.Path(directory) / f"{exited}.json"
+                try:
+                    wait_for_held_exec_request(child, [], 1, "synthetic held request",
+                                              failure_path, timeout=0.05)
+                except AssertionError:
+                    assert failure_path.is_file(), "exec failure lost child evidence"
+                    retained = json.loads(failure_path.read_text())
+                    assert retained["stderr"] == "preflight sentinel", retained
+                    assert retained["returncode_before_cleanup"] == (23 if exited else None), retained
+                    assert retained["requests"] == 0 and retained["expected_requests"] == 1, retained
+                    assert not retained["stderr_at_limit"], retained
+                    assert failure_path.stat().st_mode & 0o777 == 0o600
+                else:
+                    raise AssertionError("absent provider request became ready")
+            finally:
+                dispose_all(lambda: stop_process(child, timeout=5), child.stdout.close, child.stderr.close)
     print("pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound", flush=True)
 
 
@@ -516,7 +644,8 @@ def command_entry_cases():
         env = {**os.environ, "HOME": str(home)}
         executor = subprocess.Popen([str(fixture.RUI), "exec", "held prompt"], cwd=workspace,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        fixture.wait_for(lambda: len(endpoint.requests) == 3, "exec provider request")
+        wait_for_held_exec_request(executor, endpoint.requests, 3, "exec provider request",
+                                  state / "exec-answer-request-failure.json")
         assert executor.poll() is None, "exec returned on Admission instead of waiting for the answer"
         assert not select.select([executor.stdout], [], [], 0)[0], "exec leaked receipts to stdout"
         exec_release.set()
@@ -537,7 +666,8 @@ def command_entry_cases():
         lost = subprocess.run([str(fixture.RUI), "exec", "lost original"], cwd=workspace,
             env=env, capture_output=True, timeout=10)
         assert lost.returncode != 0 and lost.stdout == b"", lost
-        handle = re.search(rb"Message request: ([a-z0-9-]+)", lost.stderr).group(1).decode()
+        receipt = re.search(rb"Message request: ([a-z0-9-]+)", lost.stderr)
+        handle = receipt.group(1).decode()
         assert f"rui recover {handle}".encode() in lost.stderr, lost.stderr
         record = home / ".config/rui/requests" / (handle + ".json")
         original_record = record.read_bytes()
@@ -548,7 +678,8 @@ def command_entry_cases():
         assert record.read_bytes() == original_record and len(endpoint.requests) == 6, "exec replaced uncertain input"
         executor = subprocess.Popen([str(fixture.RUI), "exec", "needs approval"], cwd=workspace,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        fixture.wait_for(lambda: len(endpoint.requests) == 7, "exec held tool request")
+        wait_for_held_exec_request(executor, endpoint.requests, 7, "exec held tool request",
+                                  state / "exec-tool-request-failure.json")
         pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
         selected = pages[-1]["sessions"][-1]["reference"]
         # Permission mode is selected at proposal admission, not dispatch.
@@ -2337,8 +2468,8 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
-    if selected == "all":
+    assert selected in ("all", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    if selected in ("all", "compaction-settings"):
         help_case()
     if selected in ("all", "terminal-waits"):
         prove_terminal_process()
@@ -2409,6 +2540,12 @@ def main(selected="all"):
     completed = False
     try:
         host = fixture.start_host(store, url)
+        if selected in ("all", "compaction-settings"):
+            compaction_settings_case(home, store, workspace)
+        if selected == "compaction-settings":
+            completed = True
+            print("compaction settings and scoped help passed (partial human CLI suite)")
+            return
         if selected == "incomplete-input":
             run(home, "configure", "--store", store, "--session", "incomplete/input",
                 "--workspace", workspace, "--provider", "codex", "--model", "model-a")

@@ -103,8 +103,18 @@ jobs:
           echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-      - run: actionlint -shellcheck= .github/workflows/*.yml
+      - name: Validate workflows
         if: ${{ steps.cadence.outputs.run == 'true' }}
+        run: |
+          for workflow in .github/workflows/*.yml; do
+            if [ "$workflow" = .github/workflows/qualify-macos.yml ]; then
+              # 1.7.7 predates GitHub's scoped cache tokens. CI tests validate
+              # this one workflow's read-only value and reject job overrides.
+              actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
+            else
+              actionlint -shellcheck= "$workflow"
+            fi
+          done
   linux_suites:
     name: linux suites (${{ matrix.part }})
     needs: plan

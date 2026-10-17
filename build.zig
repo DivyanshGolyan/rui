@@ -858,8 +858,10 @@ fn configureTransport(
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const sqlite = b.dependency("sqlite", .{});
     const module = compile.root_module;
-    const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
-    bindings.addIncludePath(sqlite.path("."));
+    if (module.root_source_file != null) {
+        const bindings = addBindings(b, module, "sqlite", "#include <sqlite3.h>\n");
+        bindings.addIncludePath(sqlite.path("."));
+    }
     module.link_libc = true;
     module.addIncludePath(sqlite.path("."));
     module.addCSourceFile(.{

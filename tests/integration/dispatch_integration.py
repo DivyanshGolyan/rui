@@ -63,6 +63,187 @@ def dispose_dispatch(processes, endpoints, releases, *after):
     )
 
 
+def compaction_cases(state, processes, endpoints, releases):
+    """Exercise compaction through ordinary intake, transport and recovery."""
+    def compact_response(label, *, extra=None):
+        items = [
+            {"type": "reasoning", "id": f"{label}-before", "summary": [], "encrypted_content": "discard-before-anchor"},
+            {"type": "compaction", "id": f"{label}-anchor", "encrypted_content": "opaque-" + "é" * 5000, "created_by": "response-only"},
+            {"type": "message", "id": f"{label}-tail", "role": "assistant", "content": [{"type": "output_text", "text": "private compaction tail"}]},
+        ]
+        if extra is not None:
+            items.append(extra)
+        payloads = []
+        for index, item in enumerate(items):
+            payloads.append({"type": "response.output_item.done", "output_index": index, "item": item})
+        payloads.append({"type": "response.completed", "response": {
+            "id": label, "status": "completed", "model": "model-a-served", "output": items,
+            "usage": {"total_tokens": 999999},
+        }})
+        return encode_sse(payloads), items
+
+    def endpoint_for(responses):
+        endpoint = SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        return endpoint, f"http://127.0.0.1:{endpoint.server_port}/responses"
+
+    def patch(store, session, key, *flags):
+        result = command("configure", "--store", store, "--record", state / f"{key}.json",
+                         "--session", session, "--key", key, *flags)
+        assert result["answer"]["status"] == "accepted", result
+
+    def user_texts(request):
+        return [item["content"][0]["text"] for item in request["input"] if item.get("role") == "user"]
+
+    overflow_http = ResponseSpec(b'{"error":{"code":"context_length_exceeded"}}', {}, status=400)
+    overflow_sse = encode_sse([{"type": "response.failed", "response": {
+        "status": "failed", "error": {"code": "context_length_exceeded"},
+    }}], done=False)
+    for route, overflow in (("http", overflow_http), ("sse", overflow_sse)):
+        compact, items = compact_response(route)
+        gate = threading.Event()
+        releases.append(gate.set)
+        answer, _, _ = sse_answer(f"{route}-answer", f"{route}-reason", f"{route}-message", "recovered answer")
+        endpoint, url = endpoint_for([overflow, (compact, gate), answer])
+        store = state / f"compaction-{route}"
+        session = f"direct/compact-{route}"
+        host = start_host(store, url)
+        processes.append(host)
+        configure(state, store, f"{route}-config", session, "model-a", instructions="baseline")
+        settings = command("inspect-session", "--store", store, "--session", session)["session"]
+        assert settings["compaction_trigger"] is None and settings["output_reservation"] == "0", settings
+        message(state, store, f"{route}-first", session, "covered user input")
+        wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
+        compaction = json.loads(endpoint.requests[1])
+        assert compaction["input"][-1] == {"type": "compaction_trigger"}, compaction
+        assert compaction["store"] is False and compaction["stream"] is True, compaction
+        assert compaction["include"] == ["reasoning.encrypted_content"], compaction
+        assert user_texts(compaction) == ["covered user input"], compaction
+        # Admission fixes coverage. Later settings and messages cannot enter it.
+        patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
+        configure(state, store, f"{route}-instructions", session, "model-a", instructions="arrived during compaction")
+        message(state, store, f"{route}-late", session, "pending input")
+        gate.set()
+        wait_for(lambda: completed_observation(store, f"{route}-late"), "compaction successor answer")
+        assert read_result(store, f"{route}-first") == b"recovered answer"
+        assert read_result(store, f"{route}-late") == b"recovered answer"
+        assert len(endpoint.requests) == 3, endpoint.requests
+        successor = json.loads(endpoint.requests[2])
+        assert user_texts(successor) == ["covered user input", "pending input"], successor
+        assert [item["content"][0]["text"] for item in successor["input"] if item.get("role") == "developer"] == ["arrived during compaction"], successor
+        assert not any(item.get("id") == items[0]["id"] for item in successor["input"]), successor
+        replay_anchor = dict(items[1])
+        replay_anchor.pop("created_by")
+        assert successor["input"][1:3] == [replay_anchor, items[2]], successor
+        report = command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+        assert report["actions"]["count"] == "0", report
+        assert b"private compaction tail" not in json.dumps(report).encode(), report
+        # The full canonical output is saved once, with no Conversation projection.
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute("SELECT purpose,resolution_code FROM model_operation ORDER BY operation_id").fetchall() == [
+                (0, "context_overflow"), (1, "continued"), (0, "completed")]
+            assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
+            assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
+        # Reset recovers default selection, then restart reconstructs the same base.
+        followup, _, _ = sse_answer(f"{route}-followup", f"{route}-r2", f"{route}-m2", "after restart")
+        endpoint.responses.append(followup)
+        host = start_host(store, url)
+        processes.append(host)
+        patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
+        current = command("inspect-session", "--store", store, "--session", session)["session"]
+        assert current["compaction_trigger"] is None and current["compaction_trigger_override"] is None, current
+        assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
+        message(state, store, f"{route}-followup-input", session, "followup input")
+        wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
+        assert read_result(store, f"{route}-followup-input") == b"after restart"
+        restarted = json.loads(endpoint.requests[3])
+        assert replay_anchor in restarted["input"] and items[2] in restarted["input"], restarted
+        assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
+        execution = wait_for(lambda: (value := command("inspect-session", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
+        assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
+        stop_host(host)
+        processes.remove(host)
+        # Corruption after the base must not silently shorten the suffix.
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            database.execute("DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_operation) AND item_ordinal=0")
+        host = start_host(store, url)
+        processes.append(host)
+        message(state, store, f"{route}-corrupt-input", session, "do not dispatch incomplete history")
+        wait_for(lambda: host.poll() is not None, "missing suffix fences Host")
+        assert host.returncode == 1, host.returncode
+        failure = host.stderr.read()
+        assert b"dispatch fenced" in failure and b"CorruptStore" in failure, failure
+        assert len(endpoint.requests) == 4, endpoint.requests
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+
+    # Proactive compaction holds the new input outside its frozen view.
+    first, _, _ = sse_answer("auto-first", "auto-r", "auto-m", "original answer")
+    compact, _ = compact_response("auto")
+    last, _, _ = sse_answer("auto-last", "auto-r2", "auto-m2", "automatic answer")
+    endpoint, url = endpoint_for([first, compact, last])
+    store, session = state / "compaction-auto", "direct/compact-auto"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "auto-config", session, "model-a")
+    message(state, store, "auto-first", session, "first")
+    wait_for(lambda: completed_observation(store, "auto-first"), "automatic first answer")
+    patch(store, session, "auto-policy", "--compaction-trigger", "1")
+    message(state, store, "auto-next", session, "apply only after compaction")
+    wait_for(lambda: completed_observation(store, "auto-next"), "automatic compaction answer")
+    assert read_result(store, "auto-first") == b"original answer"
+    assert read_result(store, "auto-next") == b"automatic answer"
+    assert len(endpoint.requests) == 3, endpoint.requests
+    assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
+    assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    # A valid base followed by overflow of unchanged input is irreducible;
+    # a second compaction would only repeat the same covered context forever.
+    compact, _ = compact_response("irreducible")
+    endpoint, url = endpoint_for([overflow_sse, compact, overflow_sse])
+    store, session = state / "compaction-irreducible", "direct/irreducible"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "irreducible-config", session, "model-a")
+    message(state, store, "irreducible", session, "input cannot fit")
+    outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
+    assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
+    assert len(endpoint.requests) == 3, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    # Compaction can never grant tool authority, even after a valid anchor.
+    forbidden_effect = state / "compaction-forbidden-effect"
+    compact, _ = compact_response("unexpected-action", extra={
+        "type": "function_call", "id": "forbidden", "name": "bash", "call_id": "forbidden-call",
+        "arguments": json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None,
+            "description": "Create forbidden marker"}, separators=(",", ":")),
+    })
+    endpoint, url = endpoint_for([overflow_sse, compact])
+    store, session = state / "compaction-invalid", "direct/compact-invalid"
+    host = start_host(store, url)
+    processes.append(host)
+    configure(state, store, "invalid-config", session, "model-a")
+    message(state, store, "invalid-compaction", session, "compact without tools")
+    rejected = wait_for(lambda: (value := observe(store, "invalid-compaction")).get("result") and value, "invalid compaction settlement")
+    assert rejected["result"]["code"] == "unsupported_provider_output", rejected
+    report = command("inspect-session", "--store", store, "--session", session, "--profile", "full")
+    assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
+    assert len(endpoint.requests) == 2, endpoint.requests
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+
 def main():
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
@@ -84,6 +265,7 @@ def main():
     completed = False
     try:
         endpoint_thread.start()
+        compaction_cases(state, processes, endpoints, releases)
         forbidden_effect = state / "proposal-must-not-launch"
         calls = [
             ("bash", "call\nA", json.dumps({"cmd": f"touch {forbidden_effect}", "timeout_ms": None, "description": "Create forbidden effect marker"}, separators=(",", ":"))),
@@ -180,7 +362,11 @@ def main():
                 "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
                 (int(first_request["action"]),),
             ).fetchone() == (2, "denied")
-        assert recovered["execution"]["custody_occupied"] == "0", recovered
+        # Replay preserves canonical work; a live inspection may sample a
+        # temporary no-work admission reservation before its owner releases it.
+        assert recovered["work"]["status"] == "waiting_for_permission", recovered
+        assert len(recovered["full"]["model_operations"]) == 1, recovered
+        assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_calls", recovered
         second = recovered["actions"]["unresolved"][0]
         assert second["call_ordinal"] == "3", second
         assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
@@ -226,9 +412,16 @@ def main():
             try:
                 first_lock = proposal_milestones.wait("control_lock_acquired", subject=first_key)[0]
                 assert first_process.poll() is None, "first control did not remain held at the Store owner"
+                second_phase = "connection_request_" + ("session_stop" if order == "denial-first" else "permission_decision")
+                preceding = len(proposal_milestones.matching(second_phase))
                 second_process = start_command(*(stop_args if order == "denial-first" else deny_args))
-                second_request = proposal_milestones.wait("control_store_queued", subject=second_key)[0]
-                assert second_process.poll() is None, "second control did not remain queued at the Store owner"
+                routed = proposal_milestones.wait(second_phase, count=preceding + 1)
+                assert len(routed) == preceding + 1, routed
+                second_request = routed[-1]
+                assert second_request["subject_kind"] == "request_number", second_request
+                assert second_request["process"] == first_lock["process"] and second_request["run"] == first_lock["run"], second_request
+                assert int(second_request["sequence"]) > int(first_lock["sequence"]), second_request
+                assert second_process.poll() is None, "second control did not remain awaiting control service"
                 with control_gate.open("wb", buffering=0) as release:
                     release.write(b"x")
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
@@ -287,6 +480,15 @@ def main():
 
         stop_host(proposal_host)
         processes.remove(proposal_host)
+        starts = [record for record in proposal_milestones.records
+                  if record["rui_test_phase"].startswith("connection_request_")]
+        assert [record["rui_test_phase"] for record in starts] == [
+            "connection_request_permission_decision", "connection_request_session_stop",
+            "connection_request_permission_decision", "connection_request_permission_decision",
+            "connection_request_session_stop", "connection_request_session_stop",
+            "connection_request_permission_decision"], starts
+        assert all(record["subject_kind"] == "request_number" for record in starts), starts
+        assert len({record["subject"] for record in starts}) == 7, starts
         proposal_milestones = None
         os.close(proposal_gate_keeper)
         proposal_gate_keeper = None
@@ -1115,7 +1317,6 @@ def main():
                 "--session",
                 f"direct/{fault}",
             )["execution"]
-            assert resources["custody_occupied"] == "0", resources
             assert resources["scratch_used_bytes"] == "0", resources
             stop_host(offline)
             processes.remove(offline)
@@ -1307,6 +1508,7 @@ def main():
             "must not publish",
             served_model="model-body",
         )
+        contradictory_request_id = 'contradictory-"quoted"\\path'
         contradictory_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(
@@ -1314,7 +1516,7 @@ def main():
                     {
                         "OpenAI-Model": "model-openai-header",
                         "X-OpenAI-Model": "model-x-openai-header",
-                        "X-Request-Id": "contradictory-request",
+                        "X-Request-Id": contradictory_request_id,
                     },
                 )
             ]
@@ -1359,7 +1561,7 @@ def main():
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, None)
+        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, contradictory_request_id)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1376,6 +1578,21 @@ def main():
             "status": "failed",
             "code": "contradictory_provider_output",
         }, restarted_failure
+        report = command(
+            "inspect-session", "--store", contradictory_store,
+            "--session", "direct/contradictory-evidence", "--profile", "full",
+        )
+        operation = report["full"]["model_operations"][0]
+        assert operation["request_id"] == contradictory_request_id, operation
+        resolution = operation["resolution"]
+        assert resolution["content"] is not None, resolution
+        assert json.loads(resolution["content"]["text"]) == {
+            "reason": "ContradictoryProviderOutput", "stage": "response",
+            "byte_offset": str(len(contradictory_sse)), "output_index": None,
+        }, resolution
+        assert len(resolution["content"]["text"].encode()) <= 512
+        assert "must not publish" not in json.dumps(report), report
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         unreadable_result = subprocess.run(
             [
                 str(RUI),
@@ -1460,50 +1677,80 @@ def main():
         # surface. Even a complete 2xx text response cannot be published under
         # a frozen object schema without schema validation.
         schema_candidate = sse_answer(
-            "schema-response", "schema-reasoning", "schema-message", "not a JSON object"
+            "schema-response", "schema-reasoning", "schema-message", "private schema answer"
         )[0]
-        schema_endpoint = SuccessEndpoint([schema_candidate])
+        schema_request_ids = ('schema-"quoted\\request', None)
+        schema_endpoint = SuccessEndpoint([
+            ResponseSpec(schema_candidate, {"X-Request-Id": request_id} if request_id else {})
+            for request_id in schema_request_ids
+        ])
         schema_thread = threading.Thread(target=schema_endpoint.serve_forever, daemon=True)
         endpoints[schema_endpoint] = schema_thread
         schema_thread.start()
-        schema_store = state / "unsupported-schema-store"
-        schema_host = start_host(
-            schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
-        )
-        processes.append(schema_host)
-        configure(
-            state,
-            schema_store,
-            "schema-config",
-            "direct/unsupported-schema",
-            "model-a",
-            {"type": "object"},
-        )
-        message(
-            state,
-            schema_store,
-            "schema-message",
-            "direct/unsupported-schema",
-            "return an object",
-        )
-        schema_failure = wait_for(
-            lambda: (value := observe(schema_store, "schema-message")).get("result", {}).get("code")
-            and value,
-            "unsupported structured output rejection",
-        )
-        assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
-        assert len(schema_endpoint.requests) == 1
-        database = sqlite3.connect(schema_store / "rui.sqlite3")
-        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
-        assert database.execute(
-            "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
-        ).fetchone()[0] == 0
-        assert database.execute(
-            "SELECT outcome_content_id FROM turn"
-        ).fetchone()[0] is None
-        database.close()
-        stop_host(schema_host)
-        processes.remove(schema_host)
+        for index, request_id in enumerate(schema_request_ids):
+            schema_store = state / f"unsupported-schema-store-{index}"
+            schema_host = start_host(
+                schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
+            )
+            processes.append(schema_host)
+            configure(
+                state,
+                schema_store,
+                f"schema-config-{index}",
+                "direct/unsupported-schema",
+                "model-a",
+                {"type": "object"},
+            )
+            message(
+                state,
+                schema_store,
+                f"schema-message-{index}",
+                "direct/unsupported-schema",
+                "return an object",
+            )
+            schema_failure = wait_for(
+                lambda: (value := observe(schema_store, f"schema-message-{index}")).get("result", {}).get("code")
+                and value,
+                "unsupported structured output rejection",
+            )
+            assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
+            with sqlite3.connect(schema_store / "rui.sqlite3") as database:
+                assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+                assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+                assert database.execute(
+                    "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+                ).fetchone()[0] == 0
+                assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
+            before_operation = command(
+                "inspect-session", "--store", schema_store,
+                "--session", "direct/unsupported-schema", "--profile", "full",
+            )["full"]["model_operations"][0]
+            stop_host(schema_host)
+            processes.remove(schema_host)
+            reopened = start_host(schema_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", schema_store,
+                "--session", "direct/unsupported-schema", "--profile", "full",
+            )
+            operation = report["full"]["model_operations"][0]
+            assert operation == before_operation, operation
+            resolution = operation["resolution"]
+            assert resolution["code"] == "unsupported_output_schema", resolution
+            assert resolution["content"] is not None, resolution
+            assert json.loads(resolution["content"]["text"]) == {
+                "reason": "UnsupportedOutputSchema", "stage": "response",
+                "byte_offset": str(len(schema_candidate)), "output_index": None,
+            }, resolution
+            assert len(resolution["content"]["text"].encode()) <= 512
+            assert operation["request_id"] == request_id, operation
+            assert "private schema answer" not in json.dumps(report), report
+            assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+            assert observe(schema_store, f"schema-message-{index}")["result"] == schema_failure["result"]
+            assert len(schema_endpoint.requests) == index + 1
+            stop_host(reopened)
+            processes.remove(reopened)
         stop_endpoint(schema_endpoint, endpoints)
 
         # Completed transport is not success: the whole SSE candidate must be
@@ -1588,15 +1835,34 @@ def main():
         encrypted_cases.append(encode_sse([
             {"type": "response.output_item.done", "output_index": 0, "item": missing}
         ], done=False))
+        private_sentinel = "PRIVATE-CONTINUATION-MUST-NOT-APPEAR"
+        unsupported_message = dict(invalid_message)
+        unsupported_message["phase"] = "future_phase"
+        unsupported_message["content"] = [{"type": "output_text", "text": private_sentinel}]
+        unsupported_cases = [
+            encode_sse([{"type": "response.output_item.done", "output_index": 0,
+                         "item": unsupported_message}], done=False),
+            encode_sse([{"type": "response.future_event", "private": private_sentinel}], done=False),
+        ]
+        # Distinct output item identities pass parsing, but the decoded call
+        # identity must remain unique when Store imports the complete envelope.
+        duplicate_calls = sse_tool_calls("duplicate-calls", [
+            ("bash", "same-call", json.dumps({
+                "description": f"Print duplicate marker {index}",
+                "cmd": "true", "timeout_ms": None,
+            })) for index in range(2)
+        ])
         invalid_endpoint = SuccessEndpoint(
             [
-                first_sse[:-1],
+                ResponseSpec(first_sse[:-1], {}),
                 contradictory,
                 changed_terminal,
                 duplicate_identity,
                 late_malformed,
                 incomplete_tool,
                 *encrypted_cases,
+                *unsupported_cases,
+                duplicate_calls,
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
@@ -1617,6 +1883,9 @@ def main():
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "continuation_unavailable",
+                "unsupported_provider_output",
+                "unsupported_provider_output",
+                "contradictory_provider_output",
             )
         ):
             invalid_store = state / f"invalid-output-{index}"
@@ -1645,9 +1914,51 @@ def main():
             assert database.execute(
                 "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
             ).fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+            expected_request_id = None if index == 0 else f"request-{index + 1}"
+            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
             database.close()
+            before_operation = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )["full"]["model_operations"][0]
+            assert before_operation["request_id"] == expected_request_id, before_operation
             stop_host(invalid_host)
             processes.remove(invalid_host)
+            # Rejection evidence must survive scratch disposal and Host restart,
+            # without turning a diagnostic into an answer or continuation.
+            reopened = start_host(invalid_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )
+            operation = report["full"]["model_operations"][0]
+            assert operation["operation"] == before_operation["operation"], operation
+            assert operation["request_id"] == expected_request_id, operation
+            resolution = operation["resolution"]
+            assert resolution["code"] == expected_code, resolution
+            assert resolution["content"] is not None, resolution
+            detail = json.loads(resolution["content"]["text"])
+            assert detail["reason"] and detail["stage"], detail
+            assert len(resolution["content"]["text"].encode()) <= 512
+            assert private_sentinel not in json.dumps(report), report
+            if index == 13:
+                assert detail["reason"] == "UnsupportedMessagePhase", detail
+                assert detail["stage"] == "item" and detail["output_index"] == 0, detail
+            if index == 14:
+                assert detail["reason"] == "UnsupportedEventType", detail
+                assert detail["stage"] == "event" and detail["output_index"] is None, detail
+            if index == 15:
+                assert detail == {
+                    "reason": "InvalidProviderEnvelope", "stage": "response",
+                    "byte_offset": str(len(duplicate_calls)), "output_index": None,
+                }, detail
+            assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+            stop_host(reopened)
+            processes.remove(reopened)
+        assert len(invalid_endpoint.requests) == 16
         stop_endpoint(invalid_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
@@ -2723,8 +3034,8 @@ def main():
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
                 "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807 FROM sequence"
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
+                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807,0 FROM sequence"
             )
             database.commit()
         finally:
@@ -2818,8 +3129,8 @@ def main():
                 "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
                 "SELECT value+1 FROM sequence WHERE value<100) "
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) "
-                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807 "
+                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
+                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807,0 "
                 "FROM sequence"
             )
             database.commit()
@@ -4082,7 +4393,6 @@ def main():
             resources = command(
                 "inspect-session", "--store", owned_store, "--session", f"direct/{fault}"
             )["execution"]
-            assert resources["custody_occupied"] == "0", resources
             assert resources["scratch_used_bytes"] == "0", resources
             stop_host(cleanup_host)
             processes.remove(cleanup_host)
@@ -4128,7 +4438,6 @@ def main():
         resources = command(
             "inspect-session", "--store", unlink_store, "--session", "direct/unlink"
         )["execution"]
-        assert resources["custody_occupied"] == "0", resources
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(offline)
         processes.remove(offline)

@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from host_process import TestHTTPServer, start_ready_process, stop_process, wait_for_execution_release
+from host_process import TestHTTPServer, is_peer_disconnect, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -66,8 +66,9 @@ class FailureHandler(http.server.BaseHTTPRequestHandler):
             time.sleep(2.5)
             try:
                 self.wfile.write(b"x")
-            except BrokenPipeError:
-                pass
+            except OSError as error:
+                if not is_peer_disconnect(error):
+                    raise
             self.close_connection = True
             return
         if not self.server.release.wait(10):
@@ -366,7 +367,9 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
             try:
                 self.wfile.write(payload[cursor : cursor + size])
                 self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError as error:
+                if not is_peer_disconnect(error):
+                    raise
                 break
             cursor += size
             index += 1
@@ -428,7 +431,7 @@ def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_cap
     return args
 
 
-def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1, observations=None):
+def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacity=1, observations=None, stderr_pipe=None):
     args = host_arguments(
         store,
         endpoint,
@@ -439,6 +442,7 @@ def start_host(store, endpoint, *extra, accelerated_retries=True, active_capacit
     process, _ = start_ready_process(
         args,
         observations=observations,
+        stderr_pipe=stderr_pipe,
         required_fields=(
             {"execution": "enabled", "curl": "8.22.0"}
             if endpoint is not None

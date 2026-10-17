@@ -4,6 +4,7 @@
 import json
 import io
 import contextlib
+import errno
 import mmap
 import os
 import pathlib
@@ -26,6 +27,7 @@ from host_process import (
     ReleaseGate,
     TestHTTPServer,
     _Observations,
+    canonical_fixture_root,
     dispose_all,
     start_ready_process,
     stop_process,
@@ -64,6 +66,7 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
 
 def main():
     prove_dispose_all()
+    prove_peer_disconnects()
     prove_peer_census()
     prove_one_reply()
     prove_terminal_capture_budget()
@@ -108,6 +111,7 @@ def main():
         stop_process(process)
     prove_private_environment()
     prove_coalesced_phase_records()
+    prove_observation_startup_credit()
     prove_observation_channel()
     prove_observation_disposal()
     prove_intentional_crash_retirement()
@@ -564,6 +568,87 @@ time.sleep(30)
             assert process.returncode is not None and process.stdout.closed and process.stderr.closed
             assert not diagnostics.thread.is_alive() and not process.rui_observations.thread.is_alive()
     print('Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown')
+
+
+def prove_observation_startup_credit():
+    import errno
+    import host_process
+    host_process._observation_atomics()  # Compile setup before intercepting launch.
+    # Independent workload bound: ten held inspections, each with request,
+    # captured and gate-waiting receipts of at most 512 bytes.
+    required = 10 * 3 * 512
+    pipe, write, read = os.pipe, os.write, os.read
+    for case in ("ready", "write-error", "short-write", "read-error", "short-read", "wrong-bytes", "disabled"):
+        descriptors = []
+        supplied = []
+        class LaunchWitness(OSError):
+            pass
+
+        def observation_pipe():
+            descriptors.extend(pipe())
+            return tuple(descriptors)
+
+        def supply(fd, data):
+            if fd == descriptors[1]:
+                if case == "write-error":
+                    raise BlockingIOError(errno.EAGAIN, "injected unavailable startup credit")
+                if case == "short-write":
+                    return write(fd, data[:-1])
+                supplied.append(write(fd, data))
+                return supplied[-1]
+            return write(fd, data)
+
+        def drain(fd, size):
+            if fd == descriptors[0]:
+                if case == "read-error":
+                    raise BlockingIOError(errno.EAGAIN, "injected unavailable startup credit")
+                if case == "short-read":
+                    return read(fd, size - 1)
+                result = read(fd, size)
+                return bytes(value ^ 1 for value in result) if case == "wrong-bytes" else result
+            return read(fd, size)
+
+        def launch(*args, **kwargs):
+            if case == "disabled":
+                assert not descriptors and kwargs["pass_fds"] == (), "disabled observation added pipe credit"
+            else:
+                assert case == "ready", "refused startup credit still launched a child"
+                assert supplied == [required], "startup reached launch without inspection-cohort credit"
+                reader, writer = descriptors
+                assert os.get_blocking(reader) and not os.get_blocking(writer), "wrong inherited observation modes"
+                os.set_blocking(reader, False)
+                try:
+                    leftover = read(reader, required)
+                except BlockingIOError:
+                    pass
+                else:
+                    raise AssertionError(f"startup left observation bytes before launch: {leftover!r}")
+                finally:
+                    os.set_blocking(reader, True)
+            raise LaunchWitness("launch boundary witnessed")
+
+        with patch.object(host_process.os, "pipe", observation_pipe), \
+             patch.object(host_process.os, "write", supply), \
+             patch.object(host_process.os, "read", drain), \
+             patch.object(host_process.subprocess, "Popen", launch):
+            try:
+                start_ready_process(["unused-rui"], observations=None if case == "disabled" else "control_peers")
+            except LaunchWitness:
+                assert case in ("ready", "disabled"), case
+            except BlockingIOError:
+                assert case in ("write-error", "read-error"), case
+            except AssertionError as error:
+                assert case in ("short-write", "short-read", "wrong-bytes") and "startup credit" in str(error), error
+            else:
+                raise AssertionError(f"{case}: startup did not reach its expected boundary")
+        for fd in descriptors:
+            try:
+                os.fstat(fd)
+            except OSError as error:
+                assert error.errno == errno.EBADF, error
+            else:
+                raise AssertionError(f"{case}: startup retained a pipe descriptor")
+    print("Observation startup: complete cohort credit drained before launch; unavailable/short/corrupt credit refuses and closes; disabled path unchanged")
 
 
 def prove_observation_channel():
@@ -1169,7 +1254,7 @@ def prove_terminal_capture_budget():
 
             def start_inspector(*args):
                 (root / "capture-receipt" / "probe.log").write_text(
-                    "diagnostic-held-inspection\n" + json.dumps(held) + "\n")
+                    "diagnostic-dropped-inspection\ndiagnostic-held-inspection\n" + json.dumps(held) + "\n")
                 return inspector
 
             def observe(*args, **kwargs):
@@ -1195,13 +1280,16 @@ def prove_terminal_capture_budget():
             for name, replacement in replacements.items():
                 patches.enter_context(patch.object(terminal, name, replacement))
             for name, replacement in {
-                "SuccessEndpoint": MagicMock(), "configure": MagicMock(), "message": MagicMock(),
+                "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object()])),
+                "configure": MagicMock(), "message": MagicMock(),
                 "start_command": start_inspector, "observe": observe, "command": inspect,
             }.items():
                 patches.enter_context(patch.object(terminal.fixture, name, replacement))
             patches.enter_context(patch.object(terminal.threading, "Thread", MagicMock()))
             terminal.threading.Thread.return_value.is_alive.return_value = False
             patches.enter_context(patch.object(time, "monotonic", lambda: clock[0]))
+            patches.enter_context(patch.object(time, "sleep", side_effect=AssertionError(
+                "terminal capture clock witness waited for unmodeled external work")))
             patches.enter_context(patch.object(terminal.fixture.subprocess, "run", read))
             patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
             try:
@@ -1496,6 +1584,76 @@ def prove_dispose_all():
     print("Fixture disposal: primary failure retained, all resources attempted")
 
 
+def prove_peer_disconnects():
+    # Exercise the real provider handler: a cancelled consumer is an observed
+    # disconnect, whereas broken fixture I/O must still fail the caller.
+    with patch.object(sys, "argv", [__file__, "/bin/false"]):
+        import control_integration as control
+
+    accepted = (BrokenPipeError("closed"), ConnectionResetError("closed"),
+                OSError(errno.EPIPE, "closed"), OSError(errno.ECONNRESET, "closed"),
+                OSError(errno.ENOTCONN, "closed"))
+    rejected = (TimeoutError("deadline"), OSError(errno.EBADF, "bad descriptor"),
+                OSError(errno.EIO, "fixture I/O"), OSError(errno.EAGAIN, "not ready"),
+                OSError(errno.ECONNREFUSED, "setup failed"), OSError("no errno"))
+    for error in accepted + rejected:
+        def write(_value):
+            raise error
+
+        server = SimpleNamespace(condition=threading.Condition(), requests=0,
+                                 disconnects=0, release=SimpleNamespace(wait=lambda _timeout: False))
+        handler = SimpleNamespace(headers={"Content-Length": "0"}, rfile=io.BytesIO(),
+                                  server=server, wfile=SimpleNamespace(write=write, flush=lambda: None),
+                                  send_response=lambda _code: None, send_header=lambda *_args: None,
+                                  end_headers=lambda: None)
+        try:
+            control.StreamingHandler.do_POST(handler)
+        except OSError as observed:
+            assert error in rejected and observed is error, ("peer disconnect escaped", observed)
+            assert server.disconnects == 0
+        else:
+            assert error in accepted and server.disconnects == 1, ("fixture error suppressed", error)
+        assert server.requests == 1
+
+    from host_process import is_peer_disconnect
+    assert all(is_peer_disconnect(error) for error in accepted)
+    assert not any(is_peer_disconnect(error) for error in rejected)
+
+    with patch.object(sys, "argv", [__file__, "/bin/false", "/bin/false"]):
+        import host_stop_integration as stop
+
+    # Completion keeps every observed byte, including an acceptance prefix
+    # that the shutdown caller must reject even if a reset follows it.
+    prefix = b'HTTP/1.1 200 OK\r\n\r\n{"status":"accepted"}'
+    for error in accepted + rejected:
+        for received in (b"", prefix):
+            stream = MagicMock()
+            stream.__enter__.return_value = stream
+            if received:
+                stream.recv.side_effect = [received, error]
+            else:
+                stream.sendall.side_effect = error
+            try:
+                observed = stop.finish(stream, b"remaining upload")
+            except OSError as observed_error:
+                assert error in rejected and observed_error is error
+            else:
+                assert error in accepted and observed == received
+
+    from host_status_integration import complete_response
+    for body in (b"xy", b"x"):
+        stream = MagicMock()
+        stream.recv.side_effect = [b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n" + body,
+                                   OSError(errno.ENOTCONN, "closed")]
+        try:
+            response = complete_response(stream)
+        except AssertionError:
+            assert body == b"x"
+        else:
+            assert body == b"xy" and response.endswith(body)
+    print("Peer disconnects: broken pipe/reset/ENOTCONN observed; setup, timeout and I/O errors preserved")
+
+
 def prove_one_reply():
     from one_reply import BODY_LIMIT, HEADER_LIMIT, one_reply
 
@@ -1530,7 +1688,7 @@ def prove_one_reply():
         accepted.clear()
         threads = set(threading.enumerate())
         with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
-            path = pathlib.Path(root) / "peer"
+            path = canonical_fixture_root(root) / "peer"
             try:
                 with patch("socket.socket", TrackedSocket):
                     yield path
@@ -1616,7 +1774,7 @@ def prove_one_reply():
 
     # A completed worker failure and failed unlink remain secondary to the client.
     with tempfile.TemporaryDirectory(prefix="rui-reply-failure-") as root:
-        path = pathlib.Path(root) / "peer"
+        path = canonical_fixture_root(root) / "peer"
         primary = RuntimeError("original client failure")
         sockets.clear()
         accepted.clear()

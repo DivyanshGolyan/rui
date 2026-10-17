@@ -3,6 +3,7 @@
 import atexit
 import http.server
 import ctypes
+import errno
 import functools
 import json
 import mmap
@@ -22,25 +23,35 @@ from collections import Counter
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024
+# Ten held inspections can each emit request, capture and gate-wait receipts
+# before their FIFO stops them. Provision this cohort before concurrent writes;
+# this is not whole-plan capacity or a guarantee against reader starvation.
+OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # Explicit finite native populations, not an execution-duration history.
 # list: 101 configuration + 37 list exchanges, two endpoints each.
 # status: 12 simultaneous clients + 40 repeated status calls + at most 20
 # setup/guard probes, three phases per connection, two boundaries and two Bash admissions.
 # stop: at most 321 Action probes (8 seconds / 25ms interval + final probe)
-# plus twenty non-poll numbered exchanges, each with a release; five stop
+# plus twenty-three non-poll numbered exchanges, each with a release; five stop
 # issuers, twelve observe classifications, three two-phase cleanup owners,
-# capture entry and Bash handoff. No release is filtered out by request kind.
+# capture entry, Bash handoff, three Message classification/header pairs and
+# one owned report gate. No release is filtered out by request kind.
 # control: at most 50 inspection attempts (capture + gate), four model owners
 # (ten selected phases), three controls (hint + timing), two boundaries.
 # control_peers: gated contention owns four 8s/25ms observation polls (321 each,
 # conservatively including a boundary probe), fifty total inspections, and six
-# setup/control exchanges. This exceeds real contention (2*321+38), delivery
-# (321+21), capacity (37), admission (11), and delivery restart (2).
+# setup/control exchanges. This also covers the smaller capacity and delivery
+# populations and admission's 103 numbered exchanges.
 # Each exchange has start/release and at most two inspection/control phases;
 # four model owners have ten phases, plus two lifecycle boundaries and eight
 # separately issued unnumbered releases. These are test-only retained records.
 # PeerCensus enforces issuance bounds before traffic, not on received records.
-# dispatch: seven controls with queued/acquired/released endpoints; the first
+# transport: at most 100 configurations and twenty waves of 100 Messages,
+# 100 result reads, 100 initial result probes plus 1,801 failed probes within
+# the shared 45s/25ms budget, and 801 drain inspections within 20s/25ms.
+# The smaller two-wave H1 case has a shared 40s result/drain budget.
+# HostRequests enforces issuance before traffic; retain both native endpoints.
+# dispatch: seven routed controls with queued/acquired/released endpoints; the first
 # rollback or preparation advance per separately observed Host, not retry history.
 # capture: one gate, one exact cancellation and one injected resume failure.
 # No cleanup or polling history; public drainage remains its separate oracle.
@@ -51,10 +62,12 @@ STDERR_TAIL_LIMIT = 16 * 1024
 # emergency drain (25ms intervals, including final probes), six fixed reads.
 # bash_pipes: one held leader observation, one permission and one Session stop.
 PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
+TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
-                      "stop": 321 + 20 + 5 + 12 + 3 * 2 + 1 + 1,
-                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 3 + 1,
+                      "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
+                      "transport": 2 * TRANSPORT_EXCHANGE_LIMIT,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
                       "bash_pipes": 1 + 2}
@@ -325,6 +338,12 @@ def canonical_fixture_root(path):
     return pathlib.Path(path).resolve(strict=True)
 
 
+def is_peer_disconnect(error):
+    """Classify socket closure; callers decide whether closure is expected."""
+    return isinstance(error, (BrokenPipeError, ConnectionResetError)) or (
+        isinstance(error, OSError) and error.errno == errno.ENOTCONN)
+
+
 def wait_for_execution_release(inspect, deadline):
     """Observe both accounting totals in one timely reply, not permanent idleness."""
     execution = None
@@ -512,6 +531,8 @@ class HostDiagnostics:
             plans = ("control", "control_peers", "bash_cleanup")
         elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
             plans = ("bash_pipes",)
+        elif phase in ("connection_request_session_stop", "connection_request_permission_decision"):
+            plans = ("dispatch", "status", "list", "control_peers")
         if plans is not None:
             assert self.observations is not None and self.observations.plan in plans, (
                 "required receipt needs native observation authority", phase)
@@ -817,6 +838,13 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
             reader, writer = os.pipe()
             os.set_blocking(writer, False)
             assert os.fpathconf(writer, "PC_PIPE_BUF") >= 512
+            os.set_blocking(reader, False)
+            credit = bytes(OBSERVATION_STARTUP_CREDIT)
+            supplied = os.write(writer, credit)
+            assert supplied == len(credit), f"incomplete observation startup credit: {supplied}/{len(credit)}"
+            drained = os.read(reader, len(credit))
+            assert drained == credit, "incomplete or corrupt observation startup credit drain"
+            os.set_blocking(reader, True)
             state_file = tempfile.TemporaryFile()
             state_file.truncate(OBSERVATION_STATE_BYTES)
             state = mmap.mmap(state_file.fileno(), OBSERVATION_STATE_BYTES, access=mmap.ACCESS_WRITE)
