@@ -240,12 +240,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["host-stop-integration"])
 
-    def test_h2_fixture_and_companion_keep_their_owning_target(self):
+    def test_h2_fixture_and_companion_keep_both_owning_targets(self):
         for path in ("tests/integration/transport_h2_integration.py",
                      "tests/integration/transport_h2_integration_test.py"):
             result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["transport-h2-integration"])
-            self.assertEqual(result["native_targets"], ["transport-h2-integration"])
+            self.assertEqual(result["targets"], ["codex-h2-integration", "transport-h2-integration"])
+            self.assertEqual(result["native_targets"], ["codex-h2-integration", "transport-h2-integration"])
 
     def test_public_read_fixture_and_client_select_owner_once(self):
         for owner in ("proposal", "activity"):
