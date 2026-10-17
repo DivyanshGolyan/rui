@@ -28,10 +28,11 @@ def assert_managed_descriptor_rejection(rejected, limit):
     assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
     fixed_host = 11 if sys.platform == "darwin" else 9
     authentication = 10 if sys.platform == "darwin" else 8
-    required = inherited + fixed_host + 42 + 10 + authentication + 1
+    # 100 ordinary exchanges at four descriptors, two controls and discovery.
+    required = inherited + fixed_host + 403 + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
-                    inherited=inherited, fixed_host=fixed_host, clients=42,
-                    execution=10, authentication=authentication, self_wake=1)
+                    inherited=inherited, fixed_host=fixed_host, clients=403,
+                    execution=10, authentication=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
     print(f"managed descriptor rejection passed: {expected}", flush=True)
     return required
@@ -62,7 +63,7 @@ def run(*, observed=False):
     try:
         # Probe below the minimum inherited population, then test the exact
         # adjacent boundary observed before any Host-owned descriptors open.
-        minimum_required = {"linux": 73, "darwin": 77}[sys.platform]
+        minimum_required = {"linux": 435, "darwin": 439}[sys.platform]
         serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]

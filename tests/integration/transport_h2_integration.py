@@ -23,7 +23,7 @@ import h2.settings
 
 import control_integration as control
 import model_fixture as dispatch
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, wait_for_execution_release as wait_for_drain
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -425,8 +425,8 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
         assert len(body) == int(headers[b"content-length"]), "truncated Host response"
         expected_type = b"text/plain" if kind == "read_result" else b"application/json"
         assert headers[b"content-type"].strip().startswith(expected_type), head
-        # Every caller, not just inspection, must release its server-side
-        # content/report handles and socket before an idle FD sample.
+        # EOF establishes peer closure, not retirement of reports or other
+        # exchange resources. Idle sampling separately waits for native release.
         set_timeout()
         assert connection.recv(1) == b"", "Host must close after its response"
     result = body if kind == "read_result" else json.loads(body)
@@ -434,7 +434,29 @@ def closed_host_request(socket_path, store, kind, *, timeout=15, deadline=None, 
     return result
 
 
+class HostRequests:
+    """Issue a bounded population; sample only after every native owner retires."""
+
+    def __init__(self, host, socket_path, store):
+        self.host, self.socket_path, self.store = host, socket_path, store
+        self.diagnostics = HostDiagnostics(host)
+        assert self.diagnostics.observations is not None and self.diagnostics.observations.plan == "transport", (
+            "idle descriptors require native transport observation authority")
+        self.routes = []
+
+    def call(self, kind, **fields):
+        assert len(self.routes) < TRANSPORT_EXCHANGE_LIMIT, "transport exhausted exchange population"
+        self.routes.append({"observe_command": "observe", "inspect_session": "inspect"}.get(kind, kind))
+        return closed_host_request(self.socket_path, self.store, kind, **fields)
+
+    def idle_descriptors(self, deadline):
+        self.diagnostics.borrower_census(deadline, self.routes)
+        assert time.monotonic() < deadline, "exchange retirement exceeded original deadline"
+        return open_descriptors(self.host.pid)
+
+
 def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
+    assert 0 < capacity <= 100 and 0 < rounds <= 20, "transport workload exceeds observed population"
     store = root / f"store-{capacity}"
     host, ready = dispatch.start_ready_process(
         dispatch.host_arguments(
@@ -445,8 +467,10 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             active_capacity=capacity,
         ),
         required_fields={"execution": "enabled", "curl": "8.22.0"},
+        observations="transport",
     )
     try:
+        requests = HostRequests(host, ready["socket"], store)
         idle_fds = []
         physical_peaks = []
         if observe is not None:
@@ -455,8 +479,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             for index in range(capacity):
                 session = f"direct/h2-{capacity}-{index}"
                 if round_number == 0:
-                    configured = closed_host_request(
-                        ready["socket"], store, "configure", key=f"config-{capacity}-{index}",
+                    configured = requests.call(
+                        "configure", key=f"config-{capacity}-{index}",
                         session=session, configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
@@ -468,8 +492,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured
-                submitted = closed_host_request(
-                    ready["socket"], store, "message", key=f"message-{capacity}-{round_number}-{index}",
+                submitted = requests.call(
+                    "message", key=f"message-{capacity}-{round_number}-{index}",
                     session=session, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
@@ -482,31 +506,30 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             for index in range(capacity):
                 key = f"message-{capacity}-{round_number}-{index}"
                 result = dispatch.wait_for(
-                    lambda key=key: closed_host_request(
-                        ready["socket"], store, "observe_command", key=key,
+                    lambda key=key: requests.call(
+                        "observe_command", key=key,
                         deadline=result_deadline,
                     )["observation"].get("result"),
                     f"H2 result {key}", deadline=result_deadline,
                 )
                 assert result["status"] == "completed", result
-                assert closed_host_request(ready["socket"], store, "read_result", key=key,
-                                           deadline=result_deadline) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
+                assert requests.call("read_result", key=key,
+                                     deadline=result_deadline) == endpoint.answers[f"h2-{capacity}-{round_number}-{index}"]
             drain_deadline = min(result_deadline, time.monotonic() + 20)
             wait_for_drain(
-                lambda remaining: closed_host_request(
-                    ready["socket"], store, "inspect_session", session=f"direct/h2-{capacity}-0",
+                lambda remaining: requests.call(
+                    "inspect_session", session=f"direct/h2-{capacity}-0",
                     timeout=remaining, deadline=drain_deadline,
                 )["execution"],
                 drain_deadline,
             )
-            # Every preceding request reached EOF; no caller socket or report
-            # can inflate the first baseline or mask later retained FDs.
-            idle_fds.append(open_descriptors(host.pid))
+            idle_fds.append(requests.idle_descriptors(drain_deadline))
             if endpoint.observed_shape:
                 physical_peaks.append(host_physical_peak(host.pid))
                 # Flush completed-wave evidence before starting work that can fail.
                 print(json.dumps({"case": "observed_shape_wave", "round": round_number + 1,
                                   "capacity": capacity, "host_physical_peak_bytes": physical_peaks[-1],
+                                  "native_connection_observations": True,
                                   "completed_idle_fds": idle_fds[-1]}), flush=True)
             if observe is not None:
                 observe(host.pid, round_number + 1)
@@ -526,6 +549,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             "complete_request_histories_validated": len(streams),
             "request_bytes": sum(len(body) for _, _, _, body in streams),
             "offered_sse_bytes": endpoint.offered_bytes,
+            "native_connection_observations": True,
             "host_physical_peak_bytes": peak,
             "host_physical_peaks_by_round": physical_peaks,
             "completed_idle_fds": idle_fds,
@@ -588,15 +612,16 @@ def queued_h1(root):
     host = None
     try:
         host = dispatch.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
-                                   active_capacity=capacity)
+                                   active_capacity=capacity, observations="transport")
         socket_path = host.rui_ready_fields["socket"]
+        requests = HostRequests(host, socket_path, store)
         idle_fds = []
         for round_number in range(2):
             for index in range(capacity):
                 session = f"direct/h1-{index}"
                 if round_number == 0:
-                    configured = closed_host_request(
-                        socket_path, store, "configure", key=f"h1-config-{index}",
+                    configured = requests.call(
+                        "configure", key=f"h1-config-{index}",
                         session=session, configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
@@ -608,8 +633,8 @@ def queued_h1(root):
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured
-                submitted = closed_host_request(
-                    socket_path, store, "message", key=f"h1-message-{round_number}-{index}",
+                submitted = requests.call(
+                    "message", key=f"h1-message-{round_number}-{index}",
                     session=session, text={"state": "value", "value": f"h1-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
@@ -631,13 +656,13 @@ def queued_h1(root):
                 held_fds = open_descriptors(host.pid)
                 assert held_cpu <= 1, f"queued H1 Host used {held_cpu} CPU seconds in 3 wall seconds"
                 for index in range(capacity):
-                    pending = closed_host_request(
-                        socket_path, store, "observe_command", key=f"h1-message-0-{index}",
+                    pending = requests.call(
+                        "observe_command", key=f"h1-message-0-{index}",
                     )["observation"]
                     assert (pending.get("processing") or {}).get("attempt") == "1", pending
                     assert pending.get("result") is None, pending
-                inspection = closed_host_request(
-                    socket_path, store, "inspect_session", session="direct/h1-1",
+                inspection = requests.call(
+                    "inspect_session", session="direct/h1-1",
                 )["execution"]
                 assert int(inspection["custody_occupied"]) > 0, inspection
                 endpoint.release_first.set()
@@ -645,23 +670,23 @@ def queued_h1(root):
             for index in range(capacity):
                 key = f"h1-message-{round_number}-{index}"
                 result = dispatch.wait_for(
-                    lambda key=key: closed_host_request(
-                        socket_path, store, "observe_command", key=key, deadline=result_deadline,
+                    lambda key=key: requests.call(
+                        "observe_command", key=key, deadline=result_deadline,
                     )["observation"].get("result"),
                     f"queued H1 result {key}", deadline=result_deadline,
                 )
                 assert result["status"] == "completed", result
-                assert closed_host_request(
-                    socket_path, store, "read_result", key=key, deadline=result_deadline,
+                assert requests.call(
+                    "read_result", key=key, deadline=result_deadline,
                 ) == f"answer-h1-{round_number}-{index}".encode()
             wait_for_drain(
-                lambda remaining: closed_host_request(
-                    socket_path, store, "inspect_session", session="direct/h1-0",
+                lambda remaining: requests.call(
+                    "inspect_session", session="direct/h1-0",
                     timeout=remaining, deadline=result_deadline,
                 )["execution"],
                 result_deadline,
             )
-            idle_fds.append(open_descriptors(host.pid))
+            idle_fds.append(requests.idle_descriptors(result_deadline))
         with endpoint.lock:
             assert len(endpoint.requests) == 2 * capacity, endpoint.requests
             assert {text for text, _ in endpoint.requests} == {

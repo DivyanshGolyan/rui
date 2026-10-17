@@ -73,9 +73,34 @@ func TestNativeLinuxProcessSnapshot(t *testing.T) {
 	if sample.LinuxMemory == nil || sample.LinuxMemory.RollupBytes["Rss"] == 0 || sample.OpenDescriptors == 0 {
 		t.Fatalf("incomplete native snapshot: %+v", sample)
 	}
+	metadata, err := os.ReadFile(path + ".json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved ProcessSample
+	if err := json.Unmarshal(metadata, &saved); err != nil || saved.RSSBytes == 0 || saved.LinuxMemory == nil || saved.SamplingError != "" {
+		t.Fatalf("incomplete process receipt: %s err=%v", metadata, err)
+	}
 	for _, suffix := range []string{".smaps_rollup", ".status"} {
 		if _, err := os.Stat(path + suffix); err != nil {
 			t.Fatal(fmt.Errorf("raw evidence: %w", err))
 		}
+	}
+	// An initial sample can abort its caller before any workload row exists.
+	// Its independent counters and failure must still survive in the sidecar.
+	failedPath := filepath.Join(t.TempDir(), "initial-failed")
+	if err := os.Mkdir(failedPath+".smaps_rollup", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	partial, sampleError := SampleProcess(target, failedPath)
+	if sampleError == nil || partial.RSSBytes == 0 {
+		t.Fatalf("missing initial failure or core evidence: %+v err=%v", partial, sampleError)
+	}
+	metadata, err = os.ReadFile(failedPath + ".json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(metadata, &saved); err != nil || saved.RSSBytes == 0 || saved.SamplingError == "" {
+		t.Fatalf("failed initial receipt lost: %s err=%v", metadata, err)
 	}
 }
