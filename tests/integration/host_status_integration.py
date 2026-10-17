@@ -460,6 +460,8 @@ def main():
             ambiguous_bodies = (
                 valid_body.replace(b'"store": ', b'"store": "/wrong", "store": ', 1),
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
+                *(valid_body.replace(b'"capabilities":', f'"{field}": "{value}", "capabilities":'.encode())
+                  for field in ("intake_capacity", "descriptor_limit") for value in ("010", "+10", "1_0")),
             )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
@@ -592,6 +594,7 @@ def main():
             assert json.loads(body) == {
                 "version": "1", "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
+                "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "capabilities": {"bash": True, "model": True, "managed_authentication": True},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

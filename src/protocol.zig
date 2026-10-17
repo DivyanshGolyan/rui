@@ -267,6 +267,8 @@ pub const HostInfo = struct {
     store: []const u8,
     instance: []const u8,
     active_capacity: []const u8,
+    intake_capacity: []const u8 = "100",
+    descriptor_limit: []const u8 = "unlimited",
     capabilities: struct {
         bash: bool,
         model: bool,
@@ -1823,6 +1825,8 @@ pub const max_host_info_response_bytes =
     maximumJsonStringBytes(max_store_bytes) +
     ",\"instance\":\"".len + 32 +
     "\",\"active_capacity\":\"".len + 20 +
+    "\",\"intake_capacity\":\"".len + 20 +
+    "\",\"descriptor_limit\":\"".len + 20 +
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
