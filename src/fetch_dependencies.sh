@@ -30,18 +30,21 @@ prepare_dependencies() {
         url=$(sed -n "/\.$name = /,/},/s/.*\.url = \"\([^\"]*\)\".*/\1/p" "$manifest")
         expected=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$manifest")
         [[ -n $url && -n $expected ]]
+        case "$url" in
+            git+https://codeberg.org/*|git+https://github.com/*)
+                revision=${url#*#}
+                if [[ ! $revision =~ ^[[:xdigit:]]{40}$ ]]; then
+                    printf 'Pinned %s Git dependency in %s requires # followed by a full 40-character hexadecimal commit ID.\n' "$name" "$manifest" >&2
+                    exit 1
+                fi
+                remote=${url#git+}
+                remote=${remote%%#*}
+                remote=${remote%%\?*}
+                url="${remote%.git}/archive/$revision.tar.gz"
+                ;;
+        esac
         case "$prepared" in *" $expected "*) continue ;; esac
         if [[ ! -d "$packages/$expected" ]]; then
-            case "$url" in
-                git+https://codeberg.org/*\#*)
-                    revision=${url##*#}
-                    [[ $revision =~ ^[[:xdigit:]]{40}$ ]]
-                    remote=${url#git+}
-                    remote=${remote%%#*}
-                    remote=${remote%%\?*}
-                    url="${remote%.git}/archive/$revision.tar.gz"
-                    ;;
-            esac
             archive="$scratch/${url##*/}"
             printf 'Preparing pinned %s dependency ...\n' "$name"
             curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
