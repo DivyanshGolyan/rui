@@ -2,6 +2,44 @@
 
 This file lists build-time and runtime-linked dependencies, evaluator-boundary test dependencies and measurement-only components distributed or used with Rui. Versions and source hashes are pinned in `build.zig.zon`; measurement-only Go modules are pinned in `tests/qualification/go.mod`.
 
+## libvaxis 0.6.0 (commit d4c3b3666e0c090e2b5092ca09893c6db15e0b79)
+
+The alternate-screen conversation frontend uses libvaxis for cell drawing and
+terminal-sequence parsing. Rui retains terminal entry and restoration custody.
+`src/prepare_vaxis.sh` copies the pinned source into generated build output and
+applies `src/vaxis-parser.patch`; the dependency archive remains unchanged.
+The patch retains fragmented APC terminators, checks CSI associated-text scratch
+capacity before UTF-8 encoding, and propagates cell-allocation failures through
+rendering instead of logging and continuing. Width accumulation saturates at the
+public width type's maximum rather than overflowing, so Rui can reject clusters
+outside its cell/window limit through the normal restored-error path. A failed render may leave partial
+output and inaccurate cached terminal state. Rui restores the terminal and exits;
+another render or `queueRefresh` is not a recovery operation.
+
+- Source: `https://github.com/rockorager/libvaxis` at `d4c3b3666e0c090e2b5092ca09893c6db15e0b79`
+- Zig package content hash: `vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM`
+- License: MIT, reproduced in the source distribution's `LICENSE` file
+
+Copyright (c) 2023 Tim Culverhouse
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## translate-c 2.0.1
 
 The build uses the official translator at commit
