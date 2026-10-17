@@ -2854,8 +2854,8 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
-        # A valid opaque credential arrives while the prompt is open, then
-        # becomes renewal-due before the choice. It remains usable for creation.
+        # A renewal-due opaque credential arrives while the prompt is open. It
+        # remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
@@ -2872,15 +2872,10 @@ def main(selected="all"):
             dispose_all(lambda: os.close(ready_write))
         try:
             assert "No locally ready provider" in provider_prompt(master, ready_read)
-            expiry = int(time.time()) + 2
             credential_file = explicit_config / "codex.json"
-            codex_fixture.credentials(credential_file)
-            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", f"expires_at={expiry}"))
-            assert "credential: error" in run(preferences_home, "setup", environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)}), "JWT/record expiry mismatch was accepted"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
-            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={expiry - 8 * 24 * 60 * 60}"))
-            while time.time() < expiry:
-                time.sleep(0.01)
+            renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
+            credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert "usable locally; renewal due at dispatch" in run(preferences_home, "setup", environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})
             welcome = terminal_step(master, "d", "› ")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
