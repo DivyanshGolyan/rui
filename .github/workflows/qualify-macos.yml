@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+# Dispatch can execute an unreviewed ref while the workflow runs on main.
+# Scoped cache tokens deny publication even from requested-ref setup/build code.
+cache-mode: read
+
 jobs:
   plan:
     if: ${{ !github.event.repository.private }}
