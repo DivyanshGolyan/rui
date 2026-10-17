@@ -1,12 +1,15 @@
 import json
 import re
 import os
+from contextlib import ExitStack
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from select_tests import execution_batches, select, setup_requirements
 
@@ -338,7 +341,8 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
-    def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error=""):
+    def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
+                 timeout=60, python_delay=0, fail_at=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             # Exercise the shell gate's public commands without launching product
@@ -347,6 +351,7 @@ class FullCheckPartitionTest(unittest.TestCase):
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
 identity="$fixture.$2"
+printf "%s %s\\n" "$identity" "$$" >> "$GATE_DIR/peer-pids"
 if [ "$fixture" = human_cli_integration.py ]; then
     test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46
 fi
@@ -361,10 +366,7 @@ fi
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.started"
     if [ "$fixture" = human_cli_integration.py ]; then
-        n=0
         while [ ! -e "$GATE_DIR/activity_integration.py.release.started" ]; do
-            n=$((n + 1))
-            if [ "$n" -ge 200 ]; then exit 43; fi
             sleep 0.01
         done
     fi
@@ -403,6 +405,10 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
                        HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+            if python_delay:
+                (root / "sitecustomize.py").write_text(
+                    f"import time\ntime.sleep({python_delay!r})\n")
+                env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
                     "import sys, time\n"
@@ -416,6 +422,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]
+            releases = []
             if timing:
                 clock = root / "clock"
                 clock.write_text("10000000000")
@@ -424,80 +431,195 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
                 env.update(PYTHONPATH=str(root), TMPDIR=str(root))
                 fixtures = ("human_cli_integration.py", "preference_policy_integration.py")
-                releases = []
-                process = None
-                try:
+            # The serial driver starts 43 real interpreters, including its
+            # version check. This is a functional test, not a startup benchmark.
+            # One coarse deadline owns readiness, drainage and every child.
+            deadline = time.monotonic() + timeout
+            try:
+                if timing:
                     for fixture in fixtures:
                         fifo = root / f"{fixture}.release"
                         os.mkfifo(fifo)
                         releases.append(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
-                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    deadline = time.monotonic() + 5
-                    while not all((root / f"{fixture}.started").exists() for fixture in fixtures):
-                        self.assertIsNone(process.poll())
-                        self.assertLess(time.monotonic(), deadline, "both timed fixtures must start")
-                        time.sleep(.005)
-                    clock.with_suffix(".next").write_text("13000000000")
-                    clock.with_suffix(".next").replace(clock)
-                    os.write(releases[1], b"r\n")
-                    # The later inventory entry must save its own elapsed time
-                    # while the earlier entry still prevents batch printing.
-                    deadline = time.monotonic() + 5
-                    while not any(path.read_text().strip() for path in root.glob("rui-check.*/preference-policy.status")):
-                        self.assertIsNone(process.poll())
-                        self.assertLess(time.monotonic(), deadline, "completed peer must record timing before inventory wait")
-                        time.sleep(.005)
-                    clock.with_suffix(".next").write_text("30000000000")
-                    clock.with_suffix(".next").replace(clock)
-                finally:
-                    for release in releases:
-                        os.write(release, b"r\n")
+                elif hold:
+                    os.mkfifo(root / "release")
+                    releases.append(os.open(root / "release", os.O_RDWR | os.O_NONBLOCK))
+                with ExitStack() as streams:
+                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
+                                               stderr=subprocess.PIPE, start_new_session=True)
+                    streams.callback(process.stdout.close)
+                    streams.callback(process.stderr.close)
                     try:
-                        if process is not None:
-                            stdout, stderr = process.communicate(timeout=10)
-                    finally:
-                        for release in releases:
-                            os.close(release)
-                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-            elif hold:
-                os.mkfifo(root / "release")
-                # Own release before launch, including assertion-failure disposal.
-                release = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
-                process = None
-                try:
-                    process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    deadline = time.monotonic() + 3
-                    while not list(root.glob(f"{hold}.*.started")):
-                        self.assertIsNone(process.poll())
-                        self.assertLess(time.monotonic(), deadline)
-                        time.sleep(.005)
-                    # The peer is explicitly held, not assumed slow. Give an
-                    # incorrectly skipped wait a bounded chance to launch work.
-                    deadline = time.monotonic() + .1
-                    while time.monotonic() < deadline:
-                        self.assertFalse((root / "isolated.started").exists())
-                        time.sleep(.005)
-                finally:
-                    os.write(release, b"r\n")
-                    try:
-                        if process is not None:
-                            stdout, stderr = process.communicate(timeout=10)
-                    finally:
-                        os.close(release)
-                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-            else:
-                try:
-                    result = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10)
-                except subprocess.TimeoutExpired as failure:
-                    failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
-                    failure.add_note(f"completed invocations: {invocations.read_text()!r}")
-                    failure.add_note(f"stdout: {failure.stdout!r}\nstderr: {failure.stderr!r}")
-                    raise
+                        try:
+                            if timing:
+                                while not all((root / f"{fixture}.started").exists() for fixture in fixtures):
+                                    self.assertIsNone(process.poll())
+                                    self.assertLess(time.monotonic(), deadline, "both timed fixtures must start")
+                                    time.sleep(.005)
+                                if fail_at == "timed_ready":
+                                    self.fail("injected failure at timed_ready")
+                                clock.with_suffix(".next").write_text("13000000000")
+                                clock.with_suffix(".next").replace(clock)
+                                os.write(releases[1], b"r\n")
+                                # Completion timing belongs to the peer, not
+                                # the later inventory-order wait for it.
+                                while not any(path.read_text().strip() for path in root.glob("rui-check.*/preference-policy.status")):
+                                    self.assertIsNone(process.poll())
+                                    self.assertLess(time.monotonic(), deadline, "completed peer must record timing before inventory wait")
+                                    time.sleep(.005)
+                                if fail_at == "timed_recorded":
+                                    self.fail("injected failure at timed_recorded")
+                                clock.with_suffix(".next").write_text("30000000000")
+                                clock.with_suffix(".next").replace(clock)
+                            elif hold:
+                                while not list(root.glob(f"{hold}.*.started")):
+                                    self.assertIsNone(process.poll())
+                                    self.assertLess(time.monotonic(), deadline)
+                                    time.sleep(.005)
+                                if fail_at == "held_ready":
+                                    self.fail("injected failure at held_ready")
+                                # Held authority, not scheduler speed, prevents
+                                # isolated work during this observation.
+                                observation_deadline = time.monotonic() + .1
+                                while time.monotonic() < observation_deadline:
+                                    self.assertFalse((root / "isolated.started").exists())
+                                    time.sleep(.005)
+                        finally:
+                            # Successful observation releases the test gates.
+                            # A failed observation retires the owned group below.
+                            if sys.exception() is None:
+                                for release in releases:
+                                    os.write(release, b"r\n")
+                        stdout, stderr = process.communicate(timeout=max(0, deadline - time.monotonic()))
+                    except BaseException as failure:
+                        failure.add_note(f"driver_pid={process.pid}")
+                        # A timed-out shell may still own clock or mock peers
+                        # holding our pipes. Retire the entire private group,
+                        # then drain and reap before the fixture root disappears.
+                        disposal_deadline = time.monotonic() + 5
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
+                            try:
+                                process.kill()
+                            except BaseException as cleanup:
+                                failure.add_note(f"driver kill failed: {cleanup!r}")
+                        try:
+                            process.wait(timeout=max(0, disposal_deadline - time.monotonic()))
+                            failure.add_note(f"driver_pid={process.pid}, returncode={process.returncode}")
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver reap failed: {cleanup!r}")
+                        try:
+                            stdout, stderr = process.communicate(timeout=max(0, disposal_deadline - time.monotonic()))
+                            failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver disposal failed: {cleanup!r}")
+                        failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
+                        try:
+                            peers = root / "peer-pids"
+                            failure.add_note("peer_pids=" + json.dumps(peers.read_text() if peers.exists() else ""))
+                            failure.add_note(f"completed invocations: {invocations.read_text()!r}")
+                        except BaseException as diagnostic:
+                            failure.add_note(f"driver diagnostics unavailable: {diagnostic!r}")
+                        raise
+                    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            finally:
+                for release in releases:
+                    os.close(release)
             return result, invocations.read_text().splitlines()
 
     def records(self, result):
         return re.findall(r"^([a-z-]+) (?:passed|failed): exit=(\d+) elapsed=(\d+\.\d{3})s$",
                           result.stdout + result.stderr, re.MULTILINE)
+
+    def test_slow_interpreter_startup_is_not_a_driver_failure(self):
+        # At least 43 * .25 seconds of startup in this serial inventory exceeds
+        # the old ten-second limit without any blocked or incorrect fixture.
+        result, lines = self.run_part("all", "host_allocator_test.py", python_delay=.25)
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        self.assertEqual(lines[-1], "host_allocator_test.py release")
+        self.assertEqual(self.records(result)[-1][:2], ("host-allocator", "42"))
+
+    def test_driver_deadline_reaps_and_preserves_the_original_failure(self):
+        for part, options, error, message, held in (
+            ("all", {"python_delay": 2, "timeout": .001}, subprocess.TimeoutExpired, "", ()),
+            ("parallel", {"hold": "dispatch_integration.py", "overlap": True,
+                          "fail_at": "held_ready"}, AssertionError, "held_ready",
+             ("dispatch_integration.py.release",)),
+            ("callers", {"timing": True, "fail_at": "timed_ready"}, AssertionError, "timed_ready",
+             ("human_cli_integration.py.release", "preference_policy_integration.py.preferences")),
+            ("callers", {"timing": True, "fail_at": "timed_recorded"}, AssertionError, "timed_recorded",
+             ("human_cli_integration.py.release",)),
+        ):
+            with self.subTest(part=part, message=message):
+                with self.assertRaises(error) as rejected:
+                    self.run_part(part, **options)
+                if message:
+                    self.assertEqual(str(rejected.exception), f"injected failure at {message}")
+                notes = "\n".join(rejected.exception.__notes__)
+                self.assertNotIn("driver disposal failed", notes)
+                self.assertIn("completed invocations:", notes)
+                self.assertIn("stdout:", notes)
+                driver = re.search(r"driver_pid=(\d+), returncode=(-?\d+)", notes)
+                self.assertIsNotNone(driver, notes)
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(int(driver[1]), os.WNOHANG)
+                peers = dict(line.split() for line in json.loads(next(
+                    note.removeprefix("peer_pids=") for note in rejected.exception.__notes__
+                    if note.startswith("peer_pids=")
+                )).splitlines())
+                for identity in held:
+                    self.assertIn(identity, peers)
+                    # Grandchildren may briefly be zombies awaiting their OS
+                    # reaper, but cannot remain live or hold the capture pipes.
+                    deadline = time.monotonic() + 5
+                    while True:
+                        observed = subprocess.run(["ps", "-o", "stat=", "-p", peers[identity]],
+                                                  capture_output=True, text=True)
+                        self.assertIn(observed.returncode, (0, 1), observed.stderr)
+                        self.assertFalse(observed.stderr)
+                        state = observed.stdout.strip()
+                        if not state or state.startswith("Z"):
+                            break
+                        self.assertLess(time.monotonic(), deadline, (identity, state))
+                        time.sleep(.005)
+
+    def test_disposal_and_diagnostic_faults_preserve_the_primary_failure(self):
+        read_text = Path.read_text
+
+        def diagnostic_failure(path, *args, **kwargs):
+            if path.name == "peer-pids":
+                raise OSError("injected diagnostic read failure")
+            return read_text(path, *args, **kwargs)
+
+        killpg = os.killpg
+        for fault in ("diagnostic", "retirement"):
+            with self.subTest(fault=fault):
+                try:
+                    with patch.object(Path, "read_text", diagnostic_failure) if fault == "diagnostic" else patch(
+                            "os.killpg", side_effect=PermissionError("injected group retirement failure")):
+                        with self.assertRaisesRegex(AssertionError, "injected failure at held_ready") as rejected:
+                            self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
+                                          fail_at="held_ready")
+                    notes = "\n".join(rejected.exception.__notes__)
+                    driver = re.search(r"driver_pid=(\d+), returncode=(-?\d+)", notes)
+                    self.assertIsNotNone(driver, notes)
+                    with self.assertRaises(ChildProcessError):
+                        os.waitpid(int(driver[1]), os.WNOHANG)
+                    self.assertIn("injected diagnostic read failure" if fault == "diagnostic"
+                                  else "driver group retirement unconfirmed", notes)
+                finally:
+                    # Injected group failure deliberately leaves descendants;
+                    # the outer test retains independent disposal authority.
+                    if fault == "retirement" and rejected.exception.__notes__:
+                        pid = int(rejected.exception.__notes__[0].split("=")[1])
+                        try:
+                            killpg(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_elapsed_belongs_to_invocation_not_inventory_wait(self):
         for part in ("callers", "parallel"):
