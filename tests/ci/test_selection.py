@@ -62,7 +62,8 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/store.zig"], "review", AVAILABLE)
         self.assertEqual(result["native_targets"], ["test"])
         combined = select(["src/store.zig", "src/server.zig"], "review", AVAILABLE)
-        self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check"])
+        self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check",
+                                                     "codex-h2-integration", "transport-h2-integration"])
 
     def test_bash_keeps_real_custody_and_recovery_checks(self):
         result = select(["src/bash_platform.c"], "review", AVAILABLE)
@@ -98,6 +99,21 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertIn("transport-h2-integration", result[family])
                 self.assertIn("codex-h2-integration", result[family])
+
+    def test_startup_capacity_owners_keep_every_refusal_oracle(self):
+        for path in ("src/descriptor_capacity.zig", "src/descriptor_limit.zig",
+                     "src/server.zig", "src/platform.zig", "src/cli.zig", "src/host_launch.c",
+                     "tests/integration/descriptor_capacity_integration.py",
+                     "tests/integration/host_launch_integration.py"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    checks = set(result[family])
+                    self.assertIn("codex-h2-integration", checks)
+                    self.assertIn("transport-h2-integration", checks)
+                    if not checks & {"check", "check-full"}:
+                        self.assertTrue({"test", "host-launch-integration",
+                                         "descriptor-capacity-integration"} <= checks)
 
     def test_bootstrap_action_is_not_cheap_ci_policy(self):
         for path in (".github/actions/setup/action.yml", "install.sh", "src/fetch_dependencies.sh"):
