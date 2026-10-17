@@ -75,6 +75,13 @@ class SelectionTest(unittest.TestCase):
                                                   "bash-owner-integration", "bash-recovery-integration",
                                                   "test", "test-logic"], path)
 
+    def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
+        for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertEqual(result[family], ["codex-credential-integration", "codex-h2-integration",
+                                                  "codex-integration", "test", "test-logic"])
+
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["check", "codex-credential-integration", "codex-h2-integration"])

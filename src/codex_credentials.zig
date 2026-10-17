@@ -1,47 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("posix");
+const policy = @import("codex_credential_policy.zig");
 
 const io = std.Io.Threaded.global_single_threaded.io();
 
-pub const max_account_id_bytes = 1024;
-pub const max_token_bytes = 16 * 1024;
-pub const max_file_bytes = 64 * 1024;
-
-pub fn Bounded(comptime capacity: usize) type {
-    return struct {
-        bytes: [capacity]u8 = undefined,
-        len: usize = 0,
-
-        pub fn set(self: *@This(), value: []const u8) !void {
-            if (value.len > capacity) return error.CredentialFieldTooLong;
-            @memcpy(self.bytes[0..value.len], value);
-            self.len = value.len;
-        }
-
-        pub fn slice(self: *const @This()) []const u8 {
-            return self.bytes[0..self.len];
-        }
-    };
-}
-
-pub const State = enum { ready, refresh_pending };
-
-/// A complete credential value. It owns every returned slice; no pathname or
-/// file buffer is borrowed. Callers should overwrite it after the final header
-/// consumer releases its borrow.
-pub const Record = struct {
-    version: u32 = 3,
-    generation: u64,
-    account_id: Bounded(max_account_id_bytes),
-    fedramp: bool = false,
-    id_token: Bounded(max_token_bytes),
-    access_token: Bounded(max_token_bytes),
-    refresh_token: Bounded(max_token_bytes),
-    expires_at: i64,
-    refreshed_at: i64,
-    state: State = .ready,
-};
+pub const max_account_id_bytes = policy.max_account_id_bytes;
+pub const max_token_bytes = policy.max_token_bytes;
+pub const max_file_bytes = policy.max_file_bytes;
+pub const State = policy.State;
+pub const Record = policy.Record;
 
 /// Holds the stable cross-process lock through the model launch decision.
 /// The caller owns the returned record and must release this lease on every path.
@@ -74,7 +42,7 @@ pub fn leaseInto(path: []const u8, destination: *Lease) !void {
     try destination.owner.readRecordInto(&destination.record);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&destination.record));
     try destination.owner.syncDirectory();
-    if (destination.record.state != .ready) return error.RefreshRequiresLogin;
+    try policy.requireReady(&destination.record);
 }
 
 pub fn load(path: []const u8) !Record {
@@ -91,12 +59,6 @@ pub fn loadInto(path: []const u8, destination: *Record) !void {
     try owner.readRecordInto(destination);
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(destination));
     try owner.syncDirectory();
-}
-
-/// Opaque tokens have no encoded expiry; both local inspection and runtime
-/// refresh use the last successful exchange as their clock.
-pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
-    return now_seconds -| refreshed_at >= 8 * 24 * 60 * 60;
 }
 
 /// Read an atomic snapshot without creating a lock or refreshing. On success
@@ -118,8 +80,9 @@ pub fn readSnapshotInto(path: []const u8, destination: *Record) !bool {
 /// existing login and advances its generation. A non-null value is a refresh
 /// compare-and-swap and must preserve the account binding.
 pub fn install(path: []const u8, record: *const Record, expected_generation: ?u64) !void {
-    try validateRecord(record);
-    if (record.state != .ready) return error.InstallMustBeReady;
+    // Refuse an incomplete record before touching the owner directory;
+    // admission checks it again with the current record.
+    try policy.validateReplacement(record);
     var owner = try Owner.open(path);
     defer owner.close();
     const lock = try owner.acquireLock(.exclusive);
@@ -132,20 +95,7 @@ pub fn install(path: []const u8, record: *const Record, expected_generation: ?u6
     defer if (current) |*old| std.crypto.secureZero(u8, std.mem.asBytes(old));
     var replacement = record.*;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-    if (expected_generation) |expected| {
-        const old = current orelse return error.GenerationMismatch;
-        if (old.generation != expected or old.state != .refresh_pending)
-            return error.GenerationMismatch;
-        if (!std.mem.eql(u8, old.account_id.slice(), replacement.account_id.slice()) or
-            old.fedramp != replacement.fedramp)
-            return error.AccountMismatch;
-        replacement.generation = std.math.add(u64, expected, 1) catch return error.GenerationExhausted;
-    } else {
-        replacement.generation = if (current) |old|
-            std.math.add(u64, old.generation, 1) catch return error.GenerationExhausted
-        else
-            1;
-    }
+    replacement.generation = try policy.admitReplacement(if (current) |*old| old else null, &replacement, expected_generation);
     try owner.publish(&replacement);
 }
 
@@ -160,18 +110,11 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, context: anyt
     defer lock.close(io);
     var record = try owner.readRecord();
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (record.state != .ready) return error.RefreshRequiresLogin;
-    if (record.generation != expected_generation) return false;
-    record.state = .refresh_pending;
+    if (try policy.claimRefresh(&record, expected_generation) == .superseded) return false;
     try owner.publish(&record);
     var replacement = try exchange(context, &record);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-    try validateRecord(&replacement);
-    if (replacement.state != .ready) return error.InstallMustBeReady;
-    if (!std.mem.eql(u8, record.account_id.slice(), replacement.account_id.slice()) or
-        record.fedramp != replacement.fedramp)
-        return error.AccountMismatch;
-    replacement.generation = std.math.add(u64, expected_generation, 1) catch return error.GenerationExhausted;
+    replacement.generation = try policy.admitReplacement(&record, &replacement, expected_generation);
     try owner.publish(&replacement);
     return true;
 }
@@ -259,7 +202,7 @@ const Owner = struct {
         defer std.crypto.secureZero(u8, &bytes);
         const count = try file.readPositionalAll(io, bytes[0..@intCast(stat.size + 1)], 0);
         if (count != stat.size) return error.CredentialFileChanged;
-        try parseInto(bytes[0..count], destination);
+        try policy.parseInto(bytes[0..count], destination);
     }
 
     fn publish(self: *Owner, record: *const Record) !void {
@@ -307,7 +250,7 @@ const Owner = struct {
         }
         var bytes: [max_file_bytes]u8 = undefined;
         defer std.crypto.secureZero(u8, &bytes);
-        const encoded = try encode(record, &bytes);
+        const encoded = try policy.encode(record, &bytes);
         if (fault == .write) {
             try file.writeStreamingAll(io, encoded[0..@min(4, encoded.len)]);
             return error.InjectedCredentialWriteFailure;
@@ -366,70 +309,6 @@ fn validateOwner(handle: anytype) !void {
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.StatFailed;
     if (stat.st_uid != c.geteuid()) return error.NotOwnedByCurrentUser;
-}
-
-fn validateText(value: []const u8, empty_allowed: bool) !void {
-    if (!empty_allowed and value.len == 0) return error.EmptyCredentialField;
-    for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialByte;
-}
-
-fn validateRecord(record: *const Record) !void {
-    if (record.version != 3) return error.UnsupportedCredentialVersion;
-    try validateText(record.account_id.slice(), false);
-    try validateText(record.id_token.slice(), false);
-    try validateText(record.access_token.slice(), false);
-    try validateText(record.refresh_token.slice(), false);
-    if (record.expires_at < 0 or record.refreshed_at <= 0) return error.InvalidCredentialTime;
-    var segments = std.mem.splitScalar(u8, record.access_token.slice(), '.');
-    var count: usize = 0;
-    while (segments.next()) |segment| {
-        if (segment.len == 0) return error.InvalidAccessToken;
-        count += 1;
-    }
-    if (count != 1 and count != 3) return error.InvalidAccessToken;
-}
-
-fn encode(record: *const Record, destination: []u8) ![]const u8 {
-    try validateRecord(record);
-    return std.fmt.bufPrint(destination, "version=3\ngeneration={d}\naccount_id={s}\nfedramp={d}\nid_token={s}\naccess_token={s}\nrefresh_token={s}\nexpires_at={d}\nrefreshed_at={d}\nstate={s}\n", .{ record.generation, record.account_id.slice(), @intFromBool(record.fedramp), record.id_token.slice(), record.access_token.slice(), record.refresh_token.slice(), record.expires_at, record.refreshed_at, @tagName(record.state) }) catch
-        return error.CredentialFileTooLarge;
-}
-
-fn parse(bytes: []const u8) !Record {
-    var result: Record = undefined;
-    try parseInto(bytes, &result);
-    return result;
-}
-
-fn parseInto(bytes: []const u8, record: *Record) !void {
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    if (!std.mem.eql(u8, lines.next() orelse return error.InvalidCredentialFile, "version=3"))
-        return error.UnsupportedCredentialVersion;
-    record.* = .{ .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
-    try record.account_id.set(try field(lines.next(), "account_id="));
-    const fedramp = try field(lines.next(), "fedramp=");
-    if (std.mem.eql(u8, fedramp, "1")) record.fedramp = true else if (!std.mem.eql(u8, fedramp, "0")) return error.InvalidCredentialFile;
-    try record.id_token.set(try field(lines.next(), "id_token="));
-    try record.access_token.set(try field(lines.next(), "access_token="));
-    try record.refresh_token.set(try field(lines.next(), "refresh_token="));
-    record.expires_at = try decimal(i64, field(lines.next(), "expires_at="));
-    record.refreshed_at = try decimal(i64, field(lines.next(), "refreshed_at="));
-    record.state = std.meta.stringToEnum(State, try field(lines.next(), "state=")) orelse
-        return error.InvalidCredentialState;
-    if (!std.mem.eql(u8, lines.next() orelse return error.InvalidCredentialFile, "") or lines.next() != null)
-        return error.TrailingCredentialData;
-    try validateRecord(record);
-}
-
-fn field(line: ?[]const u8, prefix: []const u8) ![]const u8 {
-    const value = line orelse return error.InvalidCredentialFile;
-    if (!std.mem.startsWith(u8, value, prefix)) return error.InvalidCredentialFile;
-    return value[prefix.len..];
-}
-
-fn decimal(comptime T: type, value: anytype) !T {
-    return std.fmt.parseInt(T, try value, 10) catch return error.InvalidCredentialNumber;
 }
 
 fn testRecord(account: []const u8, generation: u64) !Record {
@@ -561,48 +440,46 @@ test "explicit login overtakes refresh intent without overwriting its new accoun
         }
     }.fail));
     try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
+    // Admission rules are value-tested in codex_credential_policy.zig; this
+    // proves install reads the pending record under the lock and replaces it.
     var new_login = try testRecord("account-B", 0);
-    try std.testing.expectError(error.AccountMismatch, install(path, &new_login, 1));
     try install(path, &new_login, null);
-    try std.testing.expectError(error.GenerationMismatch, install(path, &original, 1));
     var selected = try lease(path);
     defer selected.release();
     try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
     try std.testing.expectEqualStrings("account-B", selected.record.account_id.slice());
 }
 
-test "refresh preserves routing but explicit login may replace it" {
+test "a rejected refresh replacement leaves the claim pending until login" {
+    // Both routing directions and the admission rules are value-tested in
+    // codex_credential_policy.zig. This proves the shell publishes the pending
+    // claim before the exchange and nothing after a rejected replacement.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try testPath(&tmp, "auth", &path_buffer);
-    for ([_]bool{ false, true }) |initial_fedramp| {
-        var original = try testRecord("acct", 0);
-        original.fedramp = initial_fedramp;
-        try install(path, &original, null);
-        const generation = (try load(path)).generation;
-        try std.testing.expectError(error.AccountMismatch, exchangeRefresh(path, generation, {}, struct {
-            fn change(_: void, current: *const Record) !Record {
-                var replacement = current.*;
-                replacement.fedramp = !current.fedramp;
-                replacement.state = .ready;
-                return replacement;
-            }
-        }.change));
-        const pending = try load(path);
-        try std.testing.expectEqual(State.refresh_pending, pending.state);
-        try std.testing.expectEqual(generation, pending.generation);
-        try std.testing.expectEqual(initial_fedramp, pending.fedramp);
-        try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
-        var changed = original;
-        changed.fedramp = !initial_fedramp;
-        try std.testing.expectError(error.AccountMismatch, install(path, &changed, generation));
-        try install(path, &changed, null);
-        var selected = try lease(path);
-        try std.testing.expectEqual(generation + 1, selected.record.generation);
-        try std.testing.expectEqual(!initial_fedramp, selected.record.fedramp);
-        selected.release();
-    }
+    var original = try testRecord("acct", 0);
+    try install(path, &original, null);
+    try std.testing.expectError(error.AccountMismatch, exchangeRefresh(path, 1, {}, struct {
+        fn change(_: void, current: *const Record) !Record {
+            var replacement = current.*;
+            replacement.fedramp = !current.fedramp;
+            replacement.state = .ready;
+            return replacement;
+        }
+    }.change));
+    const pending = try load(path);
+    try std.testing.expectEqual(State.refresh_pending, pending.state);
+    try std.testing.expectEqual(@as(u64, 1), pending.generation);
+    try std.testing.expect(!pending.fedramp);
+    try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
+    var changed = original;
+    changed.fedramp = true;
+    try install(path, &changed, null);
+    var selected = try lease(path);
+    defer selected.release();
+    try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
+    try std.testing.expect(selected.record.fedramp);
 }
 
 test "unsafe paths and credential aliases fail closed" {
@@ -644,22 +521,6 @@ test "private file, lock, directory, and abandoned temp are validated" {
     try private.setPermissions(io, .fromMode(0o755));
     try std.testing.expectError(error.InsecureCredentialDirectory, load(path));
     try private.setPermissions(io, .fromMode(0o700));
-}
-
-test "format is bounded and strictly consumed" {
-    var record = try testRecord("acct", 7);
-    var bytes: [max_file_bytes]u8 = undefined;
-    const encoded = try encode(&record, &bytes);
-    const decoded = try parse(encoded);
-    try std.testing.expectEqual(@as(u64, 7), decoded.generation);
-    try record.access_token.set("opaque-access");
-    record.expires_at = 0;
-    const opaque_encoded = try encode(&record, &bytes);
-    try std.testing.expectEqualStrings("opaque-access", (try parse(opaque_encoded)).access_token.slice());
-    var extra: [max_file_bytes]u8 = undefined;
-    @memcpy(extra[0..opaque_encoded.len], opaque_encoded);
-    @memcpy(extra[opaque_encoded.len..][0..4], "junk");
-    try std.testing.expectError(error.TrailingCredentialData, parse(extra[0 .. opaque_encoded.len + 4]));
 }
 
 test "each replacement failure leaves only a complete old or new credential" {
