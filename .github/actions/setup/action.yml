@@ -96,13 +96,20 @@ runs:
         test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
-    - name: Install the selected H2 fixture dependency
-      if: ${{ steps.requirements.outputs.h2 == 'true' }}
+    - name: Install the selected Python fixture dependencies
+      if: ${{ steps.requirements.outputs.h2 == 'true' || contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}
       shell: bash
       run: |
         set -euo pipefail
         python3 -m venv "$RUNNER_TEMP/rui-python"
-        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 'h2==4.3.0'
+        packages=()
+        if [ '${{ steps.requirements.outputs.h2 }}' = true ]; then
+          packages+=('h2==4.3.0')
+        fi
+        if [ '${{ contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}' = true ]; then
+          packages+=('pyte==0.8.2' 'wcwidth==0.2.13')
+        fi
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 "${packages[@]}"
         echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
     - name: Fetch the existing pinned dependency graph
       if: ${{ steps.build-cache.outputs.cache-hit != 'true' }}
