@@ -2226,12 +2226,20 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
+    // Cross-response and transactional envelope checks run after parsing the
+    // complete capture; their coordinate is its end, not the parser's last item.
+    rejection = .{ .stage = .response, .byte_offset = response.length };
     if (!modelObservationsAgree(
         validated.evidence.served_model.slice(),
         openai_model.slice(),
         x_openai_model.slice(),
     )) {
-        settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "contradictory_provider_output", .request_id = request_id }, .terminal);
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "contradictory_provider_output",
+            .diagnostic = rejection.format(error.ContradictoryProviderOutput, &detail),
+            .request_id = request_id,
+        }, .terminal);
         return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
@@ -2263,7 +2271,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
-            host.store.settleModelAttemptFailure(owner.binding, .{ .code = "contradictory_provider_output", .request_id = request_id }, .terminal, .{
+            var detail: [512]u8 = undefined;
+            host.store.settleModelAttemptFailure(owner.binding, .{
+                .code = "contradictory_provider_output",
+                .diagnostic = rejection.format(err, &detail),
+                .request_id = request_id,
+            }, .terminal, .{
                 .before_commit = host.faults.result_before_commit,
             }) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);

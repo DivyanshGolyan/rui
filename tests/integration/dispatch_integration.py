@@ -1561,6 +1561,19 @@ def main():
             "status": "failed",
             "code": "contradictory_provider_output",
         }, restarted_failure
+        report = command(
+            "inspect-session", "--store", contradictory_store,
+            "--session", "direct/contradictory-evidence", "--profile", "full",
+        )
+        resolution = report["full"]["model_operations"][0]["resolution"]
+        assert resolution["content"] is not None, resolution
+        assert json.loads(resolution["content"]["text"]) == {
+            "reason": "ContradictoryProviderOutput", "stage": "response",
+            "byte_offset": str(len(contradictory_sse)), "output_index": None,
+        }, resolution
+        assert len(resolution["content"]["text"].encode()) <= 512
+        assert "must not publish" not in json.dumps(report), report
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         unreadable_result = subprocess.run(
             [
                 str(RUI),
@@ -1782,6 +1795,14 @@ def main():
                          "item": unsupported_message}], done=False),
             encode_sse([{"type": "response.future_event", "private": private_sentinel}], done=False),
         ]
+        # Distinct output item identities pass parsing, but the decoded call
+        # identity must remain unique when Store imports the complete envelope.
+        duplicate_calls = sse_tool_calls("duplicate-calls", [
+            ("bash", "same-call", json.dumps({
+                "description": f"Print duplicate marker {index}",
+                "cmd": "true", "timeout_ms": None,
+            })) for index in range(2)
+        ])
         invalid_endpoint = SuccessEndpoint(
             [
                 first_sse[:-1],
@@ -1792,6 +1813,7 @@ def main():
                 incomplete_tool,
                 *encrypted_cases,
                 *unsupported_cases,
+                duplicate_calls,
             ]
         )
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
@@ -1814,6 +1836,7 @@ def main():
                 "continuation_unavailable",
                 "unsupported_provider_output",
                 "unsupported_provider_output",
+                "contradictory_provider_output",
             )
         ):
             invalid_store = state / f"invalid-output-{index}"
@@ -1843,6 +1866,7 @@ def main():
                 "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
             ).fetchone()[0] == 0
             assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
             assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == f"request-{index + 1}"
             database.close()
             stop_host(invalid_host)
@@ -1868,9 +1892,15 @@ def main():
             if index == 14:
                 assert detail["reason"] == "UnsupportedEventType", detail
                 assert detail["stage"] == "event" and detail["output_index"] is None, detail
+            if index == 15:
+                assert detail == {
+                    "reason": "InvalidProviderEnvelope", "stage": "response",
+                    "byte_offset": str(len(duplicate_calls)), "output_index": None,
+                }, detail
             assert report["full"]["turns"][0]["outcome"]["content"] is None, report
             stop_host(reopened)
             processes.remove(reopened)
+        assert len(invalid_endpoint.requests) == 16
         stop_endpoint(invalid_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
