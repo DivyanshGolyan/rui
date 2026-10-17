@@ -186,7 +186,7 @@ At Host startup, an incompatible build reports the Store path, its format and th
 
 Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. Each `install.*` directory has a `revision` file identifying its build. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
 
-To back up the old Store, close other clients. Once the Host has stopped, run no other Rui command against that Store, including bare `rui` or `rui resume`, until the copy finishes. Set `STORE` to the exact path printed in the error:
+To back up the old Store, close other clients. Once the Host has stopped, run no Rui command other than `host status` against that Store until the copy finishes. Bare `rui` and `rui resume` can start a Host. Set `STORE` to the exact path printed in the error:
 
 ```sh
 RUI="$HOME/.local/bin/rui"
