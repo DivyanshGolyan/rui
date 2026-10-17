@@ -124,3 +124,30 @@ test "terminal width reports distinguish enabled mode from mere support" {
         try std.testing.expectEqual(@as(?vaxis.gwidth.Method, if (status == 1 or status == 3) .unicode else .wcwidth), input.reported_width);
     }
 }
+
+test "fragmented APC and oversized associated text preserve the following key" {
+    var input: Self = .{};
+    for ("\x1b_Greply\x1b") |byte| try std.testing.expect((try input.feed(byte)) == null);
+    try std.testing.expectEqual(Pending.incomplete, input.pending());
+    try std.testing.expectEqual(@as(?vaxis.Event, .cap_kitty_graphics), try input.feed('\\'));
+    try std.testing.expectEqualStrings("Z", (try input.feed('Z')).?.key_press.text.?);
+    for ([_]u8{ 'u', 'A', '~' }) |final| {
+        for (0..3) |boundary| {
+            var bytes: [256]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            try out.writeAll("\x1b[5;1;");
+            for (0..31) |_| try out.writeAll("128512:");
+            try out.writeAll(if (boundary == 2) "97:97:97:233" else "128512");
+            if (boundary == 1) try out.writeAll(":97");
+            try out.writeByte(final);
+            for (out.buffered()[0 .. out.end - 1]) |byte| try std.testing.expect((try input.feed(byte)) == null);
+            const event = try input.feed(final);
+            if (boundary == 0) {
+                const text = event.?.key_press.text.?;
+                try std.testing.expectEqual(@as(usize, 128), text.len);
+                for (0..32) |index| try std.testing.expectEqualStrings("😀", text[index * 4 ..][0..4]);
+            } else try std.testing.expect(event == null);
+            try std.testing.expectEqualStrings("Q", (try input.feed('Q')).?.key_press.text.?);
+        }
+    }
+}

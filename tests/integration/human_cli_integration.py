@@ -2647,6 +2647,20 @@ def renderer_cases():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configure("renderer/geometry")
+        codex_fixture.credentials(home / ".config/rui/codex.json")
+        env = {**os.environ, "HOME": str(home), "RUI_RENDERER": "vaxis"}
+        rejected = subprocess.run([str(fixture.RUI), "resume", "--store", str(store), "renderer/geometry"],
+            env=env, input=b"", capture_output=True, timeout=5)
+        assert rejected.returncode != 0 and b"InteractiveTerminalRequired" in rejected.stderr, rejected
+        assert b"\x1b" not in rejected.stdout + rejected.stderr, rejected
+        pipe_text = "/literal\nstdin café\n"
+        pipe_answer = answer("pipe")
+        piped = subprocess.run([str(fixture.RUI), "exec", "--store", str(store), "--provider", "codex", "--model", "model-a", "-"],
+            cwd=workspace, env=env, input=pipe_text.encode(), capture_output=True, timeout=10)
+        assert piped.returncode == 0 and piped.stdout == (pipe_answer + "\n").encode(), piped
+        assert b"\x1b" not in piped.stdout + piped.stderr, piped
+        submitted(pipe_text)
+        print("renderer: non-TTY rejection and literal multiline pipe output retain their existing contracts", flush=True)
         with terminal("renderer/geometry") as tty:
             # Keep the historical native Mac OOM sequence exactly: wide5000X
             # at 24x2048, shrink to 24x80, then a + 2048 combining acutes.
@@ -2719,11 +2733,13 @@ def renderer_cases():
         try:
             with terminal("renderer/consent", ready_write) as tty:
                 tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
-                records = set((home / ".config/rui/requests").glob("*.json"))
                 release.set()
                 tty.ready(ready_read)
                 shown = tty.wait("a: Allow once / d: Deny (Enter)")
                 assert "printf approved > renderer-effect" in shown and f"Workspace: {workspace}" in shown, shown
+                # The earlier draft frame can precede Message publication.
+                # Action readiness follows it; only later Decisions are new.
+                records = set((home / ".config/rui/requests").glob("*.json"))
                 current = fixture.command("inspect-session", "--store", store, "--session", "renderer/consent")
                 action = current["actionable_permissions"][0]["action"]
                 exact = json.loads(run(home, "inspect-action", "--store", store, "--session", "renderer/consent", "--action", action, "--json"))
