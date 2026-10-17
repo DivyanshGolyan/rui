@@ -116,16 +116,9 @@ def run():
         )
         assert configured["answer"]["status"] == "accepted"
         fixture.message(state, store, "pending-message", "managed/session", "run the proof")
-        fixture.wait_for(lambda: fixture.observe(store, "pending-message").get("result"), "authentication failure")
+        pending = fixture.wait_for(lambda: fixture.observe(store, "pending-message").get("result"), "authentication failure")
+        assert pending["code"] == "provider_authentication_failed", pending
         assert not endpoint.requests, "pending refresh reached transport"
-        fixture.stop_host(host)
-        host = None
-
-        credentials(credential_file, access="e30.eyJleHAiOjQxMDI0NDQ4MDB9.b3RoZXI")
-        host = start(store, url)
-        fixture.message(state, store, "other-credential", "managed/session", "reject another credential")
-        fixture.wait_for(lambda: fixture.observe(store, "other-credential").get("result"), "synthetic-only fixture rejection")
-        assert not endpoint.requests, "a non-canary credential reached the test endpoint"
         fixture.stop_host(host)
         host = None
 

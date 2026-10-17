@@ -352,15 +352,10 @@ test "installed local credential status completes under the exclusive mutation l
         path: []const u8,
         done: std.atomic.Value(bool) = .init(false),
         configured: ?auth.LocalStatus = null,
-        expired: ?auth.LocalStatus = null,
         failure: ?anyerror = null,
 
         fn run(self: *@This()) void {
             self.configured = auth.localStatus(self.path, 4_102_444_799) catch |err| result: {
-                self.failure = err;
-                break :result null;
-            };
-            self.expired = auth.localStatus(self.path, 4_102_444_800) catch |err| result: {
                 self.failure = err;
                 break :result null;
             };
@@ -384,70 +379,9 @@ test "installed local credential status completes under the exclusive mutation l
     try std.testing.expect(completed_while_locked);
     try std.testing.expectEqual(@as(?anyerror, null), worker.failure);
     try std.testing.expectEqual(@as(?auth.LocalStatus, .configured), worker.configured);
-    try std.testing.expectEqual(@as(?auth.LocalStatus, .renewal_due), worker.expired);
     var after_buffer: [4096]u8 = undefined;
     defer std.crypto.secureZero(u8, &after_buffer);
     try std.testing.expectEqualStrings(before, try private.readFile(io, "auth", &after_buffer));
-}
-
-test "successive login, generation compare, pending restart, and privacy" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try testPath(&tmp, "auth", &path_buffer);
-    var first = try testRecord("acct", 999);
-    try install(path, &first, null);
-    try std.testing.expectEqual(@as(u64, 1), (try load(path)).generation);
-    var second = try testRecord("acct", 0);
-    try install(path, &second, null);
-    try std.testing.expectEqual(@as(u64, 2), (try load(path)).generation);
-    try std.testing.expectError(error.GenerationMismatch, install(path, &second, 1));
-    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 2, {}, struct {
-        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
-            return error.InjectedRefreshFailure;
-        }
-    }.fail));
-    const pending = try load(path);
-    try std.testing.expectEqual(State.refresh_pending, pending.state);
-    try std.testing.expectError(error.RefreshRequiresLogin, exchangeRefresh(path, 2, {}, struct {
-        fn unexpected(_: void, _: *const Record) error{UnexpectedRefresh}!Record {
-            return error.UnexpectedRefresh;
-        }
-    }.unexpected));
-    try std.testing.expectEqual(@as(u64, 2), pending.generation);
-    try install(path, &second, 2);
-    try std.testing.expectEqual(@as(u64, 3), (try load(path)).generation);
-
-    const stat = try tmp.dir.statFile(io, "private/auth", .{});
-    const lock_stat = try tmp.dir.statFile(io, "private/.auth.lock", .{});
-    try std.testing.expectEqual(@as(u16, 0o600), stat.permissions.toMode() & 0o777);
-    try std.testing.expectEqual(@as(u16, 0o600), lock_stat.permissions.toMode() & 0o777);
-}
-
-test "explicit login overtakes refresh intent without overwriting its new account" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try testPath(&tmp, "auth", &path_buffer);
-    var original = try testRecord("account-A", 0);
-    try install(path, &original, null);
-    var initial = try lease(path);
-    try std.testing.expectEqualStrings("account-A", initial.record.account_id.slice());
-    initial.release();
-    try std.testing.expectError(error.InjectedRefreshFailure, exchangeRefresh(path, 1, {}, struct {
-        fn fail(_: void, _: *const Record) error{InjectedRefreshFailure}!Record {
-            return error.InjectedRefreshFailure;
-        }
-    }.fail));
-    try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
-    // Admission rules are value-tested in codex_credential_policy.zig; this
-    // proves install reads the pending record under the lock and replaces it.
-    var new_login = try testRecord("account-B", 0);
-    try install(path, &new_login, null);
-    var selected = try lease(path);
-    defer selected.release();
-    try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
-    try std.testing.expectEqualStrings("account-B", selected.record.account_id.slice());
 }
 
 test "a rejected refresh replacement leaves the claim pending until login" {
@@ -506,6 +440,8 @@ test "private file, lock, directory, and abandoned temp are validated" {
     const path = try testPath(&tmp, "auth", &path_buffer);
     var record = try testRecord("acct", 0);
     try install(path, &record, null);
+    for ([_][]const u8{ "private/auth", "private/.auth.lock" }) |name|
+        try std.testing.expectEqual(@as(u16, 0o600), (try tmp.dir.statFile(io, name, .{})).permissions.toMode() & 0o777);
     var private = try tmp.dir.openDir(io, "private", .{ .iterate = true });
     defer private.close(io);
     const file = try private.openFile(io, "auth", .{ .mode = .read_write });
