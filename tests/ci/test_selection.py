@@ -5,6 +5,7 @@ import os
 from contextlib import ExitStack
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,9 @@ from unittest.mock import patch
 
 from select_tests import execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+from host_process import dispose_all
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
@@ -455,10 +459,48 @@ class SelectionTest(unittest.TestCase):
 
 
 class FullCheckPartitionTest(unittest.TestCase):
+    @staticmethod
+    def wait_for_group_retirement(group, deadline):
+        # A delivered signal, leader reap and pipe EOF do not retire private
+        # peers with redirected captures. Zombies cannot create more files.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"live driver group {group} did not retire")
+            census = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                                    text=True, check=True, timeout=remaining)
+            live = False
+            for row in census.stdout.splitlines():
+                pgid, state = row.split()
+                if int(pgid) == group and not state.startswith("Z"):
+                    live = True
+            if not live:
+                return
+            time.sleep(min(.005, max(0, deadline - time.monotonic())))
+
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
                  timeout=60, python_delay=0, fail_at=""):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+        with ExitStack() as owner:
+            root = Path(tempfile.mkdtemp())
+            process = None
+            retired = False
+            disposal_deadline = None
+
+            def dispose_root(kind, failure, traceback):
+                try:
+                    if process is not None and not retired:
+                        self.wait_for_group_retirement(
+                            process.pid, disposal_deadline if disposal_deadline is not None
+                            else time.monotonic() + 5)
+                    shutil.rmtree(root)
+                except BaseException as cleanup:
+                    if failure is None:
+                        cleanup.add_note(f"retained driver root: {root}")
+                        raise
+                    failure.add_note(f"driver root disposal failed: {cleanup!r}")
+                    failure.add_note(f"retained driver root: {root}")
+
+            owner.push(dispose_root)
             # Exercise the shell gate's public commands without launching product
             # fixtures. A controlled clock checks elapsed reporting, not speed.
             command = '''#!/bin/sh
@@ -561,8 +603,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 with ExitStack() as streams:
                     process = subprocess.Popen(command, env=env, text=True, stdout=subprocess.PIPE,
                                                stderr=subprocess.PIPE, start_new_session=True)
-                    streams.callback(process.stdout.close)
-                    streams.callback(process.stderr.close)
+                    streams.push(lambda *exc: dispose_all(process.stdout.close, process.stderr.close))
                     try:
                         try:
                             if timing:
@@ -631,6 +672,11 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                             failure.add_note(f"stdout: {stdout!r}\nstderr: {stderr!r}")
                         except BaseException as cleanup:
                             failure.add_note(f"driver disposal failed: {cleanup!r}")
+                        try:
+                            self.wait_for_group_retirement(process.pid, disposal_deadline)
+                            retired = True
+                        except BaseException as cleanup:
+                            failure.add_note(f"driver group retirement unconfirmed: {cleanup!r}")
                         failure.add_note(f"part={part!r}, failing fixture={fail!r}, overlap={overlap!r}")
                         try:
                             peers = root / "peer-pids"
@@ -641,8 +687,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                         raise
                     result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
             finally:
-                for release in releases:
-                    os.close(release)
+                dispose_all(*(lambda fd=fd: os.close(fd) for fd in releases))
             return result, invocations.read_text().splitlines()
 
     def records(self, result):
@@ -734,6 +779,122 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                             killpg(pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+                        self.wait_for_group_retirement(pid, time.monotonic() + 5)
+                        for note in rejected.exception.__notes__:
+                            if note.startswith("retained driver root: "):
+                                shutil.rmtree(note.removeprefix("retained driver root: "))
+
+    def test_root_disposal_requires_the_whole_group_to_retire(self):
+        run, killpg, rmtree = subprocess.run, os.killpg, shutil.rmtree
+        mkdtemp = tempfile.mkdtemp
+        for delivery in ("delayed", "lost"):
+            with self.subTest(delivery=delivery):
+                group = None
+                root = None
+                observed_live = False
+
+                def make_root(*args, **kwargs):
+                    nonlocal root
+                    directory = mkdtemp(*args, **kwargs)
+                    root = Path(directory)
+                    return directory
+
+                def live_members():
+                    census = run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                                 text=True, check=True, timeout=5)
+                    return [row for row in census.stdout.splitlines()
+                            if int(row.split()[0]) == group and not row.split()[1].startswith("Z")]
+
+                def leader_only(pgid, sig):
+                    nonlocal group
+                    group = pgid
+                    # The held descendant has private log captures. Leader
+                    # reap and caller pipe EOF must not authorize root deletion.
+                    peers = dict(line.split() for line in (root / "peer-pids").read_text().splitlines())
+                    held = int(peers["dispatch_integration.py.release"])
+                    census = run(["ps", "-axo", "pid=,pgid="], capture_output=True,
+                                 text=True, check=True, timeout=5)
+                    for row in census.stdout.splitlines():
+                        pid, member_group = map(int, row.split())
+                        if member_group == group and pid != held:
+                            try:
+                                os.kill(pid, sig)
+                            except ProcessLookupError:
+                                pass
+
+                def census_then_deliver(*args, **kwargs):
+                    nonlocal observed_live
+                    result = run(*args, **kwargs)
+                    if group is not None and live_members():
+                        observed_live = True
+                        if delivery == "delayed":
+                            killpg(group, signal.SIGKILL)
+                    return result
+
+                def delete_after_retirement(path, *args, **kwargs):
+                    nonlocal root
+                    root = Path(path)
+                    self.assertFalse(live_members(), "root deleted while a descendant can still write")
+                    return rmtree(path, *args, **kwargs)
+
+                try:
+                    with patch("tempfile.mkdtemp", side_effect=make_root), patch(
+                            "os.killpg", side_effect=leader_only), patch(
+                            "subprocess.run", side_effect=census_then_deliver), patch(
+                            "shutil.rmtree", side_effect=delete_after_retirement):
+                        with self.assertRaisesRegex(AssertionError, "^injected failure at held_ready$") as rejected:
+                            self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
+                                          fail_at="held_ready")
+                    self.assertTrue(observed_live, "the counterexample must contain a live descendant")
+                    notes = rejected.exception.__notes__
+                    self.assertTrue(any(note.startswith("stdout:") for note in notes), notes)
+                    retained = [note.removeprefix("retained driver root: ") for note in notes
+                                if note.startswith("retained driver root: ")]
+                    if delivery == "lost":
+                        self.assertEqual(len(retained), 1, notes)
+                        root = Path(retained[0])
+                        self.assertTrue(root.is_dir())
+                        self.assertTrue(any("driver group retirement unconfirmed" in note for note in notes), notes)
+                    else:
+                        self.assertFalse(retained, notes)
+                        self.assertIsNotNone(root)
+                        self.assertFalse(root.exists())
+                finally:
+                    if group is not None:
+                        try:
+                            killpg(group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        deadline = time.monotonic() + 5
+                        while live_members():
+                            self.assertLess(time.monotonic(), deadline)
+                            time.sleep(.005)
+                    if root is not None and root.exists():
+                        rmtree(root)
+
+    def test_root_cleanup_failure_is_secondary_only_when_the_body_failed(self):
+        rmtree = shutil.rmtree
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                root = None
+
+                def refuse_cleanup(path):
+                    nonlocal root
+                    root = Path(path)
+                    raise OSError("injected root cleanup failure")
+
+                try:
+                    with patch("shutil.rmtree", side_effect=refuse_cleanup):
+                        with self.assertRaisesRegex(
+                                AssertionError if failed else OSError,
+                                "injected failure at held_ready" if failed else "injected root cleanup failure") as rejected:
+                            self.run_part("parallel", overlap=True, hold="dispatch_integration.py",
+                                          fail_at="held_ready" if failed else "")
+                    self.assertTrue(root.is_dir())
+                    self.assertIn(f"retained driver root: {root}", rejected.exception.__notes__)
+                finally:
+                    if root is not None:
+                        rmtree(root)
 
     def test_elapsed_belongs_to_invocation_not_inventory_wait(self):
         for part in ("callers", "parallel"):
