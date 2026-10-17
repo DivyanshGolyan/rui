@@ -1,8 +1,5 @@
 name: On-demand macOS qualification
 on:
-  push:
-    branches: [hosted-macos-qualification]
-    paths: [.github/workflows/qualify-macos.yml]
   workflow_dispatch:
     inputs:
       ref:
@@ -11,7 +8,7 @@ on:
         default: main
         type: string
       suite:
-        description: Existing checks; resources includes the 20-wave footprint workload
+        description: 'Existing suites: footprint=1 job, resources=10, native=4, all=14'
         required: true
         default: footprint
         type: choice
@@ -19,11 +16,6 @@ on:
 
 permissions:
   contents: read
-
-# Independent requests retain their evidence; never cancel a running measurement.
-concurrency:
-  group: qualify-macos-${{ github.run_id }}
-  cancel-in-progress: false
 
 jobs:
   plan:
@@ -36,11 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.ref || 'c4224bbbb8f33743f430be07e349933e42f3423a' }}
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - id: plan
         env:
-          SUITE: ${{ inputs.suite || 'footprint' }}
+          SUITE: ${{ inputs.suite }}
         run: |
           set -euo pipefail
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -111,10 +103,14 @@ jobs:
           test "$(uname -m)" = arm64
           echo "Tested SHA $(git rev-parse HEAD); hosted $(sw_vers -productVersion)/$(uname -m). VM-specific resource evidence, not personal-Mac equivalence." >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.github/actions/setup
+        id: setup
         with:
           targets: ${{ matrix.resource && '["measurement-check"]' || toJSON(matrix.targets) }}
           check-part: ${{ matrix.part }}
+      - name: Record the compiler used by every suite
+        run: zig version | tee "$EVIDENCE/zig-version.txt"
       - name: Existing measurement setup and tests
+        id: measurement
         if: ${{ matrix.resource }}
         run: |
           set -euo pipefail
@@ -122,6 +118,7 @@ jobs:
           GOTOOLCHAIN=local go -C tests/qualification mod download
           zig build measurement-check -j2 --summary all 2>&1 | tee "$EVIDENCE/measurement-check.log"
       - name: Execute the existing gates without changing their verdicts
+        id: gates
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           PART: ${{ matrix.part }}
@@ -130,24 +127,35 @@ jobs:
           set -euo pipefail
           if [ "$RESOURCE" = true ]; then
             target=$(python3 -c 'import json,os; print(json.loads(os.environ["TARGETS"])[0])')
-            # stdout is the existing runner's JSON; stderr retains the build log.
+            arguments=()
+            stdout=result.json
+            # This existing runner publishes a summary plus compressed evidence
+            # to files instead of stdout; keep both under the upload directory.
+            if [ "$target" = measure-execution-service ]; then
+              arguments=(-- --output "$EVIDENCE/result.json")
+              stdout=runner.log
+            fi
             trap 'cat "$EVIDENCE/build.log" >&2' EXIT
-            zig build "$target" -j2 --summary all 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
+            zig build "$target" -j2 --summary all "${arguments[@]}" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/$stdout"
           else
             python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" 2>&1 | tee "$EVIDENCE/gates.log"
           fi
       - name: Retain raw measurement diagnostics, never Stores or payload files
+        id: retention
         if: ${{ always() && matrix.resource }}
         run: |
           python3 - <<'PY'
-          import json, os, pathlib, re, shutil, stat
+          import json, os, pathlib, re, shutil, stat, tempfile
           destination = pathlib.Path(os.environ['EVIDENCE'])
+          destination.mkdir(parents=True, exist_ok=True)
           receipt = {'copied': [], 'omitted': [], 'limits': '4 MiB/file, 64 MiB total'}
           remaining = 64 * 1024 * 1024
           # Only fixture-created roots and known diagnostic labels. Do not upload
           # whole temporary trees: they also contain Store, HOME and result data.
-          labels = re.compile(r'(?:.*footprint.*\.txt(?:\.[a-z-]+\.json|\.json)?|host-(?:heap|vmmap)\.txt|(?:controller-)?facts\.jsonl)')
-          for root in sorted(pathlib.Path('/private/tmp').glob('rui-*')):
+          labels = re.compile(r'(?:.*footprint.*\.(?:txt|json)(?:\.[a-z-]+\.json|\.json)?|host-(?:heap|vmmap)\.txt|(?:controller-)?facts\.jsonl)')
+          parents = {pathlib.Path('/private/tmp').resolve(), pathlib.Path(tempfile.gettempdir()).resolve()}
+          roots = sorted({root for parent in parents for root in parent.glob('rui-*')})
+          for root in roots:
               if root.is_symlink() or not root.is_dir():
                   continue
               for directory, children, names in os.walk(root, followlinks=False):
@@ -172,7 +180,15 @@ jobs:
           (destination / 'retention.json').write_text(json.dumps(receipt, indent=2))
           PY
           { sysctl vm.swapusage; memory_pressure; df -h /private/tmp; } > "$EVIDENCE/environment-after.txt"
+      - name: Retain setup's actual native-tool identity even if setup failed
+        if: ${{ always() }}
+        run: |
+          mkdir -p "$EVIDENCE"
+          if [ -f "$RUNNER_TEMP/rui-native-tools.txt" ]; then
+            cp "$RUNNER_TEMP/rui-native-tools.txt" "$EVIDENCE/native-tools.txt"
+          fi
       - name: Upload evidence even after a failed qualification
+        id: evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -180,3 +196,24 @@ jobs:
           path: ${{ env.EVIDENCE }}
           retention-days: 3
           if-no-files-found: warn
+      - name: Summarize outcome and evidence
+        if: ${{ always() }}
+        env:
+          NAME: ${{ matrix.name }}
+          PART: ${{ matrix.part }}
+          SETUP: ${{ steps.setup.outcome }}
+          MEASUREMENT: ${{ steps.measurement.outcome }}
+          GATES: ${{ steps.gates.outcome }}
+          RETENTION: ${{ steps.retention.outcome }}
+          ARTIFACT: ${{ steps.evidence.outputs.artifact-url }}
+        run: |
+          python3 - <<'PY'
+          import os
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output:
+              print(f"\n### {os.environ['NAME']} (partition {os.environ['PART']})", file=output)
+              for key in ('SETUP', 'MEASUREMENT', 'GATES', 'RETENTION'):
+                  print(f"- {key.lower()}: {os.environ[key] or 'unavailable'}", file=output)
+              artifact = os.environ['ARTIFACT']
+              print(f'\n[Evidence (expires after three days)]({artifact})' if artifact else '\nArtifact unavailable.', file=output)
+              print('\nInspect the failed step and retained diagnostics before rerunning. A skipped gate or missing measurement is not acceptance; hosted measurements describe this VM only.', file=output)
+          PY
