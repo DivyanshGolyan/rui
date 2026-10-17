@@ -295,6 +295,21 @@ pub const CustodyPool = struct {
         return !record.delivered.load(.acquire);
     }
 
+    /// Custody an Attempt holds: attached for execution or detached for
+    /// cleanup. Unlike `occupied`, excludes the execution owner's in-flight
+    /// admission reservation, which only probes capacity until admission
+    /// attaches or releases it, so concurrent observers see no phantom custody.
+    pub fn held(self: *const CustodyPool) usize {
+        var count: usize = 0;
+        for (self.records) |*record| {
+            switch (record.state.load(.acquire)) {
+                .attached, .detached => count += 1,
+                .free, .reserved => {},
+            }
+        }
+        return count;
+    }
+
     pub fn occupied(self: *const CustodyPool) usize {
         var count: usize = 0;
         for (self.records) |*record| {
