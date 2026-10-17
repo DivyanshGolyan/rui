@@ -1,0 +1,95 @@
+name: Temporary hosted counter diagnostic
+on:
+  push:
+    branches: [hosted-macos-qualification]
+    paths:
+      - .github/workflows/macos-counter-trial.yml
+      - tests/ci/counter-trial/**
+permissions:
+  contents: read
+jobs:
+  diagnostic:
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - run: echo "EVIDENCE=$RUNNER_TEMP/counter-evidence" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Retain the exact existing diagnostic sources outside the candidate
+        run: |
+          mkdir -p "$EVIDENCE/sources"
+          cp tests/ci/counter-trial/* "$EVIDENCE/sources/"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: bef9cd52123e0dfbfa9cca1f97df766a056e2650
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["measurement-check"]'
+      - name: Record source and VM and build the uninstrumented runtime
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            git status --porcelain
+            uname -a
+            sw_vers
+            sysctl hw.model hw.ncpu hw.memsize vm.swapusage
+            memory_pressure
+            xcodebuild -version
+            zig version
+            go version
+            shasum -a 256 tests/qualification/go.sum
+          } | tee "$EVIDENCE/environment.txt"
+          test "$(uname -m)" = arm64
+          GOTOOLCHAIN=local go -C tests/qualification mod download
+          zig build -Doptimize=ReleaseSmall -j2 --summary all 2>&1 | tee "$EVIDENCE/build.log"
+          shasum -a 256 zig-out/bin/rui | tee "$EVIDENCE/binary-sha256.txt"
+      - name: Compile and run the existing one-wave diagnostic using a Go overlay
+        run: |
+          set -euo pipefail
+          cc -Wall -Wextra -Werror -O0 -g0 "$EVIDENCE/sources/probe.c" -o "$RUNNER_TEMP/counter-probe"
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path.cwd() / 'tests/qualification'
+          evidence = pathlib.Path(os.environ['EVIDENCE'])
+          replacements = {
+              str(root / 'measurement/measurement.go'): str(evidence / 'sources/measurement-diagnostic.go'),
+              str(root / 'measurement/diagnostic_command.go'): str(evidence / 'sources/diagnostic_command.go'),
+              str(root / 'model-output/diagnostic_test.go'): str(evidence / 'sources/diagnostic_test.go'),
+          }
+          (evidence / 'overlay.json').write_text(json.dumps({'Replace': replacements}, indent=2))
+          PY
+          GOTOOLCHAIN=local go -C tests/qualification test -c -overlay "$EVIDENCE/overlay.json" -o "$RUNNER_TEMP/counter.test" ./model-output
+          export RUI_COUNTER_BINARY="$PWD/zig-out/bin/rui"
+          export RUI_COUNTER_OUTPUT="$RUNNER_TEMP/rui-counter-output"
+          export RUI_COUNTER_PROBE="$RUNNER_TEMP/counter-probe"
+          "$RUNNER_TEMP/counter.test" -test.run '^TestCounterDiagnostic$' -test.count=1 -test.v 2>&1 | tee "$EVIDENCE/diagnostic.log"
+      - name: Preserve diagnostic receipts without Store or workload payloads
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, shutil
+          source = pathlib.Path(os.environ['RUNNER_TEMP']) / 'rui-counter-output'
+          destination = pathlib.Path(os.environ['EVIDENCE']) / 'output'
+          for path in source.rglob('*'):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              if path.name != 'diagnostic-result.json' and 'footprint' not in path.name and path.name != 'controller-facts.jsonl':
+                  continue
+              relative = path.relative_to(source)
+              if any(part in ('store', 'home') for part in relative.parts):
+                  continue
+              target = destination / relative
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(path, target)
+          PY
+          { sysctl vm.swapusage; memory_pressure; } > "$EVIDENCE/environment-after.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: hosted-counter-diagnostic-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          retention-days: 3
