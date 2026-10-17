@@ -6753,55 +6753,92 @@ test "file-free retirement releases intake places before acceptance with occupie
 }
 
 test "retired ordinary capture still consumes its intake classification and resource place" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    var lease: platform.StoreLease = undefined;
-    lease.paths = .{};
-    try lease.paths.scratch.set(root);
-    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
-    var intake: Intake = .{ .host = &host };
-    host.intake = &intake;
-    defer intake.exchanges.deinit(host.allocator);
-    defer {
-        for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
-        std.debug.assert(host.scratch_used.load(.acquire) == 0);
-    }
-    for (0..host.intake_capacity) |_| {
+    for (std.enums.values(enum { ingress, retained_scratch, report })) |custody| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.scratch.set(root);
+        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+        var intake: Intake = .{ .host = &host };
+        host.intake = &intake;
+        defer intake.exchanges.deinit(host.allocator);
+        defer {
+            for (intake.exchanges.items) |exchange| {
+                if (exchange.retained_scratch) |*scratch| scratch.resources.?.removal = .native;
+                exchange.cleanup_retry_at = 0;
+                std.debug.assert(exchange.destroy());
+            }
+            std.debug.assert(host.scratch_used.load(.acquire) == 0);
+        }
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+        for (0..host.intake_capacity) |_| {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try intake.accept(sockets[0]);
+            intake.exchanges.items[intake.exchanges.items.len - 1].route = .message;
+        }
+        const retained = intake.exchanges.items[0];
+        var retained_fd: ?c_int = null;
+        const budget: protocol.ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
+        switch (custody) {
+            .ingress => {
+                const ingress = try host.allocator.create(protocol.Ingress);
+                ingress.* = protocol.Ingress.init(host.allocator, .{
+                    .io = host.io,
+                    .fd = retained.fd,
+                    .content_length = 4096,
+                    .scratch_path = root,
+                    .request_number = 7,
+                    .retained_scratch = &retained.retained_scratch,
+                    .scratch_budget = budget,
+                    .expected_kind = .message,
+                });
+                retained.ingress = ingress;
+                // Seal the content file, but leave request framing incomplete.
+                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+            },
+            .retained_scratch, .report => {
+                const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
+                try file.writeStreamingAll(host.io, "abc");
+                try std.testing.expect(budget.reserve(3));
+                retained_fd = file.handle;
+                if (custody == .retained_scratch) {
+                    // Failed reclaim must stay off intake, even with no ingress left.
+                    retained.retained_scratch = named_scratch.Owner.init(host.io, file, null, "retained", budget, 3, .injected_failure);
+                } else {
+                    retained.route = .inspect;
+                    const reply = try retained.ensureReply();
+                    try reply.setReport(.{ .io = host.io, .file = file, .length = 3, .charged = 3, .budget = budget });
+                }
+            },
+        }
+        retained.state = .retired;
         var sockets: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
         defer _ = std.c.close(sockets[1]);
         try intake.accept(sockets[0]);
-        intake.exchanges.items[intake.exchanges.items.len - 1].route = .message;
+        const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
+        try writeAll(host.io, sockets[1], "POST /v1/message HTTP/1.1\r\n");
+        try std.testing.expectError(error.ClientCapacity, successor.read());
+        intake.serviceWorkers();
+        intake.retireExchanges();
+        try std.testing.expectEqual(host.intake_capacity + 1, intake.exchanges.items.len);
+        try std.testing.expectEqual(.retired, retained.state);
+        try std.testing.expectEqual(@as(u64, 3), host.scratch_used.load(.acquire));
+        if (retained_fd) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFL) >= 0);
+        // Only worker cleanup releases the file and charge, once reclamation can
+        // succeed; the occupied lanes above must not perform it on intake.
+        if (retained.retained_scratch) |*scratch| scratch.resources.?.removal = .native;
+        retained.job = .cleanup;
+        retained.state = try retained.work();
+        try std.testing.expectEqual(.closed, retained.state);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        if (retained_fd) |fd| try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(fd, std.c.F.GETFL));
     }
-    const retained = intake.exchanges.items[0];
-    const ingress = try host.allocator.create(protocol.Ingress);
-    ingress.* = protocol.Ingress.init(host.allocator, .{
-        .io = host.io,
-        .fd = retained.fd,
-        .content_length = 4096,
-        .scratch_path = root,
-        .request_number = 7,
-        .retained_scratch = &retained.retained_scratch,
-        .scratch_budget = .{ .used = &host.scratch_used, .limit = 9000 },
-        .expected_kind = .message,
-    });
-    retained.ingress = ingress;
-    // Seal the content file, but leave request framing incomplete.
-    try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
-    retained.state = .retired;
-    var sockets: [2]c_int = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
-    defer _ = std.c.close(sockets[1]);
-    try intake.accept(sockets[0]);
-    const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
-    try writeAll(host.io, sockets[1], "POST /v1/message HTTP/1.1\r\n");
-    try std.testing.expectError(error.ClientCapacity, successor.read());
-    intake.retireExchanges();
-    try std.testing.expectEqual(host.intake_capacity + 1, intake.exchanges.items.len);
-    try std.testing.expectEqual(.retired, retained.state);
-    try std.testing.expectEqual(@as(u64, 3), host.scratch_used.load(.acquire));
 }
 
 test "shutdown fences every unhanded route while preserving request and reply custody" {
