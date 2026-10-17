@@ -460,6 +460,8 @@ def main():
             ambiguous_bodies = (
                 valid_body.replace(b'"store": ', b'"store": "/wrong", "store": ', 1),
                 valid_body.replace(b'"bash": true', b'"bash": false, "bash": true'),
+                *(valid_body.replace(b'"capabilities":', f'"{field}": "{value}", "capabilities":'.encode())
+                  for field in ("intake_capacity", "descriptor_limit") for value in ("010", "+10", "1_0")),
             )
             for response in (
                 b"HTTP/1.1 bogus OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{}",
