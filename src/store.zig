@@ -4061,7 +4061,7 @@ pub const Store = struct {
     }
 
     fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
+        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
@@ -4076,6 +4076,8 @@ pub const Store = struct {
             const revision = c.sqlite3_column_int64(statement, 5);
             if (revision <= 0) return error.CorruptStore;
             try capture.appendFmt(",\"settings_revision\":\"{d}\"", .{revision});
+            try capture.append(",\"request_id\":");
+            try appendNullableColumnString(statement, 6, 256, capture);
             try capture.append("}");
         }
     }
@@ -14316,7 +14318,8 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
         defer tmp.cleanup();
         const detail = "{\"reason\":\"UnsupportedMessagePhase\",\"stage\":\"item\",\"byte_offset\":\"37\",\"output_index\":1}";
         var failure = ModelFailure{ .code = "unsupported_provider_output", .diagnostic = detail };
-        try failure.request_id.set("safe-request-id");
+        const request_id = if (fault == .import) "" else "request-\"quoted\"\\path";
+        try failure.request_id.set(request_id);
         var binding: AttemptBinding = undefined;
         var original_content: u64 = 0;
         {
@@ -14352,11 +14355,18 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
             var report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
             defer report.deinit();
             const full = report.value.object.get("full").?.object;
-            const resolution = full.get("model_operations").?.array.items[0].object.get("resolution").?.object;
+            const operation = full.get("model_operations").?.array.items[0].object;
+            const resolution = operation.get("resolution").?.object;
+            try std.testing.expect(operation.contains("request_id"));
+            if (request_id.len == 0) {
+                try std.testing.expect(operation.get("request_id").? == .null);
+            } else {
+                try std.testing.expectEqualStrings(request_id, operation.get("request_id").?.string);
+            }
             try std.testing.expectEqualStrings("unsupported_provider_output", resolution.get("code").?.string);
             try std.testing.expectEqualStrings(detail, resolution.get("content").?.object.get("text").?.string);
             try std.testing.expect(full.get("turns").?.array.items[0].object.get("outcome").?.object.get("content").? == .null);
-            try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id='safe-request-id'"));
+            try std.testing.expectEqual(@as(u64, if (request_id.len == 0) 0 else 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NOT NULL"));
             try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_output_item"));
             try expectActivityOutcome(&storage, "direct/diagnostic", binding, "unsupported_provider_output");
         }

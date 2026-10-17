@@ -1508,6 +1508,7 @@ def main():
             "must not publish",
             served_model="model-body",
         )
+        contradictory_request_id = 'contradictory-"quoted"\\path'
         contradictory_endpoint = SuccessEndpoint(
             [
                 ResponseSpec(
@@ -1515,7 +1516,7 @@ def main():
                     {
                         "OpenAI-Model": "model-openai-header",
                         "X-OpenAI-Model": "model-x-openai-header",
-                        "X-Request-Id": "contradictory-request",
+                        "X-Request-Id": contradictory_request_id,
                     },
                 )
             ]
@@ -1560,7 +1561,7 @@ def main():
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, "contradictory-request")
+        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, contradictory_request_id)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1581,7 +1582,9 @@ def main():
             "inspect-session", "--store", contradictory_store,
             "--session", "direct/contradictory-evidence", "--profile", "full",
         )
-        resolution = report["full"]["model_operations"][0]["resolution"]
+        operation = report["full"]["model_operations"][0]
+        assert operation["request_id"] == contradictory_request_id, operation
+        resolution = operation["resolution"]
         assert resolution["content"] is not None, resolution
         assert json.loads(resolution["content"]["text"]) == {
             "reason": "ContradictoryProviderOutput", "stage": "response",
@@ -1821,7 +1824,7 @@ def main():
         ])
         invalid_endpoint = SuccessEndpoint(
             [
-                first_sse[:-1],
+                ResponseSpec(first_sse[:-1], {}),
                 contradictory,
                 changed_terminal,
                 duplicate_identity,
@@ -1883,8 +1886,14 @@ def main():
             ).fetchone()[0] == 0
             assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
             assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
-            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == f"request-{index + 1}"
+            expected_request_id = None if index == 0 else f"request-{index + 1}"
+            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
             database.close()
+            before_operation = command(
+                "inspect-session", "--store", invalid_store,
+                "--session", f"direct/invalid-{index}", "--profile", "full",
+            )["full"]["model_operations"][0]
+            assert before_operation["request_id"] == expected_request_id, before_operation
             stop_host(invalid_host)
             processes.remove(invalid_host)
             # Rejection evidence must survive scratch disposal and Host restart,
@@ -1895,7 +1904,10 @@ def main():
                 "inspect-session", "--store", invalid_store,
                 "--session", f"direct/invalid-{index}", "--profile", "full",
             )
-            resolution = report["full"]["model_operations"][0]["resolution"]
+            operation = report["full"]["model_operations"][0]
+            assert operation["operation"] == before_operation["operation"], operation
+            assert operation["request_id"] == expected_request_id, operation
+            resolution = operation["resolution"]
             assert resolution["code"] == expected_code, resolution
             assert resolution["content"] is not None, resolution
             detail = json.loads(resolution["content"]["text"])
