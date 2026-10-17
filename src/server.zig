@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
@@ -133,6 +134,8 @@ const Host = struct {
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     intake: ?*Intake = null,
+    intake_capacity: usize = descriptor_capacity.default_intake,
+    descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
     trace_run_ns: u64 = 0,
@@ -310,18 +313,27 @@ const Intake = struct {
             // No successful header has left while preparation is fallible.
             reply.deinit();
             const status: u16 = switch (err) {
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => 503,
                 error.ScratchCapacityExhausted => 507,
                 error.UnsupportedControl => 501,
                 error.RequestIdentityExhausted => 500,
                 else => 400,
             };
             const code = switch (err) {
+                error.ClientCapacity => "ordinary_capacity_exhausted",
+                error.ControlCapacity => "control_capacity_exhausted",
+                error.DiscoveryCapacity => "discovery_capacity_exhausted",
                 error.RequestTooLarge => if (self.route == .host_info) "DiscoveryRequestTooLarge" else "control_request_too_large",
                 error.RequestIdentityExhausted => "request_identity_exhausted",
                 error.UnsupportedControl => "control_surface_enters_in_later_slice",
                 else => @errorName(err),
             };
-            respondStatic(self.host.io, reply, status, if (err == error.UnsupportedControl) "unsupported" else "invocation_error", code);
+            const kind = switch (err) {
+                error.ClientCapacity, error.ControlCapacity, error.DiscoveryCapacity => "busy",
+                error.UnsupportedControl => "unsupported",
+                else => "invocation_error",
+            };
+            respondStatic(self.host.io, reply, status, kind, code);
             self.state = .reply;
         }
 
@@ -348,6 +360,25 @@ const Intake = struct {
                     const header = self.header_bytes.items;
                     if (self.route == null and std.mem.endsWith(u8, header, "\r\n")) {
                         self.route = try HeaderReader.parseRoute(header[0 .. header.len - 2]);
+                        if (self.host.intake_capacity < descriptor_capacity.default_intake) {
+                            var ordinary: usize = 0;
+                            var control: usize = 0;
+                            var discovery: usize = 0;
+                            for (self.host.intake.?.exchanges.items) |peer| {
+                                if (peer.route) |route| {
+                                    if (route.isControl()) {
+                                        control += 1;
+                                    } else if (route == .host_info) {
+                                        discovery += 1;
+                                    } else ordinary += 1;
+                                }
+                            }
+                            if (self.route.?.isControl()) {
+                                if (control > 2) return error.ControlCapacity;
+                            } else if (self.route == .host_info) {
+                                if (discovery > 1) return error.DiscoveryCapacity;
+                            } else if (ordinary > self.host.intake_capacity) return error.ClientCapacity;
+                        }
                         if (!self.route.?.isControl() and self.route != .host_info)
                             traceSubject(self.host, "ordinary_classification_released", "route", @tagName(self.route.?));
                     }
@@ -648,6 +679,24 @@ const Intake = struct {
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             // Accept a bounded batch, then return to existing exchanges.
             for (0..16) |_| {
+                if (self.host.intake_capacity < descriptor_capacity.default_intake and
+                    self.exchanges.items.len >= self.host.intake_capacity + 3)
+                {
+                    // Unknown routes cannot hold all reserved progress places.
+                    // Release one before accepting its successor: never acquire
+                    // an unbudgeted descriptor or evict classified work. Stop
+                    // this batch so survivors get a read turn before turnover.
+                    for (self.exchanges.items, 0..) |peer, peer_index| {
+                        if (peer.state == .header and peer.route == null) {
+                            const destroyed = peer.destroy();
+                            std.debug.assert(destroyed);
+                            _ = self.exchanges.orderedRemove(peer_index);
+                            break;
+                        }
+                    }
+                    accept_retry_at = @as(i128, nowNs(self.host)) + 100 * std.time.ns_per_ms;
+                    break;
+                }
                 const fd = self.acceptSocket(listener.socket.handle) catch |err| switch (err) {
                     error.NoClient => break,
                     error.AcceptCapacity => {
@@ -672,6 +721,10 @@ const Intake = struct {
                     self.host.launch_mutex.unlock(self.host.io);
                     break;
                 }
+                // Give a newly acquired reserved place a classification turn
+                // before considering it for pressure-driven turnover.
+                if (self.host.intake_capacity < descriptor_capacity.default_intake and
+                    self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
         }
     }
@@ -735,23 +788,30 @@ pub fn serve(
         .flags = 0,
     };
     std.posix.sigaction(.CHLD, &child_action, null);
-    const descriptor_observation = try descriptor_limit.observe(io);
-    const descriptor_requirement = try descriptor_capacity.calculate(
+    var descriptor_observation = try descriptor_limit.observe(io);
+    var descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
         active_capacity,
-        100, // Supported burst, not an admission cap.
+        descriptor_capacity.default_intake,
         3, // Two controls and concurrent discovery.
         provider_endpoint != null,
         authentication != null,
         builtin.os.tag,
     );
-    descriptor_capacity.validate(
-        descriptor_requirement.total,
-        descriptor_observation.soft_limit,
-    ) catch |err| {
+    if (descriptor_observation.soft_limit) |limit| {
+        if (limit < descriptor_requirement.total) {
+            descriptor_limit.raise(descriptor_requirement.total);
+            descriptor_observation = try descriptor_limit.observe(io);
+        }
+    }
+    const intake_capacity = descriptor_capacity.fitIntake(descriptor_requirement.total, descriptor_observation.soft_limit) catch |err| {
         if (err == error.DescriptorCapacityInsufficient) {
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d}\n",
+                "rui: Host cannot start: descriptor soft limit {d} is below the minimum intake requirement {d} (10 ordinary clients). Rui already tried raising it. Inspect limits with ulimit -Sn and ulimit -Hn; raise the hard limit in your system/session settings (ask your administrator if needed), then retry rui host start.\n",
+                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (descriptor_capacity.default_intake - descriptor_capacity.minimum_intake) },
+            );
+            stderr.print(
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -767,6 +827,20 @@ pub fn serve(
         }
         return err;
     };
+    descriptor_requirement = try descriptor_capacity.calculate(
+        descriptor_observation.open_descriptors,
+        active_capacity,
+        intake_capacity,
+        3,
+        provider_endpoint != null,
+        authentication != null,
+        builtin.os.tag,
+    );
+    var descriptor_limit_buffer: [32]u8 = undefined;
+    const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
+        try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
+    else
+        "unlimited";
     var lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
@@ -781,13 +855,40 @@ pub fn serve(
     };
     defer if (diagnostics) |*writer| writer.close();
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
+    if (diagnostics) |*writer| {
+        var detail: [256]u8 = undefined;
+        writer.record("capacity", try std.fmt.bufPrint(&detail, "ordinary_intake={d} default_intake=100 minimum_intake=10 descriptor_requirement={d} descriptor_limit={s}", .{
+            intake_capacity, descriptor_requirement.total, descriptor_limit_text,
+        }));
+    }
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
-    var storage = try store_module.Store.openWithOptions(
+    var found_schema_version: u32 = store_module.schema_version;
+    var storage = store_module.Store.openWithOptions(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib },
-    );
+        .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib, .found_schema_version = &found_schema_version },
+    ) catch |err| {
+        if (err == error.WrongStoreVersion) {
+            var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
+            var output = std.Io.Writer.fixed(&message);
+            const reason = if (found_schema_version == store_module.schema_version)
+                "unsupported or missing Store wire metadata"
+            else
+                "unsupported Store format";
+            try output.print("rui: {s} at ", .{reason});
+            var path_text: TerminalText = .{ .mode = .line };
+            try path_text.feed(&output, lease.paths.store.slice());
+            try path_text.finish(&output);
+            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
+                found_schema_version, store_module.schema_version, protocol.wire_version,
+            });
+            const text = output.buffered();
+            _ = rui_write_readiness(2, text.ptr, text.len);
+            if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
+        }
+        return err;
+    };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     try storage.validateRetryWaits(faults.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
@@ -817,6 +918,8 @@ pub fn serve(
     var host = Host{
         .io = io,
         .allocator = allocator,
+        .intake_capacity = intake_capacity,
+        .descriptor_soft_limit = descriptor_observation.soft_limit,
         .lease = &lease,
         .store = &storage,
         .faults = faults,
@@ -878,15 +981,11 @@ pub fn serve(
         if (provider_endpoint != null) provider.deinitialize();
     }
     var ready: protocol.ResponseBuffer = .{};
-    var descriptor_limit_buffer: [32]u8 = undefined;
-    const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
-        try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
-    else
-        "unlimited";
-    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
+    try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
         lease.paths.store.slice(),
         lease.paths.socket.slice(),
         active_capacity,
+        intake_capacity,
         descriptor_requirement.total,
         descriptor_limit_text,
         @sizeOf(execution.CustodyRecord),
@@ -3543,8 +3642,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try response.appendJsonString(host.lease.paths.store.slice());
             try response.append(",\"instance\":\"");
             try response.append(&std.fmt.bytesToHex(host.instance, .lower));
-            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
+            try response.appendFmt("\",\"active_capacity\":\"{d}\",\"intake_capacity\":\"{d}\",\"descriptor_limit\":\"", .{
                 host.custody.records.len,
+                host.intake_capacity,
+            });
+            if (host.descriptor_soft_limit) |limit| try response.appendFmt("{d}", .{limit}) else try response.append("unlimited");
+            try response.appendFmt("\",\"capabilities\":{{\"bash\":true,\"model\":{s},\"managed_authentication\":{s}}}}}", .{
                 if (host.provider_endpoint != null) "true" else "false",
                 if (host.provider_endpoint != null and host.authentication != null) "true" else "false",
             });

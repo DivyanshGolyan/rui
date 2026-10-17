@@ -4,6 +4,7 @@
 import errno
 import json
 import fcntl
+import hashlib
 import os
 import pathlib
 import pty
@@ -12,13 +13,15 @@ import resource
 import select
 import shlex
 import signal
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import termios
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import canonical_fixture_root, start_ready_process, stop_process
 import codex_integration as codex_fixture
 
 
@@ -30,6 +33,7 @@ PTY_OUTPUT_LIMIT = 1024 * 1024
 LAUNCH_PROBE = r"""
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,8 +41,28 @@ LAUNCH_PROBE = r"""
 #include <unistd.h>
 
 extern int rui_launch_detached(const char *, const char *const *, size_t);
+extern int rui_launch_detached_observed(const char *, const char *const *, size_t, int *);
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "startup-failure") == 0) {
+        const char failure[] = "error: StartupProbeFailed (exit status 1)\n";
+        if (write(2, failure, sizeof(failure) - 1) != sizeof(failure) - 1) return 108;
+        return 1;
+    }
+    if (argc == 3 && strcmp(argv[1], "closed-startup") == 0) {
+        int mask = atoi(argv[2]);
+        for (int fd = 0; fd < 3; fd++) if (mask & (1 << fd)) close(fd);
+        const char *child_argv[] = {argv[0], "startup-failure", NULL};
+        int reader = -1;
+        if (rui_launch_detached_observed(argv[0], child_argv, 2, &reader)) return 109;
+        struct pollfd ready = {.fd = reader, .events = POLLIN};
+        if (poll(&ready, 1, 3000) <= 0) return 110;
+        char data[128];
+        ssize_t count = read(reader, data, sizeof(data));
+        close(reader);
+        const char expected[] = "error: StartupProbeFailed (exit status 1)\n";
+        return count == sizeof(expected) - 1 && !memcmp(data, expected, sizeof(expected) - 1) ? 0 : 111;
+    }
     if (argc == 2 && strcmp(argv[1], "launch") == 0) {
         int pipe_fds[2];
         if (pipe(pipe_fds) != 0) return 90;
@@ -102,6 +126,10 @@ def assert_launch_adapter(root, env):
     result = subprocess.run([actor, "launch"], cwd=root, env=probe_env,
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result
+    for mask in range(1, 8):
+        result = subprocess.run([actor, "closed-startup", str(mask)], env=probe_env,
+                                capture_output=True, timeout=5)
+        assert result.returncode == 0, (mask, result)
     expected = [str(actor), "witness", "", "two words", "--not-a-launch-option", "final",
                 probe_env["RUI_LAUNCH_PROBE_VALUE"], "", env["HOME"], "/", "closed"]
     deadline = time.monotonic() + 5
@@ -236,6 +264,216 @@ def lower_descriptor_limit():
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
+def startup_limits(root, env):
+    for name, hard in (("soft-256", False), ("hard-256", True)):
+        store = root / name
+        def limits():
+            _, inherited_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256 if hard else inherited_hard))
+        try:
+            started = run_start(store, env, preexec_fn=limits)
+            assert started.returncode == 0, started.stderr
+            reported = status(store, env)
+            assert "Host: ready" in reported and "Active capacity: 8" in reported, reported
+            match = re.search(r"Concurrent intake: (\d+) ordinary", reported)
+            assert match, reported
+            capacity = int(match[1])
+            assert (10 <= capacity < 100) if hard else capacity == 100, reported
+            if hard:
+                assert "reduced by descriptor limit" in reported, reported
+                socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
+                borrowers = []
+                try:
+                    for _ in range(capacity):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
+                    # Discovery is prepared by intake after reading preceding
+                    # borrowers, so its reply establishes their classification.
+                    assert "Host: ready" in status(store, env)
+                    with socket.socket(socket.AF_UNIX) as peer:
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
+                        response = bytearray()
+                        while chunk := peer.recv(4096):
+                            response.extend(chunk)
+                        header, body = bytes(response).split(b"\r\n\r\n", 1)
+                        assert header.startswith(b"HTTP/1.1 503 "), response
+                        assert json.loads(body) == {
+                            "version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
+                        }, response
+                    assert "Host: ready" in status(store, env)
+                    for _ in range(3):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                    assert "Host: ready" in status(store, env), "unknown routes blocked discovery"
+                    for _ in range(3):
+                        borrowers.pop().close()
+                    for _ in range(2):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n")
+                        assert "Host: ready" in status(store, env)
+                        peer.setblocking(False)
+                        try:
+                            assert peer.recv(1, socket.MSG_PEEK) != b"", "classified control was evicted"
+                        except BlockingIOError:
+                            pass
+                        peer.settimeout(3)
+                    for route in (b"/v1/control/session-stop", b"/v1/control/unknown"):
+                        with socket.socket(socket.AF_UNIX) as excess:
+                            excess.settimeout(3)
+                            excess.connect(socket_path)
+                            excess.sendall(b"POST " + route + b" HTTP/1.1\r\n")
+                            response = bytearray()
+                            while chunk := excess.recv(4096):
+                                response.extend(chunk)
+                            header, body = bytes(response).split(b"\r\n\r\n", 1)
+                            assert header.startswith(b"HTTP/1.1 503 "), response
+                            assert json.loads(body) == {
+                                "version": "1", "type": "busy", "code": "control_capacity_exhausted",
+                            }, response
+                    peer = socket.socket(socket.AF_UNIX)
+                    borrowers.append(peer)
+                    peer.connect(socket_path)
+                    assert "Host: ready" in status(store, env), "unknown route blocked reserved discovery"
+                    for _ in range(3):
+                        borrowers.pop().close()
+                    # One stalled discovery must not borrow either control
+                    # place. Exercise both request-line and body stalls.
+                    fields = b"Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n"
+                    for tail in (b"", fields + b"{"):
+                        discovery = socket.socket(socket.AF_UNIX)
+                        borrowers.append(discovery)
+                        discovery.settimeout(3)
+                        discovery.connect(socket_path)
+                        discovery.sendall(b"POST /v1/host-info HTTP/1.1\r\n" + tail)
+                        with socket.socket(socket.AF_UNIX) as excess:
+                            excess.settimeout(3)
+                            excess.connect(socket_path)
+                            excess.sendall(b"POST /v1/host-info HTTP/1.1\r\n")
+                            response = bytearray()
+                            while chunk := excess.recv(4096):
+                                response.extend(chunk)
+                            header, body = bytes(response).split(b"\r\n\r\n", 1)
+                            assert header.startswith(b"HTTP/1.1 503 "), response
+                            assert json.loads(body) == {
+                                "version": "1", "type": "busy", "code": "discovery_capacity_exhausted",
+                            }, response
+                        for _ in range(2):
+                            control = socket.socket(socket.AF_UNIX)
+                            borrowers.append(control)
+                            control.settimeout(3)
+                            control.connect(socket_path)
+                            control.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n" + tail)
+                        # Finish both controls independently while the discovery
+                        # body is still held. Their invalid envelopes must be
+                        # decoded, not rejected as capacity or left unaccepted.
+                        for control in borrowers[-2:]:
+                            control.sendall(fields + b"{}" if not tail else b"}")
+                            response = bytearray()
+                            while chunk := control.recv(4096):
+                                response.extend(chunk)
+                            assert bytes(response).startswith(b"HTTP/1.1 400 "), response
+                            assert json.loads(bytes(response).split(b"\r\n\r\n", 1)[1])["type"] == "invocation_error"
+                        for _ in range(3):
+                            borrowers.pop().close()
+                        assert "Host: ready" in status(store, env)
+                    stopped = subprocess.run(
+                        [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
+                        env=env, text=True, capture_output=True, timeout=5,
+                    )
+                    assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+                finally:
+                    for peer in borrowers:
+                        peer.close()
+            records = list((store / "diagnostics").glob("*.jsonl"))
+            assert records and any(f"ordinary_intake={capacity}" in path.read_text() for path in records)
+            print(f"detached startup {name}: {reported}", flush=True)
+        finally:
+            subprocess.run([RUI, "host", "stop", "--store", store], env=env, capture_output=True, timeout=5)
+            wait_for_processes(store, 0)
+
+    store = root / "below-minimum"
+    before = time.monotonic()
+    failed = run_start(store, env, preexec_fn=lower_descriptor_limit)
+    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    assert "DescriptorCapacityInsufficient" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    assert "RLIMIT_NOFILE" in failed.stderr and "minimum intake" in failed.stderr, failed.stderr
+    assert not (store / "host.lock").exists()
+
+    # A genuine prior-format Store is covered by upgrade CI. This counterexample
+    # independently drives refusal before schema reads on the real artifact.
+    store = root / "soft-256"
+    database = next(store.glob("*.sqlite*"))
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version=21")
+    before = time.monotonic()
+    failed = run_start(store, env)
+    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    assert str(store.resolve()) in failed.stderr, failed.stderr
+    assert "found schema 21" in failed.stderr and "supports schema 24" in failed.stderr, failed.stderr
+    assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+    for wire in (None, "future"):
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA user_version=24")
+            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            if wire is not None:
+                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+        original = hashlib.sha256(database.read_bytes()).digest()
+        before = time.monotonic()
+        failed = run_start(store, env)
+        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert "wire metadata" in failed.stderr and "wire 1" in failed.stderr, failed.stderr
+        assert "unsupported Store format" not in failed.stderr, failed.stderr
+        assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
+        assert hashlib.sha256(database.read_bytes()).digest() == original
+
+    # Existing paths may contain controls. Their human presentation must be
+    # safe, complete even beyond stderr.print's 1-KiB buffer, and remain data.
+    parent = root / ("\x01" * 150)
+    parent.mkdir(mode=0o700)
+    hostile = parent / ("\x01" * 150 + "\nforged\x1b[2J\r\u202e\\\"")
+    hostile.mkdir(mode=0o700)
+    escaped = (str(hostile).replace("\\", "\\\\").replace('"', '\\"')
+               .replace("\x01", "\\x01").replace("\n", "\\n").replace("\r", "\\r")
+               .replace("\x1b", "\\x1b").replace("\u202e", "\\u202e"))
+    failed = run_start(hostile, env, preexec_fn=lower_descriptor_limit)
+    assert failed.returncode != 0 and "DescriptorCapacityInsufficient" in failed.stderr, failed
+    assert f"startup failed for Store {escaped}:\n" in failed.stderr, failed.stderr
+    assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
+    # Clone only the stopped fixture DB. Version validation precedes selector
+    # identity, so no relocation or metadata rebinding is needed for refusal.
+    hostile_database = hostile / database.name
+    with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
+        source.backup(destination)
+    hostile_database.chmod(0o600)
+    for schema, wire in ((21, "1"), (24, None), (24, "future")):
+        with sqlite3.connect(hostile_database) as connection:
+            connection.execute(f"PRAGMA user_version={schema}")
+            connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
+            if wire is not None:
+                connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
+        original = hashlib.sha256(hostile_database.read_bytes()).digest()
+        before = time.monotonic()
+        failed = run_start(hostile, env)
+        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert f" at {escaped}: found schema {schema}" in failed.stderr, failed.stderr
+        assert "back up" in failed.stderr and "No migration" in failed.stderr and "exit status 1" in failed.stderr
+        assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
+        assert hashlib.sha256(hostile_database.read_bytes()).digest() == original
+    print("startup limits passed: soft raise, hard-limit fallback, below-minimum and unsupported-version fast failure", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -261,15 +499,19 @@ def wait_for_terminal_exit(caller, master, output, deadline):
 
 
 def main():
-    assert len(sys.argv) == 2, "usage: host_launch_integration.py /absolute/path/to/rui"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits]"
     from host_launch_exit_test import check_exit_reader
     check_exit_reader(wait_for_terminal_exit)
     with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
-        root = pathlib.Path(root_text)
+        root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        startup_limits(root, env)
+        if len(sys.argv) == 3:
+            assert sys.argv[2] == "startup-limits"
+            return
         assert_launch_adapter(root, env)
 
         # A held lease is attached, not replaced or reconfigured.
@@ -320,8 +562,11 @@ def main():
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if sys.platform == "linux":
-                for descriptor in range(3):
+                for descriptor in range(2):
                     assert os.readlink(f"/proc/{pids[0]}/fd/{descriptor}") == "/dev/null"
+                # The private startup error channel is not a retained caller
+                # pipe: all launchers already drained their own stderr to EOF.
+                assert os.readlink(f"/proc/{pids[0]}/fd/2").startswith("pipe:[")
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
@@ -515,9 +760,9 @@ def main():
         elapsed = time.monotonic() - started
         try:
             assert failed.returncode != 0
-            assert 9 <= elapsed < COMMAND_TIMEOUT, elapsed
-            assert "readiness unconfirmed after 10 seconds" in failed.stderr, failed.stderr
-            assert "diagnostics/ startup records" in failed.stderr, failed.stderr
+            assert elapsed < 5, elapsed
+            assert "DescriptorCapacityInsufficient" in failed.stderr, failed.stderr
+            assert "exit status 1" in failed.stderr, failed.stderr
             assert status(failure_store, env).startswith("Host: unavailable")
             assert not credential.exists()
         finally:

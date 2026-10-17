@@ -1,5 +1,16 @@
 const std = @import("std");
 
+pub const default_intake: usize = 100;
+pub const minimum_intake: usize = 10;
+
+pub fn fitIntake(default_requirement: usize, soft_limit: ?usize) !usize {
+    const limit = soft_limit orelse return default_intake;
+    if (limit >= default_requirement) return default_intake;
+    const reduction = std.math.divCeil(usize, default_requirement - limit, 4) catch unreachable;
+    if (reduction > default_intake - minimum_intake) return error.DescriptorCapacityInsufficient;
+    return default_intake - reduction;
+}
+
 pub const Requirement = struct {
     inherited: usize,
     fixed_host: usize,
@@ -205,4 +216,12 @@ test "finite descriptor limits reject below and accept exact or above" {
     try validate(70, 70);
     try validate(70, 71);
     try validate(70, null);
+}
+
+test "intake fits the available limit without sacrificing its minimum" {
+    try std.testing.expectEqual(@as(usize, 100), try fitIntake(475, null));
+    try std.testing.expectEqual(@as(usize, 100), try fitIntake(475, 475));
+    try std.testing.expectEqual(@as(usize, 45), try fitIntake(475, 256));
+    try std.testing.expectEqual(@as(usize, 10), try fitIntake(475, 115));
+    try std.testing.expectError(error.DescriptorCapacityInsufficient, fitIntake(475, 114));
 }

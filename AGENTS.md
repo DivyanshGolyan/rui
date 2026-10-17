@@ -6,6 +6,8 @@ Build the simplest complete runtime users can explain through ordinary work, fai
 
 Inspect the working-tree diff; preserve concurrent work. Read [README.md](README.md) for scope/status and affected [ARCHITECTURE.md](ARCHITECTURE.md) sections for accepted behavior.
 
+Keep transfer and evidence files under `.amp/` or outside the repository, never in a checkout root.
+
 Load applicable guidance before acting; routes combine:
 
 - **Implement, design, debug, change builds, or review engineering:** [Engineering](CODING_STANDARDS.md#engineering).
