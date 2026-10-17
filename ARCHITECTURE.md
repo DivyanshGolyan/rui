@@ -101,7 +101,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Attempt bindings, launch permits and cleanup custody | `src/attempt.zig` and `src/execution.zig`: one-shot permits and generation-checked `CustodyPool` records. |
 | Model request preparation, transport and interpretation | `src/model_adapter.zig` prepares requests; `src/provider.zig` owns curl and capture lifetimes; `src/provider_output.zig` validates sealed output. |
 | Codex authentication and credential storage | `src/codex_auth.zig` owns authentication/refresh logic; `src/codex_credentials.zig` owns private records and cross-process credential leases. |
-| Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. |
+| Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Private evaluator lifecycle | `src/evaluator.zig`: child execution, cancellation, output handoff and cleanup. This is not the public Workflow Runtime. |
 

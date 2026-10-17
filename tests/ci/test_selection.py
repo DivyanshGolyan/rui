@@ -67,6 +67,13 @@ class SelectionTest(unittest.TestCase):
         self.assertIn("bash-recovery-integration", result["targets"])
         self.assertTrue(result["native_required"])
 
+    def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
+        result = select(["src/BashLifecycle.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertEqual(result[family], ["bash-integration", "bash-lifecycle-integration",
+                                              "bash-owner-integration", "bash-recovery-integration",
+                                              "test", "test-logic"])
+
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["check", "codex-credential-integration", "codex-h2-integration"])
