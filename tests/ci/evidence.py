@@ -34,8 +34,18 @@ def identity(targets, part, *, compiled=False):
     # just production sources. Runner image and native tools cover SDK changes.
     if git("status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Evidence requires an unchanged tracked source tree")
+    system, machine = platform.system(), platform.machine()
+    floors = {("Linux", "x86_64"): ("x86_64", "x86_64"),
+              ("Darwin", "arm64"): ("aarch64", "apple_m1")}
+    arch, model = floors[(system, machine)]
+    cpu = dict(policy="baseline", arch=arch, model=model)
+    if not compiled:
+        manifest = json.loads(Path(".zig-cache/o/ci-compiled/ci-cpu.json").read_text())
+        if any(manifest.get(key) != value for key, value in cpu.items()):
+            raise ValueError("CI CPU identity mismatch")
+        cpu = manifest
     return dict(tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
-                system=platform.system(), machine=platform.machine(),
+                system=system, machine=machine, cpu=cpu,
                 image=[os.environ.get("ImageOS"), os.environ.get("ImageVersion")],
                 tools=digest(Path(os.environ["RUNNER_TEMP"]) / "rui-native-tools.txt"),
                 compiler=digest(shutil.which("zig")),

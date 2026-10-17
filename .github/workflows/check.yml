@@ -242,14 +242,15 @@ jobs:
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
-    # Preserve the existing required status for the entire selected Linux gate.
+    # Policy is required even for documentation and suppressed duplicate pushes.
     needs: [plan, policy, linux_build, linux_suites]
-    if: ${{ always() && ((needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]') || needs.plan.result == 'failure') }}
+    if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every selected Linux part
         env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
           BUILD_RESULT: ${{ needs.linux_build.result }}
@@ -257,8 +258,13 @@ jobs:
         run: |
           test "$PLAN_RESULT" = success
           test "$POLICY_RESULT" = success
-          test "$BUILD_RESULT" = success
-          test "$NATIVE_RESULT" = success
+          if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
+            test "$BUILD_RESULT" = success
+            test "$NATIVE_RESULT" = success
+          else
+            test "$BUILD_RESULT" = skipped
+            test "$NATIVE_RESULT" = skipped
+          fi
   macos_suites:
     name: macos suites (${{ matrix.name }})
     needs: [plan, macos_build]

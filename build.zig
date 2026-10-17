@@ -2,11 +2,29 @@ const std = @import("std");
 const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
     const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
-    if (ci.directory != null and (!target.query.isNative() or optimize != .debug))
-        @panic("CI artifacts require the default native target and optimization");
+    // Hosted workers can have different CPUs. Transfer only the platform's
+    // baseline instruction set; ordinary local builds still target their host.
+    const ci_mode = ci_targets != null or ci.directory != null;
+    const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
+    const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
+    const optimize = b.standardOptimizeOption(.{});
+    if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
+        @panic("CI artifacts require the native platform, baseline CPU and default optimization");
+    const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
+        .policy = "baseline",
+        .arch = @tagName(target.result.cpu.arch),
+        .model = target.result.cpu.model.name,
+        .features = std.fmt.bytesToHex(target.result.cpu.features.asBytes().*, .lower),
+    }, .{}) catch @panic("OOM");
+    if (ci.directory) |directory| {
+        const manifest_path = b.pathJoin(&.{ directory, "ci-cpu.json" });
+        b.dependOnFileContents(.{ .cwd_relative = manifest_path });
+        const recorded = std.Io.Dir.cwd().readFileAlloc(b.graph.io, manifest_path, b.allocator, .limited(4096)) catch
+            @panic("Missing CI CPU identity");
+        if (!std.mem.eql(u8, recorded, ci_cpu)) @panic("CI CPU identity mismatch");
+    }
     const pinned_transport = addPinnedTransport(b, target);
 
     const rui = addRui(b, target, optimize, "rui", pinned_transport);
@@ -715,7 +733,9 @@ pub fn build(b: *std.Build) void {
     // Compile the selected gates once, without executing their fixture Run
     // steps. Workers still execute the original gates and their assertions.
     const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
-    if (b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile")) |selected| {
+    if (ci_targets) |selected| {
+        const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
+        ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
         var names = std.mem.splitScalar(u8, selected, ',');
         var visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
         while (names.next()) |name| {

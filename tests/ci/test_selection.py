@@ -8,6 +8,8 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+from textwrap import dedent
 
 from select_tests import execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
@@ -50,6 +52,52 @@ class SelectionTest(unittest.TestCase):
 
     def test_docs_are_not_runtime_acceptance(self):
         self.assertEqual(select(["VERIFICATION.md"], "review", AVAILABLE)["targets"], [])
+
+    def test_linux_status_requires_policy_even_without_native_work(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        job = re.search(r'(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
+        expression = re.search(r'if: \$\{\{ (.*?) \}\}', job)[1]
+        expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
+        script = dedent(job.split('run: |\n', 1)[1])
+        cases = []
+        for targets in ('[]', ''):  # Documentation and duplicate-push suppression.
+            cases.append((targets, 'success', 'success', 'skipped', 'skipped', False, 'success'))
+            for result in ('failure', 'cancelled', 'skipped'):
+                cases.extend([
+                    (targets, 'success', result, 'skipped', 'skipped', False, 'failure'),
+                    (targets, result, 'success', 'skipped', 'skipped', False, 'failure'),
+                ])
+            for result in ('success', 'failure', 'cancelled'):
+                cases.extend([
+                    (targets, 'success', 'success', result, 'skipped', False, 'failure'),
+                    (targets, 'success', 'success', 'skipped', result, False, 'failure'),
+                ])
+        cases.append(('["test-logic"]', 'success', 'success', 'success', 'success', False, 'success'))
+        for result in ('failure', 'cancelled', 'skipped'):
+            cases.extend([
+                ('["test-logic"]', 'success', result, 'success', 'success', False, 'failure'),
+                ('["test-logic"]', 'success', 'success', result, 'success', False, 'failure'),
+                ('["test-logic"]', 'success', 'success', 'success', result, False, 'failure'),
+            ])
+        cases.append(('[]', 'skipped', 'skipped', 'skipped', 'skipped', True, 'skipped'))
+        for targets, plan, policy, build, native, private, expected in cases:
+            with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private):
+                needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
+                github = SimpleNamespace(event=SimpleNamespace(repository=SimpleNamespace(private=private)))
+                admitted = eval(expression, {'__builtins__': {}, 'always': lambda: True,
+                                             'needs': needs, 'github': github})
+                # Actions implicitly adds success() unless a status-check
+                # function appears; a skipped dependency otherwise skips us.
+                if not re.search(r'\b(?:always|success|failure|cancelled)\s*\(', expression):
+                    admitted = admitted and all(value == 'success' for value in (plan, policy, build, native))
+                actual = 'skipped'
+                if admitted:
+                    result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                            env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                                 'POLICY_RESULT': policy, 'BUILD_RESULT': build,
+                                                 'NATIVE_RESULT': native})
+                    actual = 'success' if result.returncode == 0 else 'failure'
+                self.assertEqual(actual, expected)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/store.zig", "src/future_owner.zig", "tests/integration/future_case.py"):

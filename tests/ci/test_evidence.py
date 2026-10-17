@@ -16,6 +16,37 @@ import build_artifact
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_cpu_floor_is_bound_to_platform_and_acceptance_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            self.addCleanup(os.chdir, previous)
+            os.chdir(directory)
+            manifest = Path('.zig-cache/o/ci-compiled/ci-cpu.json')
+            manifest.parent.mkdir(parents=True)
+            with patch.dict(os.environ, RUNNER_TEMP=directory, GITHUB_EVENT_NAME='push',
+                            GITHUB_WORKFLOW_REF='owner/repo/.github/workflows/check.yml@feature',
+                            GITHUB_REF='refs/heads/feature'), \
+                    patch.object(evidence, 'git', return_value=''), \
+                    patch.object(evidence, 'digest', return_value='tool-hash'):
+                for system, machine, arch, model in [('Linux', 'x86_64', 'x86_64', 'x86_64'),
+                                                     ('Darwin', 'arm64', 'aarch64', 'apple_m1')]:
+                    with self.subTest(system=system), \
+                            patch.object(evidence.platform, 'system', return_value=system), \
+                            patch.object(evidence.platform, 'machine', return_value=machine):
+                        floor = dict(policy='baseline', arch=arch, model=model)
+                        self.assertEqual(evidence.identity(['test'], 'all', compiled=True)['cpu'], floor)
+                        cpu = dict(floor, features='012345')
+                        manifest.write_text(json.dumps(cpu))
+                        self.assertEqual(evidence.identity(['test'], 'all')['cpu'], cpu)
+                        for changed in (dict(cpu, policy='native'), dict(cpu, model='newer-producer'),
+                                        dict(cpu, arch='wrong-architecture')):
+                            manifest.write_text(json.dumps(changed))
+                            with self.assertRaisesRegex(ValueError, 'CPU identity mismatch'):
+                                evidence.identity(['test'], 'all')
+                        manifest.unlink()
+                        with self.assertRaises(FileNotFoundError):
+                            evidence.identity(['test'], 'all')
+
     def test_compiled_handoff_checks_identity_digest_modes_and_safe_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
