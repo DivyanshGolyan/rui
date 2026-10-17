@@ -35,11 +35,15 @@ jobs:
           ulimit -n 256
           RUI_BACKPRESSURE_DIAG=old zig build terminal-restoration-integration -j2 --summary all -- renderer-backpressure 2>&1 | tee .amp/diagnostic/old.log
       - name: Controlled PTY output, same scratch4 product
-        continue-on-error: true
         run: |
           set -o pipefail
           ulimit -n 256
           RUI_BACKPRESSURE_DIAG=new zig build terminal-restoration-integration -j2 --summary all -- renderer-backpressure 2>&1 | tee .amp/diagnostic/new.log
+      - name: Drain the separate input PTY echo, same scratch4 product
+        run: |
+          set -o pipefail
+          ulimit -n 256
+          RUI_BACKPRESSURE_DIAG=echo zig build terminal-restoration-integration -j2 --summary all -- renderer-backpressure 2>&1 | tee .amp/diagnostic/echo.log
       - name: Restore conversion bug as a sensitivity control
         run: |
           set -o pipefail

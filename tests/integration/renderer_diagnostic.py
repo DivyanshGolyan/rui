@@ -41,8 +41,15 @@ INTERPOSE(observed_read, read)
 
 
 def run(mode):
-    module = importlib.import_module("terminal_restoration_integration" if mode == "old" else "terminal_restoration_corrected")
+    module = importlib.import_module("terminal_restoration_integration" if mode == "old" else "terminal_restoration_corrected" if mode == "new" else "terminal_restoration_echo")
     module.PROBE += READ_OBSERVATION
+    original_write = os.write
+    def observed_write(fd, data):
+        result = original_write(fd, data)
+        if data.startswith(b"\x15/configure") or data == b"\n":
+            print(f"PARENT write requested={len(data)} returned={result}", flush=True)
+        return result
+    os.write = observed_write
     roots = []
     original_root = module.canonical_fixture_root
     def remember(raw):
@@ -83,7 +90,7 @@ def run(mode):
             if log.exists():
                 print("EXACT PROBE OBSERVATIONS\n" + log.read_text(), flush=True)
     print(json.dumps({"mode": mode, "failure": failure}), flush=True)
-    if mode == "new" and failure is not None:
+    if mode in ("echo",) and failure is not None:
         raise RuntimeError("corrected witness failed: " + failure)
     if mode == "mutation" and (failure is None or "main-screen command return" not in failure):
         raise RuntimeError("mutation did not fail intended command return assertion: " + str(failure))

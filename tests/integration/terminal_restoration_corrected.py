@@ -1039,6 +1039,11 @@ def renderer_backpressure_case(state, library, home, store):
             remaining = deadline - time.monotonic()
             assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
             ready = select.select([output_master, caller.stderr], [], [], remaining)[0]
+            if not ready and description == "refreshed alternate-screen composer":
+                destination = pathlib.Path(".amp/diagnostic/new-refresh-sample.txt")
+                subprocess.run(["sample", str(caller.pid), "1", "-file", str(destination)], timeout=10)
+                if destination.exists():
+                    print(destination.read_text(), flush=True)
             assert ready, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
             for fd in ready:
                 chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
