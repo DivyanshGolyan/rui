@@ -121,6 +121,12 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
             error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds the bounded renderer. Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged. Ordinary message, result and inspect-action commands remain available.\n", .{}),
             else => {},
         };
+        if (screen) |value| if (value.action_view != null) {
+            if (settled.restored) |_| {
+                self.terminal.detached(store, session, self.current.first_action) catch |notice_error|
+                    @import("TerminalText.zig").diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
+            } else |_| {} // Never write a main-screen notice before confirmed restoration.
+        };
         return err;
     }
     const action = if (screen) |value| (if (value.action_view != null) self.current.first_action else null) else null;
@@ -379,7 +385,8 @@ fn driveActive(self: *Self) !void {
             }
             const view: Input.View = if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const action_visible = self.actionVisible();
-            const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) "a: Allow once / d: Deny (Enter)" else "Approval paused · Ctrl-G returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
+            const approval_ready = self.approvalReady();
+            const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) "a: Allow once / d: Deny (Enter)" else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Ctrl-G returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
                 .not_started => "Not sent · Ctrl-R retries original",
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
@@ -401,6 +408,16 @@ fn driveActive(self: *Self) !void {
                 try status.writeAll("\nBash runs without approval.");
             self.dirty = false;
             try self.terminal.redraw(view.bytes, view.cursor, status.buffered(), if (self.consent.active() and action_visible) "> " else "› ", &self.live);
+            if (!approval_ready and self.approvalReady()) {
+                // Reading completes only after delivery. Old choice text must
+                // not become a decision, but fragmented decoder/paste custody
+                // must survive until the existing empty-input freshness gate.
+                self.choice.length = 0;
+                self.choice.cursor = 0;
+                self.choice.plain_ascii = true;
+                self.consent.invalidate();
+                self.dirty = true;
+            }
             if (self.consent.active() and action_visible and self.actionVisible() and !self.dirty and !self.consent.acceptsInput() and self.choice.pending() == .none) {
                 // Every prompt byte was accepted by stdout. Discard input
                 // through its decoder, not tcflush: a paste prefix or Ctrl-C
@@ -414,7 +431,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.approvalReady() or (self.terminal.screen != null and self.dirty))) {
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.actionVisible() or (self.terminal.screen != null and self.dirty))) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -484,7 +501,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     if (self.consent.active()) {
         self.choice.vaxis_input = self.terminal.screen != null;
         const visible = self.actionVisible();
-        if (!self.approvalReady()) self.consent.invalidate();
+        if (!visible) self.consent.invalidate();
         if (visible and !self.consent.acceptsInput()) {
             // Discard text but retain fragmented input's decoder custody.
             const event = self.choice.feed(byte);
@@ -519,11 +536,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                         @memcpy(self.input.command_buffer[0..text.len], text);
                         self.input.command_length = text.len;
                     } else self.notice = "! Preparing inspection; try again when it finishes.";
-                } else self.notice = if (visible) "! Choose a or d. Nothing authorized." else "! Nothing authorized. Ctrl-G returns to the Action before deciding.";
+                } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Ctrl-G returns to the Action before deciding.";
                 self.consent.invalidate();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             },
-            .invalid, .overflow => {
+            .invalid, .edit_rejected, .overflow => {
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
                 self.consent.invalidate();
                 self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
@@ -561,7 +578,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         .editor => |event| switch (event) {
             .width_report, .page_up, .page_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
             .interrupt, .eof => self.detached = true,
-            .invalid => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
+            .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
             else => {},
         },

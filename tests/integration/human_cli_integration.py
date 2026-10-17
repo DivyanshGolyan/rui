@@ -2651,6 +2651,16 @@ def renderer_cases():
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configure("renderer/geometry")
         codex_fixture.credentials(home / ".config/rui/codex.json")
+        with terminal("renderer/geometry") as tty:
+            tty.send("kept\x01", predicate=lambda: tty.capture.draft("kept", 2))
+            tty.send("\x1b[200~\u0301discarded\x1b[201~", "! Input rejected")
+            assert tty.capture.draft("kept", 2), tty.capture.completed
+            tty.send("\x1b[200~prefix\n\u0301discarded\x1b[201~", "! Input rejected")
+            assert tty.capture.draft("kept", 2), tty.capture.completed
+            # Rejection leaves a usable editor, not a latent fatal redraw.
+            tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
+            assert os.write(tty.master, b"\x15\x0b/exit\n") == 8
+            tty.finish()
         env = {**os.environ, "HOME": str(home), "RUI_RENDERER": "vaxis"}
         rejected = subprocess.run([str(fixture.RUI), "resume", "--store", str(store), "renderer/geometry"],
             env=env, input=b"", capture_output=True, timeout=5)
@@ -2763,7 +2773,7 @@ def renderer_cases():
 
         configure("renderer/consent", "ask")
         proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
-        command = "\n".join(f"# exact command line {index}" for index in range(40)) + "\nprintf approved > renderer-effect"
+        command = "\n".join(f"# exact command line {index}" for index in range(100)) + "\nprintf approved > renderer-effect"
         arguments = json.dumps({"cmd": command, "description": "Renderer consent", "timeout_ms": None})
         release = threading.Event()
         endpoint.responses.append((fixture.sse_tool_calls("renderer-call", [("bash", "renderer-action", arguments)]), release))
@@ -2776,16 +2786,25 @@ def renderer_cases():
                 shown = tty.wait("Action continues · PgDn")
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                tty.send("a\n", "Action continues · PgDn")
+                tty.ready(ready_read)
+                tty.send("/help\n", "Inspection ready")
+                assert "Enter sends" in tty.capture.completed, tty.capture.completed
+                tty.send("\x07", "Action continues · PgDn")
+                tty.ready(ready_read)
+                tty.send("a\n", "Read the whole Action first")
                 assert not (workspace / "renderer-effect").exists(), "unseen Action tail was approved"
+                tty.ready(ready_read)
+                tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
                 for _ in range(8):
-                    tty.send("\x1b[6~", predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
+                    tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
                     if "Action read" in tty.capture.completed:
                         break
                 else:
                     raise AssertionError("complete Action never became ready after paging")
                 tty.ready(ready_read)
                 shown = tty.wait("a: Allow once / d: Deny (Enter)")
+                assert tty.capture.draft("", 2, prompt="> "), "unread choice text survived readiness"
+                tty.send("\n", "a: Allow once / d: Deny (Enter)")
                 assert "printf approved > renderer-effect" in shown, shown
                 shown_workspace = shown.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
                 assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"

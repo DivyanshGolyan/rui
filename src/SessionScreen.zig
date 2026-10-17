@@ -69,7 +69,7 @@ pub fn browse(self: *Self, down: bool) !void {
         self.browsing = self.live;
         self.selected = true;
     }
-    self.browsing.browse(down, self.height);
+    self.browsing.browse(down, self.height, if (self.actionVisible() and self.preview_complete and !self.approval_ready) self.action_seen else null);
 }
 
 pub fn latest(self: *Self) !void {
@@ -147,7 +147,10 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         self.vx.screen_last.deinit(self.memory.allocator());
         self.vx.screen = .{};
         self.vx.screen_last = empty;
-        try self.vx.resize(self.memory.allocator(), &frame.writer, .{ .rows = size.row, .cols = size.col, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
+        self.vx.resize(self.memory.allocator(), &frame.writer, .{ .rows = size.row, .cols = size.col, .x_pixel = size.xpixel, .y_pixel = size.ypixel }) catch |err| switch (err) {
+            error.WriteFailed => return error.OutOfMemory, // This writer only allocates frame memory.
+            else => return err,
+        };
     }
     const window = self.vx.window();
     window.clear();
@@ -194,7 +197,10 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
     // Any failure is fatal; never drop a frame and continue accepting consent.
-    try self.vx.render(&frame.writer);
+    self.vx.render(&frame.writer) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory, // Not a terminal I/O failure: frame allocation failed.
+        else => return err,
+    };
     try out.writeAll(frame.written());
     try out.flush();
     // Only delivered rows count as inspection; a partially written frame cannot
@@ -242,10 +248,13 @@ fn style(self: *const Self, value: View.Style) vaxis.Style {
 
 // Account actual page-rounded backing bytes, not just requested cell bytes.
 // The UI alone uses this allocator; resize peaks and Vaxis's retained grapheme
-// arena share 16 MiB. Refusal is a typed fatal render failure, never truncation.
+// arena share 32 MiB. At 49,152 cells the empty grids take 15.41 MiB; reserve
+// the other half for dense multibyte graphemes, per-cell SGR and geometric frame
+// growth, including 16-KiB allocation rounding. Refusal is fatal, not truncation.
 const Memory = struct {
     used: usize = 0,
-    const limit = 16 * 1024 * 1024;
+    peak: usize = 0,
+    const limit = 32 * 1024 * 1024;
 
     fn allocator(self: *Memory) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
@@ -264,6 +273,7 @@ const Memory = struct {
         if (amount > limit - self.used) return null;
         const result = std.heap.page_allocator.rawAlloc(length, alignment, address) orelse return null;
         self.used += amount;
+        if (@import("builtin").is_test) self.peak = @max(self.peak, self.used);
         return result;
     }
 
@@ -287,9 +297,12 @@ test "wide resize preserves a growing combining draft" {
     const narrow: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     const long: [5000]u8 = @splat('X');
     try screen.render(&out.writer, wide, &long, long.len, "", "› ", &.{});
+    std.debug.print("renderer allocation wide5000X: retained={d}, peak={d} bytes (page charged, not RSS)\n", .{ screen.memory.used, screen.memory.peak });
     try screen.append(&long);
     try screen.append("\n");
+    screen.memory.peak = screen.memory.used;
     try screen.render(&out.writer, narrow, "", 0, "", "› ", &.{});
+    std.debug.print("renderer allocation resize2048→80: retained={d}, peak={d} bytes\n", .{ screen.memory.used, screen.memory.peak });
     var draft: [4097]u8 = undefined;
     draft[0] = 'a';
     for (0..2048) |index| @memcpy(draft[1 + index * 2 ..][0..2], "\u{301}");
@@ -300,10 +313,25 @@ test "wide resize preserves a growing combining draft" {
     const window = screen.vx.window();
     try std.testing.expectEqualStrings(&draft, window.readCell(2, screen.vx.screen.cursor.row).?.char.grapheme);
     try std.testing.expectError(error.TerminalTooLarge, screen.render(&out.writer, .{ .row = 135, .col = 480, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{}));
-    screen.live.clear();
-    const dense: [Frame.max_cells]u8 = @splat('X');
-    try screen.append(&dense);
-    try screen.render(&out.writer, .{ .row = 192, .col = 256, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{});
+    screen.colour = true;
+    screen.vx.caps.no_color = false;
+    for ([_][]const u8{ "中", "é", "🐄", "\x1b[1m\x1b[3m\x1b[4m\x1b[91mX\x1b[0mX" }) |pattern| {
+        screen.live.clear();
+        const cells: usize = if (std.mem.indexOf(u8, pattern, "\x1b") != null or std.mem.eql(u8, pattern, "中") or std.mem.eql(u8, pattern, "🐄")) 2 else 1;
+        for (0..Frame.max_cells / cells) |_| try screen.append(pattern);
+        for ([_]std.posix.winsize{ .{ .row = 192, .col = 256, .xpixel = 0, .ypixel = 0 }, wide }) |size| {
+            screen.memory.peak = screen.memory.used;
+            try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            std.debug.print("renderer allocation dense {s} {d}x{d}: retained={d}, peak={d} bytes\n", .{ if (cells == 1) "NFD" else if (std.mem.indexOf(u8, pattern, "\x1b") != null) "SGR" else pattern, size.row, size.col, screen.memory.used, screen.memory.peak });
+            // Check emitted cells, not merely a non-crashing render.
+            const first = screen.vx.window().readCell(0, 0).?;
+            try std.testing.expectEqualStrings(if (cells == 1) "é" else if (std.mem.indexOf(u8, pattern, "\x1b") != null) "X" else pattern, first.char.grapheme);
+            if (std.mem.indexOf(u8, pattern, "\x1b") != null) {
+                try std.testing.expect(first.style.bold and first.style.italic and first.style.ul_style == .single);
+                try std.testing.expect(!screen.vx.window().readCell(1, 0).?.style.bold);
+            }
+        }
+    }
 }
 
 test "compact conversation keeps the composer beside content without persistent chrome" {
