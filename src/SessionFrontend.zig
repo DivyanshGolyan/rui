@@ -7,6 +7,7 @@ const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const Terminal = @import("SessionTerminal.zig");
 const Screen = @import("SessionScreen.zig");
+const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
 const View = @import("session_view.zig");
 const History = @import("session_history.zig");
@@ -18,14 +19,13 @@ pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []
 pub const Inspect = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File };
 pub fn rendererEnabled(environ: *const std.process.Environ.Map) bool {
-    return @import("TerminalFrame.zig").enabled(environ.get("RUI_RENDERER") orelse "", environ.get("TERM") orelse "");
+    return Frame.enabled(environ.get("RUI_RENDERER") orelse "", environ.get("TERM") orelse "");
 }
 const Inspection = enum { status, requests, help };
 const ReadPhase = departure.ReadPhase;
 const ReadEnd = departure.ReadEnd;
 const AdmissionEnd = Submission.End;
 const Settled = departure.Settled;
-const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
 init: std.process.Init,
 store: []const u8,
 session: []const u8,
@@ -389,9 +389,7 @@ fn driveActive(self: *Self) !void {
             var status_buffer: [2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
             if (self.terminal.screen != null) if (self.notice) |notice| {
-                const size = Terminal.geometry();
-                const hint = if (!std.mem.eql(u8, notice, inspection_ready) or size.col >= 45) notice else if (size.col >= 18) "PgUp/PgDn · Ctrl-G" else "PgUp\nPgDn\nCtrl-G";
-                try status.print("{s}\n", .{hint});
+                try status.print("{s}\n", .{notice});
             };
             try status.writeAll(base_status);
             if (self.terminal.screen != null and !self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass)
@@ -711,7 +709,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     } else if (self.read_phase == .details) {
         self.notice = "  Details complete.";
     } else if (self.read_phase == .inspection) {
-        self.notice = inspection_ready;
+        self.notice = Frame.inspection_ready;
     } else if (self.read_phase == .permission) {
         self.current = self.observed;
         self.live = self.observed_live;

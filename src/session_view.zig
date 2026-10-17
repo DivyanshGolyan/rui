@@ -285,7 +285,7 @@ pub fn Escaped(comptime Sink: type) type {
     return struct {
         sink: Sink,
         text: Text,
-        storage: [4096]u8 = undefined,
+        storage: [256]u8 = undefined,
         used: usize = 0,
         pub fn writeAll(self: *@This(), bytes: []const u8) anyerror!void {
             try self.feed(bytes);
