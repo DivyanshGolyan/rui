@@ -62,7 +62,8 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/store.zig"], "review", AVAILABLE)
         self.assertEqual(result["native_targets"], ["test"])
         combined = select(["src/store.zig", "src/server.zig"], "review", AVAILABLE)
-        self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check"])
+        self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check",
+                                                     "codex-h2-integration", "transport-h2-integration"])
 
     def test_bash_keeps_real_custody_and_recovery_checks(self):
         result = select(["src/bash_platform.c"], "review", AVAILABLE)
@@ -93,11 +94,28 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
-        for path in ("src/build_transport.sh", "src/curl-post-retry.patch", "build.zig.zon"):
+        for path in ("src/build_transport.sh", "src/curl-post-retry.patch", "build.zig.zon",
+                     "tests/integration/codex_h2_integration.py", "tests/integration/codex_integration.py",
+                     "tests/integration/transport_h2_integration.py", "tests/integration/transport_h2_integration_test.py"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("transport-h2-integration", result[family])
                 self.assertIn("codex-h2-integration", result[family])
+
+    def test_startup_capacity_owners_keep_every_refusal_oracle(self):
+        for path in ("src/descriptor_capacity.zig", "src/descriptor_limit.zig",
+                     "src/server.zig", "src/platform.zig", "src/cli.zig", "src/host_launch.c",
+                     "tests/integration/descriptor_capacity_integration.py",
+                     "tests/integration/host_launch_integration.py"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    checks = set(result[family])
+                    self.assertIn("codex-h2-integration", checks)
+                    self.assertIn("transport-h2-integration", checks)
+                    if not checks & {"check", "check-full"}:
+                        self.assertTrue({"test", "host-launch-integration",
+                                         "descriptor-capacity-integration"} <= checks)
 
     def test_bootstrap_action_is_not_cheap_ci_policy(self):
         for path in (".github/actions/setup/action.yml", "install.sh", "src/fetch_dependencies.sh"):
@@ -223,12 +241,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["host-stop-integration"])
 
-    def test_h2_fixture_and_companion_keep_their_owning_target(self):
+    def test_h2_fixture_and_companion_keep_both_owning_targets(self):
         for path in ("tests/integration/transport_h2_integration.py",
                      "tests/integration/transport_h2_integration_test.py"):
             result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["transport-h2-integration"])
-            self.assertEqual(result["native_targets"], ["transport-h2-integration"])
+            self.assertEqual(result["targets"], ["codex-h2-integration", "transport-h2-integration"])
+            self.assertEqual(result["native_targets"], ["codex-h2-integration", "transport-h2-integration"])
 
     def test_public_read_fixture_and_client_select_owner_once(self):
         for owner in ("proposal", "activity"):

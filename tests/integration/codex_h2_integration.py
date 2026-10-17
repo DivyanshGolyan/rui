@@ -34,11 +34,12 @@ def assert_managed_descriptor_rejection(rejected, limit):
                     inherited=inherited, fixed_host=fixed_host, clients=403,
                     execution=10, authentication=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
+    assert limit < required - 4 * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
     return required
 
 
-def run(*, observed=False):
+def run(*, observed=False, intake=100):
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-h2.")).resolve()
     private = root / "private"
     private.mkdir(mode=0o700)
@@ -61,29 +62,32 @@ def run(*, observed=False):
     complete = False
     store = root / "store"
     try:
-        # Probe below the minimum inherited population, then test the exact
-        # adjacent boundary observed before any Host-owned descriptors open.
-        minimum_required = {"linux": 435, "darwin": 439}[sys.platform]
+        # These totals describe default intake100, not the refusal boundary.
+        # Ten ordinary clients remain viable after dropping 90 * 4 descriptors.
+        default_required = {"linux": 435, "darwin": 439}[sys.platform]
+        minimum_required = default_required - 4 * (100 - 10)
         serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
         def limited(limit):
-            return ["sh", "-c", 'ulimit -n "$1"; shift; exec "$@"',
+            return ["sh", "-c", 'set -e; ulimit -Sn "$1"; ulimit -Hn "$1"; shift; exec "$@"',
                     "rui-managed-descriptors", str(limit), *serve]
 
         rejected = subprocess.run(limited(minimum_required - 1), capture_output=True, text=True, timeout=15)
         required = assert_managed_descriptor_rejection(rejected, minimum_required - 1)
         assert not store.exists(), "managed capacity rejection created Store files"
-        if required != minimum_required:
-            rejected = subprocess.run(limited(required - 1), capture_output=True, text=True, timeout=15)
-            assert assert_managed_descriptor_rejection(rejected, required - 1) == required, rejected.stderr
+        actual_minimum = required - 4 * (100 - 10)
+        if actual_minimum != minimum_required:
+            rejected = subprocess.run(limited(actual_minimum - 1), capture_output=True, text=True, timeout=15)
+            assert assert_managed_descriptor_rejection(rejected, actual_minimum - 1) == required, rejected.stderr
             assert not store.exists(), "managed capacity rejection created Store files"
         # Execute the same complete workload at the exact production limit
-        # and separately with the native channel's two inherited descriptors.
-        limit = required + (2 if observed else 0)
+        # at default and minimum intake; retain the separate default-intake
+        # native channel run accounting for its two inherited descriptors.
+        limit = required - 4 * (100 - intake) + (2 if observed else 0)
         host, _ = start_ready_process(
             limited(limit), observations="managed" if observed else None,
-            required_fields={"execution": "enabled", "curl": "8.22.0",
+            required_fields={"execution": "enabled", "curl": "8.22.0", "intake_capacity": str(intake),
                              "descriptor_requirement": str(limit), "descriptor_limit": str(limit)},
         )
         diagnostics = HostDiagnostics(host)
@@ -139,7 +143,7 @@ def run(*, observed=False):
             assert [row["http_version"] for row in observations] == ["3", "3", "3"], observations
             assert int(observations[0]["connection_id"]) >= 0 and len({row["connection_id"] for row in observations}) == 1, observations
             assert [row["new_connections"] for row in observations] == ["1", "0", "0"], observations
-        print(f"codex synthetic TLS/H2 production transfers passed: descriptor_limit={limit}, native_receipts={observed}, ALPN h2, one connection, three streams, conditional FedRAMP header")
+        print(f"codex synthetic TLS/H2 production transfers passed: intake_capacity={intake}, descriptor_limit={limit}, native_receipts={observed}, ALPN h2, one connection, three streams, conditional FedRAMP header")
         complete = True
     finally:
         incoming_error = sys.exc_info()[1]
@@ -176,3 +180,4 @@ def run(*, observed=False):
 if __name__ == "__main__":
     run()
     run(observed=True)
+    run(intake=10)
