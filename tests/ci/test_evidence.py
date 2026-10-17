@@ -24,6 +24,8 @@ class EvidenceTest(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'exact compiled bytes')
             binary.chmod(0o751)
+            timestamp = 1723456789123456789
+            os.utime(binary, ns=(timestamp, timestamp))
             for cache in caches.values():
                 cache.mkdir(exist_ok=True)
             inputs = dict(tree='same-tree', targets=['test'], paths={k: str(v) for k, v in caches.items()})
@@ -40,6 +42,9 @@ class EvidenceTest(unittest.TestCase):
                 build_artifact.unpack(archive, receipt, inputs)
                 self.assertEqual(binary.read_bytes(), b'exact compiled bytes')
                 self.assertEqual(binary.stat().st_mode & 0o777, 0o751)
+                self.assertEqual(binary.stat().st_mtime_ns, timestamp)
+                for label in ('local', 'global'):
+                    self.assertTrue((caches[label] / 'tmp').is_dir())
                 downloaded = io.BytesIO()
                 with zipfile.ZipFile(downloaded, 'w') as output:
                     output.write(archive, 'compiled.tar.gz')

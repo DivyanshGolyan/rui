@@ -63,7 +63,15 @@ def package(targets, destination):
                         raise ValueError(f"Unexpected build file: {name}")
                     elif info.st_mode & 0o111:
                         executables[name] = [evidence.digest(source), stat.S_IMODE(info.st_mode)]
-                    output.add(source, arcname=name, recursive=False)
+                    member = output.gettarinfo(source, arcname=name)
+                    # Float tar mtimes lose nanoseconds and invalidate Zig's
+                    # file-stat manifests even when every byte is unchanged.
+                    member.pax_headers['rui.mtime_ns'] = str(info.st_mtime_ns)
+                    if member.isfile():
+                        with source.open('rb') as stream:
+                            output.addfile(member, stream)
+                    else:
+                        output.addfile(member)
     receipt = dict(verdict="compiled-not-tested", inputs=inputs,
                    source_sha=evidence.git("rev-parse", "HEAD"),
                    run_id=int(os.environ["GITHUB_RUN_ID"]),
@@ -107,6 +115,8 @@ def unpack(archive, receipt, inputs):
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True)
+        for label in ('local', 'global'):
+            (destinations[label] / 'tmp').mkdir()
         # A second streaming pass avoids retaining archive payloads in RAM.
     with tarfile.open(archive, "r:gz") as source:
         for member in source:
@@ -118,7 +128,8 @@ def unpack(archive, receipt, inputs):
             with source.extractfile(member) as incoming, destination.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
             destination.chmod(member.mode & 0o777)
-            os.utime(destination, (member.mtime, member.mtime))
+            timestamp = int(member.pax_headers['rui.mtime_ns'])
+            os.utime(destination, ns=(timestamp, timestamp))
     for member in links:
         path = PurePosixPath(member.name)
         destination = destinations[path.parts[0]].joinpath(*path.parts[1:])
