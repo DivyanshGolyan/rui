@@ -24,8 +24,9 @@ paste_prefix_length: usize = 0,
 allow_paste: bool = true,
 rejected: ?Event = null,
 plain_ascii: bool = true,
+paste_start: struct { cursor: usize = 0, length: usize = 0, plain_ascii: bool = true } = .{},
 
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow, page_up, page_down, latest, close_view, width_report };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, overflow, page_up, page_down, latest, close_view, width_report };
 
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
@@ -233,6 +234,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
                 try output.writeStreamingAll(io, "\n");
                 return error.InvalidTerminalInput;
             },
+            .edit_rejected => unreachable, // The inline editor does not decline renderer-only edits.
             .overflow => {
                 try output.writeStreamingAll(io, "\n");
                 return error.StreamTooLong;
@@ -307,10 +309,15 @@ pub fn feed(self: *Editor, byte: u8) Event {
     return switch (event) {
         .paste_start => blk: {
             if (was_paste or !self.allow_paste) self.reject(.invalid);
+            if (!was_paste) self.paste_start = .{ .cursor = self.cursor, .length = self.length, .plain_ascii = self.plain_ascii };
             break :blk .none;
         },
         .paste_end => blk: {
             if (!was_paste) self.reject(.invalid);
+            if (self.rejected == .edit_rejected) {
+                self.rejected = null;
+                break :blk .edit_rejected;
+            }
             break :blk .none;
         },
         .cap_unicode => if (self.input.reported_width != null) .width_report else .none,
@@ -524,10 +531,40 @@ test "marked paste rejects encoded controls without releasing paste custody" {
     }
 }
 
+test "renderer declines standalone zero-width edits and rolls back an unrepresentable paste" {
+    var storage: [256]u8 = undefined;
+    for ([_][]const u8{ "\u{301}", "\u{200d}", "\u{fe0f}" }) |scalar| {
+        var editor: Editor = .{ .buffer = &storage, .vaxis_input = true };
+        for ("kept\x01") |byte| _ = editor.feed(byte);
+        var event: Event = .none;
+        for (scalar) |byte| event = editor.feed(byte);
+        try std.testing.expectEqual(Event.edit_rejected, event);
+        try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
+        try std.testing.expectEqual(@as(usize, 0), editor.cursor);
+        // Roll back a whole paste, including accepted text before a newline,
+        // while retaining both the pre-paste prefix and suffix.
+        for ("\x1b[200~pasted\n") |byte| _ = editor.feed(byte);
+        for (scalar) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Pending.incomplete, editor.pending());
+        for ("discarded\x1b[201~") |byte| event = editor.feed(byte);
+        try std.testing.expectEqual(Event.edit_rejected, event);
+        try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
+        try std.testing.expectEqual(@as(usize, 0), editor.cursor);
+        try std.testing.expectEqual(Pending.none, editor.pending());
+        for ("é🧑‍🌾") |byte| _ = editor.feed(byte);
+        try std.testing.expectEqualStrings("é🧑‍🌾kept", storage[0..editor.length]);
+        try std.testing.expectEqual(Event.submit, editor.feed('\r'));
+        var composer: @import("TerminalFrame.zig").Composer = .{};
+        try composer.append(storage[0..editor.length]);
+        try composer.layoutInput(78);
+    }
+}
+
 fn insertText(self: *Editor, text: []const u8, pasted_input: bool) Event {
     var event: Event = .none;
     for (text) |byte| {
         const next_event = self.insert(byte, pasted_input);
+        if (next_event == .edit_rejected) return next_event;
         if (next_event == .redraw or (next_event == .append and event == .none)) event = next_event;
     }
     return event;
@@ -557,6 +594,35 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) Event {
         self.reject(.invalid);
         self.partial_length = 0;
         return .none;
+    }
+    if (self.vaxis_input and codepoint != '\n' and codepoint != '\t' and vaxis.gwidth.gwidth(self.partial[0..self.partial_length], .wcwidth) == 0) {
+        // A zero-width scalar is safe only when it joins an existing cluster.
+        // Inspect the actual renderer's boundary rather than rejecting valid
+        // decomposed accents, variation selectors or joined emoji generally.
+        var pair: [8]u8 = undefined;
+        var start = self.cursor -| 1;
+        while (start > 0 and self.buffer[start] & 0xc0 == 0x80) start -= 1;
+        const prefix = self.buffer[start..self.cursor];
+        @memcpy(pair[0..prefix.len], prefix);
+        @memcpy(pair[prefix.len..][0..self.partial_length], self.partial[0..self.partial_length]);
+        var clusters = vaxis.unicode.graphemeIterator(pair[0 .. prefix.len + self.partial_length]);
+        const joins = prefix.len != 0 and clusters.next().?.len == prefix.len + self.partial_length;
+        if (!joins) {
+            self.partial_length = 0;
+            if (pasted_input) {
+                // Paste insertion is contiguous. Roll it back without losing
+                // the pre-existing suffix, draft or decoder's paste custody.
+                const added = self.length - self.paste_start.length;
+                const suffix = self.paste_start.cursor + added;
+                std.mem.copyForwards(u8, self.buffer[self.paste_start.cursor..], self.buffer[suffix..self.length]);
+                self.length = self.paste_start.length;
+                self.cursor = self.paste_start.cursor;
+                self.plain_ascii = self.paste_start.plain_ascii;
+                self.reject(.edit_rejected);
+                return .none;
+            }
+            return .edit_rejected;
+        }
     }
     if (codepoint < 32 or codepoint > 126) self.plain_ascii = false;
     const at_end = self.cursor == self.length;

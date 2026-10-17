@@ -6,8 +6,8 @@ const Self = @This();
 pub const Composer = Viewport.Sized(65_536, false);
 pub const Call = Viewport.Sized(512, false);
 pub const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
-// Includes the historical 24 × 2048 resize witness without increasing the
-// renderer's 16-MiB cell/cache/frame budget.
+// Includes the historical 24 × 2048 resize witness; the shell accounts dense
+// Unicode cells, retained graphemes and frame bytes together under 32 MiB.
 pub const max_cells = 24 * 2048;
 
 pub fn validateGeometry(width: u16, height: u16) !void {
@@ -252,7 +252,7 @@ test "inspection notice preserves navigation and work status at narrow widths" {
 
 test "Action approval requires contiguous displayed rows and resets after resize" {
     var document: Viewport.Document = .{};
-    for (0..40) |_| try document.append("command line\n");
+    for (0..100) |_| try document.append("command line\n");
     var composer: Composer = .{};
     try composer.layout(78);
     var frame: Self = undefined;
@@ -262,12 +262,18 @@ test "Action approval requires contiguous displayed rows and resets after resize
     try std.testing.expect(!frame.approval_ready);
     try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
     const seen = frame.action_seen;
-    document.top = 30; // A jump must not certify the skipped rows.
+    document.top = 70; // A jump must not certify the skipped rows.
     input.action_seen = seen;
     try frame.plan(&document, &composer, input);
     try std.testing.expect(!frame.approval_ready);
-    document.top = seen;
-    try frame.plan(&document, &composer, input);
+    document.top = 0;
+    for (0..8) |_| {
+        input.action_seen = frame.action_seen;
+        // Coalesced repeat cannot scroll past the first unread row even when
+        // many more keys arrive than could fit between two physical frames.
+        for (0..20) |_| document.browse(true, frame.height, if (frame.approval_ready) null else input.action_seen);
+        try frame.plan(&document, &composer, input);
+    }
     try std.testing.expect(frame.approval_ready);
     input.action_seen = 0;
     input.width = 40;

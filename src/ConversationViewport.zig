@@ -225,10 +225,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return row;
         }
 
-        pub fn browse(self: *Self, down: bool, height: usize) void {
+        pub fn browse(self: *Self, down: bool, height: usize, first_unseen: ?usize) void {
             const current = self.first(height);
             const row = if (down) @min(current + height, self.displayRows() -| height) else current -| height;
-            self.top = row;
+            // Key repeat may deliver many page events before a frame. Never
+            // skip unread Action rows; only delivered frames advance this cap.
+            self.top = if (down) @min(row, first_unseen orelse row) else row;
         }
     };
 }

@@ -108,10 +108,10 @@ class ScreenCapture:
         return (not self.synchronized and self.generation > 0
                 and unicodedata.normalize("NFC", marker) in self.completed)
 
-    def draft(self, text, caret):
+    def draft(self, text, caret, *, prompt="› "):
         """Check the actual caret row, not an identical earlier User row."""
         cursor = self.screen.cursor
         return (not self.synchronized and self.generation > 0
                 and "Opening…" not in self.completed
                 and cursor.x == caret
-                and self.screen.display[cursor.y].rstrip() == ("› " + unicodedata.normalize("NFC", text)).rstrip())
+                and self.screen.display[cursor.y].rstrip() == (prompt + unicodedata.normalize("NFC", text)).rstrip())
