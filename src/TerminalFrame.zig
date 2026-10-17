@@ -5,6 +5,7 @@ const Viewport = @import("ConversationViewport.zig");
 const Self = @This();
 pub const Composer = Viewport.Sized(65_536, false);
 pub const Call = Viewport.Sized(512, false);
+pub const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
 
 status: Viewport.Sized(2048, false),
 calls: [3]Call,
@@ -64,7 +65,10 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
         .caret_row = 0,
         .caret_column = 0,
     };
-    try self.status.append(input.status);
+    if (input.width < 45 and std.mem.startsWith(u8, input.status, inspection_ready)) {
+        try self.status.append(if (input.width >= 18) "PgUp/PgDn · Ctrl-G" else "PgUp\nPgDn\nCtrl-G");
+        try self.status.append(input.status[inspection_ready.len..]);
+    } else try self.status.append(input.status);
     try self.status.layout(input.width);
     const reserve: u16 = if (input.approval) 2 else 1;
     if (input.approval and self.status.displayRows() > input.height - reserve and
@@ -199,5 +203,19 @@ test "inspection navigation names its actual return target at narrow widths" {
             try frame.plan(&document, &composer, input);
             try std.testing.expectEqualStrings(if (width == 8) "Ctrl-G" else if (pending) "Ctrl-G Action" else "Ctrl-G latest", frame.heading.text());
         }
+    }
+}
+
+test "inspection notice preserves navigation and work status at narrow widths" {
+    var document: Viewport.Document = .{};
+    var composer: Composer = .{};
+    var frame: Self = undefined;
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = inspection_ready ++ "\nWorking…", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
+    for ([_]u16{ 80, 20, 8 }) |width| {
+        input.width = width;
+        try composer.layout(width - 2);
+        try frame.plan(&document, &composer, input);
+        try std.testing.expectEqualStrings(if (width == 80) input.status else if (width == 20) "PgUp/PgDn · Ctrl-G\nWorking…" else "PgUp\nPgDn\nCtrl-G\nWorking…", frame.status.text());
+        try std.testing.expect(frame.caret_row < input.height);
     }
 }
