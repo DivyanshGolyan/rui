@@ -521,9 +521,9 @@ SQLite `PRAGMA user_version` is the Store's format version. Current schema 24 in
 
 Recovery is an explicit choice: use a compatible build at the original Store path, or back up the stopped Store and select a separate fresh Store. Rui never automatically recreates an incompatible Store. Store identity binds the canonical original path; moving or copying its directory does not relocate that identity. Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration. The [recovery instructions](README.md#start-fresh-after-a-store-format-change) leave the original Store untouched.
 
-When migrations are implemented after stability, the Host runs them at startup under its Store ownership lock, after an explicitly approved backup of the stopped Store. The installer only checks and reports compatibility. [Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a migration or reset now.
+When migrations are implemented after stability, the Host runs them at startup under its Store ownership lock, after an explicitly approved backup of the stopped Store. At that stage, the installer will only check and report compatibility. Today, the installer reports Host status; compatibility is checked when a Host starts. [Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a migration or reset now.
 
-The unreleased wire label remains `1`, with one canonical configure shape including the omission-aware provider field; pre-provider captures are not accepted or defaulted to Codex.
+Development test Stores and associated configure captures are recreated for changed formats, not migrated. This does not authorize recreating user Stores. The unreleased wire label remains `1`, with one canonical configure shape including the omission-aware provider field; pre-provider captures are not accepted or defaulted to Codex.
 
 ### Admitting an attempt
 
