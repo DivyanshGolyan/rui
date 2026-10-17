@@ -126,7 +126,8 @@ def execution_batches(targets, check_part="all"):
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
     if check_part == "execution":
-        return [["check-full", "-Dcheck-part=execution"]]
+        return [["check-full", "-Dcheck-part=execution"],
+                *execution_batches([target for target in targets if target != "check-full"])]
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
@@ -197,13 +198,18 @@ def select(paths, phase, available):
         # Development does not replace final boundary/native acceptance.
         targets = {"test-logic"} if targets else set()
         native_targets = set()
+    cache_execution_checks = any(path == "build.zig" or path.startswith(".github/")
+                                 or path == "tests/ci/cache_execution.py" for path in paths)
+    if cache_execution_checks and phase == "review":
+        # One explicit shard owns auxiliary cache-policy checks on each platform.
+        targets.add("test-logic")
+        native_targets.add("test-logic")
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
-            "cache_execution_checks": any(path == "build.zig" or path.startswith(".github/")
-                                          or path == "tests/ci/cache_execution.py" for path in paths),
+            "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "reasons": sorted(reasons), "acceptance_reused": False}
 
