@@ -43,6 +43,13 @@ func TestMemoryEvidenceBoundsOnlyHostAndRequiresMeasuredPeak(t *testing.T) {
 	if got := memoryEvidenceStatus(map[string]any{"status": "complete"}); got != "incomplete" {
 		t.Fatalf("missing Host peak reduced to %s", got)
 	}
+	partial := measurement.ProcessSample{SamplingError: "lsof failed", Footprint: measurement.Footprint{LifetimePeakBytes: 1024}}
+	if got := memoryEvidenceStatus(wholeRui(partial)); got != "incomplete" {
+		t.Fatalf("partial observation qualified as %s", got)
+	}
+	if got := processDelta(map[string]any{"host": partial}, map[string]any{"host": partial}); got["status"] != "unavailable" {
+		t.Fatalf("partial sample fabricated a measured zero delta: %v", got)
+	}
 }
 
 func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
@@ -622,6 +629,67 @@ func TestOfflineCapacityAuditsRejectStopAuditAndMissingEvidenceFailures(t *testi
 	}
 	if got := dependentObservationStatus(true, true, results[0].complete); got == "passed" {
 		t.Fatal("missing offline audit evidence passed")
+	}
+}
+
+func TestOfflineCapacityAuditsPreserveIndependentRoundsAfterFailure(t *testing.T) {
+	requests := []capacityAuditRequest{capacityAuditIdentity(1, 1, false), capacityAuditIdentity(1, 2, false), capacityAuditIdentity(1, 3, false)}
+	cause := errors.New("round 2 audit failed")
+	results, err := offlineCapacityAudits(func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, keys, _ []string) ([]capacityAuditRow, bool, error) {
+			if keys[0] == requests[1].keys[0] {
+				return []capacityAuditRow{{Key: keys[0]}}, false, cause
+			}
+			return []capacityAuditRow{{Key: keys[0]}}, true, nil
+		}, measurement.NewDeadline(time.Minute), "store")
+	if !errors.Is(err, cause) || len(results) != 3 {
+		t.Fatalf("lost completed audits: results=%+v err=%v", results, err)
+	}
+	for index, result := range results {
+		if len(result.rows) != 1 || result.rows[0].Key != requests[index].keys[0] || result.complete != (index != 1) {
+			t.Fatalf("round %d lost or misattributed: %+v", index+1, result)
+		}
+	}
+}
+
+func TestCapacityCollectionKeepsCompletedWorkAndStopsAfterObservationFailure(t *testing.T) {
+	for _, completedFailedRound := range []bool{false, true} {
+		t.Run(fmt.Sprint(completedFailedRound), func(t *testing.T) {
+			cause := errors.New("retained observation failed")
+			calls := 0
+			rounds, err := measurement.CollectCompletedRounds(4, func(round int) (map[string]any, error) {
+				calls++
+				row := map[string]any{"round": round, "retained": map[string]any{}, "status": "incomplete", "durable_audit_prerequisite_met": true, "host_dimensions": map[string]any{"memory": "incomplete"}}
+				if round == 2 {
+					if completedFailedRound {
+						return row, cause
+					}
+					return nil, cause
+				}
+				return row, nil
+			})
+			want := 1
+			if completedFailedRound {
+				want = 2
+			}
+			if !errors.Is(err, cause) || calls != 2 || len(rounds) != want {
+				t.Fatalf("completed rounds=%v calls=%d err=%v", rounds, calls, err)
+			}
+			for _, row := range rounds {
+				if err := applyOfflineCapacityAudit(row, capacityAuditResult{complete: true}); err != nil {
+					t.Fatal(err)
+				}
+				if row["status"] != "incomplete" || row["all_results_audited"] != true || row["host_dimensions"].(map[string]any)["memory"] != "incomplete" {
+					t.Fatalf("audit changed missing memory into acceptance: %v", row)
+				}
+			}
+			result, err := finalizeQualification(capacityResult(1, 30, 4, true, rounds, 101, 102), err,
+				func() error { return errors.New("fact log close failed") })
+			encoded, code, encodeError := encodedQualificationResult(result)
+			if !errors.Is(err, cause) || encodeError != nil || code == 0 || !strings.Contains(string(encoded), "fact log close failed") || len(result["rounds"].([]map[string]any)) != want {
+				t.Fatalf("lost partial failure result=%s err=%v", encoded, err)
+			}
+		})
 	}
 }
 

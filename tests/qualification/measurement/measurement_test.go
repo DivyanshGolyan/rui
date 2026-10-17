@@ -171,6 +171,7 @@ func TestParseFootprintRejectsMissingMalformedNonpositiveAndInconsistent(t *test
 		"phys_footprint: 1 MB\nphys_footprint_peak: 2 MB\nphys_footprint: 1 MB\n",
 		"phys_footprint: 0 B\nphys_footprint_peak: 1 B\n",
 		"phys_footprint: 4 MB\nphys_footprint_peak: 1 KB\n",
+		"phys_footprint: 5201 KB\nphys_footprint_peak: 5057 KB\n",
 	}
 	for _, report := range reports {
 		if _, err := ParseFootprint(report); err == nil {
@@ -382,6 +383,105 @@ func TestSamplePortableProcessReadsCurrentProcess(t *testing.T) {
 	}
 	if sample.RSSBytes == 0 || sample.Threads < 1 || sample.OpenDescriptors < 1 {
 		t.Fatalf("incomplete portable sample: %+v", sample)
+	}
+}
+
+type failingDescriptorCounters struct{ *process.Process }
+
+func (failingDescriptorCounters) NumFDs() (int32, error) {
+	return 0, errors.New("descriptor query failed")
+}
+
+func (failingDescriptorCounters) IOCounters() (*process.IOCountersStat, error) {
+	return &process.IOCountersStat{DiskReadBytes: 1234, DiskWriteBytes: 5678}, nil
+}
+
+func TestCoreSamplingRetainsCountersOnBothSidesOfFailure(t *testing.T) {
+	target, err := process.NewProcess(int32(os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := sampleProcessCore(failingDescriptorCounters{target})
+	if err == nil || sample.RSSBytes == 0 || sample.Threads < 1 || sample.DiskReadBytes != 1234 || sample.DiskWriteBytes != 5678 || strings.Join(sample.UnavailableCounters, ",") != "descriptors" {
+		t.Fatalf("partial core sample=%+v err=%v", sample, err)
+	}
+}
+
+func TestDarwinSampleRetainsIndependentEvidenceOnFailure(t *testing.T) {
+	target, err := process.NewProcess(int32(os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"command", "parse", "capture", "command+capture", "lsof"} {
+		t.Run(failure, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "footprint.txt")
+			if strings.Contains(failure, "capture") {
+				path = filepath.Join(path, "missing", "footprint.txt")
+			}
+			report := "phys_footprint: 1258291 B\nphys_footprint_peak: 1507328 B\n"
+			if failure == "parse" {
+				report = "phys_footprint: 5201 KB\nphys_footprint_peak: 5057 KB\n"
+			}
+			cause := errors.New("injected " + failure)
+			sample, sampleError := sampleDarwinProcess(target, ProcessSample{RSSBytes: 1234, CPUUserSeconds: 2.5}, path, func(command *exec.Cmd) ([]byte, error) {
+				if command.Path == "/usr/bin/footprint" {
+					if strings.Contains(failure, "command") {
+						return []byte(report), cause
+					}
+					return []byte(report), nil
+				}
+				return []byte("partial descriptor report"), cause
+			})
+			if sampleError == nil || sample.RSSBytes != 1234 || sample.CPUUserSeconds != 2.5 {
+				t.Fatalf("lost partial sample: %+v err=%v", sample, sampleError)
+			}
+			if strings.Contains(failure, "command") || failure == "lsof" {
+				if !errors.Is(sampleError, cause) {
+					t.Fatalf("lost original error: %v", sampleError)
+				}
+			}
+			if !strings.Contains(failure, "capture") {
+				raw, err := os.ReadFile(path)
+				if err != nil || string(raw) != report {
+					t.Fatalf("raw failed observation lost: %q err=%v", raw, err)
+				}
+				capture := sample.FootprintCapture
+				wantCommand := fmt.Sprintf("/usr/bin/footprint -f bytes -p %d", target.Pid)
+				if capture.PID != target.Pid || capture.ProcessStartUnixMS <= 0 || !capture.IdentityUnchanged || capture.BeginUnixNS <= 0 || capture.EndUnixNS < capture.BeginUnixNS || strings.Join(capture.Command, " ") != wantCommand || capture.RawPath != path || capture.Error == "" {
+					t.Fatalf("missing capture provenance: %+v", capture)
+				}
+			}
+			if failure == "lsof" && sample.Footprint.LifetimePeakBytes != 1507328 {
+				t.Fatalf("descriptor failure erased valid footprint: %+v", sample)
+			}
+		})
+	}
+}
+
+func TestDarwinSampleRejectsTargetRetirementDuringCapture(t *testing.T) {
+	child := exec.Command("sleep", "10")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		// Kill is expected to report an already retired process after the probe.
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}()
+	target, err := process.NewProcess(int32(child.Process.Pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "footprint.txt")
+	sample, err := sampleDarwinProcess(target, ProcessSample{RSSBytes: 1000}, path, func(*exec.Cmd) ([]byte, error) {
+		if err := child.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		_ = child.Wait()
+		return []byte("phys_footprint: 100 B\nphys_footprint_peak: 200 B\n"), nil
+	})
+	if err == nil || sample.Footprint.LifetimePeakBytes != 0 || sample.FootprintCapture.IdentityUnchanged || sample.RSSBytes != 1000 {
+		t.Fatalf("retired identity accepted or partial sample lost: %+v err=%v", sample, err)
 	}
 }
 

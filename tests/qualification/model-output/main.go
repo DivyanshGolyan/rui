@@ -309,10 +309,11 @@ func wholeRui(sample measurement.ProcessSample) map[string]any {
 	if sample.Footprint.LifetimePeakBytes == 0 {
 		return map[string]any{"status": "unavailable", "host_processes": 1,
 			"linux_memory": sample.LinuxMemory, "rss_bytes": sample.RSSBytes,
-			"measurement_basis": "Linux /proc diagnostics cannot establish macOS physical footprint"}
+			"sampling_error":    sample.SamplingError,
+			"measurement_basis": "accepted macOS physical-footprint evidence unavailable; RSS and Linux /proc counters are diagnostic only"}
 	}
 	upper := sample.Footprint.LifetimePeakBytes + sample.Footprint.LifetimePeakTolerance
-	return map[string]any{
+	result := map[string]any{
 		"status": "complete", "host_processes": 1, "descendant_processes_diagnostic": sample.LiveDescendantProcesses,
 		"rss_bytes": sample.RSSBytes, "physical_footprint_bytes": sample.Footprint.PhysicalBytes,
 		"host_footprint_target_bytes":                        hostFootprintTargetBytes,
@@ -320,6 +321,11 @@ func wholeRui(sample measurement.ProcessSample) map[string]any {
 		"lifetime_peak_physical_footprint_upper_bound_bytes": upper,
 		"measurement_basis":                                  "conservative upper bound of Host lifetime physical-footprint peak",
 	}
+	if sample.SamplingError != "" {
+		// Keep a valid footprint visible even when another required query failed.
+		result["status"], result["sampling_error"] = "unavailable", sample.SamplingError
+	}
+	return result
 }
 
 func memoryEvidenceStatus(aggregates ...map[string]any) string {
@@ -966,6 +972,7 @@ type capacityAuditRequest struct {
 type capacityAuditResult struct {
 	rows     []capacityAuditRow
 	complete bool
+	err      error
 }
 
 type capacityAuditor func(measurement.Deadline, string, []string, []string) ([]capacityAuditRow, bool, error)
@@ -975,14 +982,16 @@ func offlineCapacityAudits(stopHost func() error, requests []capacityAuditReques
 		return nil, fmt.Errorf("stop and reap Host before capacity audits: %w", err)
 	}
 	results := make([]capacityAuditResult, 0, len(requests))
+	var auditError error
 	for index, request := range requests {
 		rows, complete, err := audit(deadline, store, request.keys, request.sessions)
 		if err != nil {
-			return nil, fmt.Errorf("offline capacity audit round %d: %w", index+1, err)
+			complete = false
+			auditError = errors.Join(auditError, fmt.Errorf("offline capacity audit round %d: %w", index+1, err))
 		}
-		results = append(results, capacityAuditResult{rows: rows, complete: complete})
+		results = append(results, capacityAuditResult{rows: rows, complete: complete, err: err})
 	}
-	return results, nil
+	return results, auditError
 }
 
 func capacityAuditRowsValid(rows []capacityAuditRow, keys, sessions []string) bool {
@@ -1030,6 +1039,9 @@ func processDelta(firstValue, secondValue any) map[string]any {
 	second, secondOK := secondOuter["host"].(measurement.ProcessSample)
 	if !firstOuterOK || !secondOuterOK || !firstOK || !secondOK {
 		return map[string]any{"status": "unavailable"}
+	}
+	if first.SamplingError != "" || second.SamplingError != "" {
+		return map[string]any{"status": "unavailable", "reason": "retained process sample incomplete"}
 	}
 	if first.LinuxMemory != nil && second.LinuxMemory != nil {
 		return map[string]any{"status": "observed",
@@ -1369,25 +1381,13 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 	finalScratch, finalScratchOK := measurement.IntStringField(finalInspection, "execution", "scratch_used_bytes")
 	finalCustody, finalCustodyOK := measurement.IntStringField(finalInspection, "execution", "custody_occupied")
 	cleanupComplete := finalScratchOK && finalCustodyOK && finalScratch == 0 && finalCustody == 0
-	cpuEnd, err := measurement.CPUSeconds(host.Process)
-	if err != nil {
-		return nil, err
-	}
-	if err := facts.Write("host_complete", map[string]any{"round": round, "host_cpu_seconds": cpuEnd, "inspection": finalInspection}); err != nil {
-		return nil, err
-	}
-	retained, err := measurement.SampleProcess(host.Process, filepath.Join(roundDirectory, "host-footprint-retained.txt"))
-	if err != nil {
-		return nil, err
-	}
-	fixtureRetained, err := measurement.SampleProcess(fixture.Process, filepath.Join(roundDirectory, "provider-footprint-retained.txt"))
-	if err != nil {
-		return nil, err
-	}
-	sustainedCPU, err := measurement.CheckedCPUDelta(cpu10.CPUSeconds, cpu50.CPUSeconds)
-	if err != nil {
-		return nil, err
-	}
+	// Work and drain are established. Subsequent observation failures must not
+	// erase this round or prevent its independent audit after Host retirement.
+	cpuEnd, cpuEndError := measurement.CPUSeconds(host.Process)
+	factError := facts.Write("host_complete", map[string]any{"round": round, "host_cpu_seconds": cpuEnd, "cpu_available": cpuEndError == nil, "inspection": finalInspection})
+	retained, hostSampleError := measurement.SampleProcess(host.Process, filepath.Join(roundDirectory, "host-footprint-retained.txt"))
+	fixtureRetained, providerSampleError := measurement.SampleProcess(fixture.Process, filepath.Join(roundDirectory, "provider-footprint-retained.txt"))
+	sustainedCPU, sustainedCPUError := measurement.CheckedCPUDelta(cpu10.CPUSeconds, cpu50.CPUSeconds)
 	minimumSampleWindow := cpu50.QueryStart.Sub(cpu10.QueryEnd)
 	maximumSampleWindow := cpu50.QueryEnd.Sub(cpu10.QueryStart)
 	sustainedCores := 0.0
@@ -1400,7 +1400,7 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 	}
 	offerQualified := providerOfferQualified(offer, capacity, eventsPerSecond, duration, expectedWork)
 	bracketValid := capacityCPUWindowValid(offerStart, duration, cpu10, cpu50, earliestFinalCompletion)
-	cpuWindowValid := offerQualified && bracketValid
+	cpuWindowValid := offerQualified && bracketValid && sustainedCPUError == nil
 	sustainedCPUStatus := sustainedCPUQualificationStatus(offerQualified, bracketValid, sustainedCores)
 	sustainedCPUVerdictStatus := sustainedCPUStatus
 	sustainedCPUVerdictCores := sustainedCores
@@ -1409,10 +1409,12 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 		sustainedCPUVerdictStatus = "passed"
 		sustainedCPUVerdictCores = 0
 	}
-	completeCPU, err := measurement.CheckedCPUDelta(cpuAdmissionStart, cpuEnd)
-	if err != nil {
-		return nil, err
+	if sustainedCPUError != nil {
+		sustainedCPUStatus, sustainedCPUVerdictStatus = "unavailable", "unavailable"
 	}
+	completeCPU, completeCPUError := measurement.CheckedCPUDelta(cpuAdmissionStart, cpuEnd)
+	completeCPUError = errors.Join(cpuEndError, completeCPUError)
+	postWorkError := errors.Join(factError, hostSampleError, providerSampleError, sustainedCPUError, completeCPUError)
 	expectedRequestBytes, expectedRequestDigest := expectedCapacityRequests(keys, workspace)
 	requestComplete := offer.RequestBytes == expectedRequestBytes && offer.RequestSetSHA256 == expectedRequestDigest
 	requestOracle := "independent exact-byte set"
@@ -1431,6 +1433,9 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 	initialWhole := wholeRui(initial)
 	retainedWhole := wholeRui(retained)
 	memoryVerdict := memoryEvidenceStatus(initialWhole, retainedWhole)
+	if hostSampleError != nil || providerSampleError != nil {
+		memoryVerdict = "incomplete"
+	}
 	status := capacityVerdict(capacityVerdictInput{
 		Capacity:               capacity,
 		EventsPerSecond:        eventsPerSecond,
@@ -1448,6 +1453,9 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 		SustainedAverageCores:  sustainedCPUVerdictCores,
 		CompleteWorkCPUSeconds: completeCPU,
 	})
+	if postWorkError != nil && status == "passed" {
+		status = "incomplete"
+	}
 	observedOffer := map[string]any{"status": "unavailable"}
 	if offerWorkComplete && offer.LatestFinalCompletionUnixNS > offer.StartUnixNS {
 		seconds := time.Duration(offer.LatestFinalCompletionUnixNS - offer.StartUnixNS).Seconds()
@@ -1458,7 +1466,7 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 		requestEvidence["expected_bytes"] = expectedRequestBytes
 		requestEvidence["expected_set_sha256"] = expectedRequestDigest
 	}
-	return map[string]any{
+	row := map[string]any{
 		"status": status, "round": round, "active_capacity": capacity, "events_per_second_per_stream": eventsPerSecond, "offer_seconds": duration.Seconds(), "fixture_ready": ready, "paced_offer": offer, "fixture_completion": completion,
 		"retained_request_baseline": baselineInspection, "capture_before_terminal": heldInspection, "completion_inspection": finalInspection,
 		"cpu": map[string]any{
@@ -1466,16 +1474,20 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 			"first_query":                   map[string]any{"start_unix_ns": cpu10.QueryStart.UnixNano(), "finish_unix_ns": cpu10.QueryEnd.UnixNano(), "host_cpu_seconds": cpu10.CPUSeconds},
 			"second_query":                  map[string]any{"start_unix_ns": cpu50.QueryStart.UnixNano(), "finish_unix_ns": cpu50.QueryEnd.UnixNano(), "host_cpu_seconds": cpu50.CPUSeconds},
 			"minimum_sample_window_seconds": minimumSampleWindow.Seconds(), "maximum_sample_window_seconds": maximumSampleWindow.Seconds(), "earliest_stream_final_completion_unix_ns": offer.EarliestFinalCompletionUnixNS,
-			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_at_most_120_cpu_seconds": completeCPU <= capacityMaximumCPUSeconds,
+			"average_cores_conservative": sustainedCores, "at_most_2_average_cores": cpuWindowValid && sustainedCores <= capacityMaximumAverageCores, "complete_work_cpu_seconds": completeCPU, "complete_work_cpu_available": completeCPUError == nil, "complete_work_at_most_120_cpu_seconds": completeCPUError == nil && completeCPU <= capacityMaximumCPUSeconds,
 		},
 		"initial": map[string]any{"host": initial, "whole_rui": initialWhole}, "retained": map[string]any{"host": retained, "whole_rui": retainedWhole},
 		"provider_process":               map[string]any{"pid": fixture.cmd.Process.Pid, "initial": fixtureInitial, "retained": fixtureRetained},
-		"host_dimensions":                map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus},
+		"host_dimensions":                map[string]any{"capture": captureStatus, "cleanup": cleanupStatus, "request_integrity": requestIntegrityStatus, "result_delivery": resultDeliveryStatus, "memory": memoryVerdict},
 		"durable_audit_prerequisite_met": auditPrerequisite, "result_delivery_complete": resultDeliveryComplete, "retained_request_scratch_bytes": baselineScratch, "expected_response_scratch_delta_bytes": responseScratch, "expected_retained_scratch_bytes": expectedScratch, "capture_observation_complete": captureComplete, "cleanup_observation_complete": cleanupComplete,
 		"expected_provider_work": expectedWork,
 		"observed_offer":         observedOffer,
 		"request_integrity":      requestEvidence,
-	}, nil
+	}
+	if postWorkError != nil {
+		row["observation_error"] = postWorkError.Error()
+	}
+	return row, postWorkError
 }
 
 func applyOfflineCapacityAudit(row map[string]any, audit capacityAuditResult) error {
@@ -1484,6 +1496,13 @@ func applyOfflineCapacityAudit(row map[string]any, audit capacityAuditResult) er
 		return errors.New("capacity round lacks durable audit prerequisite evidence")
 	}
 	status := dependentObservationStatus(prerequisite, true, audit.complete)
+	if audit.err != nil {
+		status = "unavailable"
+		row["audit_error"] = audit.err.Error()
+		if row["status"] == "passed" {
+			row["status"] = "incomplete"
+		}
+	}
 	dimensions, ok := row["host_dimensions"].(map[string]any)
 	if !ok {
 		return errors.New("capacity round lacks Host dimensions")
@@ -1587,25 +1606,21 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	if os.Getpid() == fixture.cmd.Process.Pid || host.Cmd.Process.Pid == fixture.cmd.Process.Pid || os.Getpid() == host.Cmd.Process.Pid {
 		return nil, errors.New("controller, provider fixture and Host must have distinct process identities")
 	}
-	rounds = make([]map[string]any, 0, roundCount)
-	result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
-	for round := 1; round <= roundCount; round++ {
+	rounds, resultError = measurement.CollectCompletedRounds(roundCount, func(round int) (map[string]any, error) {
 		info, statError := os.Stat(filepath.Join(directory, "host-stderr.log"))
 		if statError != nil {
-			return result, statError
+			return nil, statError
 		}
 		diagnosticOffset := info.Size()
 		row, err := measureCapacityRound(binary, directory, store, workspace, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts)
 		if err != nil {
-			return result, err
+			return row, err
 		}
-		rounds = append(rounds, row)
-		result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
 		if diagnostics {
 			row["retained_memory_composition"] = memoryComposition(host.Cmd.Process.Pid, filepath.Join(directory, fmt.Sprintf("round-%d", round)))
 			log, openError := os.Open(filepath.Join(directory, "host-stderr.log"))
 			if openError != nil {
-				return result, openError
+				return row, openError
 			}
 			_, seekError := log.Seek(diagnosticOffset, io.SeekStart)
 			var report []byte
@@ -1614,20 +1629,22 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 				report, readError = io.ReadAll(log)
 			}
 			if err := errors.Join(seekError, readError, log.Close()); err != nil {
-				return result, fmt.Errorf("read per-round SQLite diagnostics: %w", err)
+				return row, fmt.Errorf("read per-round SQLite diagnostics: %w", err)
 			}
 			records, parseError := sqliteDiagnosticRecords(report)
 			if parseError != nil {
-				return result, parseError
+				return row, parseError
 			}
 			row["host_sqlite_diagnostics"] = records
 			status := productionDiagnosticsStatus(records)
 			row["sqlite_diagnostics_status"] = status
 			row["status"] = reduceStatuses([]map[string]any{row, {"status": status}})
 		}
-	}
-	auditRequests := make([]capacityAuditRequest, 0, roundCount)
-	for round := 1; round <= roundCount; round++ {
+		return row, nil
+	})
+	result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
+	auditRequests := make([]capacityAuditRequest, 0, len(rounds))
+	for round := 1; round <= len(rounds); round++ {
 		auditRequests = append(auditRequests, capacityAuditIdentity(capacity, round, sameSessions))
 	}
 	audits, err := offlineCapacityAudits(func() error {
@@ -1637,18 +1654,16 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		}
 		return err
 	}, auditRequests, auditCapacity, deadline, store)
-	if err != nil {
-		return result, err
-	}
+	resultError = errors.Join(resultError, err)
 	for index, audit := range audits {
 		if err := applyOfflineCapacityAudit(rounds[index], audit); err != nil {
-			return result, err
+			resultError = errors.Join(resultError, err)
 		}
 		if err := facts.Write("offline_capacity_audit", map[string]any{"round": index + 1, "host_reaped": true, "complete": audit.complete, "rows": audit.rows}); err != nil {
-			return result, err
+			resultError = errors.Join(resultError, err)
 		}
 	}
-	return capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid), nil
+	return capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid), resultError
 }
 
 // These sequential snapshots explain live heap versus allocator-resident pages.

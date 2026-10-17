@@ -365,77 +365,100 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	return map[string]any{"status": historyStatus, "waiting_retry_backlog_cases": []int{1, 10, 100}, "stages": rows, "future_only_unresolved_retries": future, "future_only_idle_cpu_percent_one_core": idleCPU, "future_only_idle_cpu_sample_seconds": idleElapsed, "discovery_qualification_limit_ms": 2000, "idle_cpu_qualification_limit_percent_one_core": 1}, nil
 }
 
-func churn(binary, root string, e *retryEndpoint) (map[string]any, error) {
+func churn(binary, root string, e *retryEndpoint) (result map[string]any, resultError error) {
+	defer func() {
+		if result != nil && resultError != nil {
+			result["status"], result["error"] = "failed", resultError.Error()
+		}
+	}()
 	directory := filepath.Join(root, "churn")
-	_ = os.Mkdir(directory, 0o700)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		return nil, err
+	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(8 * time.Minute)
 	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-cleanup-delay-ms", "250")
 	if err != nil {
 		return nil, err
 	}
+	hostNeedsStop := true
+	defer func() {
+		if hostNeedsStop {
+			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		}
+	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	baseline, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-baseline.txt"))
-	if err != nil {
-		return nil, err
-	}
 	rows := []map[string]any{}
-	work := func() error {
-		for round := 0; round < rounds; round++ {
-			for index := 0; index < operationsPerRound; index++ {
-				ordinal := round*operationsPerRound + index
-				session := fmt.Sprintf("measure/churn-%d", ordinal)
-				if err := client.Submit(fmt.Sprintf("churn-%d", ordinal), session, fmt.Sprintf("churn-operation-%d", ordinal)); err != nil {
-					return err
-				}
+	result = map[string]any{"status": "incomplete", "active_capacity": capacity, "operations_per_round": operationsPerRound, "rounds": rows, "baseline": baseline, "custody_record_bytes": host.Ready["custody_record_bytes"], "execution_slot_bytes": host.Ready["execution_slot_bytes"]}
+	if err != nil {
+		return result, err
+	}
+	rows, work := measurement.CollectCompletedRounds(rounds, func(round int) (map[string]any, error) {
+		for index := 0; index < operationsPerRound; index++ {
+			ordinal := (round-1)*operationsPerRound + index
+			session := fmt.Sprintf("measure/churn-%d", ordinal)
+			if err := client.Submit(fmt.Sprintf("churn-%d", ordinal), session, fmt.Sprintf("churn-operation-%d", ordinal)); err != nil {
+				return nil, err
 			}
-			expected := (round + 1) * operationsPerRound
-			if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn attempts", func() (bool, error) { return e.total("churn-operation-") == expected*2, nil }); err != nil {
-				return err
-			}
-			if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn cleanup", func() (bool, error) { return custodyZero(client, fmt.Sprintf("measure/churn-%d", expected-1)) }); err != nil {
-				return err
-			}
-			sample, err := measurement.SampleProcess(host.Process, filepath.Join(directory, fmt.Sprintf("footprint-round-%d.txt", round+1)))
-			if err != nil {
-				return err
-			}
-			database, _ := os.Stat(filepath.Join(store, "rui.sqlite3"))
-			rows = append(rows, map[string]any{"round": round + 1, "terminal_operations": expected, "database_bytes": database.Size(), "process": sample})
 		}
-		return nil
-	}()
+		expected := round * operationsPerRound
+		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn attempts", func() (bool, error) { return e.total("churn-operation-") == expected*2, nil }); err != nil {
+			return nil, err
+		}
+		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn cleanup", func() (bool, error) { return custodyZero(client, fmt.Sprintf("measure/churn-%d", expected-1)) }); err != nil {
+			return nil, err
+		}
+		sample, sampleError := measurement.SampleProcess(host.Process, filepath.Join(directory, fmt.Sprintf("footprint-round-%d.txt", round)))
+		database, databaseError := measurement.DatabaseSize(store)
+		row := map[string]any{"round": round, "terminal_operations": expected, "process": sample}
+		if databaseError == nil {
+			row["database_bytes"] = database["database_logical_bytes"]
+		}
+		return row, errors.Join(sampleError, databaseError)
+	})
+	result["rounds"] = rows
 	if work == nil && !e.exact("churn-operation-", 2) {
 		work = errors.New("a churn operation did not launch exactly twice")
 	}
-	cpuBefore, err := measurement.CPUSeconds(host.Process)
-	if err != nil {
-		host.Stop(measurement.TeardownAllowance)
-		return nil, err
+	if work == nil {
+		work = func() error {
+			cpuBefore, err := measurement.CPUSeconds(host.Process)
+			if err != nil {
+				return err
+			}
+			idleStarted := time.Now()
+			time.Sleep(2 * time.Second)
+			cpuAfter, err := measurement.CPUSeconds(host.Process)
+			if err != nil {
+				return err
+			}
+			idleElapsed := time.Since(idleStarted).Seconds()
+			idleDelta, err := measurement.CheckedCPUDelta(cpuBefore, cpuAfter)
+			if err != nil {
+				return err
+			}
+			idleCPU := 100 * idleDelta / idleElapsed
+			result["status"] = idleStatus(idleCPU)
+			result["idle_cpu_percent_one_core"], result["idle_cpu_sample_seconds"] = idleCPU, idleElapsed
+			result["idle_cpu_qualification_limit_percent_one_core"] = 1
+			retained, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-retained.txt"))
+			result["retained_idle"] = retained
+			return err
+		}()
 	}
-	idleStarted := time.Now()
-	time.Sleep(2 * time.Second)
-	cpuAfter, err := measurement.CPUSeconds(host.Process)
-	if err != nil {
-		host.Stop(measurement.TeardownAllowance)
-		return nil, err
+	if stopError := host.Stop(measurement.TeardownAllowance); stopError != nil {
+		return result, errors.Join(work, stopError)
 	}
-	idleElapsed := time.Since(idleStarted).Seconds()
-	idleDelta, err := measurement.CheckedCPUDelta(cpuBefore, cpuAfter)
-	if err != nil {
-		host.Stop(measurement.TeardownAllowance)
-		return nil, err
-	}
-	retained, sampleErr := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-retained.txt"))
-	if err := errors.Join(work, sampleErr, host.Stop(measurement.TeardownAllowance)); err != nil {
-		return nil, err
-	}
+	hostNeedsStop = false
 	groups, err := sql(deadline, store, "SELECT attempt_ordinal||','||allowance_used||','||resolution_code||','||count(*) FROM model_operation GROUP BY attempt_ordinal,allowance_used,resolution_code;")
-	if err != nil || groups != fmt.Sprintf("2,2,provider_http_422,%d", rounds*operationsPerRound) {
-		return nil, fmt.Errorf("unexpected churn facts: %s: %w", groups, err)
+	result["attempt_fact_groups"] = groups
+	result["offline_audit_after_host_reaped"] = true
+	if err == nil && groups != fmt.Sprintf("2,2,provider_http_422,%d", len(rows)*operationsPerRound) {
+		err = fmt.Errorf("unexpected churn facts: %s", groups)
 	}
-	idleCPU := 100 * idleDelta / idleElapsed
-	return map[string]any{"status": idleStatus(idleCPU), "active_capacity": capacity, "operations_per_round": operationsPerRound, "rounds": rows, "baseline": baseline, "custody_record_bytes": host.Ready["custody_record_bytes"], "execution_slot_bytes": host.Ready["execution_slot_bytes"], "idle_cpu_percent_one_core": idleCPU, "idle_cpu_sample_seconds": idleElapsed, "idle_cpu_qualification_limit_percent_one_core": 1, "retained_idle": retained, "attempt_fact_groups": groups}, nil
+	result["offline_audit_complete"] = err == nil
+	return result, errors.Join(work, err)
 }
 
 func run() (exitCode int) {
@@ -475,21 +498,17 @@ func run() (exitCode int) {
 	if err != nil {
 		panic(err)
 	}
-	churnResult, err := churn(binary, root, e)
-	if err != nil {
-		panic(err)
-	}
+	churnResult, runError := churn(binary, root, e)
 	result := map[string]any{"format": "rui-model-retry-v3-go", "scope": "issue-174 production retry discovery and custody churn", "status": retryStatus(timingResult, historyResult, churnResult), "artifacts": root, "timing": timingResult, "unresolved_history": historyResult, "churn_and_delayed_cleanup": churnResult, "elapsed_seconds": time.Since(started).Seconds(), "limits": []string{"macOS Apple Silicon runtime evidence only", "deterministic loopback HTTP classifies no live-provider behavior", "a 250 ms fixture delay separates committed retry discovery from provider launch", "waiting retry backlog and churn are qualified through the current 100-operation stress scale, not a product quota", "process termination evidence is not power-loss qualification"}}
-	if err := e.Close(); err != nil {
-		result["status"], result["error"] = "failed", err.Error()
-	}
+	runError = errors.Join(runError, e.Close())
 	e = nil
 	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, *output)
-	if err != nil {
-		panic(err)
-	}
+	runError = errors.Join(runError, err)
 	for name, value := range evidence {
 		result[name] = value
+	}
+	if runError != nil {
+		result["status"], result["error"] = "failed", runError.Error()
 	}
 	if err := measurement.PublishQualification(*output, result); err != nil {
 		panic(err)
