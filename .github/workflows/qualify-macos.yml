@@ -12,7 +12,7 @@ on:
         required: true
         default: footprint
         type: choice
-        options: [footprint, resources, native, all]
+        options: [footprint, resources, native, all, ci-diagnostic]
 
 permissions:
   contents: read
@@ -48,6 +48,8 @@ jobs:
                        'measure-model-queue', 'measure-model-control', 'measure-call-classification',
                        'measure-execution-service']
           rows = []
+          if suite == 'ci-diagnostic':
+              rows = [dict(name='ci-diagnostic', targets=['test-logic'], part='all', resource=False)]
           if suite in ('footprint', 'resources', 'all'):
               rows += [dict(name=target, targets=[target], part='all', resource=True)
                        for target in (resources if suite != 'footprint' else resources[:1])]
@@ -113,6 +115,13 @@ jobs:
           check-part: ${{ matrix.part }}
       - name: Record the compiler used by every suite
         run: zig version | tee "$EVIDENCE/zig-version.txt"
+      - name: Diagnose the mocked driver and run the CI Python suite
+        if: ${{ matrix.name == 'ci-diagnostic' }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin e8c7fec006b84f29cfd6511d72c69fe5f7e61794
+          python3 tests/ci/diagnose_driver.py 2>&1 | tee "$EVIDENCE/driver-diagnostic.log"
+          python3 -m unittest discover -s tests/ci -p 'test_*.py' -v 2>&1 | tee "$EVIDENCE/python-ci.log"
       - name: Existing measurement setup and tests
         id: measurement
         if: ${{ matrix.resource }}
