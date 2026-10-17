@@ -71,11 +71,12 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(result["native_required"])
 
     def test_bash_lifecycle_values_keep_portable_and_native_owner_checks(self):
-        result = select(["src/BashLifecycle.zig"], "review", AVAILABLE)
-        for family in ("targets", "native_targets"):
-            self.assertEqual(result[family], ["bash-integration", "bash-lifecycle-integration",
-                                              "bash-owner-integration", "bash-recovery-integration",
-                                              "test", "test-logic"])
+        for path in ("src/BashLifecycle.zig", "src/deadline.zig"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertEqual(result[family], ["bash-integration", "bash-lifecycle-integration",
+                                                  "bash-owner-integration", "bash-recovery-integration",
+                                                  "test", "test-logic"], path)
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
