@@ -1506,6 +1506,7 @@ fn planConfigurationUpdate(
 pub const OpenOptions = struct {
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
+    found_schema_version: ?*u32 = null,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -1609,6 +1610,7 @@ pub const Store = struct {
         try dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
         try dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
         if (existing) {
+            if (options.found_schema_version) |found| found.* = try pragmaInt(database.?, "PRAGMA user_version");
             try validateExisting(database.?, selector);
         }
         try exec(database.?, "PRAGMA busy_timeout=0");

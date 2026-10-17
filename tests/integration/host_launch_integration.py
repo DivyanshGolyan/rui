@@ -4,6 +4,7 @@
 import errno
 import json
 import fcntl
+import hashlib
 import os
 import pathlib
 import pty
@@ -12,13 +13,15 @@ import resource
 import select
 import shlex
 import signal
+import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import termios
 import time
 
-from host_process import start_ready_process, stop_process
+from host_process import canonical_fixture_root, start_ready_process, stop_process
 import codex_integration as codex_fixture
 
 
@@ -236,6 +239,79 @@ def lower_descriptor_limit():
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
+def startup_limits(root, env):
+    for name, hard in (("soft-256", False), ("hard-256", True)):
+        store = root / name
+        def limits():
+            _, inherited_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256 if hard else inherited_hard))
+        try:
+            started = run_start(store, env, preexec_fn=limits)
+            assert started.returncode == 0, started.stderr
+            reported = status(store, env)
+            assert "Host: ready" in reported and "Active capacity: 8" in reported, reported
+            match = re.search(r"Concurrent intake: (\d+) ordinary", reported)
+            assert match, reported
+            capacity = int(match[1])
+            assert (10 <= capacity < 100) if hard else capacity == 100, reported
+            if hard:
+                assert "reduced by descriptor limit" in reported, reported
+                socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
+                borrowers = []
+                try:
+                    for _ in range(capacity):
+                        peer = socket.socket(socket.AF_UNIX)
+                        borrowers.append(peer)
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
+                    # Discovery is prepared by intake after reading preceding
+                    # borrowers, so its reply establishes their classification.
+                    assert "Host: ready" in status(store, env)
+                    with socket.socket(socket.AF_UNIX) as peer:
+                        peer.settimeout(3)
+                        peer.connect(socket_path)
+                        peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
+                        response = bytearray()
+                        while chunk := peer.recv(4096):
+                            response.extend(chunk)
+                        assert b"503" in response and b"ClientCapacity" in response, response
+                    assert "Host: ready" in status(store, env)
+                finally:
+                    for peer in borrowers:
+                        peer.close()
+            records = list((store / "diagnostics").glob("*.jsonl"))
+            assert records and any(f"ordinary_intake={capacity}" in path.read_text() for path in records)
+            print(f"detached startup {name}: {reported}", flush=True)
+        finally:
+            subprocess.run([RUI, "host", "stop", "--store", store], env=env, capture_output=True, timeout=5)
+            wait_for_processes(store, 0)
+
+    store = root / "below-minimum"
+    before = time.monotonic()
+    failed = run_start(store, env, preexec_fn=lower_descriptor_limit)
+    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    assert "DescriptorCapacityInsufficient" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    assert "RLIMIT_NOFILE" in failed.stderr and "minimum intake" in failed.stderr, failed.stderr
+    assert not (store / "host.lock").exists()
+
+    # A genuine prior-format Store is covered by upgrade CI. This counterexample
+    # independently drives refusal before schema reads on the real artifact.
+    store = root / "soft-256"
+    database = next(store.glob("*.sqlite*"))
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version=21")
+    before = time.monotonic()
+    failed = run_start(store, env)
+    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    assert str(store.resolve()) in failed.stderr, failed.stderr
+    assert "found schema 21" in failed.stderr and "supports schema 24" in failed.stderr, failed.stderr
+    assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
+    print("startup limits passed: soft raise, hard-limit fallback, below-minimum and unsupported-version fast failure", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -261,15 +337,19 @@ def wait_for_terminal_exit(caller, master, output, deadline):
 
 
 def main():
-    assert len(sys.argv) == 2, "usage: host_launch_integration.py /absolute/path/to/rui"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits]"
     from host_launch_exit_test import check_exit_reader
     check_exit_reader(wait_for_terminal_exit)
     with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
-        root = pathlib.Path(root_text)
+        root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        startup_limits(root, env)
+        if len(sys.argv) == 3:
+            assert sys.argv[2] == "startup-limits"
+            return
         assert_launch_adapter(root, env)
 
         # A held lease is attached, not replaced or reconfigured.
@@ -515,9 +595,9 @@ def main():
         elapsed = time.monotonic() - started
         try:
             assert failed.returncode != 0
-            assert 9 <= elapsed < COMMAND_TIMEOUT, elapsed
-            assert "readiness unconfirmed after 10 seconds" in failed.stderr, failed.stderr
-            assert "diagnostics/ startup records" in failed.stderr, failed.stderr
+            assert elapsed < 5, elapsed
+            assert "DescriptorCapacityInsufficient" in failed.stderr, failed.stderr
+            assert "exit status 1" in failed.stderr, failed.stderr
             assert status(failure_store, env).startswith("Host: unavailable")
             assert not credential.exists()
         finally:

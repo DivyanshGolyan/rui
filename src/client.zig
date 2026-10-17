@@ -663,6 +663,8 @@ pub const HostStatus = union(enum) {
         store: protocol.Bounded(protocol.max_store_bytes),
         instance: protocol.InstanceId,
         active_capacity: usize,
+        intake_capacity: usize = 100,
+        descriptor_limit: ?usize = null,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -796,12 +798,17 @@ fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     for (info.active_capacity) |digit| if (!std.ascii.isDigit(digit)) return error.InvalidHostInfo;
     const instance = protocol.parseInstanceId(info.instance) catch return error.InvalidHostInfo;
     const capacity = std.fmt.parseInt(usize, info.active_capacity, 10) catch return error.InvalidHostInfo;
+    const intake_capacity = std.fmt.parseInt(usize, info.intake_capacity, 10) catch return error.InvalidHostInfo;
+    if (intake_capacity < 10 or intake_capacity > 100) return error.InvalidHostInfo;
+    const descriptor_limit = if (std.mem.eql(u8, info.descriptor_limit, "unlimited")) null else std.fmt.parseInt(usize, info.descriptor_limit, 10) catch return error.InvalidHostInfo;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
     try identity.set(info.store);
     return .{ .ready = .{
         .store = identity,
         .instance = instance,
         .active_capacity = capacity,
+        .intake_capacity = intake_capacity,
+        .descriptor_limit = descriptor_limit,
         .capabilities = info.capabilities,
     } };
 }

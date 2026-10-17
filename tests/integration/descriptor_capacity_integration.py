@@ -768,7 +768,7 @@ def main():
         # This preflight is a resource estimate, not a runtime admission cap.
         clients = 100 * 4 + 3
         fixed = fixed_host + clients + execution + 0 + 2
-        minimum_required = fixed + 3
+        minimum_required = fixed - clients + 10 * 4 + 3 + 3
         rejected_store = state / "rejected-store"
         rejected = subprocess.run(
             limited_host(
@@ -797,16 +797,16 @@ def main():
             authentication=0, self_wake=2)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
-        if required != minimum_required:
+        if fields["inherited"] != 3:
             rejected = subprocess.run(
-                limited_host(required - 1, "serve", "--store", rejected_store,
+                limited_host(required - clients + 10 * 4 + 3 - 1, "serve", "--store", rejected_store,
                     "--active-capacity", "2", "--provider-endpoint",
                     f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 text=True, capture_output=True, timeout=10)
             assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected
             assert not rejected.stdout.startswith("ready "), rejected.stdout
             fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-            assert fields == {**expected, "soft_limit": required - 1}, fields
+            assert fields == {**expected, "soft_limit": required - clients + 10 * 4 + 3 - 1}, fields
             assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
 
         store = state / "adequate-store"

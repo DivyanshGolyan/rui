@@ -5,14 +5,37 @@
 #include <signal.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <crt_externs.h>
 #include <spawn.h>
+#include <sys/sysctl.h>
+#include <limits.h>
 extern char **environ;
 #endif
+
+int rui_raise_descriptor_limit(size_t required) {
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0) return errno;
+    if (limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= required) return 0;
+    rlim_t target = required;
+    if (limit.rlim_max != RLIM_INFINITY && target > limit.rlim_max) target = limit.rlim_max;
+#if defined(__APPLE__)
+    /* Darwin rejects RLIM_INFINITY and values above its per-process ceiling. */
+    int ceiling;
+    size_t size = sizeof(ceiling);
+    if (sysctlbyname("kern.maxfilesperproc", &ceiling, &size, NULL, 0) != 0) return errno;
+    if (ceiling <= 0) return EINVAL;
+    if (target > (rlim_t)ceiling) target = (rlim_t)ceiling;
+    if (target > OPEN_MAX) target = OPEN_MAX;
+#endif
+    if (target <= limit.rlim_cur) return 0;
+    limit.rlim_cur = target;
+    return setrlimit(RLIMIT_NOFILE, &limit) == 0 ? 0 : errno;
+}
 
 /* Only async-signal-safe operations run after fork. The parent owns the
  * CLOEXEC pipe until exec succeeds or a fixed-size errno is returned. */
@@ -84,7 +107,7 @@ int rui_write_readiness(int fd, const unsigned char *data, size_t length) {
  * this caller. Readiness and ownership are established separately by Rui.
  * Borrow the caller's bounded, terminated argv through exec/error handoff;
  * argv[0] is executable and argc excludes the NULL terminator. */
-static int launch_detached(const char *executable, const char *const *argv, size_t argc) {
+static int launch_detached(const char *executable, const char *const *argv, size_t argc, int startup_write) {
 #if defined(__APPLE__)
     /* Transport framing only; application policy belongs to the caller.
      * Prepare before spawn, not in the post-fork grandchild. */
@@ -117,6 +140,10 @@ static int launch_detached(const char *executable, const char *const *argv, size
     if (err != 0) goto attributes_done;
     for (int fd = 0; fd < 3; fd++) {
         err = posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", O_RDWR, 0);
+        if (err != 0) goto attributes_done;
+    }
+    if (startup_write >= 0) {
+        err = posix_spawn_file_actions_adddup2(&actions, startup_write, 2);
         if (err != 0) goto attributes_done;
     }
     err = posix_spawn_file_actions_adddup2(&actions, report, 3);
@@ -152,6 +179,7 @@ spawn_done:
         for (int fd = 0; fd < 3; fd++) {
             if (dup2(null_fd, fd) < 0) fail_child(report, errno);
         }
+        if (startup_write >= 0 && dup2(startup_write, 2) < 0) fail_child(report, errno);
         if (null_fd > 2 && null_fd != report) close(null_fd);
         /* Preserve the exec-error channel at 3, then close every other
          * descriptor, including ones above a subsequently lowered soft limit. */
@@ -186,14 +214,31 @@ spawn_done:
     return read_error;
 }
 
-int rui_launch_detached(const char *executable, const char *const *argv, size_t argc) {
+static int launch_with_signals(const char *executable, const char *const *argv, size_t argc, int startup_write) {
     struct sigaction previous, normal = {0};
     normal.sa_handler = SIG_DFL;
     sigemptyset(&normal.sa_mask);
     if (sigaction(SIGCHLD, &normal, &previous) != 0) return errno;
     // The helper must remain waitable even when the caller inherited
     // SIG_IGN or SA_NOCLDWAIT. Its Host grandchild also inherits SIG_DFL.
-    int result = launch_detached(executable, argv, argc);
+    int result = launch_detached(executable, argv, argc, startup_write);
     int restore_error = sigaction(SIGCHLD, &previous, NULL) == 0 ? 0 : errno;
     return result != 0 ? result : restore_error;
+}
+
+int rui_launch_detached(const char *executable, const char *const *argv, size_t argc) {
+    return launch_with_signals(executable, argv, argc, -1);
+}
+
+int rui_launch_detached_observed(const char *executable, const char *const *argv, size_t argc, int *startup_read) {
+    int channel[2];
+    if (pipe(channel) != 0) return errno;
+    int result = fcntl(channel[0], F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(channel[1], F_SETFD, FD_CLOEXEC) < 0 ||
+        fcntl(channel[0], F_SETFL, O_NONBLOCK) < 0 ? errno : 0;
+    if (result == 0) result = launch_with_signals(executable, argv, argc, channel[1]);
+    close(channel[1]);
+    if (result != 0) close(channel[0]);
+    else *startup_read = channel[0];
+    return result;
 }
