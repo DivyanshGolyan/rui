@@ -1,6 +1,7 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const ResponseTiming = @import("ResponseTiming.zig");
 
 /// Pin before spawning a borrower; reset or destroy only after return/join.
 /// Stop is local transport intent, never cancellation of admitted Host work.
@@ -43,7 +44,7 @@ pub const Requests = struct {
         reply_buffer.len = 0;
         try self.check();
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
-        const reply = try sendSource(self, &paths, captured.target.route(), captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
         result.context = captured.saved;
         return result;
@@ -56,7 +57,7 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try renderReadRequest(&body, "observe_command", paths.store.slice(), "key", key, null, null);
-        const reply = try sendSource(self, &paths, "/v1/observe-command", body.len, null, body.slice(), null, null, reply_buffer, null);
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .observation = try CommandObservation.parse(reply, key) };
     }
@@ -249,11 +250,11 @@ pub const Requests = struct {
 };
 
 fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?CommandObservation.ContentReference, sink: anytype) !?ReadFailure {
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
         var reply_buffer: ReplyBuffer = .{};
-        return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, null), false);
+        return try decodeReadFailure(try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, null), false);
     }
     if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
     if (expected) |reference| if (head.content_length != reference.bytes) return error.ContentBindingMismatch;
@@ -691,7 +692,7 @@ pub fn stopHost(io: std.Io, input: HostStopInput, reply_buffer: *ReplyBuffer) !H
     try body.append("{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":");
     try body.appendJsonString(paths.store.slice());
     try body.append("}");
-    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
+    const reply = sendSource(.{ .io = io }, &paths, "/v1/control/host-stop", ResponseTiming.mutation, body.len, null, body.slice(), input.drop_reply, &input.instance, reply_buffer, null);
     const result = reply catch |err| return if (err == error.FileNotFound or err == error.ConnectionRefused)
         .unavailable
     else
@@ -753,7 +754,7 @@ fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) HostS
     var reply_buffer: ReplyBuffer = .{};
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     const until = @min(probe_end, deadline orelse probe_end);
-    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
+    const reply = sendSource(.{ .io = io }, paths, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, &reply_buffer, until) catch |err| return switch (err) {
         error.AccessDenied, error.PermissionDenied => .access_failure,
         error.WrongWireVersion, error.InvalidResponse, error.ResponseHeaderTooLarge, error.ResponseTooLarge, error.InvalidCharacter, error.Overflow => .incompatible,
         else => .owned_unavailable,
@@ -1593,7 +1594,7 @@ pub fn retry(
     defer file.close(io);
     const binding = try readCapturedBinding(io, &file);
     if (!binding.saved.store.eql(paths.store.slice()) or binding.target != selected) return error.RequestBindingMismatch;
-    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), try file.length(io), &file, null, null, null, reply_buffer, null);
+    const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
     result.context = binding.saved;
     return result;
@@ -3117,6 +3118,7 @@ fn sendSource(
     requests: Requests,
     paths: *const platform.Paths,
     route: []const u8,
+    timing: ResponseTiming,
     length: u64,
     file: ?*std.Io.File,
     bytes: ?[]const u8,
@@ -3151,7 +3153,7 @@ fn sendSource(
             sent += count;
         }
     } else try writeAllRequest(requests, fd, bytes.?, until);
-    return readCommandResponseRequest(requests, fd, reply_buffer, until);
+    return readCommandResponseRequest(requests, fd, reply_buffer, timing, until);
 }
 
 fn closeSocket(io: std.Io, fd: std.posix.fd_t) void {
@@ -3255,19 +3257,18 @@ fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
 }
 
 fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !ResponseHead {
-    return readResponseHeadUntil(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, inactivity_ms, null);
+    return readResponseHeadUntil(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, .{ .inactivity_ms = inactivity_ms }, null);
 }
 
-fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, inactivity_ms: i32, until: ?i128) !ResponseHead {
+fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
-    // Ordinary requests start their inactivity window after the first byte;
-    // Host readiness alone has an absolute deadline that includes this wait.
-    const first_count = try readRequest(requests, fd, header_buffer[0..1], until);
+    const first_deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, false);
+    const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
     if (first_count == 0) return error.TruncatedResponse;
     var used: usize = first_count;
     while (used < header_buffer.len) {
         if (used >= 4 and std.mem.eql(u8, header_buffer[used - 4 .. used], "\r\n\r\n")) break;
-        const deadline = until orelse (std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + @as(i128, inactivity_ms) * std.time.ns_per_ms);
+        const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, header_buffer[used .. used + 1], deadline);
         if (count == 0) return error.TruncatedResponse;
         used += count;
@@ -3346,14 +3347,14 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandReply {
-    return readCommandResponseRequest(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, reply_buffer, null);
+    return readCommandResponseRequest(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, reply_buffer, .{}, null);
 }
 
-fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
+fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, until);
+    const head = try readResponseHeadUntil(requests, fd, timing, until);
     if (head.kind != .command_json) return error.InvalidResponse;
-    return readCommandBodyUntil(requests, fd, head, reply_buffer, until);
+    return readCommandBodyUntil(requests, fd, head, reply_buffer, timing, until);
 }
 
 fn readResultResponse(
@@ -3372,10 +3373,10 @@ fn readResultResponseSink(
     reply_buffer: *ReplyBuffer,
 ) !ResultReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
-        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
+        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .result_text) return error.InvalidResponse;
     try readResponseBody(requests, fd, head.content_length, sink);
@@ -3389,10 +3390,10 @@ fn readReportResponse(
     reply_buffer: *ReplyBuffer,
 ) !ReportReply {
     reply_buffer.len = 0;
-    const head = try readResponseHeadUntil(requests, fd, 60_000, null);
+    const head = try readResponseHeadUntil(requests, fd, .{}, null);
     if (head.status != 200) {
         if (head.kind != .command_json) return error.InvalidResponse;
-        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, null) };
+        return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .command_json) return error.InvalidResponse;
     try readResponseBody(requests, fd, head.content_length, sink);
@@ -3417,14 +3418,14 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     }
 }
 
-fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, until: ?i128) !CommandReply {
+fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
     if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
-        const deadline = until orelse (std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds + 60 * std.time.ns_per_s);
+        const deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, true);
         const count = try readRequest(requests, fd, reply_buffer.bytes[offset..body_length], deadline);
         if (count == 0) return error.TruncatedResponse;
         offset += count;
@@ -3732,31 +3733,53 @@ test "Host-info first byte is bounded independently of normal processing waits" 
     defer writer.join();
     var buffer: ReplyBuffer = .{};
     const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
-    try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, until));
+    try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, .{}, until));
 }
 
-test "Host-info deadline includes partial header and body" {
+test "response deadlines include partial header and body" {
     const response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nab";
     const body_start = std.mem.indexOf(u8, response, "\r\n\r\n").? + 4;
-    for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
-        const sockets = try socketPair();
-        defer closeTestDescriptor(sockets[0]);
-        const flags = std.c.fcntl(sockets[0], std.c.F.GETFL);
-        const nonblocking: u32 = @bitCast(std.c.O{ .NONBLOCK = true });
-        try std.testing.expect(flags >= 0 and std.c.fcntl(sockets[0], std.c.F.SETFL, flags | @as(c_int, @intCast(nonblocking))) == 0);
-        try writeAll(sockets[1], response[0..prefix_len]);
-        const writer = try std.Thread.spawn(.{}, delayedResponse, .{
-            std.testing.io,
-            sockets[1],
-            std.Io.Duration.fromMilliseconds(50),
-            response[prefix_len..],
-        });
-        defer writer.join();
-        var buffer: ReplyBuffer = .{};
-        const until = std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
-        try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, until));
-        try std.testing.expectEqual(@as(usize, 0), buffer.len);
+    for ([_]bool{ false, true }) |mutation| {
+        for ([_]usize{ 1, body_start + 1 }) |prefix_len| {
+            const sockets = try socketPair();
+            defer closeTestDescriptor(sockets[0]);
+            try addNonblocking(sockets[0]);
+            try writeAll(sockets[1], response[0..prefix_len]);
+            const writer = try std.Thread.spawn(.{}, delayedResponse, .{
+                std.testing.io,
+                sockets[1],
+                std.Io.Duration.fromMilliseconds(50),
+                response[prefix_len..],
+            });
+            defer writer.join();
+            var buffer: ReplyBuffer = .{};
+            const until: ?i128 = if (mutation) null else std.Io.Clock.Timestamp.now(std.testing.io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+            const timing: ResponseTiming = if (mutation) .{ .inactivity_ms = 10, .wait_for_first_byte = false } else .{};
+            try std.testing.expectError(error.ResponseInactive, readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, timing, until));
+            try std.testing.expectEqual(@as(usize, 0), buffer.len);
+        }
     }
+}
+
+test "mutation response progress renews inactivity through header and body" {
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    const Producer = struct {
+        fn run(fd: std.posix.fd_t) void {
+            defer closeTestDescriptor(fd);
+            writeAll(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n") catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
+            writeAll(fd, "\r\n{") catch return;
+            std.Io.sleep(std.testing.io, .fromMilliseconds(4_500), .awake) catch return;
+            writeAll(fd, "}") catch return;
+        }
+    };
+    const writer = try std.Thread.spawn(.{}, Producer.run, .{sockets[1]});
+    defer writer.join();
+    var buffer: ReplyBuffer = .{};
+    const reply = try readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &buffer, ResponseTiming.mutation, null);
+    try std.testing.expectEqual(@as(u16, 200), reply.status);
+    try std.testing.expectEqualStrings("{}", reply.body);
 }
 
 test "Host processing wait does not consume response transfer inactivity" {
@@ -4003,17 +4026,18 @@ test "capture returns original identity before send and preserves empty explicit
 
 test "capture retransmits complete original bytes after a lost reply" {
     const Peer = struct {
+        const Response = enum { closed, silent, reply };
         var client_fd: std.posix.fd_t = undefined;
         var failure: ?anyerror = null;
         fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
             return client_fd;
         }
-        fn serve(fd: std.posix.fd_t, expected: []const u8, reply: bool) void {
-            exchange(fd, expected, reply) catch |err| {
+        fn serve(fd: std.posix.fd_t, expected: []const u8, response: Response) void {
+            exchange(fd, expected, response) catch |err| {
                 failure = err;
             };
         }
-        fn exchange(fd: std.posix.fd_t, expected: []const u8, reply: bool) !void {
+        fn exchange(fd: std.posix.fd_t, expected: []const u8, response: Response) !void {
             defer closeTestDescriptor(fd);
             var head: [512]u8 = undefined;
             var used: usize = 0;
@@ -4037,7 +4061,11 @@ test "capture retransmits complete original bytes after a lost reply" {
                 try std.testing.expectEqualSlices(u8, expected[offset..][0..count], bytes[0..count]);
                 offset += count;
             }
-            if (reply) try writeAll(fd, empty_test_response);
+            switch (response) {
+                .closed => {},
+                .silent => try std.Io.sleep(std.testing.io, .fromSeconds(6), .awake),
+                .reply => try writeAll(fd, empty_test_response),
+            }
         }
     };
     const io = std.testing.io;
@@ -4056,19 +4084,23 @@ test "capture retransmits complete original bytes after a lost reply" {
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    for ([_]bool{ false, true }) |reply| {
+    for ([_]Peer.Response{ .closed, .silent, .reply }) |response| {
         const sockets = try socketPair();
         Peer.client_fd = sockets[0]; // The production send owns and closes it.
         Peer.failure = null;
-        const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, reply });
+        const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected, response });
         var buffer: ReplyBuffer = .{};
         const result = sendCaptured(connected_io, &captured, null, &buffer);
         peer.join();
         if (Peer.failure) |err| return err;
-        if (reply) {
-            try std.testing.expectEqual(@as(u16, 200), (try result).status);
-            try std.testing.expectError(error.InvalidResponse, (try result).answer);
-        } else try std.testing.expectError(error.TruncatedResponse, result);
+        switch (response) {
+            .closed => try std.testing.expectError(error.TruncatedResponse, result),
+            .silent => try std.testing.expectError(error.ResponseInactive, result),
+            .reply => {
+                try std.testing.expectEqual(@as(u16, 200), (try result).status);
+                try std.testing.expectError(error.InvalidResponse, (try result).answer);
+            },
+        }
         try std.testing.expectEqualStrings("owned-key", captured.identity().key.slice());
     }
 }
