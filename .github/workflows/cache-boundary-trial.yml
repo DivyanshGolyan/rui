@@ -1,0 +1,64 @@
+name: Temporary cache capability diagnostic
+on:
+  push:
+    branches: [hosted-macos-qualification]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  seed:
+    runs-on: macos-15
+    timeout-minutes: 5
+    cache-mode: write
+    steps:
+      - run: |
+          mkdir -p "$RUNNER_TEMP/cache-probe"
+          printf 'benign cache capability control\n' > "$RUNNER_TEMP/cache-probe/control.txt"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/cache-probe
+          key: rui-cache-boundary-${{ github.run_id }}-control
+  read-only:
+    needs: seed
+    runs-on: macos-15
+    timeout-minutes: 5
+    cache-mode: read
+    steps:
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: restore
+        with:
+          path: ${{ runner.temp }}/cache-probe
+          key: rui-cache-boundary-${{ github.run_id }}-control
+      - name: Require actual restoration, not a skipped cache service
+        env:
+          HIT: ${{ steps.restore.outputs.cache-hit }}
+        run: |
+          test "$HIT" = true
+          test "$(cat "$RUNNER_TEMP/cache-probe/control.txt")" = 'benign cache capability control'
+          printf 'benign denied-write probe\n' > "$RUNNER_TEMP/cache-probe/attempt.txt"
+      - name: Attempt a save despite overriding the client environment
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        env:
+          ACTIONS_CACHE_MODE: write
+        with:
+          path: ${{ runner.temp }}/cache-probe
+          key: rui-cache-boundary-${{ github.run_id }}-blocked
+      - name: Verify the server rejected publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPOSITORY/actions/caches?key=rui-cache-boundary-$RUN-" > "$RUNNER_TEMP/cache-inventory.json"
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['RUNNER_TEMP'] + '/cache-inventory.json') as source:
+              caches = json.load(source)['actions_caches']
+          keys = [cache['key'] for cache in caches]
+          print(json.dumps(keys, indent=2))
+          prefix = 'rui-cache-boundary-' + os.environ['RUN']
+          assert prefix + '-control' in keys, 'write-capable control did not publish'
+          assert prefix + '-blocked' not in keys, 'read-only token published a cache'
+          PY
