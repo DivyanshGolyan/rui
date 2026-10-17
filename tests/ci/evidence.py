@@ -20,11 +20,16 @@ def git(*args):
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def identity(targets, part):
+def identity(targets, part, *, compiled=False):
     # Go's test runner discards its executable. Unrelated restored Zig binaries
     # cannot establish that test artifact's identity, so run these cheap checks.
     if "measurement-check" in targets:
         raise ValueError("measurement-check requires fresh Go execution")
+    # Process fixtures compile temporary C helpers, and the sanitizer discards
+    # its executable. Cached product binaries cannot identify those artifacts.
+    # Only native unit gates retain their complete executable set today.
+    if not compiled and set(targets) - {"test", "test-full", "test-logic"}:
+        raise ValueError("Process/sanitizer gates require fresh execution: temporary native helpers are not retained")
     # The complete tree covers fixtures, policy, pins and workflow inputs, not
     # just production sources. Runner image and native tools cover SDK changes.
     if git("status", "--porcelain", "--untracked-files=no"):

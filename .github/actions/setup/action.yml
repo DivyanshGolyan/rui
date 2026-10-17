@@ -11,7 +11,7 @@ inputs:
     description: Use genuinely empty build, package and global compiler caches
     default: 'false'
   compiled:
-    description: A verified same-run compiled artifact supplies build caches and dependencies
+    description: A verified same-run artifact supplies emitted executables and pinned package sources
     default: 'false'
 runs:
   using: composite
@@ -103,6 +103,7 @@ runs:
         test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
+        mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"
     - name: Install the selected H2 fixture dependency
       if: ${{ steps.requirements.outputs.h2 == 'true' }}
       shell: bash

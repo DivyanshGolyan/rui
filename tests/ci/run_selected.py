@@ -110,6 +110,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("targets", help="JSON array from the selector")
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
+    parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
     parser.add_argument("--reuse-evidence", action="store_true",
                         help="Verify identical-tree Actions evidence; never use for qualification")
     args = parser.parse_args()
@@ -128,7 +129,8 @@ def main():
         start = time.monotonic()
         states = []
         published_output = bytearray()
-        with subprocess.Popen(["zig", "build", *batch, "--summary", "all"],
+        artifacts = ["-Dci-artifacts=" + args.ci_artifacts] if args.ci_artifacts else []
+        with subprocess.Popen(["zig", "build", *batch, *artifacts, "--summary", "all"],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as result:
             for line in iter(lambda: result.stdout.readline(65536), b""):
                 sys.stdout.buffer.write(line)

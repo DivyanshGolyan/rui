@@ -166,7 +166,7 @@ jobs:
           set -euo pipefail
           { zig version; go version; shasum -a 256 tests/qualification/go.mod tests/qualification/go.sum; } | tee "$EVIDENCE/toolchains.txt"
           GOTOOLCHAIN=local go -C tests/qualification mod download
-          zig build measurement-check -j2 --summary all 2>&1 | tee "$EVIDENCE/measurement-check.log"
+          zig build measurement-check -Dci-artifacts=.zig-cache/o/ci-compiled -j2 --summary all 2>&1 | tee "$EVIDENCE/measurement-check.log"
       - name: Execute the existing gates without changing their verdicts
         id: gates
         env:
@@ -182,18 +182,18 @@ jobs:
             # This existing runner publishes a summary plus compressed evidence
             # to files instead of stdout; keep both under the upload directory.
             if [ "$target" = measure-execution-service ]; then
-              zig build "$target" -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
+              zig build "$target" -Dci-artifacts=.zig-cache/o/ci-compiled -j2 --summary all -- --output "$EVIDENCE/result.json" 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/runner.log"
             else
               python3 - <<'PY' 2> "$EVIDENCE/build.log" | tee "$EVIDENCE/result.json"
           import json, os, subprocess
           target = json.loads(os.environ['TARGETS'])[0]
           args = json.loads(os.environ['ARGS'])
-          command = ['zig', 'build', target, '-j2', '--summary', 'all']
+          command = ['zig', 'build', target, '-Dci-artifacts=.zig-cache/o/ci-compiled', '-j2', '--summary', 'all']
           raise SystemExit(subprocess.call(command + (['--', *args] if args else [])))
           PY
             fi
           else
-            python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" 2>&1 | tee "$EVIDENCE/gates.log"
+            python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$PART" --ci-artifacts .zig-cache/o/ci-compiled 2>&1 | tee "$EVIDENCE/gates.log"
           fi
       - name: Retain raw measurement diagnostics, never Stores or payload files
         id: retention

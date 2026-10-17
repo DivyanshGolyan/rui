@@ -19,16 +19,14 @@ class EvidenceTest(unittest.TestCase):
     def test_compiled_handoff_checks_identity_digest_modes_and_safe_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            caches = {label: root / label for label in ('local', 'global', 'packages')}
-            binary = caches['local'] / 'o/hash/test'
+            caches = {label: root / label for label in ('binaries', 'packages')}
+            binary = caches['binaries'] / 'test-tests'
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'exact compiled bytes')
             binary.chmod(0o751)
-            timestamp = 1723456789123456789
-            os.utime(binary, ns=(timestamp, timestamp))
             for cache in caches.values():
                 cache.mkdir(exist_ok=True)
-            inputs = dict(tree='same-tree', targets=['test'], paths={k: str(v) for k, v in caches.items()})
+            inputs = dict(tree='same-tree', targets=['test'])
             with patch.dict(os.environ, GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2',
                             GITHUB_REPOSITORY='owner/repo'), \
                     patch.object(build_artifact, 'roots', return_value=caches), \
@@ -42,9 +40,6 @@ class EvidenceTest(unittest.TestCase):
                 build_artifact.unpack(archive, receipt, inputs)
                 self.assertEqual(binary.read_bytes(), b'exact compiled bytes')
                 self.assertEqual(binary.stat().st_mode & 0o777, 0o751)
-                self.assertEqual(binary.stat().st_mtime_ns, timestamp)
-                for label in ('local', 'global'):
-                    self.assertTrue((caches[label] / 'tmp').is_dir())
                 downloaded = io.BytesIO()
                 with zipfile.ZipFile(downloaded, 'w') as output:
                     output.write(archive, 'compiled.tar.gz')
@@ -68,31 +63,23 @@ class EvidenceTest(unittest.TestCase):
                             build_artifact.restore('101', ['test'])
                 for field, value in [('run_attempt', 1), ('run_id', 456), ('source_sha', 'other'),
                                      ('verdict', 'passed'), ('archive', '0' * 64),
-                                     ('executables', {'local/o/hash/test': ['wrong-hash', 0o751]})]:
+                                     ('executables', {'binaries/test-tests': ['wrong-hash', 0o751]})]:
                     with self.subTest(field=field), self.assertRaises(ValueError):
                         build_artifact.unpack(archive, dict(receipt, **{field: value}), inputs)
                 with self.assertRaisesRegex(ValueError, 'inputs mismatch'):
                     build_artifact.unpack(archive, receipt, dict(inputs, targets=['test-full']))
                 # Correct archive digests cannot authorize arbitrary extraction.
-                for name, kind, link in [('local/../../escaped', tarfile.REGTYPE, ''),
+                for name, kind, link in [('binaries/../../escaped', tarfile.REGTYPE, ''),
                                          ('/tmp/escaped', tarfile.REGTYPE, ''),
-                                         ('local/parent', tarfile.SYMTYPE, '/tmp'),
-                                         ('local/device', tarfile.FIFOTYPE, ''),
-                                         ('local/hardlink', tarfile.LNKTYPE, '/tmp')]:
+                                         ('binaries/parent', tarfile.SYMTYPE, '/tmp'),
+                                         ('binaries/device', tarfile.FIFOTYPE, ''),
+                                         ('binaries/hardlink', tarfile.LNKTYPE, '/tmp')]:
                     with tarfile.open(archive, 'w:gz') as output:
                         member = tarfile.TarInfo(name)
                         member.type, member.linkname = kind, link
                         output.addfile(member)
                     with self.subTest(name=name), self.assertRaisesRegex(ValueError, 'Unsafe compiled'):
                         build_artifact.unpack(archive, dict(receipt, archive=evidence.digest(archive)), inputs)
-                # The SDK exception is exact, not permission for arbitrary links.
-                with patch.object(build_artifact.os, 'uname') as uname, \
-                        patch.object(build_artifact.subprocess, 'check_output', return_value='/SDK\n'):
-                    uname.return_value.sysname = 'Darwin'
-                    path = 'local/o/hash/pinned-transport-aarch64-macos/sdk/usr/include'
-                    self.assertTrue(build_artifact.sdk_link(path, '/SDK/usr/include'))
-                    self.assertFalse(build_artifact.sdk_link(path, '/other/usr/include'))
-                    self.assertFalse(build_artifact.sdk_link('local/o/hash/elsewhere', '/SDK/usr/include'))
 
     def test_go_checks_cannot_reuse_unrelated_native_cache_artifacts(self):
         with patch.dict(os.environ, RUNNER_TEMP="/tmp", GITHUB_WORKFLOW_REF="owner/repo/check.yml@feature",
@@ -102,6 +89,17 @@ class EvidenceTest(unittest.TestCase):
                 patch.object(evidence.subprocess, "check_output", return_value="go version go1.27.1"), \
                 self.assertRaisesRegex(ValueError, "fresh Go execution"):
             evidence.identity(["measurement-check"], "all")
+
+    def test_temporary_native_helpers_cannot_reuse_product_binary_receipts(self):
+        # Both a reported caller and an analogous H2 caller compile helpers via
+        # host_process; sanitizer and future unknown gates fail closed as well.
+        for targets, part in [(['check-full'], 'execution'), (['check-full'], 'callers'),
+                              (['host-launch-integration'], 'all'),
+                              (['transport-h2-integration'], 'all'),
+                              (['future-native-gate'], 'all')]:
+            with self.subTest(targets=targets, part=part), \
+                    self.assertRaisesRegex(ValueError, 'temporary native helpers'):
+                evidence.identity(targets, part)
 
     def test_accepts_only_matching_inputs_origin_archive_and_executables(self):
         with tempfile.TemporaryDirectory() as directory:

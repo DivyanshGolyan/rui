@@ -14,64 +14,43 @@ import evidence
 
 
 def roots():
-    return {"local": Path(".zig-cache").resolve(),
-            "global": Path(os.environ["ZIG_GLOBAL_CACHE_DIR"]).resolve(),
+    return {"binaries": Path(".zig-cache/o/ci-compiled").resolve(),
             "packages": Path("zig-pkg").resolve()}
 
 
 def identity(targets):
     # Go test binaries are not transferred; their target still executes fresh.
-    inputs = evidence.identity([t for t in targets if t != "measurement-check"], "all")
+    inputs = evidence.identity([t for t in targets if t != "measurement-check"], "all", compiled=True)
     inputs["targets"] = targets
-    inputs["paths"] = {name: str(path) for name, path in roots().items()}
     return inputs
 
 
-def sdk_link(name, target):
-    """Only build_transport.sh's three SDK references may leave cache custody."""
-    if os.uname().sysname != "Darwin":
-        return False
-    path = PurePosixPath(name)
-    suffixes = ("System/Library/Frameworks", "usr/include", "usr/lib")
-    sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()
-    return any(path.match(f"local/o/*/pinned-transport-aarch64-macos/sdk/{suffix}") and target == f"{sdk}/{suffix}"
-               for suffix in suffixes)
-
-
-def package(targets, destination):
+def package(targets, destination, binaries=None):
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / "compiled.tar.gz"
     inputs = identity(targets)
     executables = {}
+    sources = roots()
+    if binaries is not None:
+        sources["binaries"] = binaries
     with tarfile.open(archive, "w:gz", compresslevel=1) as output:
-        for label, root in roots().items():
+        for label, root in sources.items():
             for directory, children, files in os.walk(root, followlinks=False):
-                # No transient locks, sockets or failed-build temporary output.
-                children[:] = sorted(child for child in children if child != "tmp")
+                children.sort()
                 for child in children[:]:
                     if (Path(directory) / child).is_symlink():
-                        children.remove(child)
-                        files.append(child)
+                        raise ValueError(f"Unexpected build symlink: {child}")
                 for filename in sorted(files):
                     source = Path(directory) / filename
                     name = str(PurePosixPath(label, source.relative_to(root)))
                     info = source.lstat()
-                    if stat.S_ISLNK(info.st_mode):
-                        if not sdk_link(name, os.readlink(source)):
-                            raise ValueError(f"Unexpected build symlink: {name}")
-                    elif not stat.S_ISREG(info.st_mode):
+                    if not stat.S_ISREG(info.st_mode):
                         raise ValueError(f"Unexpected build file: {name}")
                     elif info.st_mode & 0o111:
                         executables[name] = [evidence.digest(source), stat.S_IMODE(info.st_mode)]
                     member = output.gettarinfo(source, arcname=name)
-                    # Float tar mtimes lose nanoseconds and invalidate Zig's
-                    # file-stat manifests even when every byte is unchanged.
-                    member.pax_headers['rui.mtime_ns'] = str(info.st_mtime_ns)
-                    if member.isfile():
-                        with source.open('rb') as stream:
-                            output.addfile(member, stream)
-                    else:
-                        output.addfile(member)
+                    with source.open('rb') as stream:
+                        output.addfile(member, stream)
     receipt = dict(verdict="compiled-not-tested", inputs=inputs,
                    source_sha=evidence.git("rev-parse", "HEAD"),
                    run_id=int(os.environ["GITHUB_RUN_ID"]),
@@ -91,7 +70,6 @@ def unpack(archive, receipt, inputs):
     if evidence.digest(archive) != receipt["archive"]:
         raise ValueError("Compiled archive mismatch")
     destinations = roots()
-    links = []
     seen = set()
     with tarfile.open(archive, "r:gz") as source:
         # Validate the entire inventory before writing, and never extract through
@@ -102,9 +80,7 @@ def unpack(archive, receipt, inputs):
                     or path.parts[0] not in destinations or member.name in seen):
                 raise ValueError("Unsafe compiled path")
             seen.add(member.name)
-            if member.issym() and sdk_link(member.name, member.linkname):
-                links.append(member)
-            elif not member.isfile():
+            if not member.isfile():
                 raise ValueError("Unsafe compiled file")
         for name in seen:
             if any(str(parent) in seen for parent in PurePosixPath(name).parents):
@@ -115,26 +91,15 @@ def unpack(archive, receipt, inputs):
             if root.exists():
                 shutil.rmtree(root)
             root.mkdir(parents=True)
-        for label in ('local', 'global'):
-            (destinations[label] / 'tmp').mkdir()
         # A second streaming pass avoids retaining archive payloads in RAM.
     with tarfile.open(archive, "r:gz") as source:
         for member in source:
-            if member.issym():
-                continue
             path = PurePosixPath(member.name)
             destination = destinations[path.parts[0]].joinpath(*path.parts[1:])
             destination.parent.mkdir(parents=True, exist_ok=True)
             with source.extractfile(member) as incoming, destination.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
             destination.chmod(member.mode & 0o777)
-            timestamp = int(member.pax_headers['rui.mtime_ns'])
-            os.utime(destination, ns=(timestamp, timestamp))
-    for member in links:
-        path = PurePosixPath(member.name)
-        destination = destinations[path.parts[0]].joinpath(*path.parts[1:])
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.symlink_to(member.linkname)
     actual = {}
     for label, root in destinations.items():
         for directory, _, files in os.walk(root, followlinks=False):
@@ -181,9 +146,10 @@ def main():
     args = parser.parse_args()
     targets = json.loads(args.targets)
     if args.operation == "build":
+        prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
         subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets),
-                        "--summary", "all"], check=True)
-        package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled")
+                        "--prefix", str(prefix), "--summary", "all"], check=True)
+        package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", prefix / "bin")
     else:
         try:
             restore(args.artifact_id, targets)
