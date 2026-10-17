@@ -101,7 +101,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Attempt bindings, launch permits and cleanup custody | `src/attempt.zig` and `src/execution.zig`: one-shot permits and generation-checked `CustodyPool` records. |
 | Model request preparation, transport and interpretation | `src/model_adapter.zig` prepares requests; `src/provider.zig` owns curl and capture lifetimes; `src/provider_output.zig` validates sealed output. |
 | Codex authentication and credential storage | `src/codex_auth.zig` owns authentication/refresh logic; `src/codex_credentials.zig` owns private records and cross-process credential leases. |
-| Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. |
+| Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Private evaluator lifecycle | `src/evaluator.zig`: child execution, cancellation, output handoff and cleanup. This is not the public Workflow Runtime. |
 
@@ -1086,7 +1086,9 @@ Connections serve one exchange then close, without pipelining or idle keepalive.
 
 Intake and durable admission make progress independently of execution credits, including when every credit holds a Bash caller sending a message. Discovery, Session stop, Workflow cancellation, Model Interruption and Permission Decision remain usable during supported ordinary load. The former 12/10/2 connection quotas and thread-per-connection model are not constraints on the replacement. Any caps, buffering or isolation machinery need demonstrated resource and progress justification. Demand scaling does not promise unlimited memory or throughput; genuine descriptor, allocation, scratch and infrastructure failures preserve exact uncertainty recovery.
 
-Exchange custody lasts through import or rejection, delivery and required cleanup, including socket close and native handler retirement. Incomplete uploads publish nothing. Every valid short control and its complete semantic response fit a field-derived bound, including framing and worst-case escaping, without content scratch. Reject oversized discovery before body parsing and route/kind disagreement before content capture. Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes. Progress cannot renew it. Mutation-response waiting and transfer inactivity follow [the client transport contract](#client-transport-and-observations). Timeout releases temporary exchange state, not committed work.
+One local-work stack serves ordinary capture, reply production and cleanup; the other reserves stateful control service. Ordinary work cannot borrow that control capacity. Both retain canonical Store serialization and nonpreemptible I/O limits. Successful local capture completion starts a fresh ordinary ingress inactivity wait, so Host processing does not consume the peer's next wait. Discovery retains its absolute deadline.
+
+Exchange custody lasts through import or rejection, delivery and required cleanup, including socket close and native handler retirement. After delivery retires and local borrowers finish, intake closes the accepted socket independently of failed scratch reclamation. Retained cleanup keeps its file handles, charge and exchange owner until reclamation succeeds. Incomplete uploads publish nothing. Every valid short control and its complete semantic response fit a field-derived bound, including framing and worst-case escaping, without content scratch. Reject oversized discovery before body parsing and route/kind disagreement before content capture. Discovery keeps one acceptance-derived ten-second absolute deadline across headers, body and all reply/error writes. Progress cannot renew it. Mutation-response waiting and transfer inactivity follow [the client transport contract](#client-transport-and-observations). Timeout releases temporary exchange state, not committed work.
 
 Control service permits admission and durable acknowledgment, not a connection held until stop or cancellation completion. Observe completion through subsequent one-shot reads. If admission is unavailable or the reply is lost, the caller cannot infer whether a control committed. Recover core controls with the original core idempotency key and inputs, preserving their committed selection. Workflow cancellation is addressed to one immutable Workflow ID and repeated cancellation recovers its existing fence and propagation intents; it never starts a new propagation after completion. Reconnection obtains a fresh complete observation, not a continuation of a partially delivered report.
 
@@ -1139,7 +1141,7 @@ After the lease, the serving Host writes allowlisted startup phase records under
 
 Each serving Host generates a random 128-bit opaque instance identity before advertising readiness. It changes on replacement and has no PID or recovery authority. The Host accepts an optional canonical lowercase-hex `X-Rui-Host-Instance` header on protected exchanges; after reading and validating the bounded request, the receiving Host compares it with its own identity **before** dispatch and returns `host_instance_changed` without mutation on mismatch. Omission preserves existing clients, except for Host stop. A caller retaining this identity must still use the ordinary Store selector, wire checks and command idempotency/recovery rules.
 
-On shutdown, listener closure first prevents new handlers, then the execution owner drains every process, transport and retained-cleanup owner, and existing connection handlers drain. Only afterward may the Store connection close and the OS-held lease release. These populations and their existing synchronization are the release proof; there is no parallel shutdown registry. Optional retained output has no independent lease authority after producer aliases and execution custody retire: ordinary retention cleanup runs while the Host lives, and any named leftovers are handled by the startup policy below.
+On shutdown, listener closure prevents new exchanges and the intake owner retires requests not yet handed to local work, including incomplete headers and uploads. It retains handed-off work, report/content delivery and failed reclamation until their owners retire. The execution owner independently drains every process, transport and retained-cleanup owner. Only after both populations drain may the Store connection close and the OS-held lease release. These owners are the release proof; there is no parallel shutdown registry. Optional retained output has no independent lease authority after producer aliases and execution custody retire: ordinary retention cleanup runs while the Host lives, and any named leftovers are handled by the startup policy below.
 
 ### Infrastructure shutdown
 
@@ -1259,15 +1261,15 @@ Derive SQL/row/parameter bounds from actual statements and pinned representation
 
 Before Store ownership or readiness, the Host observes inherited descriptors and `RLIMIT_NOFILE`, then computes its simultaneous requirement with checked arithmetic. Linux enumerates `/proc/self/fd`, or checks the bounded range with `F_GETFD` when procfs is unavailable and the limit is finite. An unlimited Linux limit requires procfs; macOS enumerates `/dev/fd`.
 
-For configured Active Capacity \(C\), the requirement is \(I + F + T + 42 + 1 + E(C) + A(C)\):
+For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 403 + 2 + E(C) + A(C)\):
 
 | Term | Descriptor requirement |
 | --- | --- |
 | \(I\) | Inherited open descriptors. |
 | \(F\) | 7 for Store lease, database, journal, temporary storage, directory sync and listener ownership. |
 | \(T\) | 0 without transport; 2 Linux eventfds or 4 descriptors for two macOS curl pipes. |
-| 42 | Ten ordinary exchanges at four descriptors each, plus two control sockets. |
-| 1 | Listener self-wake. |
+| 403 | 100 ordinary exchanges at four descriptors each, plus two controls and one discovery socket. These are workload populations, not admission quotas. |
+| 2 | Intake wake socket pair. |
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 8 on Linux or 10 on macOS for the independent authentication worker. |
 

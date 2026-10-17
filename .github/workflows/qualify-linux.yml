@@ -25,6 +25,6 @@ jobs:
       platform: linux
       ref: ${{ inputs.ref || github.sha }}
       # Full native acceptance is the daily backstop. Resource campaigns remain
-      # explicit: Linux cannot qualify macOS footprint, and hosted trials found
-      # unresolved control/queue/request-audit failures. Never mask their exits.
+      # explicit until platform counters and shared-runner behavior qualify.
+      # Linux cannot qualify macOS footprint. Never mask a resource gate's exit.
       suite: ${{ inputs.suite || 'native' }}

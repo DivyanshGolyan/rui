@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "1";
@@ -560,23 +561,176 @@ pub const ParseOptions = struct {
     fault_content_acquire: bool = false,
     fault_content_write: bool = false,
     fault_content_seal: bool = false,
-    cleanup_failed: *bool,
+    retained_scratch: *?named_scratch.Owner,
     scratch_budget: ?ScratchBudget = null,
     expected_kind: ?Kind = null,
     deadline: ?i128 = null,
 };
 
-pub fn parseRequest(options: ParseOptions) !Request {
-    var source = SocketBody.init(options.fd, options.content_length);
-    source.io = options.io;
-    source.deadline = options.deadline;
-    var parser = Parser{ .source = &source, .options = options };
-    var request = try parser.parse();
-    errdefer request.removeTemporaryContent(options.io) catch {
-        options.cleanup_failed.* = true;
-    };
-    if (source.remaining != 0 or source.start != source.end) return error.TrailingInput;
-    return request;
+/// Resumable ingress owns captures until complete framing and validation.
+/// Parser remains the sole wire grammar: only its content-read instruction
+/// can open a capture. Replays see metadata, never descriptors or charges.
+pub const Ingress = struct {
+    allocator: std.mem.Allocator,
+    options: ParseOptions,
+    metadata: std.ArrayList(u8) = .empty,
+    received: u64 = 0,
+    lexical: enum { plain, string, escape } = .plain,
+    expecting_content: bool = false,
+    capture: ?ContentCapture = null,
+    decoder: StringDecoder = .{},
+    contents: [2]ContentField = .{ .{}, .{} },
+    content_count: usize = 0,
+    complete: bool = false,
+
+    // Configure owns the largest scalar population. Allow worst-case escaping
+    // of its identity/settings fields and 128 short grammar tokens (keys,
+    // states, tools and literals, each at most 32 bytes), plus punctuation
+    // and one preserved whitespace separator at every lexical boundary.
+    const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
+        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 128 * 32) + 128 * 8);
+
+    pub fn init(allocator: std.mem.Allocator, options: ParseOptions) Ingress {
+        return .{ .allocator = allocator, .options = options };
+    }
+
+    pub fn deinit(self: *Ingress) void {
+        if (self.capture) |*capture| capture.deinit();
+        self.capture = null;
+        for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
+        self.metadata.deinit(self.allocator);
+        self.metadata = .empty;
+    }
+
+    pub fn feed(self: *Ingress, bytes: []const u8) !void {
+        if (bytes.len > self.options.content_length - self.received) return error.TrailingInput;
+        for (bytes) |byte| {
+            if (self.complete) return error.TrailingInput;
+            self.received += 1;
+            if (self.expecting_content) {
+                if (self.capture == null) {
+                    switch (byte) {
+                        ' ', '\t', '\r', '\n' => continue,
+                        '"' => {},
+                        else => return error.InvalidJsonShape,
+                    }
+                    self.capture = try ContentCapture.init(self.options, @intCast(self.content_count + 1));
+                    self.decoder = .{};
+                } else if (try self.decoder.feed(byte, &self.capture.?.sink)) {
+                    self.contents[self.content_count] = try self.capture.?.seal();
+                    self.content_count += 1;
+                    self.capture.?.deinit();
+                    self.capture = null;
+                    self.expecting_content = false;
+                    try self.append('"');
+                    try self.append('"');
+                    try self.preview();
+                }
+                continue;
+            }
+            var boundary = false;
+            switch (self.lexical) {
+                .plain => switch (byte) {
+                    ' ', '\t', '\r', '\n' => {
+                        // Do not join tokens (t rue) or erase trailing input.
+                        if (self.metadata.items.len == 0 or self.metadata.items[self.metadata.items.len - 1] != ' ')
+                            try self.append(' ');
+                        continue;
+                    },
+                    '"' => self.lexical = .string,
+                    '{', '}', '[', ']', ',', ':' => boundary = true,
+                    else => {},
+                },
+                .string => switch (byte) {
+                    '"' => {
+                        self.lexical = .plain;
+                        boundary = true;
+                    },
+                    '\\' => self.lexical = .escape,
+                    else => {},
+                },
+                .escape => self.lexical = .string,
+            }
+            try self.append(byte);
+            if (boundary) try self.preview();
+        }
+    }
+
+    fn append(self: *Ingress, byte: u8) !void {
+        if (self.metadata.items.len == metadata_limit) return error.ValueTooLong;
+        try self.metadata.append(self.allocator, byte);
+    }
+
+    fn parse(self: *Ingress) !Request {
+        var source = SocketBody.init(-1, 0);
+        source.input = self.metadata.items;
+        var parser = Parser{
+            .source = &source,
+            .options = self.options,
+            .captured = self.contents[0..self.content_count],
+        };
+        const request = try parser.parse();
+        std.debug.assert(parser.content_ordinal == self.content_count);
+        return request;
+    }
+
+    fn preview(self: *Ingress) !void {
+        _ = self.parse() catch |err| switch (err) {
+            error.NeedInput => return,
+            error.NeedContent => {
+                std.debug.assert(self.content_count < self.contents.len);
+                self.expecting_content = true;
+                return;
+            },
+            else => return err,
+        };
+        self.complete = true;
+        if (self.received != self.options.content_length) return error.TrailingInput;
+    }
+
+    pub fn finish(self: *Ingress) !Request {
+        if (self.received != self.options.content_length) return error.UnexpectedEndOfBody;
+        var request = self.parse() catch |err| switch (err) {
+            error.NeedInput, error.NeedContent => return error.UnexpectedEndOfBody,
+            else => return err,
+        };
+        // All fallible validation precedes this non-failing custody transfer.
+        var index: usize = 0;
+        switch (request) {
+            .configure => |*command| {
+                for ([_]*ContentField{ &command.configuration.instructions, &command.configuration.output_schema }) |field| {
+                    if (field.state != .value) continue;
+                    field.* = self.contents[index];
+                    self.contents[index] = .{};
+                    index += 1;
+                }
+            },
+            .message => |*command| {
+                command.text = self.contents[0];
+                self.contents[0] = .{};
+                index = 1;
+            },
+            else => {},
+        }
+        std.debug.assert(index == self.content_count);
+        self.metadata.deinit(self.allocator);
+        self.metadata = .empty;
+        return request;
+    }
+};
+
+pub fn parseRequest(allocator: std.mem.Allocator, options: ParseOptions) !Request {
+    var ingress = Ingress.init(allocator, options);
+    defer ingress.deinit();
+    var buffer: [content_window_bytes]u8 = undefined;
+    while (ingress.received < options.content_length) {
+        try pollExchange(options.io, options.fd, std.posix.POLL.IN, options.deadline);
+        const wanted: usize = @intCast(@min(options.content_length - ingress.received, buffer.len));
+        const count = try std.posix.read(options.fd, buffer[0..wanted]);
+        if (count == 0) return error.UnexpectedEndOfBody;
+        try ingress.feed(buffer[0..count]);
+    }
+    return ingress.finish();
 }
 
 // Discovery uses one absolute budget. Ordinary ingress keeps its existing
@@ -613,16 +767,27 @@ const SocketBody = struct {
     buffer: [content_window_bytes]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
+    input: ?[]const u8 = null,
 
     fn init(fd: std.posix.fd_t, length: u64) SocketBody {
         return .{ .fd = fd, .remaining = length };
     }
 
     fn readByte(self: *SocketBody) !u8 {
+        if (self.input) |input| {
+            if (self.start == input.len) return error.NeedInput;
+            const byte = input[self.start];
+            self.start += 1;
+            return byte;
+        }
         if (self.start == self.end) try self.refill();
         const byte = self.buffer[self.start];
         self.start += 1;
         return byte;
+    }
+
+    fn atEnd(self: *const SocketBody) bool {
+        return if (self.input) |input| self.start == input.len else self.remaining == 0 and self.start == self.end;
     }
 
     fn refill(self: *SocketBody) !void {
@@ -641,6 +806,7 @@ const Parser = struct {
     source: *SocketBody,
     options: ParseOptions,
     content_ordinal: u8 = 0,
+    captured: ?[]const ContentField = null,
 
     fn parse(self: *Parser) !Request {
         try self.expectByte('{');
@@ -722,11 +888,9 @@ const Parser = struct {
             .activity_page => .{ .activity_page = try self.parseActivityPage(store) },
             .activity_content => .{ .activity_content = try self.parseActivityContent(store) },
         };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('}');
-        if (self.source.remaining != 0 or self.source.start != self.source.end) {
+        if (!self.source.atEnd()) {
             return error.TrailingInput;
         }
         return request;
@@ -734,9 +898,7 @@ const Parser = struct {
 
     fn parseConfigure(self: *Parser, store: Bounded(max_store_bytes)) !ConfigureCommand {
         var request = ConfigureCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
         try self.readSmallString(&request.key);
@@ -798,9 +960,7 @@ const Parser = struct {
 
     fn parseMessage(self: *Parser, store: Bounded(max_store_bytes)) !MessageCommand {
         var request = MessageCommand{ .store = store };
-        errdefer request.removeTemporaryContent(self.options.io) catch {
-            self.options.cleanup_failed.* = true;
-        };
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte(',');
         try self.expectKey("key");
         try self.readSmallString(&request.key);
@@ -1160,111 +1320,28 @@ const Parser = struct {
 
     fn readContentString(self: *Parser, field: *ContentField) !void {
         self.content_ordinal += 1;
-        if (self.options.fault_content_acquire) return error.InjectedContentAcquireFailure;
-        const max_request_number_bytes = 20;
-        const max_content_ordinal_bytes = 3;
-        const max_content_path_bytes = max_store_bytes +
-            "/scratch/request-".len + max_request_number_bytes +
-            "-".len + max_content_ordinal_bytes + ".tmp".len;
-        var path_buffer: [max_content_path_bytes]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buffer, "{s}/request-{d}-{d}.tmp", .{
-            self.options.scratch_path,
-            self.options.request_number,
-            self.content_ordinal,
-        });
-        const writer = try std.Io.Dir.createFileAbsolute(self.options.io, path, .{
-            .read = true,
-            .exclusive = true,
-            .permissions = .fromMode(0o600),
-        });
-        var writer_open = true;
-        var sealed: ?std.Io.File = null;
-        var transferred = false;
-        var sink = ContentSink{ .io = self.options.io, .file = writer, .scratch_budget = self.options.scratch_budget };
-        defer if (!transferred) {
-            if (writer_open) writer.close(self.options.io);
-            if (sealed) |file| file.close(self.options.io);
-            const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, path)) |_| true else |err| switch (err) {
-                error.FileNotFound => true,
-                else => false,
-            };
-            if (removed) {
-                if (sink.scratch_budget) |budget| budget.release(sink.charged);
-            } else {
-                self.options.cleanup_failed.* = true;
-            }
-        };
-        try self.readJsonString(&sink);
-        if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
-        try sink.finish();
-        writer.sync(self.options.io) catch return error.ContentSyncFailed;
-        if (self.options.fault_content_seal) return error.InjectedContentSealFailure;
-        field.length = sink.length;
-        field.digest = sink.hash.finalResult();
-        // Seal custody before admission; the charge follows the read-only file.
-        sealed = try std.Io.Dir.openFileAbsolute(self.options.io, path, .{});
-        writer.close(self.options.io);
-        writer_open = false;
-        try std.Io.Dir.deleteFileAbsolute(self.options.io, path);
-        field.file = sealed.?;
-        field.scratch_budget = sink.scratch_budget;
-        field.charged = sink.charged;
-        transferred = true;
+        if (self.captured) |captured| {
+            if (self.content_ordinal > captured.len) return error.NeedContent;
+            try self.expectByte('"');
+            if (try self.source.readByte() != '"') return error.InvalidJsonShape;
+            const original = captured[self.content_ordinal - 1];
+            // Speculative request disposal has no resource authority.
+            field.length = original.length;
+            field.digest = original.digest;
+            return;
+        }
+        var capture = try ContentCapture.init(self.options, self.content_ordinal);
+        defer capture.deinit();
+        try self.readJsonString(&capture.sink);
+        const state = field.state;
+        field.* = try capture.seal();
+        field.state = state;
     }
 
     fn readJsonString(self: *Parser, sink: anytype) !void {
         try self.expectByte('"');
-        while (true) {
-            const byte = try self.source.readByte();
-            switch (byte) {
-                '"' => break,
-                0...0x1f => return error.InvalidJsonString,
-                '\\' => {
-                    const escaped = try self.source.readByte();
-                    switch (escaped) {
-                        '"', '\\', '/' => try sink.write(&.{escaped}),
-                        'b' => try sink.write("\x08"),
-                        'f' => try sink.write("\x0c"),
-                        'n' => try sink.write("\n"),
-                        'r' => try sink.write("\r"),
-                        't' => try sink.write("\t"),
-                        'u' => {
-                            const first = try self.readHex16();
-                            var codepoint: u21 = undefined;
-                            if (first >= 0xd800 and first <= 0xdbff) {
-                                if (try self.source.readByte() != '\\' or try self.source.readByte() != 'u') {
-                                    return error.InvalidUnicodeEscape;
-                                }
-                                const second = try self.readHex16();
-                                if (second < 0xdc00 or second > 0xdfff) return error.InvalidUnicodeEscape;
-                                codepoint = @intCast(0x10000 +
-                                    ((@as(u32, first) - 0xd800) << 10) +
-                                    (@as(u32, second) - 0xdc00));
-                            } else {
-                                if (first >= 0xdc00 and first <= 0xdfff) return error.InvalidUnicodeEscape;
-                                codepoint = @intCast(first);
-                            }
-                            var encoded: [4]u8 = undefined;
-                            const length = try std.unicode.utf8Encode(codepoint, &encoded);
-                            try sink.write(encoded[0..length]);
-                        },
-                        else => return error.InvalidJsonEscape,
-                    }
-                },
-                else => try sink.write(&.{byte}),
-            }
-        }
-        try sink.endString();
-    }
-
-    fn readHex16(self: *Parser) !u16 {
-        var value: u16 = 0;
-        for (0..4) |_| {
-            const byte = try self.source.readByte();
-            const digit: u16 = std.fmt.charToDigit(byte, 16) catch return error.InvalidUnicodeEscape;
-            value = value * 16 + digit;
-        }
-        return value;
+        var decoder = StringDecoder{};
+        while (!try decoder.feed(try self.source.readByte(), sink)) {}
     }
 
     fn expectKey(self: *Parser, key: []const u8) !void {
@@ -1299,6 +1376,157 @@ const Parser = struct {
                 },
             }
         }
+    }
+};
+
+// Shared by the synchronous metadata grammar and suspended content ingestion.
+// The opening quote belongs to the caller; feed consumes through the closing
+// quote and never consumes subsequent syntax.
+const StringDecoder = struct {
+    state: enum { plain, escape, hex, surrogate_slash, surrogate_u } = .plain,
+    digits: u3 = 0,
+    value: u16 = 0,
+    high_surrogate: ?u16 = null,
+
+    fn feed(self: *StringDecoder, byte: u8, sink: anytype) !bool {
+        switch (self.state) {
+            .plain => switch (byte) {
+                '"' => {
+                    try sink.endString();
+                    return true;
+                },
+                0...0x1f => return error.InvalidJsonString,
+                '\\' => self.state = .escape,
+                else => try sink.write(&.{byte}),
+            },
+            .escape => {
+                self.state = .plain;
+                switch (byte) {
+                    '"', '\\', '/' => try sink.write(&.{byte}),
+                    'b' => try sink.write("\x08"),
+                    'f' => try sink.write("\x0c"),
+                    'n' => try sink.write("\n"),
+                    'r' => try sink.write("\r"),
+                    't' => try sink.write("\t"),
+                    'u' => {
+                        self.state = .hex;
+                        self.digits = 0;
+                        self.value = 0;
+                    },
+                    else => return error.InvalidJsonEscape,
+                }
+            },
+            .hex => {
+                const digit: u16 = std.fmt.charToDigit(byte, 16) catch return error.InvalidUnicodeEscape;
+                self.value = self.value * 16 + digit;
+                self.digits += 1;
+                if (self.digits != 4) return false;
+                const codepoint: u21 = if (self.high_surrogate) |high| blk: {
+                    if (self.value < 0xdc00 or self.value > 0xdfff) return error.InvalidUnicodeEscape;
+                    self.high_surrogate = null;
+                    break :blk @intCast(0x10000 + ((@as(u32, high) - 0xd800) << 10) + (@as(u32, self.value) - 0xdc00));
+                } else blk: {
+                    if (self.value >= 0xd800 and self.value <= 0xdbff) {
+                        self.high_surrogate = self.value;
+                        self.state = .surrogate_slash;
+                        return false;
+                    }
+                    if (self.value >= 0xdc00 and self.value <= 0xdfff) return error.InvalidUnicodeEscape;
+                    break :blk self.value;
+                };
+                var encoded: [4]u8 = undefined;
+                const length = try std.unicode.utf8Encode(codepoint, &encoded);
+                try sink.write(encoded[0..length]);
+                self.state = .plain;
+            },
+            .surrogate_slash => {
+                if (byte != '\\') return error.InvalidUnicodeEscape;
+                self.state = .surrogate_u;
+            },
+            .surrogate_u => {
+                if (byte != 'u') return error.InvalidUnicodeEscape;
+                self.state = .hex;
+                self.value = 0;
+                self.digits = 0;
+            },
+        }
+        return false;
+    }
+};
+
+const ContentCapture = struct {
+    options: ParseOptions,
+    path: [max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
+    path_len: usize,
+    sink: ContentSink,
+    writer_open: bool = true,
+    sealed: ?std.Io.File = null,
+    transferred: bool = false,
+
+    fn init(options: ParseOptions, ordinal: u8) !ContentCapture {
+        if (options.fault_content_acquire) return error.InjectedContentAcquireFailure;
+        var capture: ContentCapture = undefined;
+        const path = try std.fmt.bufPrint(&capture.path, "{s}/request-{d}-{d}.tmp", .{
+            options.scratch_path, options.request_number, ordinal,
+        });
+        const writer = try std.Io.Dir.createFileAbsolute(options.io, path, .{
+            .read = true,
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        });
+        capture.options = options;
+        capture.path_len = path.len;
+        capture.sink = .{ .io = options.io, .file = writer, .scratch_budget = options.scratch_budget };
+        capture.writer_open = true;
+        capture.sealed = null;
+        capture.transferred = false;
+        return capture;
+    }
+
+    fn seal(self: *ContentCapture) !ContentField {
+        if (self.options.fault_content_write) return error.InjectedContentWriteFailure;
+        try self.sink.finish();
+        self.sink.file.sync(self.options.io) catch return error.ContentSyncFailed;
+        if (self.options.fault_content_seal) return error.InjectedContentSealFailure;
+        self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
+        self.sink.file.close(self.options.io);
+        self.writer_open = false;
+        try std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len]);
+        self.transferred = true;
+        return .{
+            .state = .value,
+            .file = self.sealed.?,
+            .scratch_budget = self.sink.scratch_budget,
+            .charged = self.sink.charged,
+            .length = self.sink.length,
+            .digest = self.sink.hash.finalResult(),
+        };
+    }
+
+    fn deinit(self: *ContentCapture) void {
+        if (self.transferred) return;
+        const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len])) |_| true else |err| switch (err) {
+            error.FileNotFound => true,
+            else => false,
+        };
+        if (removed) {
+            if (self.writer_open) self.sink.file.close(self.options.io);
+            if (self.sealed) |file| file.close(self.options.io);
+            if (self.sink.scratch_budget) |budget| budget.release(self.sink.charged);
+        } else {
+            const retained = self.options.retained_scratch;
+            std.debug.assert(retained.* == null);
+            retained.* = named_scratch.Owner.init(
+                self.options.io,
+                if (self.writer_open) self.sink.file else self.sealed.?,
+                if (self.writer_open) self.sealed else null,
+                std.fs.path.basename(self.path[0..self.path_len]),
+                self.sink.scratch_budget,
+                self.sink.charged,
+                .native,
+            );
+        }
+        self.transferred = true;
     }
 };
 
@@ -1742,7 +1970,7 @@ test "configuration content sealing peaks at four descriptors with its socket" {
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(std.testing.io, &root);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     const json = "\"instructions\"\"schema\"";
     var source = SocketBody.init(-1, 0);
     @memcpy(source.buffer[0..json.len], json);
@@ -1753,7 +1981,7 @@ test "configuration content sealing peaks at four descriptors with its socket" {
         .content_length = json.len,
         .scratch_path = root[0..root_len],
         .request_number = 1,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
     } };
     var instructions = ContentField{};
     errdefer removeContent(&instructions, io) catch unreachable;
@@ -1804,7 +2032,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &root);
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     for ([_][]const u8{ "\"abc\"", "\"\\u0061\\u0062\\u0063\"" }, 0..) |json, ordinal| {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
@@ -1815,7 +2043,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
             .content_length = 999999,
             .scratch_path = root[0..n],
             .request_number = ordinal,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
             .scratch_budget = .{ .used = &used, .limit = 3 },
         } };
         var field = ContentField{};
@@ -1834,7 +2062,7 @@ test "ingress charges decoded growth and transfers file charge through cleanup" 
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-test "failed ingress unlink retains only the affected file charge" {
+test "failed ingress unlink retains an actionable owner and only the affected charge" {
     const FailDelete = struct {
         fn delete(_: ?*anyopaque, _: std.Io.Dir, _: []const u8) std.Io.Dir.DeleteFileError!void {
             return error.AccessDenied;
@@ -1846,10 +2074,10 @@ test "failed ingress unlink retains only the affected file charge" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = try tmp.dir.realPath(io, &root);
     var used = std.atomic.Value(u64).init(0);
-    var cleanup_failed = false;
     var vtable = io.vtable.*;
     vtable.dirDeleteFile = FailDelete.delete;
     const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    var retained: ?named_scratch.Owner = null;
     const json = "\"abc\"";
     var source = SocketBody.init(-1, 0);
     @memcpy(source.buffer[0..json.len], json);
@@ -1860,7 +2088,7 @@ test "failed ingress unlink retains only the affected file charge" {
         .content_length = json.len,
         .scratch_path = root[0..n],
         .request_number = 1,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 8 },
     } };
     const good_file = try tmp.dir.createFile(io, "good", .{});
@@ -1871,12 +2099,18 @@ test "failed ingress unlink retains only the affected file charge" {
     var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
     var field = ContentField{};
     try std.testing.expectError(error.AccessDenied, parser.readContentString(&field));
-    try std.testing.expect(cleanup_failed);
     try std.testing.expect(!field.hasFile());
     try std.testing.expectEqual(@as(u64, 5), used.load(.acquire));
     try removeContent(&good_field, io);
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try std.testing.expectEqual(@as(u64, 3), (try tmp.dir.statFile(io, "request-1-1.tmp", .{})).size);
+    try std.testing.expect(retained != null);
+    try std.testing.expectError(error.AccessDenied, retained.?.reclaim(root[0..n]));
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    vtable.dirDeleteFile = io.vtable.dirDeleteFile;
+    try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(root[0..n]));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "request-1-1.tmp", .{}));
 }
 
 test "ingress unknown write failure keeps submitted charge until close" {
@@ -1910,14 +2144,14 @@ test "observation needs no scratch at a full budget" {
     @memcpy(source.buffer[0..json.len], json);
     source.end = json.len;
     var used = std.atomic.Value(u64).init(3);
-    var cleanup_failed = false;
+    var retained: ?named_scratch.Owner = null;
     var parser = Parser{ .source = &source, .options = .{
         .io = std.testing.io,
         .fd = -1,
         .content_length = json.len,
         .scratch_path = "unused",
         .request_number = 0,
-        .cleanup_failed = &cleanup_failed,
+        .retained_scratch = &retained,
         .scratch_budget = .{ .used = &used, .limit = 3 },
     } };
     const request = try parser.parse();
@@ -1940,8 +2174,8 @@ test "Conversation content stream wire requires start zero and literal true" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
         } else {
@@ -1970,8 +2204,8 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
         } else {
@@ -2006,8 +2240,8 @@ test "configuration token heuristics parse sparsely and bind idempotency" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
-        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .cleanup_failed = &cleanup_failed } };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
             continue;
@@ -2057,14 +2291,14 @@ test "configuration provider envelope preserves exact spelling and omission" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..json.len], json);
         source.end = json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parser.parse());
@@ -2104,14 +2338,14 @@ test "Session report profile is closed and omission selects Current" {
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..case.json.len], case.json);
         source.end = case.json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.expected) |expected| {
             const request = try parser.parse();
@@ -2133,14 +2367,14 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
         var source = SocketBody.init(-1, 0);
         @memcpy(source.buffer[0..case.json.len], case.json);
         source.end = case.json.len;
-        var cleanup_failed = false;
+        var retained: ?named_scratch.Owner = null;
         var parser = Parser{ .source = &source, .options = .{
             .io = std.testing.io,
             .fd = -1,
             .content_length = case.json.len,
             .scratch_path = "unused",
             .request_number = 0,
-            .cleanup_failed = &cleanup_failed,
+            .retained_scratch = &retained,
         } };
         if (case.valid) {
             const request = (try parser.parse()).list_sessions;
@@ -2148,5 +2382,113 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
             try std.testing.expectEqual(case.ceiling, request.ceiling);
             if (case.workspace) |workspace| try std.testing.expectEqualStrings(workspace, request.workspace.?.slice()) else try std.testing.expect(request.workspace == null);
         } else try std.testing.expectError(error.InvalidCursor, parser.parse());
+    }
+}
+
+test "incremental ingress streams fragmented content and transfers charged custody only at complete framing" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"text\":{\"state\":\"value\",\"value\":\"";
+    const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
+    const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
+    const suffix = "\"}}";
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    var ingress = Ingress.init(std.testing.allocator, .{
+        .io = io,
+        .fd = -1,
+        .content_length = prefix.len + encoded.len + suffix.len,
+        .scratch_path = root[0..root_len],
+        .request_number = 42,
+        .retained_scratch = &retained,
+        .scratch_budget = .{ .used = &used, .limit = expected.len },
+        .expected_kind = .message,
+    });
+    defer ingress.deinit();
+    for (prefix ++ encoded) |byte| try ingress.feed(&.{byte});
+    try std.testing.expectEqual(@as(u64, 8192), used.load(.acquire));
+    try std.testing.expectError(error.UnexpectedEndOfBody, ingress.finish());
+    for (suffix) |byte| try ingress.feed(&.{byte});
+    var request = try ingress.finish();
+    defer request.removeTemporaryContent(io) catch unreachable;
+    // Disposing the exchange's parser cannot refund or close admitted ingress.
+    ingress.deinit();
+    try std.testing.expectEqual(@as(u64, expected.len), used.load(.acquire));
+    try std.testing.expectEqualStrings("p\x00é", request.message.session.slice());
+    var actual: [expected.len]u8 = undefined;
+    try std.testing.expectEqual(actual.len, try request.message.text.file.?.readPositionalAll(io, &actual, 0));
+    try std.testing.expectEqualStrings(expected, &actual);
+    var hash = contentHasher();
+    hash.update(expected);
+    try std.testing.expectEqualSlices(u8, &hash.finalResult(), &request.message.text.digest);
+    try request.removeTemporaryContent(io);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained == null);
+}
+
+test "incremental ingress preserves grammar and releases both captures after late failure" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const configure = "{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"configuration\":{" ++
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"}," ++
+        "\"instructions\":{\"state\":\"value\",\"value\":\"first\\n\"},\"tools\":{\"state\":\"omitted\"}," ++
+        "\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"value\",\"value\":\"{}\"}}";
+    const cases = [_]struct { bytes: []const u8, kind: Kind = .configure, failure: ?anyerror = null }{
+        .{ .bytes = configure ++ "}" },
+        .{ .bytes = configure ++ ",\"require_model\":true}" },
+        .{ .bytes = configure ++ ",\"require_model\":t rue}", .failure = error.InvalidJsonShape },
+        .{ .bytes = configure ++ "} ", .failure = error.TrailingInput },
+        .{ .bytes = configure ++ ",\"extra\":true}", .failure = error.UnexpectedField },
+        .{ .bytes = configure ++ "}", .kind = .session_stop, .failure = error.RouteKindMismatch },
+        .{ .bytes = configure, .failure = error.UnexpectedEndOfBody },
+    };
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    for (cases, 0..) |case, index| {
+        // Every split of this small command must have the same grammar and
+        // capture lifetime, including suspension between surrogate/quote bytes.
+        for (0..case.bytes.len + 1) |split| {
+            var ingress = Ingress.init(std.testing.allocator, .{
+                .io = io,
+                .fd = -1,
+                .content_length = case.bytes.len,
+                .scratch_path = root[0..root_len],
+                .request_number = index,
+                .retained_scratch = &retained,
+                .scratch_budget = .{ .used = &used, .limit = 8 },
+                .expected_kind = case.kind,
+                // A mismatched kind must fail before file acquisition.
+                .fault_content_acquire = case.kind != .configure,
+            });
+            const result: anyerror!Request = blk: {
+                ingress.feed(case.bytes[0..split]) catch |err| break :blk err;
+                ingress.feed(case.bytes[split..]) catch |err| break :blk err;
+                break :blk ingress.finish();
+            };
+            if (case.failure) |failure| {
+                try std.testing.expectError(failure, result);
+            } else {
+                var request = try result;
+                try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
+                try std.testing.expectEqual(index == 1, request.configure.require_model);
+                const fields = [_]ContentField{ request.configure.configuration.instructions, request.configure.configuration.output_schema };
+                const expected = [_][]const u8{ "first\n", "{}" };
+                for (fields, expected) |field, bytes| {
+                    var buffer: [8]u8 = undefined;
+                    const count = try field.file.?.readPositionalAll(io, &buffer, 0);
+                    try std.testing.expectEqualStrings(bytes, buffer[0..count]);
+                }
+                try request.removeTemporaryContent(io);
+            }
+            ingress.deinit();
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expect(retained == null);
+        }
     }
 }

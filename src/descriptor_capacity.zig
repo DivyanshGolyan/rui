@@ -23,8 +23,8 @@ const ExecutionPopulation = struct {
 pub fn calculate(
     inherited: usize,
     active_capacity: usize,
-    ordinary_client_capacity: usize,
-    control_client_capacity: usize,
+    ordinary_exchanges: usize,
+    control_exchanges: usize,
     provider_configured: bool,
     authentication_configured: bool,
     os_tag: std.Target.Os.Tag,
@@ -53,11 +53,12 @@ pub fn calculate(
     // connection can retain its socket, the first sealed file, and both the
     // second value's writer and read-only custody handles. Absolute POSIX
     // opens use AT_FDCWD directly and acquire no directory descriptor.
-    // Control places retain only their sockets. The server supplies both
-    // capacities.
+    // Controls retain only their sockets. These are simultaneous populations
+    // of the supported workload, not runtime connection quotas. Demand beyond
+    // them can fail allocation/open with original request recovery intact.
     const ordinary_client = try add(1, 3);
-    const ordinary_clients = try multiply(ordinary_client_capacity, ordinary_client);
-    const clients = try add(ordinary_clients, control_client_capacity);
+    const ordinary_clients = try multiply(ordinary_exchanges, ordinary_client);
+    const clients = try add(ordinary_clients, control_exchanges);
 
     // A model slot owns one request file, two response aliases, and at most
     // two Happy Eyeballs transport sockets. A running Bash slot owns its
@@ -83,9 +84,9 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
 
-    // A dispatch fence connects to its own still-open listener. This must be
-    // possible while all admitted client places remain occupied.
-    const self_wake: usize = 1;
+    // The intake owner retains both ends of one nonblocking wake socket pair.
+    // Workers and the execution fence notify without opening new connections.
+    const self_wake: usize = 2;
     var total = try add(inherited, fixed_host);
     total = try add(total, clients);
     total = try add(total, execution);
@@ -157,28 +158,28 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     try std.testing.expectEqual(@as(usize, 42), linux.clients);
     try std.testing.expectEqual(@as(usize, 15), linux.execution);
     try std.testing.expectEqual(@as(usize, 0), linux.authentication);
-    try std.testing.expectEqual(@as(usize, 1), linux.self_wake);
-    try std.testing.expectEqual(@as(usize, 70), linux.total);
+    try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
+    try std.testing.expectEqual(@as(usize, 71), linux.total);
 
     const managed = try calculate(3, 2, 10, 2, true, true, .linux);
     try std.testing.expectEqual(@as(usize, 8), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 78), managed.total);
+    try std.testing.expectEqual(@as(usize, 79), managed.total);
 
     const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
-    try std.testing.expectEqual(@as(usize, 68), without_transport.total);
+    try std.testing.expectEqual(@as(usize, 69), without_transport.total);
 
     const macos = try calculate(3, 2, 10, 2, true, true, .macos);
     try std.testing.expectEqual(@as(usize, 11), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 10), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 82), macos.total);
+    try std.testing.expectEqual(@as(usize, 83), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
     const requirement = try calculate(3, 0, 10, 2, false, true, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
-    try std.testing.expectEqual(@as(usize, 53), requirement.total);
+    try std.testing.expectEqual(@as(usize, 54), requirement.total);
 }
 
 test "execution population compares exclusive steady and shared transition overlaps" {

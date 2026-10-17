@@ -23,6 +23,7 @@ install_system_packages() {
         perl
         pkg-config
         python3
+        sqlite3
         xz-utils
     )
     local missing=()
