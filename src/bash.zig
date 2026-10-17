@@ -221,7 +221,7 @@ pub const Prepared = struct {
             .lifecycle = .start(started, self.timeout_ms),
             .leader = child.id.?,
             .pgid = child.id.?,
-            .pipes = .{ stdout_pipe, stderr_pipe },
+            .pipes = .init(.{ .stdout = stdout_pipe, .stderr = stderr_pipe }),
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
             .script = script,
@@ -309,7 +309,7 @@ pub const Execution = struct {
     /// Anchored original process group: the cancellation scope.
     pgid: std.process.Child.Id,
     /// Open while the matching lifecycle pipe is not closed.
-    pipes: [2]?std.Io.File,
+    pipes: std.enums.EnumArray(BashLifecycle.Stream, ?std.Io.File),
     stdout_capture: OwnedFile,
     stderr_capture: OwnedFile,
     script: OwnedFile,
@@ -544,25 +544,14 @@ pub const Execution = struct {
         };
     }
 
-    fn closeDescriptor(self: *Execution, stream: BashLifecycle.Stream) void {
-        const slot = &self.pipes[@backingInt(stream)];
+    /// Closes the descriptor once the lifecycle closes its pipe. The
+    /// descriptor is open exactly while the lifecycle pipe is not closed.
+    fn releaseClosedDescriptor(self: *Execution, stream: BashLifecycle.Stream) void {
+        if (self.lifecycle.pipes.get(stream) != .closed) return;
+        const slot = self.pipes.getPtr(stream);
         if (slot.*) |file| file.close(self.io);
         slot.* = null;
     }
-
-    fn endPipe(self: *Execution, stream: BashLifecycle.Stream, end: BashLifecycle.PipeEnd, now: std.Io.Clock.Timestamp) void {
-        self.closeDescriptor(stream);
-        self.sendSignal(self.lifecycle.endPipe(stream, end, now));
-    }
-
-    /// One bounded pipe operation's result, applied at the service-time
-    /// observation taken after the potentially blocking operation.
-    const PipeStep = union(enum) {
-        idle,
-        copied,
-        drained: u64,
-        ended: BashLifecycle.PipeEnd,
-    };
 
     fn servicePipe(
         self: *Execution,
@@ -572,106 +561,75 @@ pub const Execution = struct {
         now: *std.Io.Clock.Timestamp,
         fault: *?anyerror,
     ) bool {
-        const step = self.readPipe(stream, window) catch |err| failed: {
-            fault.* = fault.* orelse err;
-            break :failed PipeStep{ .ended = .{ .failed = .read } };
-        };
-        now.* = time.observe();
-        switch (step) {
-            .idle => return false,
-            .copied => return true,
-            .drained => |bytes| {
-                self.lifecycle.drainedTail(stream, bytes);
-                return true;
-            },
-            .ended => |end| {
-                self.endPipe(stream, end, now.*);
-                return true;
-            },
+        const before = self.lifecycle.pipes.get(stream);
+        std.debug.assert((before == .closed) == (self.pipes.get(stream) == null));
+        if (before == .closed) {
+            now.* = time.observe();
+            return false;
         }
+        const read = self.readPipe(stream, window) catch |err| failed: {
+            fault.* = fault.* orelse err;
+            break :failed BashLifecycle.PipeRead{ .failed = .read };
+        };
+        // Apply the read at an observation taken after the potentially
+        // blocking pipe operation.
+        now.* = time.observe();
+        const signal = self.lifecycle.observePipe(stream, read, now.*);
+        // Close a failed pipe before signaling its writers.
+        self.releaseClosedDescriptor(stream);
+        self.sendSignal(signal);
+        return read != .empty or !std.meta.eql(before, self.lifecycle.pipes.get(stream));
     }
 
-    fn readPipe(self: *Execution, stream: BashLifecycle.Stream, window: []u8) !PipeStep {
-        const state = self.lifecycle.pipes[@backingInt(stream)];
-        const descriptor_slot = self.pipes[@backingInt(stream)];
-        // The descriptor is open exactly while the lifecycle pipe is not closed.
-        std.debug.assert((state == .closed) == (descriptor_slot == null));
-        if (state == .closed) return .idle;
-        const pipe = descriptor_slot.?;
+    /// One bounded, non-blocking read. A tail never reads past the bytes it
+    /// owes; with nothing owed, a one-byte probe distinguishes EOF from a
+    /// writer that still holds the pipe. Probe bytes are never retained.
+    fn readPipe(self: *Execution, stream: BashLifecycle.Stream, window: []u8) !BashLifecycle.PipeRead {
+        const state = self.lifecycle.pipes.get(stream);
+        const pipe = self.pipes.get(stream).?;
         const destination = self.capture(stream);
-        if (state == .tail) return self.readTail(pipe, destination, state.tail, window);
+        const wanted: usize = switch (state) {
+            .reading => window.len,
+            .tail => |owed| @intCast(@min(owed, window.len)),
+            .closed => unreachable,
+        };
         var descriptor = [_]std.posix.pollfd{.{
             .fd = pipe.handle,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        if (try std.posix.poll(&descriptor, 0) == 0) return .idle;
-        const reserved: usize = @intCast(destination.budget.reserveUpTo(window.len));
+        // A tail that still owes bytes has them queued, so it reads directly.
+        if (!(state == .tail and wanted != 0) and try std.posix.poll(&descriptor, 0) == 0) return .empty;
+        const reserved: usize = if (wanted == 0) 0 else @intCast(destination.budget.reserveUpTo(wanted));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
             const count = std.posix.read(pipe.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) return .idle;
-                return .{ .ended = .{ .failed = .read } };
+                if (err == error.WouldBlock) return .empty;
+                return .{ .failed = .read };
             };
-            if (count == 0) return .{ .ended = .eof };
-            return .{ .ended = .{ .failed = .exhausted } };
+            if (count == 0) return .end;
+            // Output that capture wanted but the scratch budget cannot hold.
+            if (wanted != 0) return .{ .failed = .exhausted };
+            return .{ .bytes = count };
         }
         const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
             destination.budget.release(reserved);
-            if (err == error.WouldBlock) return .idle;
-            return .{ .ended = .{ .failed = .read } };
+            if (err == error.WouldBlock) return .empty;
+            return .{ .failed = .read };
         };
         if (count < reserved) destination.budget.release(reserved - count);
-        if (count == 0) return .{ .ended = .eof };
-        if (self.faults.capture_read and !self.read_fault_used) {
+        if (count == 0) return .end;
+        if (state == .reading and self.faults.capture_read and !self.read_fault_used) {
             self.read_fault_used = true;
             destination.budget.release(count);
-            return .{ .ended = .{ .failed = .read } };
+            return .{ .failed = .read };
         }
         destination.charged += count;
-        if (self.faults.capture_write) return .{ .ended = .{ .failed = .write } };
+        if (state == .reading and self.faults.capture_write) return .{ .failed = .write };
         destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
-            return .{ .ended = .{ .failed = .write } };
+            return .{ .failed = .write };
         };
-        return .copied;
-    }
-
-    fn readTail(
-        self: *Execution,
-        pipe: std.Io.File,
-        destination: *OwnedFile,
-        remaining: u64,
-        window: []u8,
-    ) !PipeStep {
-        if (remaining == 0) {
-            var descriptor = [_]std.posix.pollfd{.{
-                .fd = pipe.handle,
-                .events = std.posix.POLL.IN,
-                .revents = 0,
-            }};
-            if (try std.posix.poll(&descriptor, 0) == 0) return .{ .ended = .incomplete };
-            var probe: [1]u8 = undefined;
-            const count = std.posix.read(pipe.handle, &probe) catch |err| {
-                if (err == error.WouldBlock) return .{ .ended = .incomplete };
-                return .{ .ended = .{ .failed = .read } };
-            };
-            return .{ .ended = if (count == 0) .eof else .incomplete };
-        }
-        const wanted: usize = @intCast(@min(remaining, window.len));
-        const reserved: usize = @intCast(destination.budget.reserveUpTo(wanted));
-        if (reserved == 0) return .{ .ended = .{ .failed = .exhausted } };
-        const count = std.posix.read(pipe.handle, window[0..reserved]) catch |err| {
-            destination.budget.release(reserved);
-            if (err == error.WouldBlock) return .idle;
-            return .{ .ended = .{ .failed = .read } };
-        };
-        if (count < reserved) destination.budget.release(reserved - count);
-        if (count == 0) return .{ .ended = .{ .failed = .read } };
-        destination.charged += count;
-        destination.file.?.writeStreamingAll(self.io, window[0..count]) catch {
-            return .{ .ended = .{ .failed = .write } };
-        };
-        return .{ .drained = count };
+        return .{ .bytes = count };
     }
 
     fn observeLeader(self: *Execution, now: std.Io.Clock.Timestamp, source: ObservationSource) !bool {
@@ -723,20 +681,19 @@ pub const Execution = struct {
 
     fn cutCapture(self: *Execution, now: std.Io.Clock.Timestamp, fault: *?anyerror) bool {
         const cutoff = self.lifecycle.cutoff(now) orelse return false;
-        for (std.enums.values(BashLifecycle.Stream)) |stream| {
-            if (cutoff.snapshot[@backingInt(stream)]) self.beginTail(stream);
-        }
+        var snapshots = cutoff.snapshot.iterator();
+        while (snapshots.next()) |stream| self.beginTail(stream);
         if (cutoff.unconfirmed) fault.* = fault.* orelse error.BashCleanupUnconfirmed;
-        return cutoff.changed();
+        return cutoff.snapshot.count() != 0;
     }
 
     fn beginTail(self: *Execution, stream: BashLifecycle.Stream) void {
-        const pipe = self.pipes[@backingInt(stream)].?;
+        const pipe = self.pipes.get(stream).?;
         var queued: u64 = 0;
         const observed = self.faults.lifecycle != .tail_snapshot and
             rui_bash_pipe_queued_bytes(pipe.handle, &queued) >= 0;
-        if (!observed) self.closeDescriptor(stream);
         self.lifecycle.beginTail(stream, if (observed) queued else null);
+        self.releaseClosedDescriptor(stream);
     }
     fn formatResult(
         self: *Execution,
@@ -1039,11 +996,11 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
         .io = std.testing.io,
         .lifecycle = .{
             .process = .{ .running = .{ .deadline = BashLifecycle.addMilliseconds(started, timeout_ms) } },
-            .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+            .pipes = .initFill(.{ .closed = .eof }),
         },
         .leader = 1,
         .pgid = 1,
-        .pipes = .{ null, null },
+        .pipes = .initFill(null),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
@@ -1161,10 +1118,10 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             .lifecycle = .{ .process = undefined },
             .leader = null,
             .pgid = 1,
-            .pipes = .{
-                .{ .handle = stdout_fds[0], .flags = .{ .nonblocking = false } },
-                .{ .handle = stderr_fds[0], .flags = .{ .nonblocking = false } },
-            },
+            .pipes = .init(.{
+                .stdout = .{ .handle = stdout_fds[0], .flags = .{ .nonblocking = false } },
+                .stderr = .{ .handle = stderr_fds[0], .flags = .{ .nonblocking = false } },
+            }),
             .stdout_capture = undefined,
             .stderr_capture = undefined,
             .script = undefined,
@@ -1175,8 +1132,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         };
         stdout_read_owned = false;
         stderr_read_owned = false;
-        defer execution.closeDescriptor(.stdout);
-        defer execution.closeDescriptor(.stderr);
+        defer for (execution.pipes.values) |pipe| if (pipe) |file| file.close(std.testing.io);
         execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stdout_capture.cleanup(root) catch {};
         execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
@@ -1209,7 +1165,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         var window: [copy_window_bytes]u8 = undefined;
         const result = execution.serviceAt(&window, observation.now, .none);
         try std.testing.expectEqual(observation.cutoff, execution.lifecycle.pipesClosed());
-        try std.testing.expectEqual(observation.cutoff, execution.pipes[0] == null and execution.pipes[1] == null);
+        try std.testing.expectEqual(observation.cutoff, execution.pipes.get(.stdout) == null and execution.pipes.get(.stderr) == null);
         try std.testing.expect(!result.retired);
         try std.testing.expectError(error.BashNotRetired, execution.checkRetired());
         if (observation.cutoff) {
@@ -1236,11 +1192,11 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         .io = std.testing.io,
         .lifecycle = .{
             .process = .{ .gone = .{ .exited = 0 } },
-            .pipes = .{ .reading, .{ .closed = .eof } },
+            .pipes = .init(.{ .stdout = .reading, .stderr = .{ .closed = .eof } }),
         },
         .leader = null,
         .pgid = 1,
-        .pipes = .{ .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } }, null },
+        .pipes = .init(.{ .stdout = .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } }, .stderr = null }),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
@@ -1250,7 +1206,7 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         .faults = .{},
     };
     gone_read_owned = false;
-    defer gone.closeDescriptor(.stdout);
+    defer if (gone.pipes.get(.stdout)) |file| file.close(std.testing.io);
     gone.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stdout", 1, 1, .none);
     defer gone.stdout_capture.cleanup(root) catch {};
     gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stderr", 1, 1, .none);
@@ -1401,11 +1357,11 @@ test "retired execution is independent of outstanding capture reclamation" {
         .io = std.testing.io,
         .lifecycle = .{
             .process = .{ .gone = .{ .exited = 0 } },
-            .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+            .pipes = .initFill(.{ .closed = .eof }),
         },
         .leader = null,
         .pgid = 1,
-        .pipes = .{ null, null },
+        .pipes = .initFill(null),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
         .script = undefined,
@@ -1459,11 +1415,11 @@ test "output publication closes producer aliases before making output evictable"
             .io = std.testing.io,
             .lifecycle = .{
                 .process = .{ .gone = .{ .exited = 0 } },
-                .pipes = .{ .{ .closed = .eof }, .{ .closed = .eof } },
+                .pipes = .initFill(.{ .closed = .eof }),
             },
             .leader = null,
             .pgid = 1,
-            .pipes = .{ null, null },
+            .pipes = .initFill(null),
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
             .script = script,
