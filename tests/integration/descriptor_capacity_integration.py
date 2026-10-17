@@ -610,11 +610,19 @@ def prove_accept_pressure(state):
             else:
                 # Real per-process exhaustion, isolated to this 512-FD Host.
                 # Incomplete headers require sockets but no content handles.
-                for _ in range(600):
+                # A full listen backlog blocks connect on Linux until the Host
+                # stops accepting, but macOS refuses it at once while the Host
+                # is still accepting; retry those refusals until EMFILE.
+                attempts, deadline = 0, time.monotonic() + 10
+                while attempts < 600 and time.monotonic() < deadline:
                     try:
                         pending = connect(ready["socket"])
+                        attempts += 1
                     except (TimeoutError, BlockingIOError):
                         break
+                    except ConnectionRefusedError:
+                        connections.pop().close()
+                        time.sleep(0.01)
                     if any(code == errno.EMFILE for code, _ in accept_records(log)):
                         break
             expected = injected or errno.EMFILE
