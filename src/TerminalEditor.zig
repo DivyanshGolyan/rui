@@ -1,6 +1,8 @@
 const std = @import("std");
 const Editor = @This();
 const termios = @import("posix");
+const vaxis = @import("vaxis");
+const Input = @import("TerminalInput.zig");
 
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_category(c_int) c_int;
@@ -11,22 +13,25 @@ cursor: usize = 0,
 partial: [4]u8 = undefined,
 partial_length: u3 = 0,
 partial_need: u3 = 0,
+input: Input = .{},
+vaxis_input: bool = false,
 escape: enum { none, esc, csi, ss3 } = .none,
 sequence: [24]u8 = undefined,
 sequence_length: usize = 0,
 paste: bool = false,
-allow_paste: bool = true,
 paste_prefix: [6]u8 = undefined,
 paste_prefix_length: usize = 0,
+allow_paste: bool = true,
 rejected: ?Event = null,
 plain_ascii: bool = true,
 
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, overflow, page_up, page_down, latest, close_view, width_report };
+
+pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
 
-pub const Pending = enum { none, escape, incomplete };
-
 pub fn pending(self: *const Editor) Pending {
+    if (self.vaxis_input) return self.input.pending();
     if (self.paste or self.partial_length != 0 or self.escape == .csi or self.escape == .ss3) return .incomplete;
     return if (self.escape == .esc) .escape else .none;
 }
@@ -58,6 +63,7 @@ pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.T
 }
 
 pub fn expire(self: *Editor) !void {
+    if (self.vaxis_input) return self.input.expire();
     switch (self.pending()) {
         .none => {},
         .escape => self.escape = .none,
@@ -208,7 +214,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         const old_length = editor.length;
         const event = editor.feed(byte[0]);
         switch (event) {
-            .none => {},
+            .none, .page_up, .page_down, .latest, .close_view, .width_report => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
@@ -292,10 +298,38 @@ fn visibleRow(editor: *const Editor, prompt_size: usize, size: std.posix.winsize
 // This transition is also the production byte-ingress path. Its result is
 // observable through the accepted line; no escape parser reads past a prompt.
 pub fn feed(self: *Editor, byte: u8) Event {
+    if (!self.vaxis_input) return self.inlineFeed(byte);
+    const was_paste = self.input.paste;
+    const event = self.input.feed(byte) catch {
+        self.reject(.invalid);
+        return if (!was_paste and (byte == '\r' or byte == '\n')) .invalid else .none;
+    } orelse return .none;
+    return switch (event) {
+        .paste_start => blk: {
+            if (was_paste or !self.allow_paste) self.reject(.invalid);
+            break :blk .none;
+        },
+        .paste_end => blk: {
+            if (!was_paste) self.reject(.invalid);
+            break :blk .none;
+        },
+        .cap_unicode => if (self.input.reported_width != null) .width_report else .none,
+        .key_press => |value| self.key(value, was_paste),
+        else => .none,
+    };
+}
+
+fn reject(self: *Editor, reason: Event) void {
+    if (self.rejected == null) self.rejected = reason;
+}
+
+// The opt-in switch does not change inline keyboard interpretation. This is
+// the existing parser, with one selected parser owner per editor invocation.
+fn inlineFeed(self: *Editor, byte: u8) Event {
     if (self.paste) return self.pasted(byte);
     if (self.escape != .none and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n')) {
         self.escape = .none;
-        return self.feed(byte);
+        return self.inlineFeed(byte);
     }
     switch (self.escape) {
         .esc => {
@@ -313,7 +347,7 @@ pub fn feed(self: *Editor, byte: u8) Event {
                 8, 127 => self.backwardWord(false),
                 'b' => self.moveWord(false),
                 'f' => self.moveWord(true),
-                else => if (self.allow_paste) self.feed(byte) else blk: {
+                else => if (self.allow_paste) self.inlineFeed(byte) else blk: {
                     self.reject(.invalid);
                     break :blk .none;
                 },
@@ -359,10 +393,6 @@ pub fn feed(self: *Editor, byte: u8) Event {
     };
 }
 
-fn reject(self: *Editor, reason: Event) void {
-    if (self.rejected == null) self.rejected = reason;
-}
-
 fn csi(self: *Editor, sequence: []const u8) Event {
     if (std.mem.eql(u8, sequence, "200~")) {
         self.paste = true;
@@ -400,6 +430,105 @@ fn pasted(self: *Editor, byte: u8) Event {
     if (self.paste_prefix_length == paste_end.len) {
         self.paste = false;
         self.paste_prefix_length = 0;
+    }
+    return event;
+}
+
+fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
+    const Key = vaxis.Key;
+    if (pasted_input) {
+        if (value.matches('j', .{ .ctrl = true })) return self.insert('\n', true);
+        if (value.matches(Key.tab, .{})) return self.insert('\t', true);
+        if (value.text) |text| return self.insertText(text, true);
+        self.reject(.invalid);
+        return .none;
+    }
+    if (value.matches('c', .{ .ctrl = true })) return .interrupt;
+    if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
+    if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
+    if (self.rejected != null) return .none;
+    if (value.matches(Key.escape, .{})) return .none;
+    if (value.matches(Key.tab, .{})) return self.insert('\t', false);
+    if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
+    if (value.matches(Key.page_up, .{})) return .page_up;
+    if (value.matches(Key.page_down, .{})) return .page_down;
+    if (value.matches(Key.end, .{ .ctrl = true })) return .latest;
+    if (value.matches('g', .{ .ctrl = true })) return .close_view;
+    if (value.matches(Key.left, .{})) return self.move(self.previous(self.cursor));
+    if (value.matches(Key.right, .{})) return self.move(self.next(self.cursor));
+    if (value.matches(Key.up, .{})) return self.vertical(false);
+    if (value.matches(Key.down, .{})) return self.vertical(true);
+    if (value.matches(Key.home, .{}) or value.matches('a', .{ .ctrl = true })) return self.move(self.lineStart());
+    if (value.matches(Key.end, .{}) or value.matches('e', .{ .ctrl = true })) return self.move(self.lineEnd());
+    if (value.matches(Key.delete, .{})) return self.deleteNext();
+    if (value.matches(Key.backspace, .{})) return self.deletePrevious();
+    if (value.matches('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
+    if (value.matches('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
+    if (value.matches('w', .{ .ctrl = true })) return self.backwardWord(true);
+    if (value.matches(Key.backspace, .{ .alt = true }) or value.matches(127, .{ .alt = true })) return self.backwardWord(false);
+    if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
+    if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
+    // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints.
+    // Only the bindings above may consume a control without rejecting input;
+    // silently ignoring another one would submit altered surrounding text.
+    if (value.mods.ctrl or value.mods.super or value.mods.hyper or value.mods.meta or
+        !validScalar(value.codepoint, false) or (!self.allow_paste and value.mods.alt))
+    {
+        self.reject(.invalid);
+        return .none;
+    }
+    if (value.text) |text| return self.insertText(text, false);
+    if (value.mods.alt) {
+        if (!self.allow_paste) self.reject(.invalid) else if (value.codepoint >= 32 and value.codepoint < 127) return self.insert(@intCast(value.codepoint), false);
+    }
+    return .none;
+}
+
+test "modified kitty text cannot become an ordinary permission choice" {
+    var storage: [64]u8 = undefined;
+    for ([_]u8{ 3, 9, 17, 33, 57 }) |modifier| {
+        for ([_][]const u8{ "", ";97" }) |text| {
+            var sequence: [32]u8 = undefined;
+            const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d}{s}u", .{ modifier, text });
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = false, .vaxis_input = true };
+            for (input) |byte| _ = editor.feed(byte);
+            try std.testing.expectEqual(Event.invalid, editor.feed('\r'));
+            try std.testing.expectEqual(@as(usize, 0), editor.length);
+        }
+    }
+    for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
+        var sequence: [32]u8 = undefined;
+        const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d};97u", .{modifier});
+        var editor: Editor = .{ .buffer = &storage, .allow_paste = false, .vaxis_input = true };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.submit, editor.feed('\r'));
+        try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+    }
+}
+
+test "marked paste rejects encoded controls without releasing paste custody" {
+    var storage: [64]u8 = undefined;
+    for ([_][]const u8{
+        "\x1b[123;4~", "\x1b[0;1:3u", "\x1b[97;1;98u",  "\x1b[200~",
+        "\x1b[201x",   "\x1b[20~",    "\x1b]title\x07", "\x1bOQ",
+        "\x1b_print",  "\x1bx",
+    }) |sequence| {
+        var editor: Editor = .{ .buffer = &storage, .vaxis_input = true };
+        for ("\x1b[200~left") |byte| _ = editor.feed(byte);
+        for (sequence) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Pending.incomplete, editor.pending());
+        try std.testing.expectEqual(Event.none, editor.feed('\n'));
+        for ("right\x7f\x1b[201~") |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Pending.none, editor.pending());
+        try std.testing.expectEqual(Event.invalid, editor.feed('\r'));
+    }
+}
+
+fn insertText(self: *Editor, text: []const u8, pasted_input: bool) Event {
+    var event: Event = .none;
+    for (text) |byte| {
+        const next_event = self.insert(byte, pasted_input);
+        if (next_event == .redraw or (next_event == .append and event == .none)) event = next_event;
     }
     return event;
 }
@@ -690,6 +819,16 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
         if (byte == '\n' and !editor.paste) try std.testing.expectEqual(Event.submit, event);
     }
     try std.testing.expectEqualStrings("line1\nline2", storage[0..editor.length]);
+    for ([_][]const u8{ "left\tright", "left\x1b[9uright" }) |input| {
+        editor = .{ .buffer = &storage, .vaxis_input = true };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.submit, editor.feed('\n'));
+        try std.testing.expectEqualStrings("left\tright", storage[0..editor.length]);
+    }
+    editor = .{ .buffer = &storage, .vaxis_input = true };
+    for ("left\x1b[27uright") |byte| _ = editor.feed(byte);
+    try std.testing.expectEqual(Event.submit, editor.feed('\n'));
+    try std.testing.expectEqualStrings("leftright", storage[0..editor.length]);
 }
 
 test "batched tail deletion retains exact Unicode clusters and following input" {
@@ -749,6 +888,15 @@ test "unknown CSI retains following text; malformed input and marked choice reje
         const event = editor.feed(byte);
         if (byte == '\n') try std.testing.expectEqual(Event.invalid, event);
     }
+    for ([_][]const u8{
+        "invalid\x00x", "invalid\x12x", "invalid\x1cx",
+        "a\x1b[0u",     "a\x1b[28u",    "a\x1b[28;3u",
+        "a\x1b\x00",
+    }) |input| for ([_]bool{ true, false }) |allow_paste| {
+        editor = .{ .buffer = &storage, .allow_paste = allow_paste, .vaxis_input = true };
+        for (input) |byte| _ = editor.feed(byte);
+        try std.testing.expectEqual(Event.invalid, editor.feed('\n'));
+    };
     editor = .{ .buffer = &storage, .allow_paste = false };
     for ("\x1b[200~a\x1b[201~\n") |byte| {
         const event = editor.feed(byte);
