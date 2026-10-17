@@ -2577,11 +2577,6 @@ const SuccessfulCompletion = union(enum) {
 fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
-    if (structured_output) {
-        settleAttemptFailure(host, owner.token, owner.binding, .{ .code = "unsupported_output_schema" }, .terminal);
-        active.transfer.deinit();
-        return .cleanup;
-    }
     var request_id: protocol.Bounded(256) = .{};
     request_id.set(active.transfer.requestId()) catch unreachable;
     var openai_model: protocol.Bounded(protocol.max_model_bytes) = .{};
@@ -2591,6 +2586,16 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
+    if (structured_output) {
+        const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+        var detail: [512]u8 = undefined;
+        settleAttemptFailure(host, owner.token, owner.binding, .{
+            .code = "unsupported_output_schema",
+            .diagnostic = rejection.format(error.UnsupportedOutputSchema, &detail),
+            .request_id = request_id,
+        }, .terminal);
+        return .cleanup;
+    }
 
     var metadata_name_buffer: [96]u8 = undefined;
     const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
