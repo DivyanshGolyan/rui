@@ -650,7 +650,7 @@ pub const HistoricalReader = struct {
             self.verified_position += count;
             if (self.verified_position == self.reference.length) {
                 if (!std.mem.eql(u8, &self.hash.finalResult(), &self.reference.digest))
-                    return self.view.store.fenceReadFailure(error.CorruptStore);
+                    return self.view.store.fence(error.CorruptStore);
                 self.verified = true;
             }
         }
@@ -672,7 +672,7 @@ pub const HistoricalReader = struct {
     /// Canonical documents passed syntax validation before acceptance.
     pub fn malformed(self: *HistoricalReader) anyerror {
         std.debug.assert(self.usable());
-        return self.view.store.fenceReadFailure(error.CorruptStore);
+        return self.view.store.fence(error.CorruptStore);
     }
 
     pub fn close(self: *HistoricalReader) void {
@@ -1533,6 +1533,144 @@ pub const Store = struct {
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) struct { decoded: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
+    /// Expected outcomes of locked entry points. A canonical read or save
+    /// fault fences the Host (ARCHITECTURE.md, "Commit boundaries and crash
+    /// recovery"), so every other error from an entry point has fenced the
+    /// Store before the caller sees it.
+    const Ordinary = struct {
+        const none = error{};
+        const page = error{ SessionNotFound, InvalidCursor };
+        const content = error{ContentNotFound};
+        const public_content = error{ ContentNotFound, RangeOutOfBounds };
+        const action = error{ActionNotFound};
+        const result = error{ ResultNotFound, ResultNotReady, ResultFailed };
+        const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
+        const historical_entry = attempt_binding || error{HistoricalPending};
+        const model_success = attempt_binding || error{InvalidProviderEnvelope};
+        const action_attempt = error{StaleActionAttemptBinding};
+        const action_dispatch = action_attempt || error{SupersededByControl};
+        const injected_admission = error{InjectedAttemptCommitFailure};
+
+        /// Rejects a declared ordinary name the body cannot return, so a
+        /// stale or misspelled name fails to compile instead of fencing.
+        fn produced(comptime Set: type, comptime Result: type) void {
+            const returned = @typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names orelse return;
+            outer: inline for (@typeInfo(Set).error_set.error_names.?) |name| {
+                inline for (returned) |candidate| {
+                    if (comptime std.mem.eql(u8, name, candidate)) continue :outer;
+                }
+                @compileError("ordinary error " ++ name ++ " is not returned by " ++ @typeName(Result));
+            }
+        }
+
+        fn contains(comptime Set: type, err: anyerror) bool {
+            inline for (@typeInfo(Set).error_set.error_names.?) |name| {
+                if (err == @field(anyerror, name)) return true;
+            }
+            return false;
+        }
+    };
+
+    const AccessTrace = union(enum) {
+        none,
+        control: ControlTrace,
+        settlement: SettlementTrace,
+
+        fn fromControl(trace: ?ControlTrace) AccessTrace {
+            return if (trace) |value| .{ .control = value } else .none;
+        }
+
+        fn fromSettlement(trace: ?SettlementTrace) AccessTrace {
+            return if (trace) |value| .{ .settlement = value } else .none;
+        }
+
+        fn mark(self: AccessTrace, phase: enum { requested, acquired, complete }) void {
+            switch (self) {
+                .none => {},
+                .control => |trace| trace.mark(switch (phase) {
+                    .requested => .lock_requested,
+                    .acquired => .lock_acquired,
+                    .complete => .store_complete,
+                }),
+                .settlement => |trace| trace.mark(switch (phase) {
+                    .requested => .lock_requested,
+                    .acquired => .lock_acquired,
+                    .complete => .settlement_complete,
+                }),
+            }
+        }
+    };
+
+    /// Exclusive canonical access for one entry point, from `enter` through
+    /// `release`. Errors leave through `finish` or `finishTransaction`, which
+    /// return the entry point's declared ordinary errors and fence the rest.
+    /// Only `lockAdmin` otherwise takes the mutex, for open/close diagnostics.
+    const Access = struct {
+        store: *Store,
+        trace: AccessTrace,
+
+        fn finish(self: Access, comptime Expected: type, result: anytype) @TypeOf(result) {
+            comptime Ordinary.produced(Expected, @TypeOf(result));
+            return result catch |err| {
+                if (Ordinary.contains(Expected, err)) return err;
+                return self.store.fence(err);
+            };
+        }
+
+        /// Rolls back any open transaction first; a failed rollback fences
+        /// and replaces the original error, including an ordinary one.
+        fn finishTransaction(self: Access, comptime Expected: type, faults: Faults, result: anytype) Transaction(@TypeOf(result)) {
+            comptime Ordinary.produced(Expected, @TypeOf(result));
+            return result catch |err| {
+                self.store.rollbackAfterError(faults) catch |rollback_err| return self.store.fence(rollback_err);
+                if (Ordinary.contains(Expected, err)) return err;
+                return self.store.fence(err);
+            };
+        }
+
+        /// Report capture marks its own scratch failures ordinary.
+        fn finishCapture(self: Access, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
+            return result catch |err| {
+                if (capture.ordinary_failure) return err;
+                return self.store.fence(err);
+            };
+        }
+
+        fn release(self: Access) void {
+            self.trace.mark(.complete);
+            self.store.mutex.unlock(self.store.io);
+        }
+
+        fn Transaction(comptime Result: type) type {
+            const info = @typeInfo(Result).error_union;
+            return (info.error_set || error{CanonicalRollbackFailed})!info.payload;
+        }
+    };
+
+    fn enter(self: *Store, trace: AccessTrace) error{StoreFenced}!Access {
+        if (self.isFenced()) return error.StoreFenced;
+        trace.mark(.requested);
+        self.mutex.lockUncancelable(self.io);
+        const access: Access = .{ .store = self, .trace = trace };
+        trace.mark(.acquired);
+        if (self.isFenced()) {
+            access.release();
+            return error.StoreFenced;
+        }
+        return access;
+    }
+
+    /// Administrative access without canonical classification.
+    fn lockAdmin(self: *Store) void {
+        self.mutex.lockUncancelable(self.io);
+    }
+
+    /// The only fence setter. Returns `err` so callers can propagate it.
+    fn fence(self: *Store, err: anytype) @TypeOf(err) {
+        self.fenced.store(true, .release);
+        return err;
+    }
+
     pub fn open(io: std.Io, database_path: []const u8, selector: []const u8) !Store {
         return openWithOptions(io, database_path, selector, .{});
     }
@@ -1630,7 +1768,7 @@ pub const Store = struct {
     }
 
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
-        self.mutex.lockUncancelable(self.io);
+        self.lockAdmin();
         defer self.mutex.unlock(self.io);
 
         var result: SqliteDiagnostic = .{};
@@ -1679,7 +1817,7 @@ pub const Store = struct {
     }
 
     pub fn close(self: *Store) !void {
-        self.mutex.lockUncancelable(self.io);
+        self.lockAdmin();
         const close_result = c.sqlite3_close(self.database);
         self.mutex.unlock(self.io);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
@@ -1688,7 +1826,7 @@ pub const Store = struct {
     }
 
     pub fn validateRetryWaits(self: *Store, waits_ms: [3]u64) !void {
-        self.mutex.lockUncancelable(self.io);
+        self.lockAdmin();
         defer self.mutex.unlock(self.io);
         const now_ms = try readUnixMilliseconds(self.database);
         for (waits_ms) |wait_ms| {
@@ -1703,14 +1841,9 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        return self.configureLocked(command, faults) catch {
-            self.finishTransactionFailure(faults);
-            return .infrastructure_failure;
-        };
+        const access = self.enter(.none) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, self.configureLocked(command, faults)) catch .infrastructure_failure;
     }
 
     fn configureLocked(
@@ -1877,14 +2010,9 @@ pub const Store = struct {
         command: *const protocol.MessageCommand,
         faults: Faults,
     ) MessageReply {
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        return self.submitMessageLocked(command, faults) catch {
-            self.finishTransactionFailure(faults);
-            return .infrastructure_failure;
-        };
+        const access = self.enter(.none) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, self.submitMessageLocked(command, faults)) catch .infrastructure_failure;
     }
 
     fn submitMessageLocked(
@@ -1973,20 +2101,9 @@ pub const Store = struct {
         command: *const protocol.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        if (faults.control_trace) |trace| trace.mark(.lock_requested);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (faults.control_trace) |trace| trace.mark(.lock_acquired);
-        const result: SessionStopReply = result: {
-            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
-            break :result self.stopSessionLocked(command, faults) catch {
-                self.finishTransactionFailure(faults);
-                break :result .infrastructure_failure;
-            };
-        };
-        if (faults.control_trace) |trace| trace.mark(.store_complete);
-        return result;
+        const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, self.stopSessionLocked(command, faults)) catch .infrastructure_failure;
     }
 
     fn stopSessionLocked(
@@ -2165,20 +2282,9 @@ pub const Store = struct {
         command: *const protocol.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        if (faults.control_trace) |trace| trace.mark(.lock_requested);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (faults.control_trace) |trace| trace.mark(.lock_acquired);
-        const result: ModelInterruptionReply = result: {
-            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
-            break :result self.interruptModelLocked(command, faults) catch {
-                self.finishTransactionFailure(faults);
-                break :result .infrastructure_failure;
-            };
-        };
-        if (faults.control_trace) |trace| trace.mark(.store_complete);
-        return result;
+        const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, self.interruptModelLocked(command, faults)) catch .infrastructure_failure;
     }
 
     fn interruptModelLocked(
@@ -2356,20 +2462,9 @@ pub const Store = struct {
         command: *const protocol.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
-        if (self.fenced.load(.acquire)) return .infrastructure_failure;
-        if (faults.control_trace) |trace| trace.mark(.lock_requested);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (faults.control_trace) |trace| trace.mark(.lock_acquired);
-        const result: PermissionDecisionReply = result: {
-            if (self.fenced.load(.acquire)) break :result .infrastructure_failure;
-            break :result self.decidePermissionLocked(command, faults) catch {
-                self.finishTransactionFailure(faults);
-                break :result .infrastructure_failure;
-            };
-        };
-        if (faults.control_trace) |trace| trace.mark(.store_complete);
-        return result;
+        const access = self.enter(.fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, faults, self.decidePermissionLocked(command, faults)) catch .infrastructure_failure;
     }
 
     pub fn denyPermission(
@@ -2468,11 +2563,13 @@ pub const Store = struct {
     }
 
     pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const existing = self.readExistingCommand(key) catch |err| return self.fenceReadFailure(err);
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.observeCommandLocked(key));
+    }
+
+    fn observeCommandLocked(self: *Store, key: []const u8) !CommandObservation {
+        const existing = try self.readExistingCommand(key);
         const command = existing orelse return .{ .status = .absent };
         var observation = CommandObservation{
             .status = if (command.accepted) .accepted else .rejected,
@@ -2484,40 +2581,34 @@ pub const Store = struct {
         observation.code = command.code;
         if (command.kind == .message and command.accepted) {
             const content_id = command.primary_content_id orelse
-                return self.fenceReadFailure(error.CorruptStore);
-            const metadata = self.readContentMetadata(content_id) catch |err|
-                return self.fenceReadFailure(err);
+                return error.CorruptStore;
+            const metadata = try self.readContentMetadata(content_id);
             observation.message = .{
                 .content = .{ .length = metadata.length, .digest = metadata.digest },
-                .queue = self.readMessageQueue(
+                .queue = try self.readMessageQueue(
                     key,
                     command.target.slice(),
                     content_id,
                     command.accepted,
-                ) catch |err| return self.fenceReadFailure(err),
+                ),
             };
-            const queue = observation.message.?.queue orelse return self.fenceReadFailure(error.CorruptStore);
+            const queue = observation.message.?.queue orelse return error.CorruptStore;
             switch (queue.state) {
                 .queued, .processing => {
-                    observation.message.?.progress = self.readMessageProgress(command.target.slice(), queue.state) catch |err|
-                        return self.fenceReadFailure(err);
+                    observation.message.?.progress = try self.readMessageProgress(command.target.slice(), queue.state);
                 },
                 else => {},
             }
         } else if (command.kind == .session_stop and command.accepted) {
-            const selection = self.readSessionStopSelection(key) catch |err|
-                return self.fenceReadFailure(err);
+            const selection = try self.readSessionStopSelection(key);
             observation.session_stop = .{
                 .selection = selection,
-                .completion = self.sessionStopCompletion(selection) catch |err|
-                    return self.fenceReadFailure(err),
+                .completion = try self.sessionStopCompletion(selection),
             };
         } else if (command.kind == .model_interruption) {
-            observation.model_interruption = self.readModelInterruptionTarget(key) catch |err|
-                return self.fenceReadFailure(err);
+            observation.model_interruption = try self.readModelInterruptionTarget(key);
         } else if (command.kind == .permission_decision) {
-            const target = self.readPermissionTarget(key) catch |err|
-                return self.fenceReadFailure(err);
+            const target = try self.readPermissionTarget(key);
             observation.permission_action_id = target.action_id;
             observation.permission_decision = target.decision;
         }
@@ -2633,10 +2724,12 @@ pub const Store = struct {
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.result, self.commandResultLocked(key));
+    }
+
+    fn commandResultLocked(self: *Store, key: []const u8) !ContentReference {
         const statement = try prepare(
             self.database,
             "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
@@ -2647,7 +2740,9 @@ pub const Store = struct {
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, key);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ResultNotFound;
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.ResultNotFound;
+        if (step != c.SQLITE_ROW) return error.ResultReadFailed;
         if (c.sqlite3_column_int(statement, 2) != 0 and c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) {
             return error.ResultFailed;
         }
@@ -2661,11 +2756,13 @@ pub const Store = struct {
     }
 
     pub fn inspectSession(self: *Store, session_ref: []const u8) !SessionObservation {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const maybe_current = self.readSession(session_ref) catch |err| return self.fenceReadFailure(err);
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.inspectSessionLocked(session_ref));
+    }
+
+    fn inspectSessionLocked(self: *Store, session_ref: []const u8) !SessionObservation {
+        const maybe_current = try self.readSession(session_ref);
         const current = maybe_current orelse return .{};
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         var observation = SessionObservation{
@@ -2683,21 +2780,17 @@ pub const Store = struct {
         observation.model = current.model;
         try observation.permission_mode.set(if (current.permission_mode == 0) "ask" else "bypass");
         if (current.instructions_id) |content_id| {
-            const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+            const metadata = try self.readContentMetadata(content_id);
             observation.instructions = .{ .length = metadata.length, .digest = metadata.digest };
         }
         if (current.output_schema_id) |content_id| {
-            const metadata = self.readContentMetadata(content_id) catch |err| return self.fenceReadFailure(err);
+            const metadata = try self.readContentMetadata(content_id);
             observation.output_schema = .{ .length = metadata.length, .digest = metadata.digest };
         }
-        observation.pending_messages = self.countPendingMessages(session_ref) catch |err|
-            return self.fenceReadFailure(err);
-        self.validateActiveTurnToolCalls(session_ref, true) catch |err|
-            return self.fenceReadFailure(err);
-        observation.action_count = self.countActions(session_ref) catch |err|
-            return self.fenceReadFailure(err);
-        observation.rejected_call_count = self.countRejectedCalls(session_ref) catch |err|
-            return self.fenceReadFailure(err);
+        observation.pending_messages = try self.countPendingMessages(session_ref);
+        try self.validateActiveTurnToolCalls(session_ref, true);
+        observation.action_count = try self.countActions(session_ref);
+        observation.rejected_call_count = try self.countRejectedCalls(session_ref);
         return observation;
     }
 
@@ -2706,14 +2799,9 @@ pub const Store = struct {
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
     pub fn publicConversationPage(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.publicConversationPageLocked(request) catch |err| switch (err) {
-            error.SessionNotFound, error.InvalidCursor => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.page, self.publicConversationPageLocked(request));
     }
 
     fn publicConversationPageLocked(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
@@ -2785,14 +2873,9 @@ pub const Store = struct {
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
     pub fn openPublicConversationContent(self: *Store, request: protocol.ConversationContent) !ContentReader {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.openPublicConversationContentLocked(request) catch |err| switch (err) {
-            error.ContentNotFound, error.RangeOutOfBounds => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.public_content, self.openPublicConversationContentLocked(request));
     }
 
     fn openPublicConversationContentLocked(self: *Store, request: protocol.ConversationContent) !ContentReader {
@@ -2871,7 +2954,8 @@ pub const Store = struct {
         pub fn peek(source: *@This()) !?u8 {
             if (source.used == source.count) {
                 const wanted: usize = @intCast(@min(source.window.len, source.end - source.position));
-                source.count = try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+                try source.store.readOwnedContentLocked(&source.reader, source.position, source.window[0..wanted]);
+                source.count = wanted;
                 source.used = 0;
                 if (source.count == 0) return null;
             }
@@ -2960,14 +3044,9 @@ pub const Store = struct {
 
     pub fn activityPage(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
         try request.validate();
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.activityPageLocked(request) catch |err| switch (err) {
-            error.SessionNotFound, error.InvalidCursor => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.page, self.activityPageLocked(request));
     }
 
     fn activityPageLocked(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
@@ -3150,41 +3229,38 @@ pub const Store = struct {
 
     pub fn openActivityContent(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.validateActivitySequence(request.session.slice()) catch |err| return self.fenceReadFailure(err);
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.content, self.openActivityContentLocked(request));
+    }
+
+    fn openActivityContentLocked(self: *Store, request: protocol.ReadActivityContent) !ContentReader {
+        self.validateActivitySequence(request.session.slice()) catch |err| return self.fence(err);
         // Only Tool Results have nonzero ordinals. Byte readers need their
         // canonical identity, not a second scan of the original arguments.
         const id = if (request.ordinal != 0) id: {
             const content = self.publicConversationContentLocked(request.session.slice(), request.position, request.ordinal) catch |err| switch (err) {
                 error.ContentNotFound => return err,
-                else => return self.fenceReadFailure(err),
+                else => return self.fence(err),
             };
             break :id content.id;
         } else id: {
             const identity = self.activityItemLocked(request.session.slice(), std.math.maxInt(i64), request.position, request.ordinal) catch |err| switch (err) {
                 error.ContentNotFound => return err,
-                else => return self.fenceReadFailure(err),
+                else => return self.fence(err),
             };
             break :id identity.content_id orelse return error.ContentNotFound;
         };
-        const content = self.readPublicContentMetadata(id) catch |err| return self.fenceReadFailure(err);
-        const raw = self.contentIsRaw(id, content.length) catch |err| return self.fenceReadFailure(err);
+        const content = self.readPublicContentMetadata(id) catch |err| return self.fence(err);
+        const raw = self.contentIsRaw(id, content.length) catch |err| return self.fence(err);
         return .{ .store = self, .content_id = id, .reference = .{ .length = content.length, .digest = content.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
     }
 
     pub fn proposalPage(self: *Store, request: protocol.ProposalPage) !ProposalPage {
         try request.validate();
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.proposalPageLocked(request) catch |err| switch (err) {
-            error.SessionNotFound, error.InvalidCursor => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.page, self.proposalPageLocked(request));
     }
 
     fn proposalPageLocked(self: *Store, request: protocol.ProposalPage) !ProposalPage {
@@ -3289,17 +3365,19 @@ pub const Store = struct {
 
     pub fn openProposalField(self: *Store, request: protocol.ReadProposalField) !ContentReader {
         if (request.position == 0 or request.position > std.math.maxInt(i64)) return error.ContentNotFound;
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.content, self.openProposalFieldLocked(request));
+    }
+
+    fn openProposalFieldLocked(self: *Store, request: protocol.ReadProposalField) !ContentReader {
         const identity = self.proposalLocked(request.session.slice(), request.position, true) catch |err| switch (err) {
             error.ContentNotFound => return err,
-            else => return self.fenceReadFailure(err),
+            else => return self.fence(err),
         };
         const index = @backingInt(request.field);
         const field = identity.metadata.fields[index];
-        const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fenceReadFailure(err);
+        const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fence(err);
         return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
     }
 
@@ -3310,15 +3388,11 @@ pub const Store = struct {
     ) !SessionReport {
         var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        const capture_result = self.renderSessionReportLocked(session_ref, options.profile, options.execution, &capture);
-        capture_result catch |err| {
-            if (!capture.ordinary_failure) self.fenced.store(true, .release);
-            self.mutex.unlock(self.io);
-            return err;
-        };
-        self.mutex.unlock(self.io);
+        {
+            const access = try self.enter(.none);
+            defer access.release();
+            try access.finishCapture(&capture, self.renderSessionReportLocked(session_ref, options.profile, options.execution, &capture));
+        }
         return capture.seal();
     }
 
@@ -3330,20 +3404,15 @@ pub const Store = struct {
             (request.after != 0 and request.after > request.ceiling)) return error.InvalidCursor;
         var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
         errdefer capture.deinit();
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        const result = self.renderSessionListLocked(request, &capture);
-        result catch |err| {
-            if (!capture.ordinary_failure) self.fenced.store(true, .release);
-            self.mutex.unlock(self.io);
-            return err;
-        };
-        self.mutex.unlock(self.io);
+        {
+            const access = try self.enter(.none);
+            defer access.release();
+            try access.finishCapture(&capture, self.renderSessionListLocked(request, &capture));
+        }
         return capture.seal();
     }
 
     fn renderSessionListLocked(self: *Store, request: protocol.ListSessions, capture: *SessionReportCapture) !void {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
         var ceiling = request.ceiling;
         if (request.after == 0) {
             const maximum = try prepare(self.database, "SELECT coalesce(max(rowid),0) FROM session");
@@ -3416,7 +3485,6 @@ pub const Store = struct {
         execution: SessionReportExecution,
         capture: *SessionReportCapture,
     ) !void {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
         const maybe_current = try self.readSession(session_ref);
         try capture.append("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"");
         try capture.append(@tagName(profile));
@@ -4270,10 +4338,9 @@ pub const Store = struct {
         var offset: u64 = 0;
         while (offset < metadata.length) {
             const wanted: usize = @intCast(@min(metadata.length - offset, buffer.len));
-            const count = try self.readOwnedContentLocked(&reader, offset, buffer[0..wanted]);
-            if (count != wanted) return error.CorruptStore;
-            try capture.appendJsonStringBytes(buffer[0..count]);
-            offset += count;
+            try self.readOwnedContentLocked(&reader, offset, buffer[0..wanted]);
+            try capture.appendJsonStringBytes(buffer[0..wanted]);
+            offset += wanted;
         }
         try capture.append("\"}");
     }
@@ -4418,15 +4485,10 @@ pub const Store = struct {
     }
 
     fn actionContent(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const access = try self.enter(.none);
+        defer access.release();
         if (action_id == 0 or action_id > std.math.maxInt(i64)) return error.ActionNotFound;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.actionContentLocked(session_ref, action_id, column) catch |err| switch (err) {
-            error.ActionNotFound => error.ActionNotFound,
-            else => self.fenceReadFailure(err),
-        };
+        return access.finish(Ordinary.action, self.actionContentLocked(session_ref, action_id, column));
     }
 
     fn actionContentLocked(self: *Store, session_ref: []const u8, action_id: u64, comptime column: []const u8) !ContentReference {
@@ -4460,17 +4522,9 @@ pub const Store = struct {
     }
 
     pub fn admitModelAttempt(self: *Store, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.admitNextModelAttemptLocked(kind, faults) catch |err| {
-            return self.finishTransactionError(
-                err,
-                faults,
-                err == error.InjectedAttemptCommitFailure,
-            );
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.injected_admission, faults, self.admitNextModelAttemptLocked(kind, faults));
     }
 
     pub fn admitNextActionAttempt(
@@ -4479,13 +4533,9 @@ pub const Store = struct {
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.admitNextActionAttemptLocked(bash_timeout_ms, faults) catch |err| {
-            return self.finishTransactionError(err, faults, err == error.InjectedAttemptCommitFailure);
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.injected_admission, faults, self.admitNextActionAttemptLocked(bash_timeout_ms, faults));
     }
 
     fn admitNextActionAttemptLocked(
@@ -4540,11 +4590,13 @@ pub const Store = struct {
     }
 
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const statement = prepare(
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.action_attempt, self.readBashExecutionInputLocked(binding));
+    }
+
+    fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
+        const statement = try prepare(
             self.database,
             "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
@@ -4552,23 +4604,23 @@ pub const Store = struct {
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
                 "AND action.resolution_code IS NULL",
-        ) catch |err| return self.fenceReadFailure(err);
+        );
         defer _ = c.sqlite3_finalize(statement);
-        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        try bindU64(statement, 1, binding.action_id);
+        try bindU64(statement, 2, binding.parent_operation_id);
+        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
-        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.ActionReadFailed);
+        if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         if (c.sqlite3_column_int64(statement, 3) != binding.turn_id) return error.StaleActionAttemptBinding;
         var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
-        readText(statement, 0, &workspace) catch |err| return self.fenceReadFailure(err);
+        try readText(statement, 0, &workspace);
         const content_id = c.sqlite3_column_int64(statement, 1);
         const timeout_ms = c.sqlite3_column_int64(statement, 2);
-        if (content_id <= 0 or timeout_ms <= 0) return self.fenceReadFailure(error.CorruptStore);
+        if (content_id <= 0 or timeout_ms <= 0) return error.CorruptStore;
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-        readText(statement, 4, &session) catch |err| return self.fenceReadFailure(err);
-        const arguments = self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id") catch |err| return self.fenceReadFailure(err);
+        try readText(statement, 4, &session);
+        const arguments = try self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id");
         return .{
             .workspace = workspace,
             .arguments = arguments,
@@ -4577,26 +4629,28 @@ pub const Store = struct {
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const statement = prepare(
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.actionSupersededByStopLocked(binding));
+    }
+
+    fn actionSupersededByStopLocked(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
+        const statement = try prepare(
             self.database,
             "SELECT (SELECT stop.command_key FROM session_stop stop JOIN core_command command ON command.command_key=stop.command_key " ++
                 "WHERE stop.selected_turn_id=operation.turn_id ORDER BY command.rowid LIMIT 1) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3",
-        ) catch |err| return self.fenceReadFailure(err);
+        );
         defer _ = c.sqlite3_finalize(statement);
-        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        try bindU64(statement, 1, binding.action_id);
+        try bindU64(statement, 2, binding.parent_operation_id);
+        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
-        if (step != c.SQLITE_ROW) return self.fenceReadFailure(if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed);
+        if (step != c.SQLITE_ROW) return if (step == c.SQLITE_DONE) error.CorruptStore else error.ActionReadFailed;
         if (c.sqlite3_column_type(statement, 0) == c.SQLITE_NULL) return null;
         var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
-        readText(statement, 0, &command_key) catch |err| return self.fenceReadFailure(err);
+        try readText(statement, 0, &command_key);
         return .{ .command_key = command_key };
     }
 
@@ -4606,27 +4660,31 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const statement = prepare(
+        const access = try self.enter(.none);
+        defer access.release();
+        try access.finish(Ordinary.action_dispatch, self.validateActionDispatchLocked(binding));
+        // Launch failures are effect outcomes, not canonical faults; the
+        // caller settles or fences them. The handoff still runs under the lock.
+        try handoff(context);
+    }
+
+    fn validateActionDispatchLocked(self: *Store, binding: ActionAttemptBinding) !void {
+        const statement = try prepare(
             self.database,
             "SELECT operation.turn_id,EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action.attempt_ordinal=?3 " ++
                 "AND action.resolution_code IS NULL",
-        ) catch |err| return self.fenceReadFailure(err);
+        );
         defer _ = c.sqlite3_finalize(statement);
-        bindU64(statement, 1, binding.action_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 2, binding.parent_operation_id) catch |err| return self.fenceReadFailure(err);
-        bindU64(statement, 3, binding.attempt_ordinal) catch |err| return self.fenceReadFailure(err);
+        try bindU64(statement, 1, binding.action_id);
+        try bindU64(statement, 2, binding.parent_operation_id);
+        try bindU64(statement, 3, binding.attempt_ordinal);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleActionAttemptBinding;
-        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.ActionReadFailed);
+        if (step != c.SQLITE_ROW) return error.ActionReadFailed;
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id) return error.StaleActionAttemptBinding;
         if (c.sqlite3_column_int(statement, 1) != 0) return error.SupersededByControl;
-        try handoff(context);
     }
 
     pub fn settleActionAttempt(
@@ -4637,13 +4695,9 @@ pub const Store = struct {
         faults: Faults,
     ) !ActionSettlement {
         if (result.len == 0) return error.InvalidActionResult;
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.settleActionAttemptLocked(binding, code, result, faults) catch |err| {
-            return self.finishTransactionError(err, faults, err == error.StaleActionAttemptBinding);
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.action_attempt, faults, self.settleActionAttemptLocked(binding, code, result, faults));
     }
 
     fn settleActionAttemptLocked(
@@ -4702,11 +4756,9 @@ pub const Store = struct {
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.recoverOneUncertainActionLocked(active) catch |err| return self.finishTransactionError(err, .{}, false);
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, .{}, self.recoverOneUncertainActionLocked(active));
     }
 
     fn recoverOneUncertainActionLocked(self: *Store, active: ActiveOperationFilter) !bool {
@@ -5161,17 +5213,9 @@ pub const Store = struct {
         active: ActiveOperationFilter,
         faults: Faults,
     ) !?AttemptAdmission {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.tryAdmitNextModelRetryLocked(active, faults) catch |err| {
-            return self.finishTransactionError(
-                err,
-                faults,
-                err == error.InjectedAttemptCommitFailure,
-            );
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.injected_admission, faults, self.tryAdmitNextModelRetryLocked(active, faults));
     }
 
     fn tryAdmitNextModelRetryLocked(
@@ -5294,21 +5338,17 @@ pub const Store = struct {
     }
 
     pub fn openHistoricalView(self: *Store, binding: AttemptBinding) !HistoricalView {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        try self.validateCurrentAttempt(binding);
+        const access = try self.enter(.none);
+        defer access.release();
+        try access.finish(Ordinary.attempt_binding, self.validateCurrentAttempt(binding));
         return .{ .store = self, .binding = binding };
     }
 
     pub fn modelOperationKind(self: *Store, binding: AttemptBinding) !ModelOperationKind {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        try self.validateCurrentAttempt(binding);
-        return self.readModelOperationKind(binding.operation_id) catch |err| self.fenceReadFailure(err);
+        const access = try self.enter(.none);
+        defer access.release();
+        try access.finish(Ordinary.attempt_binding, self.validateCurrentAttempt(binding));
+        return access.finish(Ordinary.none, self.readModelOperationKind(binding.operation_id));
     }
 
     fn readModelOperationKind(self: *Store, operation_id: u64) !ModelOperationKind {
@@ -5324,14 +5364,9 @@ pub const Store = struct {
     }
 
     fn selectedContextAnchor(self: *Store, binding: AttemptBinding) !?u64 {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.selectedContextAnchorLocked(binding) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.attempt_binding, self.selectedContextAnchorLocked(binding));
     }
 
     fn selectedContextAnchorLocked(self: *Store, binding: AttemptBinding) !?u64 {
@@ -5366,8 +5401,10 @@ pub const Store = struct {
         );
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW or
-            c.sqlite3_column_int64(statement, 0) != binding.turn_id or
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
+        if (step != c.SQLITE_ROW) return error.OperationReadFailed;
+        if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
             return error.StaleAttemptBinding;
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return;
@@ -5376,13 +5413,9 @@ pub const Store = struct {
     }
 
     fn readHistoricalSettings(self: *Store, view: *HistoricalView) !HistoricalSettings {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.readHistoricalSettingsLocked(view) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.attempt_binding, self.readHistoricalSettingsLocked(view));
     }
 
     fn readHistoricalSettingsLocked(self: *Store, view: *HistoricalView) !HistoricalSettings {
@@ -5436,23 +5469,15 @@ pub const Store = struct {
     }
 
     fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64, bytes_left: *usize, items_left: *usize) !HistoricalView.EntryProgress {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return .{ .ready = self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl, error.HistoricalPending => return err,
-            else => return self.fenceReadFailure(err),
-        } };
+        const access = try self.enter(.none);
+        defer access.release();
+        return .{ .ready = try access.finish(Ordinary.historical_entry, self.readHistoricalEntryLocked(view, after_position, bytes_left, items_left)) };
     }
 
     fn validateHistoricalOutputsStep(self: *Store, view: *HistoricalView) !bool {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.validateHistoricalOutputsStepLocked(view) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.attempt_binding, self.validateHistoricalOutputsStepLocked(view));
     }
 
     // Select the producing Operation before its items, so even a completely
@@ -5653,7 +5678,8 @@ pub const Store = struct {
                 }
 
                 pub fn readContent(source: @This(), offset: u64, destination: []u8) !usize {
-                    const count = try source.storage.readOwnedContentLocked(&source.scan.reader.?, offset, destination);
+                    try source.storage.readOwnedContentLocked(&source.scan.reader.?, offset, destination);
+                    const count = destination.len;
                     source.scan.hash.update(destination[0..count]);
                     if (offset + count == source.contentLength() and
                         !std.mem.eql(u8, &source.scan.hash.finalResult(), &source.scan.reader.?.reference.digest)) return error.CorruptStore;
@@ -5767,13 +5793,9 @@ pub const Store = struct {
         self: *Store,
         view: *HistoricalView,
     ) !?HistoricalToolResult {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        return self.readHistoricalToolResultLocked(view) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl => err,
-            else => self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.attempt_binding, self.readHistoricalToolResultLocked(view));
     }
 
     fn readHistoricalToolResultLocked(
@@ -5835,25 +5857,27 @@ pub const Store = struct {
     }
 
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        const statement = prepare(
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.operationSupersededByControlLocked(binding));
+    }
+
+    fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding) !?SupersedingControl {
+        const statement = try prepare(
             self.database,
             "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
-        ) catch |err| return self.fenceReadFailure(err);
+        );
         defer _ = c.sqlite3_finalize(statement);
-        bindU64(statement, 1, binding.operation_id) catch |err| return self.fenceReadFailure(err);
+        try bindU64(statement, 1, binding.operation_id);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return null;
-        if (step != c.SQLITE_ROW) return self.fenceReadFailure(error.OperationReadFailed);
+        if (step != c.SQLITE_ROW) return error.OperationReadFailed;
         if (c.sqlite3_column_int64(statement, 0) != binding.turn_id or
             c.sqlite3_column_int64(statement, 1) != binding.attempt_ordinal)
             return null;
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) return null;
         var command_key: protocol.Bounded(protocol.max_key_bytes) = .{};
-        readText(statement, 2, &command_key) catch |err| return self.fenceReadFailure(err);
+        try readText(statement, 2, &command_key);
         return .{ .command_key = command_key };
     }
 
@@ -5863,14 +5887,10 @@ pub const Store = struct {
         context: anytype,
         comptime handoff: anytype,
     ) !void {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.validateCurrentAttempt(binding) catch |err| switch (err) {
-            error.StaleAttemptBinding, error.SupersededByControl => return err,
-            else => return self.fenceReadFailure(err),
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        try access.finish(Ordinary.attempt_binding, self.validateCurrentAttempt(binding));
+        // As for Actions, dispatch failures belong to the caller.
         try handoff(context);
     }
 
@@ -5889,17 +5909,9 @@ pub const Store = struct {
             std.debug.assert(disposition != .retryable);
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.settleModelAttemptFailureLocked(binding, failure, disposition, faults) catch |err| {
-            return self.finishTransactionError(
-                err,
-                faults,
-                err == error.StaleAttemptBinding or err == error.SupersededByControl,
-            );
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.attempt_binding, faults, self.settleModelAttemptFailureLocked(binding, failure, disposition, faults));
     }
 
     fn settleModelAttemptFailureLocked(
@@ -6007,13 +6019,9 @@ pub const Store = struct {
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.recoverOneExhaustedModelAttemptLocked(active) catch |err| {
-            return self.finishTransactionError(err, .{}, false);
-        };
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.none, .{}, self.recoverOneExhaustedModelAttemptLocked(active));
     }
 
     fn recoverOneExhaustedModelAttemptLocked(
@@ -6093,23 +6101,9 @@ pub const Store = struct {
         output: *const ValidatedOutput,
         faults: Faults,
     ) !void {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        if (faults.settlement_trace) |trace| trace.mark(.lock_requested);
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (faults.settlement_trace) |trace| trace.mark(.lock_acquired);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.settleModelSuccessLocked(binding, output, faults) catch |err| {
-            const final_err = self.finishTransactionError(
-                err,
-                faults,
-                err == error.StaleAttemptBinding or err == error.SupersededByControl or
-                    err == error.InvalidProviderEnvelope,
-            );
-            if (faults.settlement_trace) |trace| trace.mark(.settlement_complete);
-            return final_err;
-        };
-        if (faults.settlement_trace) |trace| trace.mark(.settlement_complete);
+        const access = try self.enter(.fromSettlement(faults.settlement_trace));
+        defer access.release();
+        return access.finishTransaction(Ordinary.model_success, faults, self.settleModelSuccessLocked(binding, output, faults));
     }
 
     fn settleModelSuccessLocked(
@@ -6133,7 +6127,11 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(operation);
         try bindU64(operation, 1, binding.operation_id);
         try bindU64(operation, 2, binding.turn_id);
-        if (c.sqlite3_step(operation) != c.SQLITE_ROW) return error.StaleAttemptBinding;
+        switch (c.sqlite3_step(operation)) {
+            c.SQLITE_ROW => {},
+            c.SQLITE_DONE => return error.StaleAttemptBinding,
+            else => return error.OperationReadFailed,
+        }
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(operation, 0, &session_ref);
         const frozen_tools_value = c.sqlite3_column_int(operation, 1);
@@ -6182,7 +6180,11 @@ pub const Store = struct {
             defer _ = c.sqlite3_finalize(duplicate_identity);
             try bindU64(duplicate_identity, 1, binding.operation_id);
             try bindBlob(duplicate_identity, 2, &record.id_digest);
-            if (c.sqlite3_step(duplicate_identity) == c.SQLITE_ROW) return error.InvalidProviderEnvelope;
+            switch (c.sqlite3_step(duplicate_identity)) {
+                c.SQLITE_DONE => {},
+                c.SQLITE_ROW => return error.InvalidProviderEnvelope,
+                else => return error.OutputReadFailed,
+            }
             const content_id = try self.importSourceRange(
                 output.source,
                 output.source_length,
@@ -6245,7 +6247,11 @@ pub const Store = struct {
                 defer _ = c.sqlite3_finalize(duplicate_call);
                 try bindU64(duplicate_call, 1, binding.operation_id);
                 try bindI64(duplicate_call, 2, call_id_content_id);
-                if (c.sqlite3_step(duplicate_call) == c.SQLITE_ROW) return error.InvalidProviderEnvelope;
+                switch (c.sqlite3_step(duplicate_call)) {
+                    c.SQLITE_DONE => {},
+                    c.SQLITE_ROW => return error.InvalidProviderEnvelope,
+                    else => return error.OutputReadFailed,
+                }
 
                 const is_bash = try metadataStringEql(self.io, output.source, name, "bash");
                 const is_edit = try metadataStringEql(self.io, output.source, name, "edit");
@@ -6614,12 +6620,9 @@ pub const Store = struct {
     }
 
     fn openContentIdentity(self: *Store, reference: ContentReference, private: bool) !ContentReader {
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        return self.openContentIdentityLocked(reference, private) catch |err|
-            return self.fenceReadFailure(err);
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.openContentIdentityLocked(reference, private));
     }
 
     fn openContentIdentityLocked(self: *Store, reference: ContentReference, private: bool) !ContentReader {
@@ -6652,15 +6655,15 @@ pub const Store = struct {
     fn readOwnedContent(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
         if (destination.len > ContentReader.content_window_bytes) return error.WindowTooLarge;
         if (start > reader.reference.length) return error.RangeOutOfBounds;
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        if (self.fenced.load(.acquire)) return error.StoreFenced;
+        const access = try self.enter(.none);
+        defer access.release();
         const wanted: usize = @intCast(@min(destination.len, reader.reference.length - start));
-        return self.readOwnedContentLocked(reader, start, destination[0..wanted]) catch |err| return self.fenceReadFailure(err);
+        try access.finish(Ordinary.none, self.readOwnedContentLocked(reader, start, destination[0..wanted]));
+        return wanted;
     }
 
-    fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !usize {
+    /// Fills all of `destination` or fails, so no reader sees a short window.
+    fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
         switch (reader.representation) {
             .raw => try self.readBlob(reader.content_id, start, destination),
             .projection => |*cursor| {
@@ -6720,7 +6723,6 @@ pub const Store = struct {
                 }
             },
         }
-        return destination.len;
     }
 
     // Called only while the Store mutex is held; the blob handle never crosses
@@ -6732,30 +6734,6 @@ pub const Store = struct {
         if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob) != c.SQLITE_OK) return error.ContentReadFailed;
         defer _ = c.sqlite3_blob_close(blob);
         if (c.sqlite3_blob_read(blob, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
-    }
-
-    fn fenceReadFailure(self: *Store, err: anyerror) anyerror {
-        self.fenced.store(true, .release);
-        return err;
-    }
-
-    fn finishTransactionError(
-        self: *Store,
-        err: anyerror,
-        faults: Faults,
-        preserve_expected: bool,
-    ) anyerror {
-        self.rollbackAfterError(faults) catch |rollback_err| {
-            self.fenced.store(true, .release);
-            return rollback_err;
-        };
-        if (!preserve_expected) self.fenced.store(true, .release);
-        return err;
-    }
-
-    fn finishTransactionFailure(self: *Store, faults: Faults) void {
-        self.rollbackAfterError(faults) catch {};
-        self.fenced.store(true, .release);
     }
 
     fn rollbackAfterError(self: *Store, faults: Faults) !void {
@@ -9439,6 +9417,74 @@ test "canonical report and Action read failures fence later commands" {
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.admitNextActionAttempt(300_000, .{}));
         }
+    }
+}
+
+test "Store entry points lock and fence only through canonical access" {
+    // Every entry point classifies its errors through `Access`; a new path
+    // cannot take the mutex, read or set the fence beside it, or enter
+    // without returning through a classifier.
+    const source = @embedFile("store.zig");
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "mutex.lock" ++ "Uncancelable("));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "fenced.store" ++ "(true"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "fenced.load" ++ "("));
+    const enter = "self.enter" ++ "(";
+    var entries = std.mem.splitSequence(u8, source[0..std.mem.indexOf(u8, source, "\ntest \"").?], enter);
+    _ = entries.next();
+    var entered: usize = 0;
+    while (entries.next()) |rest| : (entered += 1) {
+        const body = rest[0 .. std.mem.indexOf(u8, rest, "\n    }\n") orelse rest.len];
+        try std.testing.expect(std.mem.indexOf(u8, body, "access.finish") != null);
+    }
+    try std.testing.expect(entered > 0);
+}
+
+/// Leaves `table` prepared normally but failing at the first step, the
+/// shape of an I/O or corruption fault after a statement compiled.
+fn failAtStepForTesting(database: *c.sqlite3, comptime table: []const u8) !void {
+    try exec(database, "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
+    try exec(database, "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
+        "WHERE abs(-9223372036854775808) IS NOT NULL");
+}
+
+test "canonical step faults fence rather than reading as ordinary misses" {
+    const Route = enum { result, view, purpose, handoff, failure, success };
+    for (std.enums.values(Route)) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try configureTestSession(&storage, "step-fault-config", "direct/step-fault");
+        try submitTestMessage(&storage, &tmp, "step-fault-input", "step-fault-message", "direct/step-fault", "work");
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const result: anyerror!void = switch (route) {
+            .result => blk: {
+                try failAtStepForTesting(storage.database, "core_command");
+                break :blk if (storage.commandResult("step-fault-message")) |_| {} else |err| err;
+            },
+            .success => blk: {
+                try failAtStepForTesting(storage.database, "session_revision");
+                break :blk settleCallsForTesting(&storage, &tmp, binding, "step-fault-success", &.{});
+            },
+            .view, .purpose, .handoff, .failure => blk: {
+                try failAtStepForTesting(storage.database, "model_operation");
+                break :blk switch (route) {
+                    .view => if (storage.openHistoricalView(binding)) |_| {} else |err| err,
+                    .purpose => if (storage.modelOperationKind(binding)) |_| {} else |err| err,
+                    .handoff => storage.withDispatchHandoff(binding, {}, struct {
+                        fn run(_: void) !void {
+                            return error.TestUnexpectedResult;
+                        }
+                    }.run),
+                    .failure => storage.settleModelAttemptFailure(binding, .{ .code = "provider_failure" }, .terminal, .{}),
+                    .result, .success => unreachable,
+                };
+            },
+        };
+        // Before the Store owned classification these were ResultNotFound or
+        // StaleAttemptBinding: ordinary outcomes that left the Store usable.
+        try std.testing.expectError(if (route == .result) error.ResultReadFailed else error.OperationReadFailed, result);
+        try std.testing.expect(storage.isFenced());
     }
 }
 
@@ -12361,14 +12407,14 @@ test "real SQLite full during import publishes no canonical prefix" {
 
     // Drive the production transaction body directly so the test observes
     // the exact import-step result before the public wrapper maps it. SQLite
-    // automatically rolls this FULL transaction back; then apply the wrapper's
-    // failure transition and verify its fence/reopen consequences below.
+    // automatically rolls this FULL transaction back; the public wrapper's
+    // `finishTransaction` then fences it as a non-ordinary error.
     try std.testing.expectError(
         error.CanonicalStorageFull,
         storage.configureLocked(&command, .{}),
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
-    storage.finishTransactionFailure(.{});
+    storage.fence(error.CanonicalStorageFull) catch {};
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
     try storage.close();
