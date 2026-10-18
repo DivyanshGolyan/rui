@@ -557,7 +557,7 @@ test "actual overflow yields wording before clipping required status" {
     }
     const before = out.written().len;
     screen.vx.queueRefresh();
-    try screen.render(&out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, "Working…\nBash runs without approval.", "› ", &calls);
+    try screen.render(&out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, "Working…\nCommand still running.", "› ", &calls);
     try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "+3 more calls") != null);
 }
 
