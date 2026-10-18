@@ -440,7 +440,9 @@ def tap_main(args):
                     select.select([], [1], [], 1)
         if capture_ok:
             try:
-                capture.feed(chunk)
+                # pyte rejects private DSR queries (tmux clients send ESC[?6n); the raw
+                # bytes stay in output.bin, only the decoded view skips them.
+                capture.feed(re.sub(rb"\x1b\[\?[0-9;]*n", b"", chunk))
             except Exception as error:
                 capture_ok = False
                 append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "screen-capture-failed", "error": repr(error)})
@@ -785,7 +787,10 @@ def term_record(run, name):
 
 KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-r": b"\x12", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "End": b"\x1b[F", "Home": b"\x1b[H",
-        "Tab": b"\t", "S-PgUp": b"\x1b[5;2~", "WheelUp": b"\x1b[<64;10;10M", "WheelDown": b"\x1b[<65;10;10M"}
+        "Tab": b"\t", "S-PgUp": b"\x1b[5;2~",
+        # Unsolicited mouse reports: Rui never enables mouse tracking (it uses ?1007
+        # alternate scroll), so a physical wheel arrives as Up/Down, not as these.
+        "SGRWheelUp": b"\x1b[<64;10;10M", "SGRWheelDown": b"\x1b[<65;10;10M"}
 
 
 def cmd_send(args):
@@ -797,8 +802,9 @@ def cmd_send(args):
     elif args.hex is not None:
         payload, tmux_args = bytes.fromhex(args.hex), None
     else:
+        # Exact bytes even through tmux: tmux key names differ (Esc is literal text there).
         payload = b"".join(KEYS[k] for k in args.keys)
-        tmux_args = list(args.keys)
+        tmux_args = None
     via = args.via or ("fifo" if record["surface"] in ("pty", "tmux-client") else "tmux")
     entry = {"t_ns": now_ns(), "wall": wall(), "term": args.name, "via": via, "payload_hex": payload.hex(),
              "payload_text": payload.decode("utf-8", "backslashreplace")}
