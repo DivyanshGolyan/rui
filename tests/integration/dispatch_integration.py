@@ -379,6 +379,7 @@ def main():
         stale = command(
             "action", "deny", "--store", proposal_store, "--record", state / "proposal-stale.json",
             "--key", "proposal-stale", "--session", "direct/proposal", "--action", second["action"],
+            expect=1,
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
         assert not forbidden_effect.exists()
@@ -427,7 +428,7 @@ def main():
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
                 first_result = finish_command(first_process)
                 second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
-                second_result = finish_command(second_process)
+                second_result = finish_command(second_process, expect=1 if order == "stop-first" else 0)
                 assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
                 assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
                 assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
@@ -660,6 +661,7 @@ def main():
             "--record", state / "continuation-stale-denial.json",
             "--key", "continuation-stale-denial", "--session", "direct/continuation",
             "--action", continuation_actions[0]["action"],
+            expect=1,
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
@@ -884,7 +886,7 @@ def main():
             "--tools",
             "bash",
         )
-        incompatible = command(*incompatible_args)
+        incompatible = command(*incompatible_args, expect=1)
         assert incompatible["answer"]["status"] == "rejected", incompatible
         assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
         replayed_incompatible = command(
@@ -895,6 +897,7 @@ def main():
             state / "incompatible-model.json",
             "--kind",
             "configure",
+            expect=1,
         )
         assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
         assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
@@ -2274,6 +2277,7 @@ def main():
             "model-b",
             "--tools",
             "none",
+            expect=1,
         ))
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
@@ -2314,6 +2318,7 @@ def main():
             "model-b",
             "--permission-mode",
             "bypass",
+            expect=1,
         ))
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"

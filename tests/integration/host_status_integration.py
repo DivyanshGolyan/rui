@@ -27,10 +27,17 @@ def status(store):
 
 
 def cli_status(home, *args):
+    # Metadata is exactly one JSON value on stdout; incompatible and access
+    # failures still report their status there and exit nonzero.
     result = subprocess.run([RUI, "host", "status", *map(str, args)],
         env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
-    return result.stdout
+    value = json.loads(result.stdout)
+    assert value["version"] == "1" and value["type"] == "host_status", result
+    failed = value["status"] in ("incompatible", "access_failure")
+    assert (result.returncode != 0) == failed, result
+    if value["status"] != "ready":
+        assert value == {"version": "1", "type": "host_status", "status": value["status"]}, result
+    return value
 
 
 def read_request(connection):
@@ -370,7 +377,7 @@ def main():
         home = pathlib.Path(root) / "home"
         home.mkdir(mode=0o700)
         assert status(store) == "unavailable"
-        assert cli_status(home, "--store", store) == "Host: unavailable (no current Store owner established)\n"
+        assert cli_status(home, "--store", store)["status"] == "unavailable"
         assert not store.exists(), "observation created a Store"
         store.mkdir(mode=0o700)
         assert status(store) == "unavailable"
@@ -379,7 +386,7 @@ def main():
         try:
             probe = subprocess.run([ACTOR, store], capture_output=True, text=True, timeout=2)
             assert probe.returncode == 0 and probe.stdout.strip() == "access_failure", probe
-            assert cli_status(home, "--store", store).startswith("Host: access failure")
+            assert cli_status(home, "--store", store)["status"] == "access_failure"
         finally:
             fifo_lock.unlink()
         stale = socket_path(store)
@@ -392,7 +399,7 @@ def main():
         with (store / "host.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             assert status(store) == "owned_unavailable"
-            assert cli_status(home, "--store", store).startswith("Host: owned but unavailable")
+            assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
             for partial in (b"", b"HTTP/1.1 200 OK\r\n", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\n{"):
                 with socket.socket(socket.AF_UNIX) as endpoint:
                     endpoint.bind(str(stale))
@@ -434,7 +441,7 @@ def main():
                 peer = threading.Thread(target=incompatible_peer)
                 peer.start()
                 assert status(store) == "incompatible"
-                assert cli_status(home, "--store", store).startswith("Host: incompatible")
+                assert cli_status(home, "--store", store)["status"] == "incompatible"
                 peer.join(timeout=3)
                 assert not peer.is_alive()
             stale.unlink()
@@ -447,7 +454,7 @@ def main():
                     stale.chmod(0)
                     try:
                         assert status(store) == "access_failure"
-                        assert cli_status(home, "--store", store).startswith("Host: access failure")
+                        assert cli_status(home, "--store", store)["status"] == "access_failure"
                     finally:
                         stale.chmod(0o600)
                 stale.unlink()
@@ -499,7 +506,7 @@ def main():
                     observed = status(store)
                     assert observed == "incompatible", (response, observed)
                     observed = cli_status(home, "--store", store)
-                    assert observed.startswith("Host: incompatible"), (response, observed)
+                    assert observed["status"] == "incompatible", (response, observed)
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
@@ -522,7 +529,7 @@ def main():
                     peer = threading.Thread(target=unavailable_peer, daemon=True)
                     peer.start()
                     assert status(store) == "owned_unavailable"
-                    assert cli_status(home, "--store", store).startswith("Host: owned but unavailable")
+                    assert cli_status(home, "--store", store)["status"] == "owned_unavailable"
                     peer.join(timeout=3)
                     assert not peer.is_alive()
                 stale.unlink()
@@ -531,7 +538,7 @@ def main():
 
         store.chmod(0o755)
         assert status(store) == "access_failure"
-        assert cli_status(home, "--store", store).startswith("Host: access failure")
+        assert cli_status(home, "--store", store)["status"] == "access_failure"
         store.chmod(0o700)
 
         # A selected managed route is enabled before login; readiness does not
@@ -573,13 +580,17 @@ def main():
             alias = store.parent / "alias"
             alias.symlink_to(store, target_is_directory=True)
             assert exchange("host_info", lambda: status(alias)) == first_status
-            setup = exchange("host_info", lambda: subprocess.run([RUI, "setup", "--store", str(alias)],
+            setup = exchange("host_info", lambda: subprocess.run([RUI, "defaults", "configure", "--store", str(alias)],
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10))
             assert setup.returncode == 0, setup.stderr
             selected = exchange("host_info", lambda: cli_status(home))
-            assert selected.startswith(f"Host: ready\nStore: {store.resolve()}\nWire: 1\nActive capacity: 3\n"), selected
-            assert "Bash: enabled\nModel: enabled\nManaged authentication: enabled\n" in selected, selected
-            assert f"Instance: {match.group(1)}\n" in selected, selected
+            assert selected == {
+                "version": "1", "type": "host_status", "status": "ready", "store": str(store.resolve()),
+                "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
+                "descriptor_limit": fields["descriptor_limit"],
+                "capabilities": {"bash": True, "model": True, "managed_authentication": True},
+                "diagnostics": f"{store.resolve()}/diagnostics",
+            }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
             assert not credential.exists()
             for _ in range(40):
@@ -631,8 +642,10 @@ def main():
             match_second = re.fullmatch(r"ready ([0-9a-f]{32}) 7 true false false", second_status)
             assert match_second, second_status
             selected = exchange("host_info", lambda: cli_status(home))
-            assert "Active capacity: 7\nBash: enabled\nModel: disabled\nManaged authentication: disabled\n" in selected, selected
-            assert f"Instance: {match_second.group(1)}\n" in selected, selected
+            assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
+            assert selected["active_capacity"] == "7", selected
+            assert selected["capabilities"] == {"bash": True, "model": False, "managed_authentication": False}, selected
+            assert selected["instance"] == match_second.group(1), selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
             old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             assert b"host_instance_changed" in old_instance and old_instance.startswith(b"HTTP/1.1 409")

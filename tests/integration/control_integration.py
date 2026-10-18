@@ -1647,7 +1647,8 @@ def prove_retry_wait_control(state, kind):
         record = state / f"{control_key}.json"
         args = [
             str(RUI),
-            "stop-session" if kind == "stop" else "session", "interrupt-model",
+            "session",
+            "stop" if kind == "stop" else "interrupt-model",
             "--store",
             str(store),
             "--record",

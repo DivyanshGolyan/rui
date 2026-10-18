@@ -180,17 +180,16 @@ def status(store, env):
     root = next((parent for parent in store.parents if parent.name.startswith("rui-host-launch-")), store.parent)
     (root / "probe.log").write_text(observation)
     assert result.returncode == 0, result.stderr
-    return result.stdout
+    # Metadata is exactly one JSON value on stdout.
+    value = json.loads(result.stdout)
+    assert value["version"] == "1" and value["type"] == "host_status", result
+    return value
 
 
 def instance(output, capacity):
-    match = re.search(
-        rf"^Active capacity: {capacity}$.*^Instance: ([0-9a-f]{{32}})$",
-        output,
-        re.MULTILINE | re.DOTALL,
-    )
-    assert match, output
-    return match.group(1)
+    assert output["status"] == "ready" and output["active_capacity"] == str(capacity), output
+    assert re.fullmatch(r"[0-9a-f]{32}", output["instance"]), output
+    return output["instance"]
 
 
 def matching_processes(store, *, descendants=False):
@@ -218,9 +217,9 @@ def matching_processes(store, *, descendants=False):
             except (ValueError, IndexError):
                 continue
     for pid, text in candidates:
-        if len(text) >= 4 and pathlib.Path(text[0]).resolve() == RUI and text[1:3] == ["host", "serve", "--store"]:
+        if len(text) >= 5 and pathlib.Path(text[0]).resolve() == RUI and text[1:4] == ["host", "serve", "--store"]:
             try:
-                selected = str(pathlib.Path(text[3]).resolve())
+                selected = str(pathlib.Path(text[4]).resolve())
             except OSError:
                 continue
             if selected == expected or (descendants and pathlib.Path(selected).is_relative_to(expected)):
@@ -284,13 +283,12 @@ def startup_limits(root, env):
             started = run_start(store, env, preexec_fn=limits)
             assert started.returncode == 0, started.stderr
             reported = status(store, env)
-            assert "Host: ready" in reported and "Active capacity: 8" in reported, reported
-            match = re.search(r"Concurrent intake: (\d+) ordinary", reported)
-            assert match, reported
-            capacity = int(match[1])
+            assert reported["status"] == "ready" and reported["active_capacity"] == "8", reported
+            assert json.loads(started.stdout) == reported, (started, reported)
+            capacity = int(reported["intake_capacity"])
             assert (10 <= capacity < 100) if hard else capacity == 100, reported
             if hard:
-                assert "reduced by descriptor limit" in reported, reported
+                assert reported["descriptor_limit"] == "256", reported
                 socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
                 borrowers = []
                 try:
@@ -302,7 +300,7 @@ def startup_limits(root, env):
                         peer.sendall(b"POST /v1/configure HTTP/1.1\r\n")
                     # Discovery is prepared by intake after reading preceding
                     # borrowers, so its reply establishes their classification.
-                    assert "Host: ready" in status(store, env)
+                    assert status(store, env)["status"] == "ready"
                     with socket.socket(socket.AF_UNIX) as peer:
                         peer.settimeout(3)
                         peer.connect(socket_path)
@@ -315,13 +313,13 @@ def startup_limits(root, env):
                         assert json.loads(body) == {
                             "version": "1", "type": "busy", "code": "ordinary_capacity_exhausted",
                         }, response
-                    assert "Host: ready" in status(store, env)
+                    assert status(store, env)["status"] == "ready"
                     for _ in range(3):
                         peer = socket.socket(socket.AF_UNIX)
                         borrowers.append(peer)
                         peer.settimeout(3)
                         peer.connect(socket_path)
-                    assert "Host: ready" in status(store, env), "unknown routes blocked discovery"
+                    assert status(store, env)["status"] == "ready", "unknown routes blocked discovery"
                     for _ in range(3):
                         borrowers.pop().close()
                     for _ in range(2):
@@ -330,7 +328,7 @@ def startup_limits(root, env):
                         peer.settimeout(3)
                         peer.connect(socket_path)
                         peer.sendall(b"POST /v1/control/session-stop HTTP/1.1\r\n")
-                        assert "Host: ready" in status(store, env)
+                        assert status(store, env)["status"] == "ready"
                         peer.setblocking(False)
                         try:
                             assert peer.recv(1, socket.MSG_PEEK) != b"", "classified control was evicted"
@@ -353,7 +351,7 @@ def startup_limits(root, env):
                     peer = socket.socket(socket.AF_UNIX)
                     borrowers.append(peer)
                     peer.connect(socket_path)
-                    assert "Host: ready" in status(store, env), "unknown route blocked reserved discovery"
+                    assert status(store, env)["status"] == "ready", "unknown route blocked reserved discovery"
                     for _ in range(3):
                         borrowers.pop().close()
                     # One stalled discovery must not borrow either control
@@ -395,12 +393,12 @@ def startup_limits(root, env):
                             assert json.loads(bytes(response).split(b"\r\n\r\n", 1)[1])["type"] == "invocation_error"
                         for _ in range(3):
                             borrowers.pop().close()
-                        assert "Host: ready" in status(store, env)
+                        assert status(store, env)["status"] == "ready"
                     stopped = subprocess.run(
                         [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
                         env=env, text=True, capture_output=True, timeout=5,
                     )
-                    assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+                    assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
                 finally:
                     for peer in borrowers:
                         peer.close()
@@ -581,8 +579,10 @@ def main():
             before = instance(status(held_store, env), 3)
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
-            assert "Attached to the ready Host" in attached.stdout, attached.stdout
-            assert f"Diagnostics: {held_store.resolve()}/diagnostics\n" in attached.stdout
+            # Attachment reports the existing Host, not the launcher's capacity 8.
+            reported = json.loads(attached.stdout)
+            assert instance(reported, 3) == before, reported
+            assert reported["diagnostics"] == f"{held_store.resolve()}/diagnostics", reported
             assert instance(status(held_store, env), 3) == before
             assert wait_for_processes(held_store, 1) == [held.pid]
         finally:
@@ -627,13 +627,9 @@ def main():
                 assert os.readlink(f"/proc/{pids[0]}/cwd") == "/", "detached Host retained launcher cwd"
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
-            diagnostic_lines = [
-                line.removeprefix("Diagnostics: ")
-                for _, stdout, _ in results
-                for line in stdout.splitlines()
-                if line.startswith("Diagnostics: ")
-            ]
-            assert diagnostic_lines, results
+            started = [json.loads(stdout) for _, stdout, _ in results]
+            assert all(instance(value, 8) == identity for value in started), results
+            diagnostic_lines = [value["diagnostics"] for value in started]
             for location in diagnostic_lines:
                 assert_diagnostics(store, credential, pathlib.Path(location))
         finally:
@@ -776,7 +772,7 @@ def main():
                 actual_terminal[3] &= ~mask
                 original_terminal[3] &= ~mask
             assert actual_terminal == original_terminal, (actual_terminal, original_terminal, output)
-            assert b"Host ready" not in output and b"Attached to the ready Host" not in output and b"Diagnostics:" not in output, output
+            assert b"host_status" not in output and b'"diagnostics"' not in output, output
             assert instance(status(bare_store, bare_env), 8)
             inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],
                 env=bare_env, capture_output=True, text=True, timeout=5)
@@ -786,14 +782,14 @@ def main():
                 "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
                 "model": "gpt-6-luna", "tools": ["bash"], "permission_mode": "bypass",
             }, current
-            recovered = subprocess.run([RUI, "request", "recover", key, "--json"],
+            recovered = subprocess.run([RUI, "request", "recover", key],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert recovered.returncode == 0, recovered.stderr
             answer = json.loads(recovered.stdout)["answer"]
             assert answer["status"] == "accepted" and answer["replayed"] is True, answer
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
-            assert stopped.returncode == 0 and "Stop acknowledged" in stopped.stdout, stopped
+            assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
         finally:
             try:
                 if caller is not None and caller.poll() is None:
@@ -820,7 +816,7 @@ def main():
             assert elapsed < 5, elapsed
             assert "DescriptorCapacityInsufficient" in failed.stderr, failed.stderr
             assert "exit status 1" in failed.stderr, failed.stderr
-            assert status(failure_store, env).startswith("Host: unavailable")
+            assert status(failure_store, env)["status"] == "unavailable"
             assert not credential.exists()
         finally:
             forced_crash_cleanup(failure_store)

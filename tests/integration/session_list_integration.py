@@ -187,18 +187,22 @@ def main():
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
             assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]
-            current = subprocess.run([RUI, "session", "list", "--store", store, "--json"],
+            current = subprocess.run([RUI, "session", "list", "--store", store],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert current.returncode == 0, current.stderr
-            current_pages = [json.loads(line) for line in current.stdout.splitlines()]
-            assert [row["reference"] for page in current_pages for row in page["sessions"]] == [
+            # Every page streams into exactly one JSON value.
+            current_list = json.loads(current.stdout)
+            assert current_list["version"] == "1" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
+            assert [row["reference"] for row in current_list["sessions"]] == [
                 names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later"]
             all_workspaces = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
-            assert all_workspaces.stdout.count("Session: ") == 11
+            all_list = json.loads(all_workspaces.stdout)
+            assert all_list["next"] is None and len(all_list["sessions"]) == 11, all_list
             assert "Bash runs without approval" not in all_workspaces.stdout
-            assert all_workspaces.stdout.count("Permission: bypass\n") == 11
+            assert [row["permission_mode"] for row in all_list["sessions"]] == ["bypass"] * 11, all_list
+            assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + ["later"]), all_list
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
             long_reference = "x" * 126 + "\x01\x00"
             assert configure("long-reference", long_reference, str(root))[1]["answer"]["status"] == "accepted"
@@ -209,7 +213,8 @@ def main():
             assert len(json.dumps(after_growth[1]).encode()) < 4096
             safe = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
-            assert safe.returncode == 0 and "\\x00" in safe.stdout and "\x00" not in safe.stdout, safe
+            assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe
+            assert long_reference in [row["reference"] for row in json.loads(safe.stdout)["sessions"]], safe
             cursor = after_growth[1]["next"]
             seen = [item["reference"] for item in after_growth[1]["sessions"]]
             while cursor:

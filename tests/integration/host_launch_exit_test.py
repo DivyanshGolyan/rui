@@ -26,7 +26,8 @@ def check_failure_retention(root_owner, read_status):
         cases = ((0, False, False, False), (7, False, False, False),
                  (0, True, False, False), (0, False, True, False), (0, False, True, True))
         for status_code, cleanup_fails, nested, before_lock in cases:
-            command.write_text(f"#!{sys.executable}\nimport sys\nprint('Host: owned but unavailable')\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
+            reported = '{"version":"1","type":"host_status","status":"owned_unavailable"}'
+            command.write_text(f"#!{sys.executable}\nimport sys\nprint({reported!r})\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
             command.chmod(0o700)
             destination = base / f"{status_code}-{cleanup_fails}-{nested}-{before_lock}"
             child = None
@@ -63,7 +64,7 @@ def check_failure_retention(root_owner, read_status):
                                     failure = error
                                     raise
                                 raise AssertionError("status command failure was suppressed")
-                            assert read_status(store, os.environ) == "Host: owned but unavailable\n"
+                            assert read_status(store, os.environ) == {"version": "1", "type": "host_status", "status": "owned_unavailable"}
                             raise failure
                     except AssertionError as error:
                         assert error is failure, "retention or cleanup replaced the original failure"
@@ -72,7 +73,7 @@ def check_failure_retention(root_owner, read_status):
                 assert (store / "rui.sqlite3").read_bytes() == b"private saved work"
                 assert f"retained native observation failure state: {root}" in output.getvalue()
                 captured = json.loads((root / "probe.log").read_text())
-                assert captured["stdout"] == "Host: owned but unavailable\n"
+                assert captured["stdout"] == '{"version":"1","type":"host_status","status":"owned_unavailable"}\n'
                 assert captured["stderr"] == "status diagnostic\n" and captured["returncode"] == status_code
                 metadata = json.loads(next(root.glob("observation-failure-*.json")).read_text())
                 assert metadata["failure"] == "AssertionError"

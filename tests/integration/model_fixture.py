@@ -405,27 +405,30 @@ def start_command(*args):
     )
 
 
-def finish_command(process):
+def finish_command(process, expect=0):
     stdout, stderr = process.communicate(timeout=15)
-    if process.returncode != 0:
+    if process.returncode != expect:
         raise AssertionError(
-            f"command returned {process.returncode}: stdout={stdout} stderr={stderr}"
+            f"command returned {process.returncode}, wanted {expect}: stdout={stdout} stderr={stderr}"
         )
     return json.loads(stdout)
 
 
 def host_arguments(store, endpoint, *extra, accelerated_retries=True, active_capacity=1):
+    # Host serve rejects repeated options, so a caller's explicit option
+    # replaces the fixture default instead of following it.
+    explicit = {str(argument) for argument in extra}
     args = [
         str(RUI),
         "host", "serve",
         "--store",
         str(store),
-        "--active-capacity",
-        str(active_capacity),
     ]
+    if "--active-capacity" not in explicit:
+        args += ["--active-capacity", str(active_capacity)]
     if endpoint is not None:
         args += ["--provider-endpoint", endpoint]
-        if accelerated_retries:
+        if accelerated_retries and "--test-retry-waits-ms" not in explicit:
             args += ["--test-retry-waits-ms", "50,100,150"]
     args += extra
     return args

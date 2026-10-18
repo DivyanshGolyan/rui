@@ -52,30 +52,27 @@ def main():
                     b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                     + str(len(encoded)).encode() + b"\r\n\r\n" + encoded)
             for mode in ("exhausted", "unknown", "scope", "version", "cursor", "duplicate", "failure"):
-                for presentation in (("--json",), ()):
-                    proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
-                    try:
-                        result = invoke("session", "list", "--store", store, *presentation)
-                    finally:
-                        proxy.close()
-                    assert proxy.exchanges, "proof never reached the real list producer"
-                    if mode == "unknown":
-                        assert result.returncode == 0, result
-                        assert "discard-me" not in result.stdout, ("unknown list metadata leaked", result)
-                        if presentation:
-                            pages = [json.loads(line) for line in result.stdout.splitlines()]
-                            references = [row["reference"] for page in pages for row in page["sessions"]]
-                        else:
-                            references = [line.removeprefix("Session: ") for line in result.stdout.splitlines() if line.startswith("Session: ")]
-                        assert references == [f"selected/{i}" for i in range(9)], result
-                    elif mode == "failure":
-                        assert result.returncode != 0 and "HostInvocationFailed" in result.stderr and result.stdout == "", result
-                        assert json.loads(result.stderr.splitlines()[0]) == {"status": 503, "type": "busy", "code": "ordinary_capacity_exhausted"}, result
-                        assert "discard-me" not in result.stderr, result
-                    else:
-                        assert result.returncode != 0 and "InvalidSessionPage" in result.stderr, (mode, result)
-                        assert result.stdout == "", ("invalid first page reached output", mode, result)
-            print("Session-list facts: actual producer, all pages, human/JSON facts, discarded extensions, exact scope/version/canonical cursor/duplicate rejection; synthetic busy diagnostics")
+                proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
+                try:
+                    result = invoke("session", "list", "--store", store)
+                finally:
+                    proxy.close()
+                assert proxy.exchanges, "proof never reached the real list producer"
+                if mode == "unknown":
+                    assert result.returncode == 0, result
+                    assert "discard-me" not in result.stdout, ("unknown list metadata leaked", result)
+                    listed = json.loads(result.stdout)
+                    assert listed["type"] == "session_list" and listed["next"] is None, result
+                    references = [row["reference"] for row in listed["sessions"]]
+                    assert references == [f"selected/{i}" for i in range(9)], result
+                elif mode == "failure":
+                    assert result.returncode != 0 and "HostInvocationFailed" in result.stderr and result.stdout == "", result
+                    assert json.loads(result.stderr.splitlines()[0]) == {"status": 503, "type": "busy", "code": "ordinary_capacity_exhausted"}, result
+                    assert "discard-me" not in result.stderr, result
+                else:
+                    assert result.returncode != 0 and "InvalidSessionPage" in result.stderr, (mode, result)
+                    assert result.stdout == "", ("invalid first page reached output", mode, result)
+            print("Session-list facts: actual producer, all pages, one JSON value, discarded extensions, exact scope/version/canonical cursor/duplicate rejection; synthetic busy diagnostics")
         finally:
             fixture.stop_host(host)
 

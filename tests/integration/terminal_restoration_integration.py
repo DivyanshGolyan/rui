@@ -988,7 +988,7 @@ def persistent_cases(state, library, home, store, host):
                 body, = [body for body, _ in proxy.exchanges]
                 request = json.loads(body)
                 assert (records / f"{request['key']}.json").read_bytes() == body
-                assert f"Message not confirmed. Use rui recover {request['key']}" in errors, errors
+                assert f"Message not confirmed. Use rui request recover {request['key']}" in errors, errors
             reply_release.set()
             if proxy is not None:
                 proxy.close()
@@ -1033,18 +1033,24 @@ def renderer_backpressure_case(state, library, home, store):
     caller = None
     output, errors = bytearray(), bytearray()
     echo_bytes = 0
+    stderr_open = True
 
     def drain_until(predicate, description, timeout=15):
-        nonlocal echo_bytes
+        nonlocal echo_bytes, stderr_open
         deadline = time.monotonic() + timeout
         while not predicate():
             remaining = deadline - time.monotonic()
             assert remaining > 0, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
-            ready = select.select([master, output_master, caller.stderr], [], [], remaining)[0]
-            assert ready, (description, caller.poll(), bytes(errors))
+            ready = select.select([master, output_master, *([caller.stderr] if stderr_open else [])], [], [], remaining)[0]
+            assert ready, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
             for fd in ready:
                 chunk = os.read(fd if isinstance(fd, int) else fd.fileno(), 65536)
-                assert chunk, (description, caller.poll(), bytes(errors))
+                if not chunk and fd is caller.stderr:
+                    # Exit can close stderr in the same readiness batch as the
+                    # final PTY bytes; the predicate still decides after them.
+                    stderr_open = False
+                    continue
+                assert chunk, (description, caller.poll(), bytes(output[-4096:]), bytes(errors))
                 if fd == master:
                     # Fresh Enter echoes on the separate input PTY after
                     # restoration. Darwin's next TCSAFLUSH waits for its peer.
@@ -1360,7 +1366,7 @@ def command_interruption_cases(state, library):
                     if case == "configure-inflight":
                         assert transmitted == [saved], "in-flight send changed captured request bytes"
                     assert identity["store"] == str(store) and identity["session"] == "command/signals"
-                    assert f"rui recover {key}".encode() in errors, errors
+                    assert f"rui request inspect {key}".encode() in errors, errors
                     if case in ("configure-admitted", "configure-presentation", "configure-rejected"):
                         assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
                         if case == "configure-presentation":
@@ -1384,7 +1390,8 @@ def command_interruption_cases(state, library):
                     expected = "rejected" if case == "configure-rejected" else "accepted"
                     not_admitted = route is None or case == "configure-inflight"
                     assert observed["observation"]["status"] == ("absent" if not_admitted else expected), observed
-                    recovered = json.loads(human.run(home, "request", "recover", key, "--json"))
+                    recovered = json.loads(human.run(home, "request", "recover", key,
+                        success=case != "configure-rejected"))
                     assert recovered["answer"]["status"] == expected
                     assert recovered["answer"]["replayed"] is (not not_admitted)
                     assert record.read_bytes() == saved and set(records.glob("*.json")) - before == {record}
@@ -1424,7 +1431,7 @@ def fatal_reporting_cases(state):
             "--workspace", root, "--provider", "codex", "--model", "model-a")
         diagnostics = [
             (["session", "resume", "--store", str(store), "missing/fatal"], b"SessionNotConfigured"),
-            (["setup", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
+            (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
             (["--store", str(store), "--provider", "unsupported", "--model", "model-a"], b"UnsupportedSelectionProvider"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
@@ -1491,7 +1498,7 @@ def fatal_reporting_cases(state):
             output, errors = human.terminal_exit(caller, master, timeout=6)
             assert caller.returncode == 1, (output, errors)
             assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
-            assert b"not confirmed" in errors and b"rui recover" in errors and b"IncompleteTerminalInput" in errors, errors
+            assert b"not confirmed" in errors and b"rui request recover" in errors and b"IncompleteTerminalInput" in errors, errors
             assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
             assert proxy.mutations == [("/v1/message", body) for body, _ in proxy.exchanges]
             after = {path: path.read_bytes() for path in records.glob("*.json")}
@@ -1616,7 +1623,8 @@ def decision_reporting_cases(state):
                 assert len(proxy.exchanges) == 1 and proxy.exchanges[0][0] == saved
                 assert request["key"].encode() in errors and message["key"].encode() not in errors, errors
                 assert request["decision"] == decision
-                assert b"rui recover " + request["key"].encode() in errors and b"rui result" not in errors, errors
+                assert (b"rui request recover " if lost else b"rui request inspect ") + request["key"].encode() in errors, errors
+                assert b"rui request read-result" not in errors, errors
                 assert (b"Decision not confirmed" if lost else b"Decision accepted; do not repeat it") in errors, errors
                 if not lost:
                     assert b"IncompleteTerminalInput" in errors and b"not confirmed" not in errors, errors
@@ -1625,7 +1633,7 @@ def decision_reporting_cases(state):
                     reply_release.set()
                 proxy.close()
                 proxy = None
-                recovered = json.loads(human.run(home, "request", "recover", request["key"], "--json"))["answer"]
+                recovered = json.loads(human.run(home, "request", "recover", request["key"]))["answer"]
                 assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                 assert record.read_bytes() == saved
                 fixture.wait_for(lambda: fixture.completed_observation(store, message["key"]), "decision continuation")
@@ -1781,7 +1789,7 @@ def detach_reporting_cases(state, library):
                 else:
                     assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
                     assert guide in errors and request["key"].encode() in errors, errors
-                    assert (b"rui result " if kind == "message" else b"rui recover ") + request["key"].encode() in errors
+                    assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
                 assert log.read_text().count("detach-enable\n") == 1
                 if fault.startswith("detach-write-"):
@@ -1805,7 +1813,7 @@ def detach_reporting_cases(state, library):
                 assert proxy.mutations == [("/v1/message", messages[0])] + ([] if kind == "message" else [("/v1/control/permission-decision", before[record])])
                 proxy.close()
                 proxy = None
-                assert json.loads(human.run(home, "request", "recover", request["key"], "--json"))["answer"]["replayed"] is True
+                assert json.loads(human.run(home, "request", "recover", request["key"]))["answer"]["replayed"] is True
                 effect = root / f"effect-{name}"
                 assert (effect.read_bytes() if effect.exists() else b"") == (b"once" if kind == "allow_once" else b"")
                 print(f"detach reporting: {name} exact accepted guide, restored termios and saved replay passed", flush=True)
@@ -1905,7 +1913,7 @@ def startup_reporting_cases(state, library):
             else:
                 intent = b"Decision" if kind in ("allow_once", "deny") else b"Message"
                 assert intent + b" was not sent" in errors and b"You may submit it again" in errors, errors
-                assert b"rui recover " not in errors and b"rui result " not in errors and b"reserved key" not in errors, errors
+                assert b"rui request recover " not in errors and b"rui request read-result " not in errors and b"reserved key" not in errors, errors
             assert {path: path.read_bytes() for path in records.glob("*.json")} == before
             assert proxy.mutations == mutations and not (root / "must-not-run").exists()
             actual = termios.tcgetattr(slave)
@@ -1921,7 +1929,7 @@ def startup_reporting_cases(state, library):
             proxy.close()
             proxy = None
             if kind == "retry":
-                assert json.loads(human.run(home, "request", "recover", request["key"], "--json"))["answer"]["replayed"] is True
+                assert json.loads(human.run(home, "request", "recover", request["key"]))["answer"]["replayed"] is True
             print(f"startup reporting: {kind} exact custody, publication/mutation conservation and cleanup precedence passed", flush=True)
         finally:
             if sys.exc_info()[0] is not None:
@@ -2099,7 +2107,9 @@ def host_diagnostic_cases(state, library):
         assert fields["execution"] == "unavailable", fields
         status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
             capture_output=True, text=True, timeout=8)
-        assert status.returncode == 0 and "Instance: " in status.stdout, status
+        assert status.returncode == 0, status
+        reported = json.loads(status.stdout)
+        assert reported["type"] == "host_status" and reported["status"] == "ready" and reported["instance"], status
         (root / "host-status.stdout").write_text(status.stdout)
         print("Host diagnostics: aliased full stdout, startup warning and failed restore: required readiness blocks until exact filler release; Host usable", flush=True)
     finally:
@@ -2150,7 +2160,9 @@ def host_diagnostic_cases(state, library):
         assert list(diagnostics.iterdir()) == [last], "failed writer grew diagnostics"
         status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
             capture_output=True, text=True, timeout=8)
-        assert status.returncode == 0 and "Instance: " in status.stdout, status
+        assert status.returncode == 0, status
+        reported = json.loads(status.stdout)
+        assert reported["type"] == "host_status" and reported["status"] == "ready" and reported["instance"], status
         print("Host diagnostics: record-time failure retained under exclusion; one notice follows required readiness; Host usable", flush=True)
     finally:
         dispose_all(lambda: (root / "stdout-stderr.log").write_bytes(output),
@@ -2321,8 +2333,10 @@ def host_diagnostic_cases(state, library):
                 fixture.configure(root, store, "config-other", "diagnostic/session-extra", "model-a")
             status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                 capture_output=True, text=True, timeout=8)
-            assert status.returncode == 0 and "Instance: " in status.stdout, status
-            instance = status.stdout.split("Instance: ", 1)[1].splitlines()[0]
+            assert status.returncode == 0, status
+            reported = json.loads(status.stdout)
+            assert reported["type"] == "host_status" and reported["status"] == "ready", status
+            instance = reported["instance"]
             # Fill only while idle. The inherited open file description starts
             # submissions with exactly its original flags, not Python's flags.
             if credit == "filled":
@@ -2431,7 +2445,10 @@ def host_diagnostic_cases(state, library):
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
                     assert stopped.returncode == 0, stopped
-                    assert "Stop acknowledged; completion and lease release are not confirmed" in stopped.stdout, stopped
+                    stop_reply = json.loads(stopped.stdout)
+                    assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
+                        "type": "host_stop", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
+                    assert "stop affects all work in this Store" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.
@@ -2609,7 +2626,7 @@ def host_diagnostic_cases(state, library):
 def native_notice_cases(state):
     """Exercise the public notice's libc adapter without a Host or interposer."""
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    expected = b"\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/a\\' path' -- $'--session'\n"
+    expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' -- $'--session'\n"
     for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
         # PTY EAGAIN is not persistent: internal delivery can make space without
         # a reader. A full pipe with no reader owns the backpressure witness.

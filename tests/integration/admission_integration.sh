@@ -96,6 +96,18 @@ contains() {
     esac
 }
 
+# A saved rejection or conflict is delivered on stdout but exits 1.
+not_accepted() {
+    status=0
+    reply=$("$@") || status=$?
+    if [ "$status" -ne 1 ]; then
+        echo "expected a saved non-acceptance with exit 1, got $status: $*" >&2
+        printf '%s\n' "$reply" >&2
+        return 1
+    fi
+    printf '%s' "$reply"
+}
+
 require_test() {
     description=$1
     shift
@@ -357,7 +369,7 @@ unknown_created=$($rui session configure --store "$store" --record "$records/unk
 contains "$unknown_created" '"status":"accepted"'
 stop_host
 start_host
-unknown=$($rui request recover --store "$store" --record "$records/unknown-message.json" --kind message)
+unknown=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-message.json" --kind message)
 contains "$unknown" '"status":"rejected"'
 contains "$unknown" '"replayed":true'
 contains "$unknown" '"code":"unknown_session"'
@@ -377,18 +389,18 @@ contains "$defaults" '"tools":["bash"]'
 contains "$defaults" '"permission_mode":"bypass"'
 contains "$defaults" '"instructions":{"bytes":"0"'
 contains "$defaults" '"output_schema":null'
-rejected=$($rui request recover --store "$store" --record "$records/incomplete.json" --kind configure)
+rejected=$(not_accepted "$rui" request recover --store "$store" --record "$records/incomplete.json" --kind configure)
 contains "$rejected" '"status":"rejected"'
 contains "$rejected" '"replayed":true'
 contains "$rejected" '"code":"incomplete_initial_configuration"'
 
 # Store tests own all eight initial-field combinations. Keep a partially filled
 # wire request and closed-provider rejection with real request-scratch cleanup.
-missing_provider=$($rui session configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model model-a)
+missing_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model model-a)
 contains "$missing_provider" '"code":"incomplete_initial_configuration"'
 printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
-unknown_provider=$($rui session configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model model-a --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
+unknown_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model model-a --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
 contains "$unknown_provider" '"code":"unsupported_provider"'
 contains "$($rui session inspect --store "$store" --session direct/unknown-provider)" '"session":null'
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
@@ -401,7 +413,7 @@ equal_binding=$($rui session configure --store "$store" --record "$records/equal
 contains "$equal_binding" '"revision":"2"'
 omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session direct/binding --permission-mode bypass)
 contains "$omitted_binding" '"revision":"3"'
-mixed_model=$($rui session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session direct/binding --model model-b --tools bash --permission-mode ask)
+mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session direct/binding --model model-b --tools bash --permission-mode ask)
 contains "$mixed_model" '"code":"model_is_immutable"'
 binding_current=$($rui session inspect --store "$store" --session direct/binding --profile current)
 contains "$binding_current" '"provider":"codex"'
@@ -411,7 +423,7 @@ contains "$binding_current" '"tools":[]'
 contains "$binding_current" '"permission_mode":"bypass"'
 stop_host
 start_host
-unknown_replay=$($rui request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
+unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
 contains "$unknown_replay" '"code":"unsupported_provider"'
 contains "$unknown_replay" '"replayed":true'
 binding_full=$($rui session inspect --store "$store" --session direct/binding --profile full)
@@ -419,7 +431,7 @@ contains "$binding_full" '"provider":"codex"'
 contains "$binding_full" '"model":"model-a"'
 contains "$binding_full" '"revision":"3"'
 printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==3; assert all(r["provider"]=="codex" and r["model"]=="model-a" for r in rows)'
-restarted_model=$($rui session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session direct/binding --model model-b --tools bash)
+restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session direct/binding --model model-b --tools bash)
 contains "$restarted_model" '"code":"model_is_immutable"'
 binding_rechecked=$($rui session inspect --store "$store" --session direct/binding --profile current)
 contains "$binding_rechecked" '"revision":"3"'
@@ -463,11 +475,11 @@ contains "$current" '"instructions":{"bytes":"0"'
 contains "$current" '"output_schema":null'
 
 # The same Store-wide key conflicts across changed inputs, targets, and kinds.
-changed=$($rui session configure --store "$store" --record "$records/changed.json" --key first-key --session direct/main --model model-c)
+changed=$(not_accepted "$rui" session configure --store "$store" --record "$records/changed.json" --key first-key --session direct/main --model model-c)
 contains "$changed" '"status":"conflict"'
-retargeted=$($rui session configure --store "$store" --record "$records/retargeted.json" --key first-key --session direct/other --workspace "$root" --provider codex --model model-a)
+retargeted=$(not_accepted "$rui" session configure --store "$store" --record "$records/retargeted.json" --key first-key --session direct/other --workspace "$root" --provider codex --model model-a)
 contains "$retargeted" '"status":"conflict"'
-changed_kind=$($rui session send --store "$store" --record "$records/changed-kind.json" --key first-key --session direct/main --text "$state/message.txt")
+changed_kind=$(not_accepted "$rui" session send --store "$store" --record "$records/changed-kind.json" --key first-key --session direct/main --text "$state/message.txt")
 contains "$changed_kind" '"status":"conflict"'
 
 # Sealed-but-unadmitted input has no saved answer; its captured record can be
@@ -521,7 +533,7 @@ contains "$partial_session" '"pending_messages":"0"'
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$($rui session configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
+invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
 contains "$invalid_schema" '"code":"invalid_output_schema"'
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
 if "$rui" session send --store "$store" --record "$records/known-message.json" --key msg-known --session direct/main --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
@@ -571,11 +583,11 @@ contains "$ordered_session" '"pending_messages":"2"'
 
 # The accepted message binding conflicts across target, canonical input and
 # kind without replacing or duplicating the original admission.
-retargeted_message=$($rui session send --store "$store" --record "$records/message-retargeted.json" --key msg-known --session direct/rejected --text "$state/message.txt")
+retargeted_message=$(not_accepted "$rui" session send --store "$store" --record "$records/message-retargeted.json" --key msg-known --session direct/rejected --text "$state/message.txt")
 contains "$retargeted_message" '"status":"conflict"'
-changed_message=$($rui session send --store "$store" --record "$records/message-changed.json" --key msg-known --session direct/main --text "$state/message.txt")
+changed_message=$(not_accepted "$rui" session send --store "$store" --record "$records/message-changed.json" --key msg-known --session direct/main --text "$state/message.txt")
 contains "$changed_message" '"status":"conflict"'
-message_changed_kind=$($rui session configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model model-a)
+message_changed_kind=$(not_accepted "$rui" session configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model model-a)
 contains "$message_changed_kind" '"status":"conflict"'
 still_two=$($rui session inspect --store "$store" --session direct/main)
 contains "$still_two" '"pending_messages":"2"'

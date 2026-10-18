@@ -26,7 +26,7 @@ def retained(state, binary, label, repetition, failed_key):
     master, slave = pty.openpty()
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "store"), "--session", "resources/message"]
-        if label == "baseline" else ["resume", "--store", str(state / "store"), "--", "resources/message"])
+        if label == "baseline" else ["session", "resume", "--store", str(state / "store"), "--", "resources/message"])
     process = subprocess.Popen([str(binary), *entry], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)
@@ -55,18 +55,60 @@ def retained(state, binary, label, repetition, failed_key):
 
 
 def held(state, binary, label, handle):
-    gate = state / f"{label}-gate"
-    process = subprocess.Popen([str(binary), "follow", handle, "--json"],
-        env={**os.environ, "HOME": str(state / "capture-home"), "RUI_TEST_FOLLOW_GATE": str(gate)},
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if label == "baseline":
+        # The historical baseline holds its decoded follow snapshot at a gate.
+        gate = state / f"{label}-gate"
+        process = subprocess.Popen([str(binary), "follow", handle, "--json"],
+            env={**os.environ, "HOME": str(state / "capture-home"), "RUI_TEST_FOLLOW_GATE": str(gate)},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            cli.fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "decoded observation held")
+            measured = sample(process.pid)
+            assert measured["fds"] == 3, measured
+            return {"binary": label, "decoded_snapshot": measured}
+        finally:
+            process.kill()
+            process.communicate(timeout=5)
+    # The candidate observes once. Hold it after its decoded observation is
+    # written: it may own only stdio plus the two hold descriptors.
+    release_read, release_write = os.pipe()
+    ready_read, ready_write = os.pipe()
+    process = subprocess.Popen([str(binary), "request", "inspect", handle],
+        env={**os.environ, "HOME": str(state / "capture-home"),
+            "RUI_TEST_POST_COMMAND_RELEASE_FD": str(release_read), "RUI_TEST_POST_COMMAND_READY_FD": str(ready_write)},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(release_read, ready_write))
+    os.close(release_read)
+    os.close(ready_write)
     try:
-        cli.fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "decoded observation held")
+        assert os.read(ready_read, 1) == b"\x01", "decoded observation held"
         measured = sample(process.pid)
-        assert measured["fds"] == 3, measured
+        assert measured["fds"] == 5 and measured["sockets"] == 0, measured
+        os.write(release_write, b"\x01")
+        output, errors = process.communicate(timeout=5)
+        assert process.returncode == 0, (output, errors)
+        reply = json.loads(output)
+        observation = reply["observation"]
+        assert reply["key"] == handle and observation["progress"]["status"] == "in_flight", reply
+        assert "result" not in observation, reply
         return {"binary": label, "decoded_snapshot": measured}
     finally:
-        process.kill()
-        process.communicate(timeout=5)
+        os.close(ready_read)
+        os.close(release_write)
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+
+
+def baseline_admit(home, *args):
+    # Setup drives the baseline with its own historical two-line receipt.
+    captured, admission = map(json.loads, cli.run(home, *args, "--json").splitlines())
+    assert captured == {"event": "captured", "request": admission["request"]}, (captured, admission)
+    assert admission["event"] == "admission", admission
+    return admission["request"]
+
+
+def baseline_observation(state, key):
+    return cli.fixture.command("observe-command", "--store", state / "store", "--key", key)["observation"]
 
 
 def main():
@@ -93,18 +135,18 @@ def main():
             try:
                 cli.run(home, "configure", "--store", state / "store", "--session", "resources/message",
                     "--workspace", state, "--provider", "codex", "--model", "model-a")
-                failed = cli.admit(home, "message", "--store", state / "store", "--session", "resources/message", "fail")["request"]
-                cli.fixture.wait_for(lambda: cli.fixture.command("observe-command", "--store", state / "store",
-                    "--key", failed)["observation"].get("result"), "saved failure")
+                failed = baseline_admit(home, "message", "--store", state / "store", "--session", "resources/message", "fail")
+                cli.fixture.wait_for(lambda: baseline_observation(state, failed).get("result"), "saved failure")
                 for repetition in range(3):
                     for label, binary in (("baseline", baseline), ("candidate", candidate)):
                         print(json.dumps(retained(state, binary, label, repetition, failed)), flush=True)
-                pending = cli.admit(home, "message", "--store", state / "store", "--session", "resources/message", "hold")["request"]
+                pending = baseline_admit(home, "message", "--store", state / "store", "--session", "resources/message", "hold")
                 cli.fixture.wait_for(lambda: len(endpoint.requests) == 2, "held provider request")
                 for label, binary in (("baseline", baseline), ("candidate", candidate)):
                     print(json.dumps(held(state, binary, label, pending)), flush=True)
                 release.set()
-                cli.fixture.wait_for(lambda: cli.fixture.completed_observation(state / "store", pending), "work survives detached readers")
+                cli.fixture.wait_for(lambda: baseline_observation(state, pending).get("result", {}).get("status") == "completed",
+                    "work survives detached readers")
             finally:
                 release.set()
                 stop_process(host)

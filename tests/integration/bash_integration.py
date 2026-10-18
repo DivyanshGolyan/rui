@@ -1188,6 +1188,7 @@ def main():
             "direct/success",
             "--action",
             success_action["action"],
+            expect=1,
         )
         assert conflict["answer"]["status"] == "conflict", conflict
         bash_cleanup_started = success_milestones.wait(
