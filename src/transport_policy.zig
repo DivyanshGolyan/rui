@@ -34,10 +34,6 @@ pub const Evidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
-/// An Attempt that waited in curl's connection queue for its whole
-/// inactivity interval never reached the provider.
-pub const expired_in_queue: Evidence = .{ .disposition = .temporary_connection };
-
 /// The curl results classification distinguishes. The shell maps each tag
 /// to the `CURLE_` constant with its upper-cased name and any other code to
 /// `other`.
@@ -317,7 +313,6 @@ test "only HTTP responses keep their captured body" {
         const expected = disposition == .success or disposition == .permanent_http or disposition == .temporary_http;
         try std.testing.expectEqual(expected, disposition.retainsResponse());
     }
-    try std.testing.expect(!expired_in_queue.disposition.retainsResponse());
 }
 
 const ns_per_ms = 1_000_000;

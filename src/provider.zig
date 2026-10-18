@@ -170,10 +170,10 @@ pub const Reactor = struct {
             return .progressed;
         }
         // curl does not invoke progress callbacks for an easy waiting in the
-        // multi connection queue, so waiting consumes the same interval here.
+        // multi connection queue, so every scan checks the same interval.
         if (!transfer.inactivity.expiredAt(transfer.now())) return .not_ready;
         self.cancel(transfer);
-        transfer.finish(.{ .transport_finished = transport_policy.expired_in_queue }, 0);
+        transfer.finish(.{ .transport_finished = .{ .disposition = .temporary_connection } }, 0);
         return .progressed;
     }
 
