@@ -540,10 +540,16 @@ def terminal_wait_oracles():
 
 
 def assert_permission_workspace(output, workspace, columns=80):
-    """Join only hanging-indent layout breaks; retain every exact path byte."""
-    shown = output.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
-    assert re.sub(r"\n {2,}", "", shown) == str(workspace), output
-    assert all(len(line) <= columns for line in ("  Workspace: " + shown).splitlines()), output
+    """Join only hanging-indent layout breaks; retain every exact path byte.
+
+    A path that fits a continuation row but not the label's row starts on
+    the next row, leaving the label at the end of its own.
+    """
+    fields = output.split("\n  Workspace:", 1)
+    assert len(fields) == 2 and "\n  Time limit:" in fields[1], ("Action fields missing", output)
+    shown = fields[1].split("\n  Time limit:", 1)[0]
+    assert re.sub(r"^ |\n {2,}", "", shown) == str(workspace), output
+    assert all(len(line) <= columns for line in ("  Workspace:" + shown).splitlines()), output
 
 
 def shown_bash_command(master):
@@ -3266,7 +3272,7 @@ def renderer_cases():
                 assert "printf approved > renderer-effect" in shown, shown
                 # The header leads the Action: where and how long, then the command.
                 assert "? Run Bash · Renderer consent" in opened, opened
-                shown_workspace = opened.split("\n  Workspace: ", 1)[1].split("\n  Time limit:", 1)[0]
+                shown_workspace = opened.split("\n  Workspace:", 1)[1].split("\n  Time limit:", 1)[0]
                 assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"
                 assert shown_workspace.replace("\n", "").replace(" ", "") == str(workspace), opened
                 assert "\n  Time limit: Host default\n  $ # exact command line 0\n    # exact command line 1\n" in opened, opened
