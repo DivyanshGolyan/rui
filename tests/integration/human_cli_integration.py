@@ -3553,8 +3553,33 @@ def renderer_cases():
             tty.send("\x07", marker)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        completed = True
         print("renderer: an open /status page follows the work it describes", flush=True)
+
+        # From Enter on, every frame shows the Message: sending, or submitted
+        # in full. A cleared composer alone or a bare submitted marker is not
+        # feedback.
+        session = "renderer/submitted-feedback"
+        configure(session)
+        marker = answer("submitted feedback")
+        with terminal(session) as tty:
+            frames = []
+            def record():
+                if not frames or frames[-1] != tty.capture.completed:
+                    frames.append(tty.capture.completed)
+                return tty.capture.reached(marker)
+            tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
+            tty.send("\n", predicate=record)
+            for frame in frames:
+                rows = frame.rstrip("\n").split("\n")
+                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+                history = rows[:composer]
+                assert "›" not in [row.strip() for row in history], frame
+                if rows[composer].strip() == "›":
+                    assert "› x" in history or {"Sending…", "Sent"} & set(history), frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        completed = True
+        print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
