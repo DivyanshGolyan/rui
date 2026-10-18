@@ -310,6 +310,8 @@ fn drawRow(window: vaxis.Window, document: anytype, document_row: usize, row: u1
     while (clusters.next()) |cluster| {
         const bytes = cluster.bytes(text);
         const width = try document.advance(bytes, column - start);
+        // Layout ends a row at a space that reaches past the edge; it has no cell.
+        if (std.mem.eql(u8, bytes, " ") and @as(u32, column) + width > window.width) continue;
         if (@as(u32, column) + width > window.width) return error.InvalidDisplayLayout;
         if (std.mem.eql(u8, bytes, "\t")) {
             column += width;
@@ -697,6 +699,8 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
         var buffer: [16]u8 = undefined;
         try screen.append(try std.fmt.bufPrint(&buffer, "live {d:0>2}\n", .{line}));
     }
+    // A word that ends at the edge leaves its following space undrawn.
+    try screen.append("0123456789012345678901234567890123456789 next\n");
     try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
     try screen.beginTranscript(0);
     for (0..5) |_| _ = screen.browse(false, false);

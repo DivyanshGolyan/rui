@@ -497,10 +497,11 @@ test "a long joined cluster fails by display contract before width arithmetic ca
 
 test "reading text wraps at words and keeps hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n› a longword\n  supercalifragilistic x\n    deeper indented words here\n• one two three four");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n    deeper indented words here\n• one two three four");
     try view.layout(16);
     const expected = [_]struct { []const u8, u16 }{
         .{ "  The plain rui ", 0 }, .{ "command isn't ", 2 }, .{ "on PATH", 2 },
+        .{ "0123456789abcdef ", 0 }, .{ "next", 0 },
         .{ "› a longword", 0 },
         .{ "  supercalifragi", 0 }, .{ "listic x", 2 },
         .{ "    deeper ", 0 }, .{ "indented ", 4 }, .{ "words here", 4 },
@@ -511,11 +512,13 @@ test "reading text wraps at words and keeps hanging indentation" {
         try std.testing.expectEqualStrings(row[0], view.rowText(index));
         try std.testing.expectEqual(row[1], view.indent(index));
     }
-    // Every row fits, counting its indentation.
+    // Every row fits, counting its indentation; only a space that ended the
+    // row at the edge may lie beyond it, and it is not drawn.
     for (0..view.displayRows()) |row| {
         var column = view.indent(row);
-        var clusters = unicode.graphemeIterator(view.rowText(row));
-        while (clusters.next()) |cluster| column += try view.advance(cluster.bytes(view.rowText(row)), column);
+        const text = std.mem.trimEnd(u8, view.rowText(row), " ");
+        var clusters = unicode.graphemeIterator(text);
+        while (clusters.next()) |cluster| column += try view.advance(cluster.bytes(text), column);
         try std.testing.expect(column <= 16);
     }
     // Draft rows still break at cells, so the caret maps to one place.
