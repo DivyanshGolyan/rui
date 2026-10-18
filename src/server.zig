@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const http_failure_diagnostic = @import("http_failure_diagnostic.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
@@ -123,6 +124,7 @@ const Host = struct {
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
     capture_writer: ?*provider.CaptureWriter = null,
+    diagnostics: ?*HostDiagnostics = null,
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
@@ -1004,6 +1006,8 @@ pub fn serve(
     try intake.init(&host);
     defer intake.deinit();
     host.intake = &intake;
+    // The writer's defer runs after execution joins below.
+    if (diagnostics) |*writer| host.diagnostics = writer;
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -1052,8 +1056,6 @@ pub fn serve(
     if (diagnostics) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
-        writer.close();
-        diagnostics = null;
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
@@ -2663,11 +2665,19 @@ fn completeTransfer(
         .init(host, owner, &active.transfer)
     else
         null;
+    var summary_buffer: [http_failure_diagnostic.max_bytes]u8 = undefined;
+    var summary: ?[]const u8 = null;
     if (answered) |attempt| {
         const overflow_result = classify: {
             var response = active.transfer.takeResponse();
             defer response.deinit();
-            break :classify model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status);
+            const overflow = model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status) catch |err| break :classify err;
+            var window: [http_failure_diagnostic.window_bytes]u8 = undefined;
+            const wanted: usize = @intCast(@min(response.length, window.len));
+            const count = response.file.readPositionalAll(host.io, window[0..wanted], 0) catch |err| break :classify err;
+            if (count != wanted) break :classify error.ShortSealedRead;
+            summary = http_failure_diagnostic.summarize(evidence.http_status, response.length, window[0..wanted], &summary_buffer);
+            break :classify overflow;
         };
         const overflow = overflow_result catch |err| {
             stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
@@ -2706,7 +2716,7 @@ fn completeTransfer(
         else
             .terminal;
     if (answered) |attempt|
-        attempt.fail(code, failure_disposition)
+        attempt.failWithSummary(code, summary.?, failure_disposition)
     else
         settleUnansweredFailure(host, owner.token, owner.binding, code, failure_disposition);
     active.transfer.deinit();
@@ -3028,6 +3038,16 @@ const AnsweredAttempt = struct {
         settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
+            .diagnostic = null,
+        } }, disposition);
+    }
+
+    /// An HTTP error status with its redacted body summary.
+    fn failWithSummary(self: *const AnsweredAttempt, code: []const u8, summary: []const u8, disposition: store_module.ModelFailureDisposition) void {
+        settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
+            .code = code,
+            .request_id = self.request_id,
+            .diagnostic = summary,
         } }, disposition);
     }
 
@@ -3063,8 +3083,19 @@ fn settleFailure(
     if (!host.custody.claimTerminalDelivery(token)) return;
     host.store.settleModelAttemptFailure(binding, failure, disposition, .{
         .before_commit = host.faults.result_before_commit,
-    }) catch |err| if (err != error.SupersededByControl)
-        fenceDispatch(host, "model failure save", err);
+    }) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "model failure save", err);
+        return;
+    };
+    if (host.diagnostics) |writer| writer.recordModelFailure(.{
+        .turn = binding.turn_id,
+        .operation = binding.operation_id,
+        .attempt = binding.attempt_ordinal,
+        .code = failure.code(),
+        .disposition = @tagName(disposition),
+        .request_id = failure.requestId(),
+        .diagnostic = failure.diagnostic(),
+    });
 }
 
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
@@ -4566,6 +4597,10 @@ fn renderCommandObservation(
                         try renderProcessingBinding(response, failed.binding);
                         try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
                         try response.appendJsonString(failed.code.slice());
+                        try response.append(",\"request_id\":");
+                        if (failed.evidence.request_id) |*value| try response.appendJsonString(value.slice()) else try response.append("null");
+                        try response.append(",\"diagnostic\":");
+                        if (failed.evidence.diagnostic) |*value| try response.appendJsonString(value.slice()) else try response.append("null");
                         try response.append("}");
                     },
                 }
@@ -6559,7 +6594,15 @@ test "message observation renders every closed queue state without fabricated re
     observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code } };
     try Expect.rendered(
         observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}",
+        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":null,\"diagnostic\":null}}}",
+    );
+    var evidence: store_module.FailureEvidence = .{ .request_id = .{}, .diagnostic = .{} };
+    try evidence.request_id.?.set("req\"1");
+    try evidence.diagnostic.?.set("{\"excerpt\":\"x\"}");
+    observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code, .evidence = evidence } };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":\"req\\\"1\",\"diagnostic\":\"{\\\"excerpt\\\":\\\"x\\\"}\"}}}",
     );
 
     try code.set("cancelled");

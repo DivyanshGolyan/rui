@@ -54,7 +54,7 @@ RULES = (
      "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
     (("src/SessionInput.zig", "src/tools.zig"), ("test-logic", "check"), ("test-logic", "check"),
      "Portable input and tool-parser tests; shared native owners stay in check"),
-    (("src/attempt.zig", "src/descriptor_capacity.zig"), ("test-logic",), ("test-logic",),
+    (("src/attempt.zig", "src/descriptor_capacity.zig", "src/http_failure_diagnostic.zig"), ("test-logic",), ("test-logic",),
      "Functional cores beside shared owners; their native checks follow"),
     (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
      "Portable Codex credential decisions and token messages; native owner checks follow below"),

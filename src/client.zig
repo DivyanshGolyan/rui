@@ -997,9 +997,21 @@ pub const Current = struct {
         status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
         turn: OmittableJson(Id) = .{},
         operation: OmittableJson(Id) = .{},
-        latest_outcome: ?struct { code: JsonString(96), content: ?Reference },
+        latest_outcome: ?Outcome,
 
         pub fn jsonStringify(self: Work, jw: anytype) !void {
+            try writeObject(self, jw);
+        }
+    };
+    /// A failed outcome carries its Operation's provider correlation and
+    /// bounded classification; earlier Hosts omit both.
+    pub const Outcome = struct {
+        code: JsonString(96),
+        content: ?Reference,
+        request_id: OmittableJson(?JsonString(256)) = .{},
+        diagnostic: OmittableJson(?JsonString(512)) = .{},
+
+        pub fn jsonStringify(self: Outcome, jw: anytype) !void {
             try writeObject(self, jw);
         }
     };
@@ -1638,7 +1650,17 @@ pub const CommandObservation = struct {
     input: ?ContentReference = null,
     queue: ?struct { status: enum { queued, processing, excluded, completed, failed, cancelled }, admission: u64 } = null,
     processing: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
-    result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(96), text: ?ContentReference } = null,
+    result: ?struct {
+        status: enum { completed, failed, cancelled },
+        code: ?protocol.Bounded(96),
+        text: ?ContentReference,
+        /// Failed results only; null when the Operation retained none and
+        /// absent from earlier Hosts.
+        request_id: protocol.FieldState = .omitted,
+        request_id_value: protocol.Bounded(256) = .{},
+        diagnostic: protocol.FieldState = .omitted,
+        diagnostic_value: protocol.Bounded(512) = .{},
+    } = null,
     progress: ?Progress = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     completion: ?enum { pending, completed } = null,
@@ -1721,6 +1743,14 @@ pub const CommandObservation = struct {
                 try writer.writeAll(",\"text\":");
                 try writeContentReference(writer, text);
             }
+            inline for (.{ "request_id", "diagnostic" }) |name| switch (@field(result, name)) {
+                .omitted => {},
+                .explicit_null => try writer.writeAll(",\"" ++ name ++ "\":null"),
+                .value => {
+                    try writer.writeAll(",\"" ++ name ++ "\":");
+                    try std.json.Stringify.value(@field(result, name ++ "_value").slice(), .{}, writer);
+                },
+            };
             try writer.writeByte('}');
         }
         if (self.progress) |progress| {
@@ -1761,7 +1791,13 @@ pub const CommandObservation = struct {
             input: OmittableJson(Ref) = .{},
             queue: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "queue")).optional.child, "status")), admission: JsonString(20) }) = .{},
             processing: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
-            result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(96)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
+            result: OmittableJson(struct {
+                status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")),
+                code: OmittableJson(JsonString(96)) = .{},
+                text: OmittableJson(Ref) = .{},
+                request_id: OmittableJson(?JsonString(256)) = .{},
+                diagnostic: OmittableJson(?JsonString(512)) = .{},
+            }) = .{},
             progress: OmittableJson(struct { status: JsonEnum(@FieldType(Progress, "status")), action: ?JsonString(20) }) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
@@ -1787,7 +1823,16 @@ pub const CommandObservation = struct {
         if (facts.input.value) |value| observed.input = try decodeReference(value);
         if (facts.queue.value) |value| observed.queue = .{ .status = value.status.value, .admission = try mutationId(value.admission, false) };
         if (facts.processing.value) |value| observed.processing = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
-        if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
+        if (facts.result.value) |value| {
+            observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
+            const result = &observed.result.?;
+            inline for (.{ "request_id", "diagnostic" }) |name| if (@field(value, name).value) |present| {
+                if (present) |text| {
+                    @field(result, name) = .value;
+                    @field(result, name ++ "_value") = text.value;
+                } else @field(result, name) = .explicit_null;
+            };
+        }
         if (facts.progress.value) |value| observed.progress = .{ .status = value.status.value, .action = if (value.action) |action| try mutationId(action, false) else null };
         if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try mutationId(turn, false) else null, .admission_cutoff = try mutationId(value.admission_cutoff, true) };
         if (facts.completion.value) |value| observed.completion = value.status.value;
@@ -1837,6 +1882,7 @@ pub const CommandObservation = struct {
             if (result.status == .completed) {
                 if (result.text == null or result.code != null or self.processing == null) return error.InvalidObservation;
             } else if (result.text != null or result.code == null or result.code.?.len == 0) return error.InvalidObservation;
+            if (result.status != .failed and (result.request_id != .omitted or result.diagnostic != .omitted)) return error.InvalidObservation;
         }
         if (self.progress) |progress| if (progress.status == .waiting_for_permission and progress.action == null) return error.InvalidObservation;
     }
@@ -5034,6 +5080,23 @@ test "keyed observation retains request acceptance independently of later work" 
         defer json.deinit();
         try std.testing.expectEqualStrings("accepted", json.value.object.get("status").?.string);
     }
+}
+
+test "failed observation evidence round-trips as value, null or omission and only on failure" {
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"status\":\"failed\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"1\"}";
+    inline for (.{
+        ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_400\",\"request_id\":\"req\\\"1\",\"diagnostic\":\"{\\\"excerpt\\\":\\\"detail=x\\\"}\"}}",
+        ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_400\",\"request_id\":null,\"diagnostic\":null}}",
+        ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_400\"}}",
+    }) |result| {
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ result ++ "}" }, "k");
+        var output: [protocol.max_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), result));
+    }
+    const completed = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"queue\":{\"status\":\"completed\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"1\"},\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @splat('b')) ++ "\"},\"diagnostic\":null}}}";
+    try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = completed }, "k"));
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {

@@ -1120,10 +1120,24 @@ def main():
 
         # A permanent request/authentication-class HTTP failure is terminal
         # after one Attempt and is never blindly retried. It keeps the
-        # provider's own request correlation, or none, through restart.
+        # provider's own request correlation, or none, and a redacted body
+        # summary through restart. The body echoes a quoted prompt, a
+        # credential-shaped token and a tool argument; none may be retained.
         permanent_request_ids = ('permanent-"quoted"\\request', None)
+        permanent_body = (
+            b'{"error":{"message":"The \'model-a\' model is not supported. Echo: \'LEAKPROMPT do not keep\' '
+            b'Bearer LEAKTOKEN0123456789abcdef","type":"invalid_request_error","arguments":"cat LEAKARGS"}}'
+        )
+        permanent_diagnostic = json.dumps({
+            "http_status": "401",
+            "body": "json",
+            "body_bytes": str(len(permanent_body)),
+            "excerpt": "error.message=The 'model-a' model is not supported. Echo: '<redacted 22 bytes>' "
+                       "Bearer <redacted 25 bytes>; error.type=invalid_request_error; error.arguments=<redacted 12 bytes>",
+            "truncated": False,
+        }, separators=(",", ":"))
         permanent_endpoint = SuccessEndpoint([
-            ResponseSpec(b"authentication rejected", {"X-Request-Id": request_id} if request_id else {}, 401)
+            ResponseSpec(permanent_body, {"X-Request-Id": request_id} if request_id else {}, 401)
             for request_id in permanent_request_ids
         ])
         permanent_thread = threading.Thread(
@@ -1155,13 +1169,35 @@ def main():
                 and value,
                 "permanent provider failure",
             )
-            assert permanent_failure["result"]["code"] == "provider_http_401"
+            assert permanent_failure["result"] == {
+                "status": "failed",
+                "code": "provider_http_401",
+                "request_id": request_id,
+                "diagnostic": permanent_diagnostic,
+            }, permanent_failure
             time.sleep(1.2)
             assert len(permanent_endpoint.requests) == index + 1
             with sqlite3.connect(permanent_store / "rui.sqlite3") as database:
                 assert database.execute(
-                    "SELECT resolution_code,resolution_content_id,request_id FROM model_operation"
-                ).fetchone() == ("provider_http_401", None, request_id)
+                    "SELECT o.resolution_code,c.payload,o.request_id FROM model_operation o "
+                    "JOIN content c ON c.content_id=o.resolution_content_id"
+                ).fetchone() == ("provider_http_401", permanent_diagnostic.encode(), request_id)
+            log_records = [
+                json.loads(line)
+                for path in sorted((permanent_store / "diagnostics").glob("host-*.jsonl"))
+                for line in path.read_text().splitlines()
+            ]
+            failures = [record for record in log_records if record["classification"] == "model_failure"]
+            assert [
+                {key: record[key] for key in ("code", "disposition", "attempt", "request_id", "diagnostic")}
+                for record in failures
+            ] == [{
+                "code": "provider_http_401",
+                "disposition": "terminal",
+                "attempt": "1",
+                "request_id": request_id,
+                "diagnostic": permanent_diagnostic,
+            }], failures
             stop_host(permanent_host)
             processes.remove(permanent_host)
             reopened = start_host(permanent_store, None)
@@ -1173,8 +1209,21 @@ def main():
             operation = report["full"]["model_operations"][0]
             assert operation["request_id"] == request_id, operation
             assert operation["resolution"]["code"] == "provider_http_401", operation
-            assert operation["resolution"]["content"] is None, operation
+            assert operation["resolution"]["content"]["text"] == permanent_diagnostic, operation
+            current = command(
+                "session", "inspect", "--store", permanent_store, "--session", "direct/permanent",
+            )
+            assert current["work"]["latest_outcome"] == {
+                "code": "provider_http_401",
+                "content": None,
+                "request_id": request_id,
+                "diagnostic": permanent_diagnostic,
+            }, current["work"]
             assert observe(permanent_store, f"permanent-message-{index}")["result"] == permanent_failure["result"]
+            for path in [permanent_store / "rui.sqlite3", *sorted((permanent_store / "diagnostics").glob("*"))]:
+                retained = path.read_bytes()
+                for leak in (b"LEAKPROMPT", b"LEAKTOKEN", b"LEAKARGS"):
+                    assert leak not in retained, (path, leak)
             assert len(permanent_endpoint.requests) == index + 1
             stop_host(reopened)
             processes.remove(reopened)

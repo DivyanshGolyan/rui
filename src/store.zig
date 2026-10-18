@@ -367,8 +367,17 @@ pub const AcceptedMessageQueue = struct {
         failed: struct {
             binding: AttemptBinding,
             code: protocol.Bounded(96),
+            evidence: FailureEvidence = .{},
         },
     };
+};
+
+/// The failed Operation's provider correlation and bounded classification:
+/// a redacted HTTP error-body summary or a sealed-response rejection.
+pub const FailureEvidence = struct {
+    pub const max_diagnostic_bytes = 512;
+    request_id: ?protocol.Bounded(256) = null,
+    diagnostic: ?protocol.Bounded(max_diagnostic_bytes) = null,
 };
 
 pub const AttemptBinding = attempt.AttemptBinding;
@@ -419,6 +428,9 @@ pub const ModelFailure = union(enum) {
         code: []const u8,
         /// The provider's own correlation; empty when it sent none.
         request_id: protocol.Bounded(256),
+        /// Borrowed redacted HTTP error-body summary for settlement only;
+        /// never Turn output or model continuation. A scheduled retry keeps none.
+        diagnostic: ?[]const u8,
     };
 
     pub const Rejected = struct {
@@ -428,7 +440,7 @@ pub const ModelFailure = union(enum) {
         request_id: protocol.Bounded(256),
     };
 
-    fn code(self: *const ModelFailure) []const u8 {
+    pub fn code(self: *const ModelFailure) []const u8 {
         return switch (self.*) {
             .uncorrelated => |value| value,
             .correlated => |value| value.code,
@@ -436,14 +448,15 @@ pub const ModelFailure = union(enum) {
         };
     }
 
-    fn diagnostic(self: *const ModelFailure) ?[]const u8 {
+    pub fn diagnostic(self: *const ModelFailure) ?[]const u8 {
         return switch (self.*) {
             .rejected => |value| value.diagnostic,
-            .uncorrelated, .correlated => null,
+            .correlated => |value| value.diagnostic,
+            .uncorrelated => null,
         };
     }
 
-    fn requestId(self: *const ModelFailure) []const u8 {
+    pub fn requestId(self: *const ModelFailure) []const u8 {
         return switch (self.*) {
             .uncorrelated => "",
             .correlated => |value| value.request_id.slice(),
@@ -2719,9 +2732,46 @@ pub const Store = struct {
                 break :blk if (outcome.eql("cancelled"))
                     .{ .admission_id = projection.admission_id, .state = .{ .cancelled = .{ .binding = applied.binding, .code = outcome } } }
                 else
-                    .{ .admission_id = projection.admission_id, .state = .{ .failed = .{ .binding = applied.binding, .code = outcome } } };
+                    .{ .admission_id = projection.admission_id, .state = .{ .failed = .{
+                        .binding = applied.binding,
+                        .code = outcome,
+                        .evidence = try self.readFailureEvidence(applied.binding.operation_id),
+                    } } };
             },
         };
+    }
+
+    /// Classification is terminal-safe and bounds its JSON spelling.
+    fn printableAscii(bytes: []const u8) bool {
+        for (bytes) |byte| if (byte < 0x20 or byte > 0x7e) return false;
+        return true;
+    }
+
+    fn readFailureEvidence(self: *Store, operation_id: u64) !FailureEvidence {
+        const statement = try prepare(self.database, "SELECT request_id,resolution_content_id FROM model_operation " ++
+            "WHERE operation_id=?1 AND resolution_code IS NOT NULL AND resolution_code!='completed'");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, operation_id);
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return .{};
+        if (step != c.SQLITE_ROW) return error.CorruptStore;
+        var evidence: FailureEvidence = .{};
+        if (c.sqlite3_column_type(statement, 0) != c.SQLITE_NULL) {
+            evidence.request_id = .{};
+            try readText(statement, 0, &evidence.request_id.?);
+        }
+        if (try readNullablePositiveI64(statement, 1)) |content_id| {
+            const metadata = try self.readContentMetadata(content_id);
+            if (metadata.length > FailureEvidence.max_diagnostic_bytes) return error.CorruptStore;
+            evidence.diagnostic = .{};
+            const destination = &evidence.diagnostic.?;
+            destination.len = @intCast(metadata.length);
+            const raw = try self.contentIsRaw(content_id, metadata.length);
+            var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+            try self.readOwnedContentLocked(&reader, 0, destination.bytes[0..destination.len]);
+            if (!printableAscii(destination.slice())) return error.CorruptStore;
+        }
+        return evidence;
     }
 
     fn readMessageProgress(self: *Store, session_ref: []const u8, state: AcceptedMessageQueue.State) !MessageProgress {
@@ -3675,6 +3725,13 @@ pub const Store = struct {
             try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
         } else {
             try capture.append("null");
+        }
+        if (!code.eql("completed") and !code.eql("cancelled")) {
+            const evidence = try self.readFailureEvidence(@intCast(operation_id));
+            try capture.append(",\"request_id\":");
+            if (evidence.request_id) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
+            try capture.append(",\"diagnostic\":");
+            if (evidence.diagnostic) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
         }
         try capture.append("}}");
     }
@@ -5958,7 +6015,7 @@ pub const Store = struct {
         // A rejected response is final; only transport and HTTP status retry.
         if (failure == .rejected) std.debug.assert(disposition != .retryable);
         if (failure.diagnostic()) |detail| {
-            std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
+            std.debug.assert(detail.len <= FailureEvidence.max_diagnostic_bytes and printableAscii(detail));
         }
         const access = try self.enter(.none);
         defer access.release();
@@ -6036,17 +6093,22 @@ pub const Store = struct {
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 },
                 .exhausted => {
+                    const diagnostic_id = if (failure.diagnostic()) |detail|
+                        try self.importBytesContent(detail, false, faults.content_import)
+                    else
+                        null;
                     const update = try prepare(
                         self.database,
-                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4 " ++
+                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5 " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                     );
                     defer _ = c.sqlite3_finalize(update);
                     try bindU64(update, 1, binding.operation_id);
                     try bindText(update, 2, code);
                     try bindU64(update, 3, binding.attempt_ordinal);
-                    // The settling Attempt's correlation, like a terminal failure.
+                    // The settling Attempt's correlation and summary, like a terminal failure.
                     try bindOptionalText(update, 4, failure.requestId());
+                    try bindNullableI64(update, 5, diagnostic_id);
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
 
@@ -9509,6 +9571,7 @@ test "response-stage model failures require their provenance" {
         }
     }
     try std.testing.expect(@hasField(ModelFailure.Correlated, "request_id"));
+    try std.testing.expect(@FieldType(ModelFailure.Correlated, "diagnostic") == ?[]const u8);
     try std.testing.expect(@hasField(ModelFailure.Rejected, "request_id"));
     try std.testing.expect(@hasField(ModelFailure.Rejected, "diagnostic"));
     try std.testing.expect(@FieldType(ModelFailure.Rejected, "diagnostic") == []const u8);
@@ -14628,7 +14691,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     const request_ids = [_][]const u8{ "attempt-1", "", "attempt-3", "attempt-\"4\"" };
     for (request_ids, 1..) |request_id, ordinal| {
         try std.testing.expectEqual(@as(u64, ordinal), binding.attempt_ordinal);
-        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{} } };
+        var failure: ModelFailure = .{ .correlated = .{ .code = "provider_temporary_http_503", .request_id = .{}, .diagnostic = null } };
         try failure.correlated.request_id.set(request_id);
         try storage.settleModelAttemptFailure(binding, failure, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
         var resolution: protocol.Bounded(96) = .{};
@@ -14657,7 +14720,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     // A provider answer without correlation records none.
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", "direct/correlation", "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } }, .terminal, .{});
+    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{}, .diagnostic = null } }, .terminal, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'"));
 }
 

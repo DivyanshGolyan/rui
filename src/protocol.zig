@@ -1806,7 +1806,13 @@ pub const max_message_observation_bytes = control_observation_prefix_bytes +
     ",\"input\":".len + max_content_reference_bytes +
     ",\"queue\":{\"status\":\"completed\",\"admission\":\"".len + 20 + "\"}".len +
     ",\"processing\":{\"turn\":\"".len + 20 + "\",\"operation\":\"".len + 20 + "\",\"attempt\":\"".len + 20 + "\"}".len +
-    ",\"result\":{\"status\":\"completed\",\"text\":".len + max_content_reference_bytes + "}".len +
+    @max(
+        ",\"result\":{\"status\":\"completed\",\"text\":".len + max_content_reference_bytes + "}".len,
+        ",\"result\":{\"status\":\"failed\",\"code\":".len + maximumJsonStringBytes(96) +
+            ",\"request_id\":".len + maximumJsonStringBytes(256) +
+            // Classification is printable ASCII: only quote and backslash escape.
+            ",\"diagnostic\":".len + 2 + 2 * 512 + "}".len,
+    ) +
     ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"".len + 20 + "\"}}}".len;
 
 pub const max_control_error_response_bytes =

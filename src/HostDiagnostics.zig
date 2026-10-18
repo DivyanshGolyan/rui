@@ -16,6 +16,8 @@ count: usize = 0,
 length: u64 = 0,
 file_cap: u64,
 failure: ?anyerror = null,
+/// Startup and the execution thread share this writer until execution joins.
+mutex: std.Io.Mutex = .init,
 
 /// The Store lease is held by the caller. Only this writer mutates diagnostic
 /// files; a failure disables further writes without changing Host work.
@@ -61,8 +63,64 @@ pub fn close(self: *Self) void {
 }
 
 pub fn record(self: *Self, phase: []const u8, detail: []const u8) void {
+    var bytes: [max_record_bytes]u8 = undefined;
+    const time = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
+    // The caller supplies only trusted phase and error names, never payloads.
+    const record_bytes = std.fmt.bufPrint(&bytes, "{{\"time_ns\":{d},\"classification\":\"startup\",\"phase\":\"{s}\",\"detail\":\"{s}\"}}\n", .{ time, phase, detail }) catch {
+        self.fail(error.DiagnosticRecordTooLong);
+        return;
+    };
+    self.append(record_bytes);
+}
+
+/// A failed model Attempt the provider answered, with the settlement's
+/// provider correlation and redacted classification. Settlement is canonical;
+/// this record only locates it, so a lost record changes no Host work.
+pub const ModelFailure = struct {
+    turn: u64,
+    operation: u64,
+    attempt: u64,
+    code: []const u8,
+    disposition: []const u8,
+    request_id: []const u8,
+    diagnostic: ?[]const u8,
+};
+
+pub fn recordModelFailure(self: *Self, failure: ModelFailure) void {
+    var bytes: [max_record_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    formatModelFailure(&out, std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds, failure) catch {
+        self.fail(error.DiagnosticRecordTooLong);
+        return;
+    };
+    self.append(out.buffered());
+}
+
+fn formatModelFailure(out: *std.Io.Writer, time: i96, failure: ModelFailure) !void {
+    try out.print("{{\"time_ns\":{d},\"classification\":\"model_failure\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\",\"code\":", .{ time, failure.turn, failure.operation, failure.attempt });
+    try std.json.Stringify.value(failure.code, .{}, out);
+    try out.writeAll(",\"disposition\":");
+    try std.json.Stringify.value(failure.disposition, .{}, out);
+    try out.writeAll(",\"request_id\":");
+    try std.json.Stringify.value(if (failure.request_id.len == 0) null else failure.request_id, .{ .escape_unicode = true }, out);
+    try out.writeAll(",\"diagnostic\":");
+    try std.json.Stringify.value(failure.diagnostic, .{ .escape_unicode = true }, out);
+    try out.writeAll("}\n");
+}
+
+fn fail(self: *Self, err: anyerror) void {
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
     if (self.failure != null) return;
-    self.write(phase, detail) catch |err| {
+    self.failure = err;
+    self.reportFailure();
+}
+
+fn append(self: *Self, record_bytes: []const u8) void {
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
+    if (self.failure != null) return;
+    self.write(record_bytes) catch |err| {
         self.failure = err;
         self.reportFailure();
     };
@@ -74,11 +132,7 @@ pub fn reportFailure(self: *Self) void {
         stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
 }
 
-fn write(self: *Self, phase: []const u8, detail: []const u8) !void {
-    var bytes: [max_record_bytes]u8 = undefined;
-    const time = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-    // The caller supplies only trusted phase and error names, never payloads.
-    const record_bytes = std.fmt.bufPrint(&bytes, "{{\"time_ns\":{d},\"classification\":\"startup\",\"phase\":\"{s}\",\"detail\":\"{s}\"}}\n", .{ time, phase, detail }) catch return error.DiagnosticRecordTooLong;
+fn write(self: *Self, record_bytes: []const u8) !void {
     if (self.file == null or self.length + record_bytes.len > self.file_cap) try self.rotate();
     try self.file.?.writePositionalAll(self.io, record_bytes, self.length);
     self.length += record_bytes.len;
