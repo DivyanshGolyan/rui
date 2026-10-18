@@ -1,0 +1,1280 @@
+#!/usr/bin/env python3
+"""verify-rui: drive a pinned Rui build in an isolated synthetic HOME/Store.
+
+Run `verify-rui --help` and read ../SKILL.md. Every Rui invocation this tool
+makes passes an explicit --store under the run's synthetic HOME; nothing reads
+or writes the user's default Store, credentials or tmux server.
+"""
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import re
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+
+CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
+VENV_PYTHON = CACHE / "venv/bin/python"
+SCRATCH_PARENT = pathlib.Path("/private/tmp")  # short paths: Unix socket limits
+HERE = pathlib.Path(__file__).resolve()
+REPO_URL = "https://github.com/DivyanshGolyan/rui.git"
+
+
+def now_ns():
+    return time.monotonic_ns()
+
+
+def wall():
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def die(message, code=2):
+    print(f"verify-rui: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def append_jsonl(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def read_jsonl(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def atomic_write(path, text):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text)
+    os.replace(temporary, path)
+
+
+def process_start(pid):
+    """Process start time and command line, used to prove a PID is still ours."""
+    result = subprocess.run(["ps", "-o", "lstart=,command=", "-p", str(pid)], capture_output=True, text=True)
+    line = result.stdout.strip()
+    if result.returncode != 0 or not line:
+        return None
+    return line[:24].strip(), line[24:].strip()
+
+
+# ---------------------------------------------------------------- run state
+
+
+class Run:
+    def __init__(self, evidence_root):
+        self.root = pathlib.Path(evidence_root).resolve()
+        meta = self.root / "run.json"
+        if not meta.exists():
+            die(f"not a verify-rui run: {self.root}")
+        self.meta = json.loads(meta.read_text())
+        self.scratch = pathlib.Path(self.meta["scratch"])
+        self.home = pathlib.Path(self.meta["home"])
+        self.store = pathlib.Path(self.meta["store"])
+        self.project = pathlib.Path(self.meta["project"])
+        self.rui = pathlib.Path(self.meta["binary"])
+        self.evidence = self.root / "evidence"
+        self.sock = self.scratch / "tmux.sock"
+
+    def env(self, **extra):
+        # A minimal, explicit environment: no inherited credentials or Store.
+        env = {
+            "HOME": str(self.home),
+            "PATH": f"{self.rui.parent}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+            "TERM": "xterm-256color",
+            "LANG": "en_US.UTF-8",
+            "TMPDIR": str(self.scratch / "tmp"),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local/state"),
+            "XDG_DATA_HOME": str(self.home / ".local/share"),
+            "TMUX_TMPDIR": str(self.scratch / "tmux"),
+        }
+        env.update(extra)
+        return env
+
+    def rui_cmd(self, *args, timeout=30, log=True):
+        """One-shot Rui CLI call with explicit --store; logged with its result."""
+        args = [str(a) for a in args]
+        # `request list` is the only command without --store: it lists captures
+        # under this run's synthetic HOME, never the user's.
+        if "--store" not in args and args[:2] != ["request", "list"]:
+            die(f"refusing Rui call without --store: {args}")
+        started = now_ns()
+        result = subprocess.run([str(self.rui), *args], env=self.env(), cwd=self.project,
+                                capture_output=True, text=True, timeout=timeout)
+        if log:
+            append_jsonl(self.evidence / "commands.jsonl", {
+                "t_ns": started, "t_end_ns": now_ns(), "argv": [str(self.rui), *args],
+                "rc": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
+        return result
+
+    def own(self, kind, pid, **facts):
+        start = process_start(pid)
+        append_jsonl(self.root / "owned.jsonl", {"kind": kind, "pid": pid, "lstart": start and start[0],
+                                                 "command": start and start[1], **facts})
+
+    def owned(self):
+        return read_jsonl(self.root / "owned.jsonl")
+
+    def tmux(self, *args, check=True):
+        result = subprocess.run(["tmux", "-S", str(self.sock), *map(str, args)], capture_output=True,
+                                text=True, env=self.env())
+        if check and result.returncode != 0:
+            die(f"tmux {' '.join(map(str, args))} failed: {result.stderr.strip()}")
+        return result
+
+    def term_dir(self, name):
+        return self.evidence / "terms" / name
+
+
+def store_arg(run):
+    return ["--store", str(run.store)]
+
+
+# ---------------------------------------------------------------- build
+
+
+def cmd_build(args):
+    sha = args.sha
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        die("build needs a full 40-hex commit SHA")
+    source = pathlib.Path(args.source).resolve() if args.source else CACHE / "src" / sha
+    build = CACHE / "builds" / sha
+    manifest = build / "manifest.json"
+    if manifest.exists() and not args.force:
+        print(json.dumps(json.loads(manifest.read_text()), indent=1))
+        return
+    origin = args.repo or str(HERE.parents[4])
+    if not source.exists():
+        source.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "-C", origin, "fetch", "--quiet", "origin", sha], check=False)
+        subprocess.run(["git", "-C", origin, "worktree", "add", "--detach", str(source), sha], check=True)
+    head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                           capture_output=True, text=True, check=True).stdout
+    if head != sha or dirty:
+        die(f"source {source} is not a clean checkout of {sha} (HEAD {head}, dirty={bool(dirty)})")
+    tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"], capture_output=True, text=True, check=True).stdout.strip()
+    build.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    if args.pkg_dir:
+        env["ZIG_LOCAL_PKG_DIR"] = args.pkg_dir
+    log = build / "build.log"
+    started = time.monotonic()
+    with open(log, "w") as handle:
+        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"], cwd=source,
+                                env=env, stdout=handle, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        die(f"zig build failed (rc={result.returncode}); see {log}")
+    bin_dir = build / "bin"
+    if bin_dir.exists():
+        shutil.rmtree(bin_dir)
+    shutil.copytree(source / "zig-out/bin", bin_dir, symlinks=False)
+    files = {p.name: sha256(p) for p in sorted(bin_dir.iterdir())}
+    record = {"sha": sha, "tree": tree, "source": str(source), "binary": str(bin_dir / "rui"),
+              "files_sha256": files, "optimize": "ReleaseSafe", "built_at": wall(),
+              "build_seconds": round(time.monotonic() - started, 1),
+              "zig": subprocess.run(["zig", "version"], capture_output=True, text=True).stdout.strip(),
+              "host": os.uname().nodename, "macos": subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip()}
+    manifest.write_text(json.dumps(record, indent=1) + "\n")
+    print(json.dumps(record, indent=1))
+
+
+def load_build(sha):
+    manifest = CACHE / "builds" / sha / "manifest.json"
+    if not manifest.exists():
+        die(f"no build for {sha}; run: verify-rui build {sha}")
+    return json.loads(manifest.read_text())
+
+
+# ---------------------------------------------------------------- fixture provider
+
+
+def fixture_main(args):
+    """Deterministic Responses endpoint. Every request and reply is logged.
+
+    Policy (by the latest user text, or by a pending tool result):
+      * after a function_call_output: "Fixture tool summary N: ..." answer
+      * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
+      * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
+      * text containing "slow": the echo answer streamed slowly (~10 s in flight)
+      * otherwise: "Fixture answer N: received <json of the exact text>"
+    Unbounded: it never exhausts, so extra submissions stay visible instead of failing.
+    """
+    run = Run(args.run)
+    sys.argv = [sys.argv[0], str(run.rui)]
+    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    import http.server
+    import model_fixture as fixture
+    log = run.evidence / "provider.jsonl"
+    bodies = run.evidence / "provider"
+    bodies.mkdir(parents=True, exist_ok=True)
+    lock = threading.Lock()
+    counter = {"n": 0}
+
+    def bash(call, cmd, description):
+        return ("bash", call, json.dumps({"cmd": cmd, "description": description, "timeout_ms": None}))
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            body = json.dumps({"verify_rui_fixture": run.meta["id"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            received = now_ns()
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            with lock:
+                counter["n"] += 1
+                n = counter["n"]
+            request = json.loads(body)
+            items = request.get("input", [])
+            last_user = next((i for i in reversed(range(len(items))) if items[i].get("role") == "user"), None)
+            user_text = None
+            if last_user is not None:
+                content = items[last_user].get("content")
+                user_text = content if isinstance(content, str) else "".join(
+                    part.get("text", "") for part in content if isinstance(part, dict))
+            tool_results = [i for i in items[(last_user or 0):] if i.get("type") == "function_call_output"]
+            chunk_delay = 0
+            if tool_results:
+                kind = "tool-summary"
+                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
+                    f"Fixture tool summary {n}: {len(tool_results)} tool results for {json.dumps(user_text)}.")[0]
+            elif user_text and "tool demonstration" in user_text:
+                kind = "tool-calls"
+                payload = fixture.sse_tool_calls(f"r{n}", [
+                    bash(f"c{n}a", "ls", "List project files"),
+                    bash(f"c{n}b", "exit 127", "Fail with exit 127"),
+                    bash(f"c{n}c", "printf 'usage: example\\nunknown option --help\\n' >&2; exit 1", "Fail with an excerpt")])
+            elif user_text and "consent check" in user_text:
+                kind = "consent-call"
+                command = "set -eu\n" + "\n".join(f"printf 'step {k:02d}\\n' >> progress.log" for k in range(1, 31)) + "\nwc -l progress.log"
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", command, "Record thirty progress steps")])
+            else:
+                kind = "echo"
+                payload = fixture.sse_answer(f"r{n}", f"rs{n}", f"rm{n}",
+                    f"Fixture answer {n}: received {json.dumps(user_text, ensure_ascii=False)}")[0]
+                if user_text and "slow" in user_text:
+                    kind, chunk_delay = "echo-slow", 0.03
+            (bodies / f"request-{n:04d}.json").write_bytes(body)
+            append_jsonl(log, {"t_ns": received, "n": n, "path": self.path, "kind": kind,
+                               "user_text": user_text, "tool_results": len(tool_results), "input_items": len(items),
+                               "body_sha256": hashlib.sha256(body).hexdigest(),
+                               "headers": {k: v for k, v in self.headers.items() if k.lower() not in ("authorization", "cookie")}})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("X-Request-Id", f"fixture-request-{n}")
+            self.send_header("OpenAI-Model", "model-a-served")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            step = 64 if chunk_delay else len(payload)
+            for offset in range(0, len(payload), step):
+                if chunk_delay:
+                    time.sleep(chunk_delay)
+                try:
+                    self.wfile.write(payload[offset:offset + step])
+                    self.wfile.flush()
+                except OSError:
+                    break
+            append_jsonl(log, {"t_ns": now_ns(), "n": n, "event": "response-finished"})
+            self.close_connection = True
+
+        def log_message(self, *_):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    atomic_write(run.scratch / "fixture.port", str(server.server_port))
+    server.serve_forever()
+
+
+# ---------------------------------------------------------------- tap: the PTY proxy around Rui
+
+
+def stty_masked(saved):
+    """stty -g fields with kernel-owned lflag bits (PENDIN, FLUSHO) cleared."""
+    import termios
+    if saved is None:
+        return None
+    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+    fields = []
+    for field in saved.split(":"):
+        if field.startswith("lflag="):
+            field = f"lflag={int(field[6:], 16) & ~mask:x}"
+        fields.append(field)
+    return ":".join(fields)
+
+
+def tap_main(args):
+    """Run argv in an inner PTY; log every received input byte and output byte.
+
+    mode=terminal: input is this process's stdin (a tmux pane or a real terminal).
+    mode=fifo: input is TERMDIR/in.fifo (headless PTY driven by `verify-rui send`).
+    Committed frames (synchronized-update boundaries) are decoded with the
+    repository's ScreenCapture and written to frames.jsonl / committed.txt.
+    """
+    import fcntl
+    import struct
+    import termios
+    import tty
+    term = pathlib.Path(args.term_dir)
+    term.mkdir(parents=True, exist_ok=True)
+    source = pathlib.Path(args.source)
+    sys.path.insert(0, str(source / "tests/integration"))
+    try:
+        from terminal_screen import ScreenCapture
+    except Exception as error:  # pyte missing: still record bytes
+        ScreenCapture = None
+        append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "screen-capture-unavailable", "error": repr(error)})
+    terminal = args.mode == "terminal"
+    if terminal:
+        size = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+        rows, columns = size[0] or 24, size[1] or 80
+        outer_attrs = termios.tcgetattr(0)
+    else:
+        columns, rows = (int(v) for v in args.size.split("x"))
+        outer_attrs = None
+        fifo = term / "in.fifo"
+        if not fifo.exists():
+            os.mkfifo(fifo, 0o600)
+    master, slave = os.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+    if outer_attrs is not None:
+        termios.tcsetattr(slave, termios.TCSANOW, outer_attrs)
+    attrs_before = termios.tcgetattr(slave)
+    pid = os.fork()
+    if pid == 0:
+        os.close(master)
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+        for fd in (0, 1, 2):
+            os.dup2(slave, fd)
+        if slave > 2:
+            os.close(slave)
+        os.chdir(args.cwd)
+        # stty -g on this same tty before and after the target: the inner tty is
+        # revoked for the tap once its session leader exits (macOS), so the
+        # wrapper shell, not the tap, observes the restored termios.
+        wrapper = ('stty -g > "$1/stty-before.txt"; shift; "$@"; rc=$?; '
+                   'stty -g > "$VERIFY_RUI_TERM/stty-after.txt"; printf "%s\\n" "$rc" > "$VERIFY_RUI_TERM/target-rc.txt"; exit "$rc"')
+        env = {**json.loads(args.env), "VERIFY_RUI_TERM": str(term)}
+        os.execve("/bin/sh", ["/bin/sh", "-c", wrapper, "verify-rui-wrapper", str(term), *args.argv], env)
+    meta = {"t_start_ns": now_ns(), "wall": wall(), "tap_pid": os.getpid(), "child_pid": pid,
+            "argv": args.argv, "mode": args.mode, "columns": columns, "rows": rows,
+            "child_lstart": (process_start(pid) or [None])[0], "attrs_before": repr(attrs_before)}
+    atomic_write(term / "meta.json", json.dumps(meta, indent=1))
+    capture = ScreenCapture(columns, rows) if ScreenCapture else None
+    frames = open(term / "frames.jsonl", "a")
+    inputs = open(term / "input.jsonl", "a")
+    outputs = open(term / "output.jsonl", "a")
+    raw_out = open(term / "output.bin", "ab")
+    raw_in = open(term / "input.bin", "ab")
+    offset = {"out": 0, "in": 0}
+
+    def commit(screen, x, y):
+        record = {"t_ns": now_ns(), "gen": capture.generation, "cursor": [x, y], "out_offset": offset["out"], "screen": screen}
+        frames.write(json.dumps(record, ensure_ascii=False) + "\n")
+        frames.flush()
+        atomic_write(term / "committed.txt", f"gen={capture.generation} cursor={x},{y}\n{screen}\n")
+
+    if capture:
+        capture.listener = commit
+    if terminal:
+        tty.setraw(0)
+        in_fd = 0
+    else:
+        in_fd = os.open(term / "in.fifo", os.O_RDWR | os.O_NONBLOCK)
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_w, False)
+
+    def on_signal(signum, _frame):
+        try:
+            os.write(wake_w, bytes([signum]))
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGCHLD, on_signal)
+    signal.signal(signal.SIGWINCH, on_signal)
+    signal.signal(signal.SIGHUP, on_signal)
+    status = None
+    capture_ok = capture is not None
+
+    def feed_output(chunk):
+        nonlocal capture_ok
+        raw_out.write(chunk)
+        raw_out.flush()
+        outputs.write(json.dumps({"t_ns": now_ns(), "offset": offset["out"], "n": len(chunk)}) + "\n")
+        outputs.flush()
+        offset["out"] += len(chunk)
+        if terminal:
+            view = memoryview(chunk)
+            while view:
+                try:
+                    written = os.write(1, view)
+                    view = view[written:]
+                except BlockingIOError:
+                    select.select([], [1], [], 1)
+        if capture_ok:
+            try:
+                capture.feed(chunk)
+            except Exception as error:
+                capture_ok = False
+                append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "screen-capture-failed", "error": repr(error)})
+        if not capture_ok or not capture:
+            return
+        try:
+            atomic_write(term / "display.txt", "\n".join(line.rstrip() for line in capture.screen.display) + "\n")
+        except Exception:
+            pass
+
+    while status is None:
+        ready = select.select([master, in_fd, wake_r], [], [], 1.0)[0]
+        if wake_r in ready:
+            for signum in os.read(wake_r, 64):
+                if signum == signal.SIGWINCH and terminal:
+                    size = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+                    if capture:
+                        capture.resize(size[1], size[0])
+                    append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "resize", "rows": size[0], "columns": size[1]})
+                elif signum == signal.SIGHUP:
+                    append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "sighup"})
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = code
+        if master in ready:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                chunk = b""
+            if chunk:
+                feed_output(chunk)
+        if in_fd in ready and status is None:
+            try:
+                chunk = os.read(in_fd, 65536)
+            except (BlockingIOError, OSError):
+                chunk = b""
+            if chunk:
+                t = now_ns()
+                raw_in.write(chunk)
+                raw_in.flush()
+                inputs.write(json.dumps({"t_ns": t, "offset": offset["in"], "n": len(chunk), "hex": chunk.hex(),
+                                         "text": chunk.decode("utf-8", "backslashreplace")}, ensure_ascii=False) + "\n")
+                inputs.flush()
+                offset["in"] += len(chunk)
+                os.write(master, chunk)
+            elif terminal:
+                append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "stdin-eof"})
+                in_fd = os.open("/dev/null", os.O_RDONLY)
+        if status is None:
+            done, code = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = code
+    os.set_blocking(master, False)
+    while True:
+        try:
+            chunk = os.read(master, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        feed_output(chunk)
+    before_path, after_path = term / "stty-before.txt", term / "stty-after.txt"
+    stty_before = before_path.read_text().strip() if before_path.exists() else None
+    stty_after = after_path.read_text().strip() if after_path.exists() else None
+    target_rc = (term / "target-rc.txt").read_text().strip() if (term / "target-rc.txt").exists() else None
+    exit_record = {"t_ns": now_ns(), "wall": wall(), "raw_status": status,
+                   "wrapper_exit_code": os.waitstatus_to_exitcode(status),
+                   "target_rc": target_rc,
+                   "termios_restored": stty_before is not None and stty_masked(stty_before) == stty_masked(stty_after),
+                   "termios_mask": "lflag PENDIN|FLUSHO (kernel-owned; same mask as terminal_restoration_integration.py)",
+                   "stty_before": stty_before, "stty_after": stty_after,
+                   "output_tail_hex": (term / "output.bin").read_bytes()[-256:].hex(),
+                   "alternate_screen_active_at_exit": capture.alternate if capture else None,
+                   "last_committed": capture.completed if capture else None,
+                   "main_screen_plain_tail": capture.plain[-2000:] if capture else None}
+    atomic_write(term / "exit.json", json.dumps(exit_record, indent=1, ensure_ascii=False))
+    if terminal:
+        termios.tcsetattr(0, termios.TCSADRAIN, outer_attrs)
+        if args.hold:
+            os.write(1, b"\r\n[verify-rui: Rui exited; press Enter to close]\r\n")
+            os.read(0, 1)
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------- new run
+
+
+def cmd_new(args):
+    build = load_build(args.sha)
+    run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
+    root = CACHE / "runs" / run_id
+    scratch = SCRATCH_PARENT / f"vr.{os.getpid()}.{int(time.time()) % 100000}"
+    for path in (root / "evidence", scratch / "home", scratch / "project", scratch / "tmp", scratch / "tmux"):
+        path.mkdir(parents=True, exist_ok=False if path == root / "evidence" else True)
+    os.chmod(scratch, 0o700)
+    os.chmod(scratch / "home", 0o700)
+    os.chmod(scratch / "tmux", 0o700)
+    scratch = scratch.resolve()
+    (scratch / "project/README.md").write_text("verify-rui project\n")
+    (scratch / "project/src").mkdir()
+    meta = {"id": run_id, "sha": args.sha, "tree": build["tree"], "binary": build["binary"],
+            "binary_sha256": build["files_sha256"]["rui"], "source": build["source"],
+            "scratch": str(scratch), "home": str(scratch / "home"), "store": str(scratch / "store"),
+            "project": str(scratch / "project"), "created": wall(), "label": args.label,
+            "helper_sha256": sha256(HERE)}
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    run = Run(root)
+    (run.home / ".config/rui").mkdir(parents=True, mode=0o700)
+    sys.argv = [sys.argv[0], str(run.rui)]
+    sys.path.insert(0, str(pathlib.Path(run.meta["source"]) / "tests/integration"))
+    import codex_integration as codex_fixture
+    codex_fixture.credentials(run.home / ".config/rui/codex.json")
+    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    fixture = subprocess.Popen([python, str(HERE), "_fixture", str(root)], stdout=open(run.evidence / "fixture.log", "w"),
+                               stderr=subprocess.STDOUT, start_new_session=True, env={**run.env(), "PATH": os.environ["PATH"]})
+    run.own("fixture", fixture.pid)
+    port_file = scratch / "fixture.port"
+    deadline = time.monotonic() + 15
+    while not port_file.exists():
+        if fixture.poll() is not None or time.monotonic() > deadline:
+            die(f"fixture did not start; see {run.evidence / 'fixture.log'}")
+        time.sleep(0.05)
+    port = int(port_file.read_text())
+    meta["fixture_url"] = f"http://127.0.0.1:{port}/responses"
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    run = Run(root)
+    host_argv = [str(run.rui), "host", "serve", "--store", str(run.store), "--active-capacity", "2",
+                 "--provider-endpoint", meta["fixture_url"], "--test-retry-waits-ms", "50,100,150"]
+    host = subprocess.Popen(host_argv, env=run.env(), cwd=run.project, stdin=subprocess.DEVNULL,
+                            stdout=open(run.evidence / "host.stdout.log", "w"), stderr=open(run.evidence / "host.log", "w"),
+                            start_new_session=True)
+    run.own("host", host.pid, argv=host_argv)
+    deadline = time.monotonic() + 30
+    while True:
+        status = run.rui_cmd("host", "status", "--store", run.store, log=False)
+        if status.returncode == 0 and "unavailable" not in status.stdout + status.stderr:
+            break
+        if host.poll() is not None or time.monotonic() > deadline:
+            die(f"host did not become ready (rc={host.poll()}); see {run.evidence / 'host.log'}")
+        time.sleep(0.1)
+    meta["host_instance"] = json.loads(status.stdout).get("instance")
+    (root / "run.json").write_text(json.dumps(meta, indent=1) + "\n")
+    for session, mode in (("demo", "bypass"), ("approve", "ask")):
+        result = run.rui_cmd("session", "configure", "--store", run.store, "--session", session, "--workspace", run.project,
+                             "--provider", "codex", "--model", "model-a", "--permission-mode", mode)
+        if result.returncode != 0:
+            die(f"configure {session} failed: {result.stderr}")
+    for index in range(args.seed):
+        text = f"Seed history message {index + 1}: " + "lorem ipsum dolor sit amet " * 12
+        result = run.rui_cmd("session", "send", "--store", run.store, "--session", "demo", text)
+        if result.returncode != 0:
+            die(f"seed send failed: {result.stderr}")
+        handle = re.search(r"request: (\S+)", result.stderr)
+        wait_request(run, handle.group(1))
+    print(root)
+
+
+def wait_request(run, handle, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = run.rui_cmd("request", "inspect", "--store", run.store, "--key", handle, log=False)
+        if result.returncode == 0 and '"completed"' in result.stdout:
+            return json.loads(result.stdout)
+        time.sleep(0.2)
+    die(f"request {handle} did not complete")
+
+
+# ---------------------------------------------------------------- doctor
+
+
+def cmd_doctor(args):
+    run = Run(args.run)
+    checks = []
+
+    def check(name, ok, detail=""):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+    build = load_build(run.meta["sha"])
+    check("binary matches pinned build", run.rui.exists() and sha256(run.rui) == build["files_sha256"]["rui"] == run.meta["binary_sha256"],
+          f"{run.rui} sha256={sha256(run.rui) if run.rui.exists() else 'missing'}")
+    head = subprocess.run(["git", "-C", run.meta["source"], "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    check("source is pinned SHA", head == run.meta["sha"], f"{run.meta['source']} HEAD={head}")
+    if args.expect_sha:
+        check("run SHA is the expected head", run.meta["sha"] == args.expect_sha, f"run={run.meta['sha']} expected={args.expect_sha}")
+    default_store = pathlib.Path.home() / ".local/share/rui/store"
+    check("synthetic HOME and Store", str(run.home).startswith(str(run.scratch)) and str(run.store).startswith(str(run.scratch))
+          and run.store != default_store, f"HOME={run.home} store={run.store}")
+    for record in run.owned():
+        if record["kind"] in ("fixture", "host"):
+            current = process_start(record["pid"])
+            check(f"owned {record['kind']} pid {record['pid']} alive and unchanged",
+                  current is not None and current[0] == record["lstart"], f"now={current}")
+    try:
+        import urllib.request
+        reply = json.loads(urllib.request.urlopen(run.meta["fixture_url"].replace("/responses", "/health"), timeout=3).read())
+        check("fixture answers with this run id", reply.get("verify_rui_fixture") == run.meta["id"], json.dumps(reply))
+    except Exception as error:
+        check("fixture answers with this run id", False, repr(error))
+    status = run.rui_cmd("host", "status", "--store", run.store, log=False)
+    host_pid = next((r["pid"] for r in run.owned() if r["kind"] == "host"), None)
+    text = status.stdout + status.stderr
+    check("Host ready on this Store", status.returncode == 0 and "unavailable" not in text, text.strip()[:600])
+    try:
+        instance = json.loads(status.stdout).get("instance")
+    except ValueError:
+        instance = None
+    check("Host instance is the one this run launched", instance and instance == run.meta.get("host_instance"),
+          f"now={instance} launched={run.meta.get('host_instance')}")
+    held = subprocess.run(["lsof", "-a", "-p", str(host_pid), "-Fn"], capture_output=True, text=True).stdout if host_pid else ""
+    check("owned Host process holds this Store open", any(line[1:].startswith(str(run.store)) for line in held.splitlines()),
+          f"pid={host_pid}")
+    sessions = run.rui_cmd("session", "list", "--store", run.store, "--all", log=False)
+    check("configured Sessions present", sessions.returncode == 0 and '"demo"' in sessions.stdout and '"approve"' in sessions.stdout,
+          sessions.stdout.strip()[:300] or sessions.stderr.strip()[:300])
+    if run.sock.exists():
+        server = run.tmux("display-message", "-p", "#{pid} #{socket_path}", check=False)
+        check("tmux server is this run's private socket", server.returncode == 0 and str(run.sock) in server.stdout, server.stdout.strip() or server.stderr.strip())
+    trusted = accessibility()
+    checks.append({"check": "macOS Accessibility (synthetic GUI input) [informational]", "ok": None, "detail": trusted})
+    ok = all(c["ok"] for c in checks if c["ok"] is not None)
+    report = {"verdict": "PASS" if ok else "ISSUES", "run": str(run.root), "sha": run.meta["sha"], "t_ns": now_ns(), "wall": wall(), "checks": checks}
+    append_jsonl(run.evidence / "doctor.jsonl", report)
+    for c in checks:
+        mark = "ok " if c["ok"] else ("-- " if c["ok"] is None else "BAD")
+        print(f"[{mark}] {c['check']}: {c['detail']}")
+    print(report["verdict"])
+    sys.exit(0 if ok else 1)
+
+
+def accessibility():
+    try:
+        import ctypes
+        services = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        services.AXIsProcessTrusted.restype = ctypes.c_bool
+        graphics = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        graphics.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        return {"AXIsProcessTrusted": services.AXIsProcessTrusted(), "CGPreflightScreenCaptureAccess": graphics.CGPreflightScreenCaptureAccess()}
+    except Exception as error:
+        return {"error": repr(error)}
+
+
+# ---------------------------------------------------------------- terminals
+
+
+def session_argv(run, session):
+    if session == "new":
+        # Bare `rui` would select the default Store; use explicit resume of a fresh configured Session.
+        die("use --session demo|approve|NAME (create NAME first with `verify-rui rui RUN session configure ...`)")
+    return [str(run.rui), "session", "resume", "--store", str(run.store), "--", session]
+
+
+def cmd_term(args):
+    run = Run(args.run)
+    name = args.name
+    term = run.term_dir(name)
+    if term.exists():
+        die(f"terminal {name} already exists in this run; pick a new name")
+    term.mkdir(parents=True)
+    argv = session_argv(run, args.session) if not args.argv else args.argv
+    columns, rows = (int(v) for v in args.size.split("x"))
+    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    child_env = run.env(COLORTERM="truecolor")
+    tap = [python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+           "--env", json.dumps(child_env), "--size", args.size]
+    record = {"name": name, "surface": args.surface, "session": args.session, "argv": argv, "size": args.size,
+              "tapped": not args.no_tap, "t_ns": now_ns(), "wall": wall()}
+    if args.surface == "pty":
+        if args.no_tap:
+            die("--no-tap applies to tmux surfaces")
+        process = subprocess.Popen([*tap, "--mode", "fifo", "--", *argv], stdin=subprocess.DEVNULL,
+                                   stdout=open(term / "tap.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+        run.own("tap", process.pid, term=name)
+        record["tap_pid"] = process.pid
+    else:
+        if not run.sock.exists():
+            first = True
+        else:
+            first = run.tmux("has-session", "-t", "=verify-rui", check=False).returncode != 0
+        pane_cmd = shlex.join([*tap, "--mode", "terminal", "--", *argv]) if not args.no_tap else \
+            "exec env -i " + " ".join(shlex.quote(f"{k}={v}") for k, v in child_env.items()) + " " + shlex.join(argv)
+        if first:
+            run.tmux("-f", "/dev/null", "new-session", "-d", "-s", "verify-rui", "-n", name, "-x", columns, "-y", rows,
+                     "-c", run.project, pane_cmd)
+            run.tmux("set-option", "-g", "remain-on-exit", "on")
+            run.tmux("set-option", "-g", "default-size", f"{columns}x{rows}")
+            run.tmux("set-option", "-g", "window-size", "manual" if args.surface == "tmux-detached" else "latest")
+            server_pid = int(run.tmux("display-message", "-p", "#{pid}").stdout.strip())
+            run.own("tmux-server", server_pid, socket=str(run.sock))
+        else:
+            run.tmux("new-window", "-d", "-t", "verify-rui", "-n", name, "-c", run.project, pane_cmd)
+        target = f"=verify-rui:={name}"
+        run.tmux("resize-window", "-t", target, "-x", columns, "-y", rows, check=False)
+        pane = run.tmux("display-message", "-p", "-t", target, "#{pane_id} #{pane_pid} #{pane_tty}").stdout.split()
+        record.update({"tmux_target": target, "pane_id": pane[0], "pane_pid": int(pane[1]), "pane_tty": pane[2]})
+        if args.surface == "tmux-attached":
+            record["client"] = attach_client(run, name, args.size)
+    atomic_write(term / "term.json", json.dumps(record, indent=1))
+    if not args.no_tap:
+        wait_meta(term)
+    print(json.dumps(record))
+
+
+def wait_meta(term, timeout=10):
+    deadline = time.monotonic() + timeout
+    while not (term / "meta.json").exists():
+        if time.monotonic() > deadline:
+            die(f"tap did not start for {term}")
+        time.sleep(0.05)
+
+
+def attach_client(run, name, size):
+    """An owned tmux client attached through its own recorded PTY (tap in fifo mode)."""
+    client = f"{name}.client"
+    term = run.term_dir(client)
+    term.mkdir(parents=True)
+    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+    argv = [shutil.which("tmux") or "/opt/homebrew/bin/tmux", "-S", str(run.sock), "attach-session", "-t", f"=verify-rui:={name}"]
+    process = subprocess.Popen([python, str(HERE), "_tap", str(term), "--source", run.meta["source"], "--cwd", str(run.project),
+                                "--env", json.dumps(run.env()), "--size", size, "--mode", "fifo", "--", *argv],
+                               stdin=subprocess.DEVNULL, stdout=open(term / "tap.log", "w"), stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    run.own("tap", process.pid, term=client)
+    wait_meta(term)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        clients = run.tmux("list-clients", "-F", "#{client_pid} #{client_tty} #{session_name}", check=False).stdout.strip()
+        if clients:
+            break
+        time.sleep(0.1)
+    atomic_write(term / "term.json", json.dumps({"name": client, "surface": "tmux-client", "attached_to": name, "argv": argv,
+                                                  "tap_pid": process.pid, "clients": clients}, indent=1))
+    return {"term": client, "tap_pid": process.pid, "clients": clients}
+
+
+def term_record(run, name):
+    path = run.term_dir(name) / "term.json"
+    if not path.exists():
+        die(f"no terminal {name} in {run.root}")
+    return json.loads(path.read_text())
+
+
+KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-r": b"\x12", "BSpace": b"\x7f",
+        "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "End": b"\x1b[F", "Home": b"\x1b[H",
+        "Tab": b"\t", "S-PgUp": b"\x1b[5;2~", "WheelUp": b"\x1b[<64;10;10M", "WheelDown": b"\x1b[<65;10;10M"}
+
+
+def cmd_send(args):
+    """Inject input and log exactly what was injected, by which mechanism, when."""
+    run = Run(args.run)
+    record = term_record(run, args.name)
+    if args.text is not None:
+        payload, tmux_args = args.text.encode(), ["-l", args.text]
+    elif args.hex is not None:
+        payload, tmux_args = bytes.fromhex(args.hex), None
+    else:
+        payload = b"".join(KEYS[k] for k in args.keys)
+        tmux_args = list(args.keys)
+    via = args.via or ("fifo" if record["surface"] in ("pty", "tmux-client") else "tmux")
+    entry = {"t_ns": now_ns(), "wall": wall(), "term": args.name, "via": via, "payload_hex": payload.hex(),
+             "payload_text": payload.decode("utf-8", "backslashreplace")}
+    if via == "fifo":
+        fd = os.open(run.term_dir(args.name) / "in.fifo", os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, payload)
+        os.close(fd)
+    elif via == "client":
+        client = record.get("client", {}).get("term")
+        if not client:
+            die("--via client needs a tmux-attached terminal")
+        entry["client_term"] = client
+        fd = os.open(run.term_dir(client) / "in.fifo", os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, payload)
+        os.close(fd)
+    else:
+        if tmux_args is None:
+            tmux_args = ["-H", *[f"{b:02x}" for b in payload]]
+        argv = ["send-keys", "-t", record["tmux_target"], *tmux_args]
+        entry["tmux_argv"] = argv
+        run.tmux(*argv)
+    entry["t_end_ns"] = now_ns()
+    append_jsonl(run.evidence / "injections.jsonl", entry)
+    print(json.dumps(entry, ensure_ascii=False))
+
+
+def cmd_signal(args):
+    run = Run(args.run)
+    meta = json.loads((run.term_dir(args.name) / "meta.json").read_text())
+    wrapper = meta["child_pid"]
+    current = process_start(wrapper)
+    if current is None or current[0] != meta["child_lstart"]:
+        die(f"wrapper {wrapper} is not the process this terminal started (now {current})")
+    children = subprocess.run(["pgrep", "-P", str(wrapper)], capture_output=True, text=True).stdout.split()
+    if len(children) != 1:
+        die(f"expected exactly one Rui child of wrapper {wrapper}, found {children}")
+    pid = int(children[0])
+    command = process_start(pid)
+    if command is None or not command[1].startswith(json.loads((run.term_dir(args.name) / "term.json").read_text())["argv"][0]):
+        die(f"child {pid} is not this terminal's Rui ({command})")
+    signum = getattr(signal, f"SIG{args.signal}")
+    entry = {"t_ns": now_ns(), "wall": wall(), "term": args.name, "via": "kill", "pid": pid, "signal": args.signal}
+    os.kill(pid, signum)
+    append_jsonl(run.evidence / "injections.jsonl", entry)
+    print(json.dumps(entry))
+
+
+def frames(run, name):
+    return read_jsonl(run.term_dir(name) / "frames.jsonl")
+
+
+def composer_ready(screen, cursor):
+    lines = screen.split("\n")
+    x, y = cursor
+    if "Opening…" in screen or y >= len(lines):
+        return False
+    line = lines[y]
+    return x >= 2 and (line == "›" or line.startswith("› "))
+
+
+def cmd_wait(args):
+    """Wait for a committed frame (after --after GEN) that contains MARKER."""
+    run = Run(args.run)
+    deadline = time.monotonic() + args.timeout
+    after = args.after
+    if after is None:
+        after = -1
+    while time.monotonic() < deadline:
+        for frame in frames(run, args.name):
+            if frame["gen"] <= after:
+                continue
+            if args.marker in frame["screen"] and (not args.composer or composer_ready(frame["screen"], frame["cursor"])) \
+                    and (args.absent is None or args.absent not in frame["screen"]):
+                print(json.dumps({"gen": frame["gen"], "t_ns": frame["t_ns"], "cursor": frame["cursor"]}))
+                print(frame["screen"])
+                return
+        exit_path = run.term_dir(args.name) / "exit.json"
+        if exit_path.exists() and not args.allow_exit:
+            die(f"terminal exited before marker {args.marker!r}: {exit_path}", 1)
+        time.sleep(0.05)
+    last = frames(run, args.name)
+    print(last[-1]["screen"] if last else "(no committed frame)")
+    die(f"timeout waiting for {args.marker!r} after gen {after}", 1)
+
+
+def cmd_screen(args):
+    """Print and save the current committed frame (and tmux's view for tmux panes)."""
+    run = Run(args.run)
+    term = run.term_dir(args.name)
+    label = args.label or f"t{now_ns()}"
+    shots = term / "shots"
+    shots.mkdir(exist_ok=True)
+    committed = (term / "committed.txt").read_text() if (term / "committed.txt").exists() else "(no committed frame)\n"
+    (shots / f"{label}.committed.txt").write_text(committed)
+    print(committed, end="")
+    record = term_record(run, args.name)
+    if record.get("tmux_target"):
+        pane = run.tmux("capture-pane", "-p", "-e", "-t", record["tmux_target"], check=False).stdout
+        (shots / f"{label}.tmux.ansi").write_text(pane)
+        plain = run.tmux("capture-pane", "-p", "-t", record["tmux_target"], check=False).stdout
+        (shots / f"{label}.tmux.txt").write_text(plain)
+        flags = run.tmux("display-message", "-p", "-t", record["tmux_target"],
+                         "alternate_on=#{alternate_on} cursor_flag=#{cursor_flag} mouse_any_flag=#{mouse_any_flag} "
+                         "mouse_sgr_flag=#{mouse_sgr_flag} keypad_cursor_flag=#{keypad_cursor_flag} pane_dead=#{pane_dead} "
+                         "pane_dead_status=#{pane_dead_status} cursor=#{cursor_x},#{cursor_y} size=#{pane_width}x#{pane_height} "
+                         "session_attached=#{session_attached}", check=False).stdout
+        (shots / f"{label}.tmux-flags.txt").write_text(flags)
+        print(f"--- tmux view ({label})\n{plain}--- tmux flags: {flags}", end="")
+    append_jsonl(run.evidence / "shots.jsonl", {"t_ns": now_ns(), "term": args.name, "label": label})
+
+
+def cmd_rui(args):
+    """Any one-shot Rui command, with this run's HOME and an enforced --store."""
+    run = Run(args.run)
+    argv = list(args.argv)
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if "--store" not in argv and argv[:2] != ["request", "list"]:
+        die("pass --store explicitly; this run's Store is " + str(run.store))
+    result = run.rui_cmd(*argv)
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------- evidence and correlation
+
+
+def cmd_evidence(args):
+    """Export Store/capture facts and correlate injections, input bytes, captures and provider requests."""
+    run = Run(args.run)
+    out = run.evidence / "export"
+    out.mkdir(exist_ok=True)
+    exports = {}
+    for name, argv in (("request-list", ["request", "list"]),
+                       ("sessions", ["session", "list", "--store", run.store, "--all"]),
+                       ("demo-inspect", ["session", "inspect", "--store", run.store, "--session", "demo", "--profile", "full"]),
+                       ("approve-inspect", ["session", "inspect", "--store", run.store, "--session", "approve", "--profile", "full"])):
+        result = run.rui_cmd(*argv)
+        (out / f"{name}.json").write_text(result.stdout)
+        if result.stderr:
+            (out / f"{name}.stderr").write_text(result.stderr)
+        exports[name] = result.returncode
+    captures = []
+    try:
+        listed = json.loads((out / "request-list.json").read_text() or "[]")
+        entries = listed if isinstance(listed, list) else listed.get("requests", listed.get("captures", []))
+        for entry in entries:
+            key = entry.get("key") if isinstance(entry, dict) else entry
+            if not key:
+                continue
+            inspect = run.rui_cmd("request", "inspect", "--store", run.store, "--key", key)
+            (out / f"request-{key}.json").write_text(inspect.stdout + inspect.stderr)
+            captures.append({"key": key, "entry": entry, "inspect_rc": inspect.returncode,
+                             "inspect": inspect.stdout[:4000]})
+    except Exception as error:
+        captures.append({"error": repr(error)})
+    provider = [r for r in read_jsonl(run.evidence / "provider.jsonl") if "kind" in r]
+    injections = read_jsonl(run.evidence / "injections.jsonl")
+    terms = {}
+    for term in sorted((run.evidence / "terms").glob("*")) if (run.evidence / "terms").exists() else []:
+        inputs = read_jsonl(term / "input.jsonl")
+        terms[term.name] = {"input_chunks": len(inputs), "input_bytes": sum(i["n"] for i in inputs),
+                            "frames": len(read_jsonl(term / "frames.jsonl")),
+                            "exit": json.loads((term / "exit.json").read_text()) if (term / "exit.json").exists() else None}
+    timeline = []
+    for i in injections:
+        timeline.append((i["t_ns"], "inject", i["term"], i.get("payload_text") or i.get("signal")))
+    for term in terms:
+        for chunk in read_jsonl(run.evidence / "terms" / term / "input.jsonl"):
+            timeline.append((chunk["t_ns"], "received", term, chunk["text"]))
+    for request in provider:
+        timeline.append((request["t_ns"], "provider", request["kind"], request["user_text"]))
+    timeline.sort()
+    lines = [f"{t / 1e9:.6f} {kind:8} {who:16} {json.dumps(text, ensure_ascii=False)[:200]}" for t, kind, who, text in timeline]
+    (run.evidence / "timeline.txt").write_text("\n".join(lines) + "\n")
+    summary = {"t_ns": now_ns(), "wall": wall(), "sha": run.meta["sha"], "exports_rc": exports,
+               "captures": captures, "provider_requests": [{k: r[k] for k in ("n", "kind", "user_text", "t_ns")} for r in provider],
+               "terms": terms, "injections": len(injections)}
+    (run.evidence / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False))
+    print(json.dumps(summary, indent=1, ensure_ascii=False)[:6000])
+    print(f"timeline: {run.evidence / 'timeline.txt'}")
+
+
+# ---------------------------------------------------------------- journey: the end-to-end compose/submit proof
+
+
+def cmd_journey(args):
+    """compose-submit: open demo, type a draft, verify draft cells, submit once,
+    verify the answer, one provider request with the exact text, one new capture, then /exit restores."""
+    run = Run(args.run)
+    name = args.name
+    text = args.text
+    result = {"journey": "compose-submit", "surface": args.surface, "term": name, "sha": run.meta["sha"], "steps": []}
+
+    def step(label, ok, **facts):
+        result["steps"].append({"step": label, "ok": bool(ok), "t_ns": now_ns(), **facts})
+        print(f"[{'ok ' if ok else 'BAD'}] {label} {json.dumps(facts, ensure_ascii=False)[:300]}", flush=True)
+        return ok
+
+    def helper(*argv, check=True):
+        completed = subprocess.run([sys.executable, str(HERE), *argv], capture_output=True, text=True)
+        if check and completed.returncode != 0:
+            raise RuntimeError(f"{argv}: {completed.stderr.strip()}\n{completed.stdout[-2000:]}")
+        return completed
+
+    before_requests = len([r for r in read_jsonl(run.evidence / "provider.jsonl") if "kind" in r])
+    before_captures = run.rui_cmd("request", "list").stdout
+    try:
+        helper("term", str(run.root), name, "--surface", args.surface, "--session", "demo", "--size", args.size)
+        opened = helper("wait", str(run.root), name, "--marker", "›", "--composer", "--timeout", "20")
+        gen = json.loads(opened.stdout.splitlines()[0])["gen"]
+        step("open: composer ready", True, gen=gen)
+        helper("screen", str(run.root), name, "--label", "01-opened")
+        initial_input = read_jsonl(run.term_dir(name) / "input.jsonl")
+        step("no input received before first injection", not initial_input or not [i for i in initial_input if not i["text"].startswith("\x1b[")],
+             received=[i["text"] for i in initial_input])
+        helper("send", str(run.root), name, "--text", text)
+        drafted = helper("wait", str(run.root), name, "--marker", "› " + text, "--after", str(gen), "--timeout", "10")
+        frame = json.loads(drafted.stdout.splitlines()[0])
+        draft_line = drafted.stdout.splitlines()[1:][frame["cursor"][1]]
+        step("draft cells show exactly the typed text at the caret row", draft_line == "› " + text and frame["cursor"][0] == 2 + len(text),
+             line=draft_line, cursor=frame["cursor"])
+        helper("screen", str(run.root), name, "--label", "02-draft")
+        helper("send", str(run.root), name, "--keys", "Enter")
+        answered = helper("wait", str(run.root), name, "--marker", "Fixture answer", "--composer", "--after", str(frame["gen"]), "--timeout", "20")
+        answer_gen = json.loads(answered.stdout.splitlines()[0])["gen"]
+        step("answer shown and composer ready", True, gen=answer_gen)
+        helper("screen", str(run.root), name, "--label", "03-answered")
+        time.sleep(1.0)
+        provider = [r for r in read_jsonl(run.evidence / "provider.jsonl") if "kind" in r][before_requests:]
+        step("exactly one provider request, carrying the exact text", len(provider) == 1 and provider[0]["user_text"] == text,
+             requests=[(r["n"], r["user_text"]) for r in provider])
+        received = "".join(i["text"] for i in read_jsonl(run.term_dir(name) / "input.jsonl"))
+        step("received input bytes equal the injected text plus one CR", received.endswith(text + "\r") and received.count("\r") == 1,
+             received=received)
+        after_captures = run.rui_cmd("request", "list").stdout
+        new_keys = sorted(set(json.loads(after_captures or "[]")) - set(json.loads(before_captures or "[]")))
+        observed = None
+        if len(new_keys) == 1:
+            inspected = run.rui_cmd("request", "inspect", "--store", run.store, "--key", new_keys[0])
+            observed = json.loads(inspected.stdout).get("observation", {}) if inspected.returncode == 0 else None
+        expected_sha = hashlib.sha256(text.encode()).hexdigest()
+        step("exactly one new capture key; its saved input is the exact text, completed",
+             observed is not None and observed.get("input", {}).get("sha256") == expected_sha
+             and observed.get("kind") == "message" and observed.get("result", {}).get("status") == "completed",
+             new_keys=new_keys, input=observed and observed.get("input"), expected_sha256=expected_sha,
+             result=observed and observed.get("result", {}).get("status"))
+        helper("send", str(run.root), name, "--text", "/exit")
+        helper("send", str(run.root), name, "--keys", "Enter")
+        deadline = time.monotonic() + 10
+        exit_path = run.term_dir(name) / "exit.json"
+        while not exit_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        exited = json.loads(exit_path.read_text()) if exit_path.exists() else None
+        step("/exit: Rui exits 0 with termios restored and alternate screen left",
+             exited and exited["target_rc"] == "0" and exited["termios_restored"] and exited["alternate_screen_active_at_exit"] is False,
+             exit=exited and {k: exited[k] for k in ("target_rc", "termios_restored", "alternate_screen_active_at_exit")},
+             resume_hint=exited and (exited["main_screen_plain_tail"] or "")[-300:])
+        if args.surface.startswith("tmux"):
+            helper("screen", str(run.root), name, "--label", "04-after-exit")
+    except Exception as error:
+        step("journey aborted", False, error=str(error)[-1500:])
+    result["verdict"] = "PASS" if all(s["ok"] for s in result["steps"]) else "ISSUES"
+    out = run.evidence / f"journey-{name}.json"
+    out.write_text(json.dumps(result, indent=1, ensure_ascii=False))
+    print(result["verdict"], out)
+    sys.exit(0 if result["verdict"] == "PASS" else 1)
+
+
+def cmd_replay(args):
+    """Re-feed a recorded terminal's received input bytes, with original gaps, into a new PTY terminal.
+
+    Source may be another run (--from-run). The new terminal opens --session and waits for its
+    composer first; chunks are replayed relative to the source's first received chunk.
+    """
+    run = Run(args.run)
+    source_run = Run(args.from_run) if args.from_run else run
+    chunks = read_jsonl(source_run.term_dir(args.source) / "input.jsonl")
+    if args.skip_reports:
+        chunks = [c for c in chunks if not re.fullmatch(r"(\x1b\[\?\d+;\d\$y)+", c["text"])]
+    if not chunks:
+        die("source terminal received no input")
+    subprocess.run([sys.executable, str(HERE), "term", str(run.root), args.name, "--surface", "pty",
+                    "--session", args.session, "--size", args.size], check=True, capture_output=True)
+    subprocess.run([sys.executable, str(HERE), "wait", str(run.root), args.name, "--marker", "›", "--composer",
+                    "--timeout", "20"], check=True, capture_output=True)
+    start, origin = time.monotonic_ns(), chunks[0]["t_ns"]
+    for chunk in chunks:
+        delay = (chunk["t_ns"] - origin) - (time.monotonic_ns() - start)
+        if delay > 0:
+            time.sleep(delay / 1e9)
+        fd = os.open(run.term_dir(args.name) / "in.fifo", os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, bytes.fromhex(chunk["hex"]))
+        os.close(fd)
+        append_jsonl(run.evidence / "injections.jsonl", {"t_ns": now_ns(), "wall": wall(), "term": args.name, "via": "replay",
+                                                         "source": f"{source_run.root.name}/{args.source}@{chunk['offset']}",
+                                                         "payload_hex": chunk["hex"], "payload_text": chunk["text"]})
+    print(json.dumps({"replayed_chunks": len(chunks), "term": args.name}))
+
+
+# ---------------------------------------------------------------- physical terminal handoff
+
+
+def cmd_gui(args):
+    """Open a real Terminal.app window attached to this run's tmux window, for a human's physical keys/wheel.
+
+    Writes a .command file and opens it; the window's input reaches Rui through tmux and the tap,
+    so input.jsonl records exactly what the physical terminal sent. Nothing is synthesized.
+    """
+    run = Run(args.run)
+    record = term_record(run, args.name)
+    if not record.get("tmux_target"):
+        die("gui needs a tmux terminal")
+    script = run.scratch / f"attach-{args.name}.command"
+    script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s\\007'\nexec %s -S %s attach-session -t %s\n" % (
+        args.name, shutil.which("tmux"), shlex.quote(str(run.sock)), shlex.quote(record["tmux_target"])))
+    script.chmod(0o700)
+    if args.open:
+        subprocess.run(["open", "-a", args.app, str(script)], check=True)
+    append_jsonl(run.evidence / "injections.jsonl", {"t_ns": now_ns(), "wall": wall(), "term": args.name, "via": "gui-open",
+                                                     "app": args.app, "script": str(script), "opened": args.open})
+    print(f"attach script: {script}")
+    print("Physical checklist (a human types these in that window; input.jsonl records the bytes):")
+    for item in ("type 'hello' then Enter", "PgUp, PgDn", "Ctrl-G", "mouse wheel up 3 notches, down 3 notches",
+                 "arrow Up x3, Down x3", "Esc", "on an Action prompt: 'a' Enter (or 'd' Enter)", "Ctrl-C"):
+        print(f"  - {item}")
+
+
+# ---------------------------------------------------------------- cleanup
+
+
+def cmd_cleanup(args):
+    """Stop exactly what this run started; preserve evidence (and a Store archive)."""
+    run = Run(args.run)
+    report = {"t_ns": now_ns(), "wall": wall(), "actions": []}
+
+    def act(what, **facts):
+        report["actions"].append({"action": what, **facts})
+        print(what, json.dumps(facts)[:300])
+
+    if not args.no_export:
+        try:
+            subprocess.run([sys.executable, str(HERE), "evidence", str(run.root)], capture_output=True, timeout=120)
+            act("exported evidence")
+        except Exception as error:
+            act("export failed", error=repr(error))
+    if run.sock.exists():
+        result = run.tmux("kill-server", check=False)
+        act("tmux kill-server (private socket)", socket=str(run.sock), rc=result.returncode)
+    stop = run.rui_cmd("host", "stop", "--store", run.store) if run.store.exists() else None
+    act("rui host stop", rc=stop and stop.returncode)
+    deadline = time.monotonic() + 15
+    for record in reversed(run.owned()):
+        pid = record["pid"]
+        while True:
+            current = process_start(pid)
+            if current is None or current[0] != record["lstart"]:
+                act(f"{record['kind']} {pid} gone", now=current)
+                break
+            if time.monotonic() > deadline or record["kind"] != "host":
+                os.kill(pid, signal.SIGTERM if record["kind"] != "host" else signal.SIGKILL)
+                act(f"signalled owned {record['kind']} {pid}", lstart=record["lstart"])
+                time.sleep(0.3)
+                if process_start(pid) is not None and process_start(pid)[0] == record["lstart"]:
+                    os.kill(pid, signal.SIGKILL)
+                    act(f"SIGKILL owned {record['kind']} {pid}")
+                continue
+            time.sleep(0.2)
+    if run.store.exists():
+        with tarfile.open(run.evidence / "store-after.tgz", "w:gz") as archive:
+            archive.add(run.store, arcname="store")
+        act("archived Store into evidence", path=str(run.evidence / "store-after.tgz"))
+    if run.scratch.exists() and str(run.scratch).startswith("/private/tmp/vr."):
+        shutil.rmtree(run.scratch)
+        act("removed scratch (synthetic HOME, Store, project, sockets)", path=str(run.scratch))
+    survivors = [r for r in run.owned() if process_start(r["pid"]) and process_start(r["pid"])[0] == r["lstart"]]
+    report["survivors"] = survivors
+    report["evidence_files"] = sum(1 for _ in run.evidence.rglob("*") if _.is_file())
+    append_jsonl(run.root / "cleanup.jsonl", report)
+    print(json.dumps({"survivors": survivors, "evidence": str(run.evidence), "evidence_files": report["evidence_files"]}))
+    sys.exit(1 if survivors else 0)
+
+
+def cmd_list(_args):
+    for root in sorted((CACHE / "runs").glob("*")):
+        meta = json.loads((root / "run.json").read_text())
+        cleaned = (root / "cleanup.jsonl").exists()
+        print(f"{root}  sha={meta['sha'][:12]} label={meta.get('label')} {'cleaned' if cleaned else 'LIVE'}")
+
+
+# ---------------------------------------------------------------- CLI
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="verify-rui", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("build", help="build a pinned SHA once (ReleaseSafe) into the cache")
+    p.add_argument("sha"); p.add_argument("--repo"); p.add_argument("--pkg-dir"); p.add_argument("--force", action="store_true")
+    p.add_argument("--source", help="existing clean detached worktree of SHA (default: cache worktree)")
+    p.set_defaults(func=cmd_build)
+    p = sub.add_parser("new", help="new run: synthetic HOME/Store, fixture provider, Host, Sessions demo(bypass)/approve(ask)")
+    p.add_argument("sha"); p.add_argument("--seed", type=int, default=0, help="seed N answered messages into demo")
+    p.add_argument("--label", default="")
+    p.set_defaults(func=cmd_new)
+    p = sub.add_parser("doctor", help="read-only: right binary/SHA, owned Host ready, owned fixture, private tmux")
+    p.add_argument("run"); p.add_argument("--expect-sha")
+    p.set_defaults(func=cmd_doctor)
+    p = sub.add_parser("term", help="open a Rui terminal: pty | tmux-detached | tmux-attached")
+    p.add_argument("run"); p.add_argument("name")
+    p.add_argument("--surface", choices=["pty", "tmux-detached", "tmux-attached"], required=True)
+    p.add_argument("--session", default="demo"); p.add_argument("--size", default="80x24")
+    p.add_argument("--no-tap", action="store_true", help="tmux only: run Rui directly in the pane (control; no byte log)")
+    p.add_argument("argv", nargs="*", help="override argv (must still pass --store)")
+    p.set_defaults(func=cmd_term)
+    p = sub.add_parser("send", help="inject input: --text, --hex or --keys; logged with monotonic time")
+    p.add_argument("run"); p.add_argument("name")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--text"); group.add_argument("--hex"); group.add_argument("--keys", nargs="+", choices=sorted(KEYS))
+    p.add_argument("--via", choices=["fifo", "tmux", "client"], help="default: fifo for pty, tmux send-keys for tmux panes")
+    p.set_defaults(func=cmd_send)
+    p = sub.add_parser("signal", help="send INT or TERM to the Rui process of a terminal (verified ownership)")
+    p.add_argument("run"); p.add_argument("name"); p.add_argument("signal", choices=["INT", "TERM", "HUP"])
+    p.set_defaults(func=cmd_signal)
+    p = sub.add_parser("wait", help="wait for a committed frame containing MARKER")
+    p.add_argument("run"); p.add_argument("name"); p.add_argument("--marker", required=True)
+    p.add_argument("--absent"); p.add_argument("--composer", action="store_true"); p.add_argument("--after", type=int)
+    p.add_argument("--timeout", type=float, default=15); p.add_argument("--allow-exit", action="store_true")
+    p.set_defaults(func=cmd_wait)
+    p = sub.add_parser("screen", help="print/save the committed frame (+ tmux capture-pane and pane flags)")
+    p.add_argument("run"); p.add_argument("name"); p.add_argument("--label")
+    p.set_defaults(func=cmd_screen)
+    p = sub.add_parser("rui", help="run a one-shot Rui command with this run's HOME (requires --store)")
+    p.add_argument("run"); p.add_argument("argv", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_rui)
+    p = sub.add_parser("evidence", help="export Store/capture facts and build timeline.txt / summary.json")
+    p.add_argument("run")
+    p.set_defaults(func=cmd_evidence)
+    p = sub.add_parser("journey", help="scripted compose-submit journey (the proof run)")
+    p.add_argument("run"); p.add_argument("name")
+    p.add_argument("--surface", choices=["pty", "tmux-detached", "tmux-attached"], default="tmux-detached")
+    p.add_argument("--size", default="80x24"); p.add_argument("--text", default="Hello from verify-rui")
+    p.set_defaults(func=cmd_journey)
+    p = sub.add_parser("replay", help="replay a terminal's received input bytes (original timing) into a new PTY terminal")
+    p.add_argument("run"); p.add_argument("source"); p.add_argument("name"); p.add_argument("--from-run")
+    p.add_argument("--session", default="demo"); p.add_argument("--size", default="80x24")
+    p.add_argument("--skip-reports", action="store_true", help="drop DECRPM terminal replies from the replay")
+    p.set_defaults(func=cmd_replay)
+    p = sub.add_parser("gui", help="write (and --open) a Terminal.app attach script for physical keys/wheel")
+    p.add_argument("run"); p.add_argument("name"); p.add_argument("--open", action="store_true")
+    p.add_argument("--app", default="Terminal")
+    p.set_defaults(func=cmd_gui)
+    p = sub.add_parser("cleanup", help="stop owned processes/tmux server; archive Store; keep evidence")
+    p.add_argument("run"); p.add_argument("--no-export", action="store_true")
+    p.set_defaults(func=cmd_cleanup)
+    p = sub.add_parser("list", help="list runs")
+    p.set_defaults(func=cmd_list)
+    p = sub.add_parser("_tap")
+    p.add_argument("term_dir"); p.add_argument("--source", required=True); p.add_argument("--cwd", required=True)
+    p.add_argument("--env", required=True); p.add_argument("--size", default="80x24")
+    p.add_argument("--mode", choices=["terminal", "fifo"], required=True); p.add_argument("--hold", action="store_true")
+    p.add_argument("argv", nargs="+")
+    p.set_defaults(func=tap_main)
+    p = sub.add_parser("_fixture")
+    p.add_argument("run")
+    p.set_defaults(func=fixture_main)
+    args = parser.parse_args()
+    if args.command in ("_tap",) and args.argv and args.argv[0] == "--":
+        args.argv = args.argv[1:]
+    if args.command == "term" and args.argv and args.argv[0] == "--":
+        args.argv = args.argv[1:]
+    args.func(args)
+
+
+if __name__ == "__main__":
+    if VENV_PYTHON.exists() and pathlib.Path(sys.prefix).resolve() != (CACHE / "venv").resolve() and os.environ.get("VERIFY_RUI_REEXEC") != "1":
+        os.environ["VERIFY_RUI_REEXEC"] = "1"
+        os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(HERE), *sys.argv[1:]])
+    main()
