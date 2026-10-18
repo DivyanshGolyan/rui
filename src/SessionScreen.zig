@@ -8,13 +8,21 @@ const Frame = @import("TerminalFrame.zig");
 const View = @import("session_view.zig");
 const Self = @This();
 
+/// What the conversation area shows. The transcript is a frozen copy of live
+/// text that can grow older canonical pages at its top; inspection and Action
+/// documents come from files. Only an Action view can collect consent reads.
+pub const ViewKind = enum { live, transcript, inspection, action };
+
 vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
 live: Document = .{},
 browsing: Document = .{},
+staging: Document = .{},
 composer: Frame.Composer = .{},
-selected: bool = false,
-file_action: bool = false,
+view: ViewKind = .live,
+// Newer transcript rows left the copy so older pages fit; returning to them
+// means returning to live.
+newer_trimmed: bool = false,
 preview_complete: bool = true,
 action_seen: usize = 0,
 approval_ready: bool = false,
@@ -43,13 +51,18 @@ pub fn append(self: *Self, bytes: []const u8) !void {
     try self.live.append(bytes);
 }
 
+/// Absolute live offsets: bytes before `origin` left the retained view.
+pub fn liveEnd(self: *const Self) u64 {
+    return self.live.origin + self.live.length;
+}
+
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.vx.caps.unicode == method) return;
     self.action_seen = 0;
     self.approval_ready = false;
     self.vx.caps.unicode = method;
     self.vx.screen.width_method = method;
-    inline for (.{ &self.live, &self.browsing, &self.composer }) |document| {
+    inline for (.{ &self.live, &self.browsing, &self.staging, &self.composer }) |document| {
         document.width_method = method;
         document.dirty = true;
     }
@@ -57,19 +70,87 @@ pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
 }
 
 pub fn actionVisible(self: *const Self) bool {
-    return self.selected and self.file_action;
+    return self.view == .action;
 }
 
 pub fn approvalReady(self: *const Self) bool {
     return self.actionVisible() and self.preview_complete and self.approval_ready;
 }
 
-pub fn browse(self: *Self, down: bool) !void {
-    if (!self.selected) {
-        self.browsing = self.live;
-        self.selected = true;
+/// Starts browsing a copy of live text from absolute offset `front`, a
+/// position from which older canonical pages continue without a gap.
+pub fn beginTranscript(self: *Self, front: u64) !void {
+    std.debug.assert(self.view == .live);
+    self.browsing = self.live;
+    self.browsing.discardFront(front);
+    try self.browsing.layout(@max(1, self.vx.screen.width));
+    self.browsing.top = self.browsing.displayRows() -| self.height;
+    self.newer_trimmed = false;
+    self.view = .transcript;
+}
+
+/// Pages or lines through the shown document. Returns true when a downward
+/// move at the transcript's end returned to live output.
+pub fn browse(self: *Self, down: bool, page: bool) bool {
+    std.debug.assert(self.view != .live);
+    const document = &self.browsing;
+    const end = document.atBottom(self.height);
+    const unseen = if (self.actionVisible() and self.preview_complete and !self.approval_ready) self.action_seen else null;
+    document.browse(down, if (page) self.height else 1, self.height, unseen);
+    if (self.view != .transcript or !down) return false;
+    // Untrimmed transcript ends where live output continues.
+    if ((end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.height))) {
+        self.view = .live;
+        return true;
     }
-    self.browsing.browse(down, self.height, if (self.actionVisible() and self.preview_complete and !self.approval_ready) self.action_seen else null);
+    return false;
+}
+
+/// The transcript shows its first retained row, so older text is wanted.
+pub fn transcriptAtTop(self: *const Self) bool {
+    return self.view == .transcript and self.browsing.atTop(self.height);
+}
+
+/// Prepends one older canonical page, rendered to `file`, above the
+/// transcript without moving the rows in view.
+pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
+    std.debug.assert(self.view == .transcript);
+    try self.load(&self.staging, io, file, false);
+    const width = @max(1, self.vx.screen.width);
+    if (self.staging.origin != 0) {
+        // A page larger than the view cannot join its older neighbour without
+        // a gap. Keep its newest whole lines and say so at the gap.
+        const text = "Rui: Earlier rows of this saved page exceed the view.\n";
+        const retained = self.staging.bytes[0..self.staging.length];
+        const cut = std.mem.indexOfScalarPos(u8, retained, text.len, '\n') orelse retained.len - 1;
+        self.staging.discardFront(self.staging.origin + cut + 1);
+        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.width_method };
+        try marker.append(View.Style.quiet.code(self.colour));
+        try marker.append(text);
+        try marker.append(View.Style.normal.code(self.colour));
+        _ = try self.staging.prepend(&marker, width, 1);
+    }
+    if (try self.browsing.prepend(&self.staging, width, self.height)) self.newer_trimmed = true;
+}
+
+/// Shows that the transcript reached the start of the saved conversation.
+pub fn markBeginning(self: *Self) !void {
+    try self.boundary("Beginning of conversation\n");
+}
+
+/// Shows that live rows above this point left the view and older saved
+/// pages cannot join here without a gap.
+pub fn markGap(self: *Self) !void {
+    try self.boundary("Earlier rows left this view.\n");
+}
+
+fn boundary(self: *Self, text: []const u8) !void {
+    std.debug.assert(self.view == .transcript);
+    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
+    try marker.append(View.Style.quiet.code(self.colour));
+    try marker.append(text);
+    try marker.append(View.Style.normal.code(self.colour));
+    if (try self.browsing.prepend(&marker, @max(1, self.vx.screen.width), self.height)) self.newer_trimmed = true;
 }
 
 pub fn latest(self: *Self) !void {
@@ -77,45 +158,50 @@ pub fn latest(self: *Self) !void {
         const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
         self.action_seen = seen;
-    } else {
-        self.selected = false;
-        self.file_action = false;
+    } else self.view = .live;
+}
+
+/// Inspection and Action files show their prefix; an older page keeps its
+/// newest text, which adjoins the transcript.
+fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool) !void {
+    const length = (try file.stat(io)).size;
+    const end = if (prefix) @min(Viewport.capacity, length) else length;
+    document.clear();
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < end) {
+        const wanted: usize = @intCast(@min(buffer.len, end - offset));
+        if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
+        try document.append(buffer[0..wanted]);
+        offset += wanted;
     }
+    document.width_method = self.vx.caps.unicode;
+    try document.layout(@max(1, self.vx.screen.width));
 }
 
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
-    self.browsing.clear();
-    var buffer: [4096]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < @min(Viewport.capacity, length)) {
-        const wanted: usize = @intCast(@min(buffer.len, @min(Viewport.capacity, length) - offset));
-        if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
-        try self.browsing.append(buffer[0..wanted]);
-        offset += wanted;
-    }
-    self.browsing.width_method = self.vx.caps.unicode;
-    try self.browsing.layout(@max(1, self.vx.screen.width));
+    self.view = if (action) .action else .inspection;
+    try self.load(&self.browsing, io, file, true);
     self.browsing.top = 0;
-    self.selected = true;
-    self.file_action = action;
     self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
     self.approval_ready = false;
-    if (action) self.action_seen = 0;
-    if (action) self.action_view = .{ .io = io, .file = file };
+    if (action) {
+        self.action_seen = 0;
+        self.action_view = .{ .io = io, .file = file };
+    }
 }
 
 pub fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
     self.action_seen = 0;
     self.approval_ready = false;
     self.action_view = .{ .io = io, .file = file };
-    if (!self.selected) try self.showFile(io, file, true);
+    if (self.view == .live) try self.showFile(io, file, true);
 }
 
 pub fn releaseAction(self: *Self) void {
     self.action_view = null;
-    self.file_action = false;
-    self.selected = false;
+    self.view = .live;
 }
 
 pub fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) !void {
@@ -135,10 +221,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     var frame: std.Io.Writer.Allocating = .init(self.memory.allocator());
     defer frame.deinit();
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
-        // Browsing resets on resize; draft bytes and its caret do not.
+        // Reflow keeps the first browsed line in view and the draft bytes and
+        // caret unchanged. An Action restarts its reading from the top.
+        const anchor: ?usize = if (self.view == .transcript or self.view == .inspection) self.browsing.offset(self.browsing.first(self.height)) else null;
         self.browsing.top = 0;
         self.action_seen = 0;
         self.approval_ready = false;
+        defer if (anchor) |position| {
+            self.browsing.layout(size.col) catch {};
+            self.browsing.top = self.browsing.rowAt(position);
+        };
         // A render failure retires this invocation; no old grid is needed for
         // rollback. Retire it before allocating replacements, rather than
         // charging both geometries at once (notably on 16-KiB-page macOS).
@@ -157,10 +249,11 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     const approval = std.mem.eql(u8, prompt, "> ");
     var call_storage: [3][View.Live.line_bytes]u8 = undefined;
     var calls: [3][]const u8 = undefined;
-    if (!self.selected) for (0..live.count) |index| {
+    const selected = self.view != .live;
+    if (!selected) for (0..live.count) |index| {
         calls[index] = try live.line(index, &call_storage[index]);
     };
-    const document = if (self.selected) &self.browsing else &self.live;
+    const document = if (selected) &self.browsing else &self.live;
     var layout: Frame = undefined;
     try layout.plan(document, &self.composer, .{
         .width = size.col,
@@ -168,9 +261,9 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .cursor = cursor,
         .status = status,
         .approval = approval,
-        .calls = calls[0..if (self.selected) 0 else live.count],
+        .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
-        .selected = self.selected,
+        .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
         .action_seen = self.action_seen,
@@ -386,16 +479,22 @@ test "optional spacing yields before exact-fit transcript rows" {
                 for (expected, 0..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
             }
             try std.testing.expectEqualStrings("›", window.readCell(0, 23).?.char.grapheme);
-            try screen.browse(false);
+            try screen.beginTranscript(0);
+            try std.testing.expect(!screen.browse(false, true));
             try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
-            try screen.browse(true);
+            // The browsing heading takes a row; the first row stays reachable.
+            try std.testing.expectEqualStrings("B", window.readCell(0, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("r", window.readCell(0, 1).?.char.grapheme);
+            try std.testing.expectEqualStrings("0", window.readCell(4, 1).?.char.grapheme);
+            // Paging past the transcript's end returns to live output.
+            try std.testing.expect(screen.browse(true, true));
+            try std.testing.expectEqual(ViewKind.live, screen.view);
             try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
-            for (rows - 22..rows, 1..) |row, y| {
+            for (first..rows, 0..) |row, y| {
                 var bytes: [16]u8 = undefined;
                 const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
                 for (expected, 0..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
             }
-            try screen.latest();
         }
     }
 }
@@ -466,7 +565,8 @@ test "narrow browsing retains the complete return instruction" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try screen.append("retained conversation\n");
-    try screen.browse(false);
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
     for ([_]u16{ 8, 20 }) |columns| {
         for ([_][]const u8{ "", "Working…" }) |status| {
             const before = out.written().len;
@@ -510,7 +610,7 @@ test "prepared Action preserves selected inspection until explicit return" {
             }
         }
         try screen.showFile(io, inspection, false);
-        try screen.browse(false);
+        _ = screen.browse(false, true);
         const position = screen.browsing.top;
         try screen.prepareAction(io, action);
         try std.testing.expectEqualStrings(status, screen.browsing.text());

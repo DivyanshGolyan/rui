@@ -225,12 +225,63 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return row;
         }
 
-        pub fn browse(self: *Self, down: bool, height: usize, first_unseen: ?usize) void {
+        /// Moves by `rows` (a page is the view height). Key repeat may deliver
+        /// many events before a frame: never skip unread Action rows; only
+        /// delivered frames advance that cap.
+        pub fn browse(self: *Self, down: bool, rows: usize, height: usize, first_unseen: ?usize) void {
             const current = self.first(height);
-            const row = if (down) @min(current + height, self.displayRows() -| height) else current -| height;
-            // Key repeat may deliver many page events before a frame. Never
-            // skip unread Action rows; only delivered frames advance this cap.
+            const row = if (down) @min(current + rows, self.displayRows() -| height) else current -| rows;
             self.top = if (down) @min(row, first_unseen orelse row) else row;
+        }
+
+        pub fn atTop(self: *const Self, height: usize) bool {
+            return self.first(height) == 0;
+        }
+
+        pub fn atBottom(self: *const Self, height: usize) bool {
+            return self.first(height) >= self.displayRows() -| height;
+        }
+
+        /// Drops retained bytes before `position` (an absolute offset that
+        /// starts a line), as eviction would. Positions are origin-relative.
+        pub fn discardFront(self: *Self, position: u64) void {
+            if (position <= self.origin) return;
+            const count: usize = @intCast(@min(position - self.origin, self.length));
+            std.mem.copyForwards(u8, &self.bytes, self.bytes[count..self.length]);
+            if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[count..self.length]);
+            self.length -= count;
+            self.origin += count;
+            self.top = null;
+            self.dirty = true;
+        }
+
+        /// Places complete older text before this text, keeping the same rows
+        /// in view. Newer bytes beyond capacity leave from the end at a line
+        /// boundary; returns whether any did.
+        pub fn prepend(self: *Self, older: anytype, columns: u16, height: usize) !bool {
+            std.debug.assert(older.control_length == 0 and older.length <= limit);
+            try self.layout(columns);
+            const anchor = self.first(height);
+            var keep = self.text().len;
+            if (older.length + keep > limit) {
+                keep = limit - older.length;
+                keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
+            }
+            const trimmed = keep != self.text().len or self.control_length != 0;
+            std.mem.copyBackwards(u8, self.bytes[older.length..][0..keep], self.bytes[0..keep]);
+            @memcpy(self.bytes[0..older.length], older.bytes[0..older.length]);
+            if (styled) {
+                std.mem.copyBackwards(u8, self.styles[older.length..][0..keep], self.styles[0..keep]);
+                @memcpy(self.styles[0..older.length], older.styles[0..older.length]);
+            }
+            self.length = older.length + keep;
+            if (trimmed) self.control_length = 0;
+            self.origin = older.origin;
+            self.dirty = true;
+            try self.layout(columns);
+            // Older text ends at a line boundary, so its rows precede ours.
+            self.top = self.rowAt(older.length) + anchor;
+            return trimmed;
         }
     };
 }

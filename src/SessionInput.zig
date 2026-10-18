@@ -13,7 +13,6 @@ editors: [2]Editor = undefined,
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
-vaxis_input: bool = false,
 submitted: ?struct { bank: u1, literal: bool } = null,
 serial: u64 = 0,
 
@@ -40,7 +39,6 @@ pub fn feed(self: *Self, byte: u8) Event {
 }
 
 pub fn feedSelected(self: *Self, byte: u8, selected: bool) Event {
-    self.editors[self.active].vaxis_input = self.vaxis_input;
     const event = self.editors[self.active].feed(byte);
     if (event == .invalid or event == .overflow) self.clear();
     if (event != .submit) return .{ .editor = event };

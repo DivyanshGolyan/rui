@@ -7,9 +7,6 @@ const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 
-extern fn utf8proc_charwidth(scalar: i32) c_int;
-extern fn utf8proc_grapheme_break_stateful(i32, i32, *c_int) c_int;
-
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
     user,
@@ -49,14 +46,14 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     };
 }
 
-pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, columns: usize, colour: bool, separate: bool) !void {
+pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
     try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
@@ -96,94 +93,38 @@ pub const Live = struct {
 };
 
 /// Live conversation and inspection share hanging indentation. Input is already
-/// escaped or rendered; only trusted renderer SGR has zero display width.
+/// escaped or rendered; cell layout owns wrapping in the alternate screen.
 pub fn Indented(comptime Sink: type) type {
     return struct {
         sink: Sink,
-        columns: usize = 0,
-        column: usize = 2,
         line_start: bool = false,
         sgr: bool = false,
-        scalar: [4]u8 = undefined,
-        used: usize = 0,
-        prior: ?i32 = null,
-        grapheme_state: c_int = 0,
-        cluster_width: usize = 0,
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             var storage: [4096]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
             for (bytes) |byte| {
-                if (storage.len - out.end < 8) {
+                if (storage.len - out.end < 3) {
                     try self.sink.feed(out.buffered());
                     out.end = 0;
                 }
-                if (self.sgr or byte == 0x1b) {
-                    if (self.line_start) {
-                        try out.writeAll("  ");
-                        self.column = 2;
-                        self.line_start = false;
-                    }
-                    self.sgr = byte != 'm';
-                    try out.writeByte(byte);
-                    continue;
-                }
-                if (byte == '\n') {
-                    try out.writeByte(byte);
-                    self.column = 0;
-                    self.line_start = true;
-                    self.prior = null;
-                    self.grapheme_state = 0;
-                    continue;
-                }
-                if (self.columns == 0) {
-                    // Cell layout owns geometry in the alternate screen.
-                    // Preserve hanging indentation without a second UTF-8,
-                    // grapheme or width pass through the same output.
-                    if (self.line_start) {
-                        try out.writeAll("  ");
-                        self.line_start = false;
-                    }
-                    try out.writeByte(byte);
-                    continue;
-                }
-                self.scalar[self.used] = byte;
-                self.used += 1;
-                const length = try std.unicode.utf8ByteSequenceLength(self.scalar[0]);
-                if (self.used != length) continue;
-                const value = try std.unicode.utf8Decode(self.scalar[0..length]);
-                const scalar: i32 = @intCast(value);
-                const boundary = if (self.prior) |prior| utf8proc_grapheme_break_stateful(prior, scalar, &self.grapheme_state) != 0 else true;
-                var width: usize = if (value == '\t') 8 - self.column % 8 else @intCast(@max(0, utf8proc_charwidth(scalar)));
-                if (value == 0xfe0f or value == 0x20e3 or value >= 0x1f1e6 and value <= 0x1f1ff) width = @max(width, 2);
-                // Reserve a wide cell at each cluster start: a later variation
-                // selector may widen it, but never permits a mid-cluster wrap.
-                if (boundary and self.columns > 3 and !self.line_start and self.column + @max(width, 2) >= self.columns) {
-                    try out.writeByte('\n');
-                    self.column = 0;
-                    self.line_start = true;
-                }
-                if (self.line_start) {
+                if (self.line_start and byte != '\n') {
                     try out.writeAll("  ");
-                    self.column = 2;
                     self.line_start = false;
                 }
-                if (value == '\t') width = 8 - self.column % 8;
-                if (boundary) self.cluster_width = 0;
-                try out.writeAll(self.scalar[0..length]);
-                self.column += @max(width, self.cluster_width) - self.cluster_width;
-                self.cluster_width = @max(width, self.cluster_width);
-                self.prior = scalar;
-                self.used = 0;
+                if (self.sgr or byte == 0x1b) {
+                    self.sgr = byte != 'm';
+                } else if (byte == '\n') self.line_start = true;
+                try out.writeByte(byte);
             }
             if (out.end != 0) try self.sink.feed(out.buffered());
         }
         pub fn finish(self: *@This()) !void {
-            if (self.used != 0 or self.sgr) return error.IncompleteRenderedText;
+            if (self.sgr) return error.IncompleteRenderedText;
         }
     };
 }
 
-test "conversation wrapping preserves Unicode clusters across content windows" {
+test "hanging indentation survives split windows and trusted styles" {
     const Sink = struct {
         bytes: [128]u8 = undefined,
         length: usize = 0,
@@ -192,24 +133,18 @@ test "conversation wrapping preserves Unicode clusters across content windows" {
             self.length += bytes.len;
         }
     };
-    const cases = .{
-        .{ "abc👩‍💻de", "  abc👩‍💻\n  de" },
-        .{ "abc❤️de", "  abc❤️\n  de" },
-        .{ "abc🇺🇸de", "  abc🇺🇸\n  de" },
-    };
-    inline for (cases) |case| {
-        for (0..case[0].len + 1) |split| {
-            var sink: Sink = .{};
-            var presentation: Indented(*Sink) = .{ .sink = &sink, .columns = 8, .line_start = true };
-            try presentation.feed(case[0][0..split]);
-            try presentation.feed(case[0][split..]);
-            try presentation.finish();
-            try std.testing.expectEqualStrings(case[1], sink.bytes[0..sink.length]);
-        }
+    const input = "first\n\x1b[1msecond\x1b[0m\n\nthird";
+    for (0..input.len + 1) |split| {
+        var sink: Sink = .{};
+        var presentation: Indented(*Sink) = .{ .sink = &sink };
+        try presentation.feed(input[0..split]);
+        try presentation.feed(input[split..]);
+        try presentation.finish();
+        try std.testing.expectEqualStrings("first\n  \x1b[1msecond\x1b[0m\n\n  third", sink.bytes[0..sink.length]);
     }
 }
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, columns: usize, colour: bool) !void {
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, colour: bool) !void {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -245,7 +180,7 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try sink.feed("? Run Bash:");
     try sink.feed(Style.normal.code(colour));
     try sink.feed("\n  ");
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
     try escaped.finish();
@@ -419,8 +354,8 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
     }
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype, columns: usize) !void {
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
+fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
     if (item.value == .assistant) {
         var answer: Answer(@TypeOf(&indented)) = undefined;
         answer.init(&indented);
@@ -435,18 +370,73 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
     try sink.feed("\n");
 }
 
+/// Compact tool outcome shared by live Activity and the scrolled transcript.
+/// Failures keep their last output lines in view; /details stays exact.
+pub fn toolResult(presentation: protocol.ToolPresentation, source: anytype, sink: anytype, colour: bool, compact: *bool) !void {
+    const succeeded = presentation.code == .succeeded;
+    try toolHeading(presentation, sink, colour, !compact.* or !succeeded);
+    var summary: Summary(@TypeOf(sink)) = .{
+        .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
+        .code = presentation.code,
+        .colour = colour,
+        .section = switch (presentation.code) {
+            .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => .ended,
+            else => .summary,
+        },
+    };
+    try source.read(&summary);
+    try summary.finish();
+    if (summary.emitted) try sink.feed("\n");
+    compact.* = succeeded and !summary.emitted;
+}
+
+fn failing(code: protocol.ToolPresentation.Code) bool {
+    return toolState(code).style == .failure;
+}
+
 fn Summary(comptime Sink: type) type {
     return struct {
+        const excerpt_lines = 3;
+        const line_bytes = 256;
+        const Tail = struct {
+            // A few lines beyond the excerpt absorb the canonical trailer.
+            lines: [excerpt_lines + 6][line_bytes]u8 = undefined,
+            lengths: [excerpt_lines + 6]usize = undefined,
+            shortened: [excerpt_lines + 6]bool = undefined,
+            count: usize = 0,
+            total: usize = 0,
+
+            fn push(tail: *@This(), line: []const u8, shortened: bool) void {
+                const slot = tail.total % tail.lines.len;
+                @memcpy(tail.lines[slot][0..line.len], line);
+                tail.lengths[slot] = line.len;
+                tail.shortened[slot] = shortened;
+                tail.total += 1;
+                tail.count = @min(tail.count + 1, tail.lines.len);
+            }
+            fn last(tail: *const @This(), back: usize) []const u8 {
+                const slot = (tail.total - 1 - back) % tail.lines.len;
+                return tail.lines[slot][0..tail.lengths[slot]];
+            }
+            fn dropLast(tail: *@This()) void {
+                tail.total -= 1;
+                tail.count -= 1;
+            }
+        };
         escaped: Escaped(Sink),
         code: protocol.ToolPresentation.Code,
-        line: [256]u8 = undefined,
+        colour: bool,
+        section: enum { summary, stdout, stderr, ended } = .summary,
+        line: [line_bytes]u8 = undefined,
         length: usize = 0,
         emitted: bool = false,
-        ended: bool = false,
         omitted: bool = false,
+        earlier_omitted: bool = false,
+        stdout: Tail = .{},
+        stderr: Tail = .{},
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             for (bytes) |byte| {
-                if (self.ended) return;
+                if (self.section == .ended) return;
                 if (byte == '\n') {
                     try self.emit();
                 } else if (self.length < self.line.len) {
@@ -461,31 +451,76 @@ fn Summary(comptime Sink: type) type {
         }
         fn emit(self: *@This()) !void {
             const line = self.line[0..self.length];
+            defer {
+                self.length = 0;
+                self.omitted = false;
+            }
+            const heading = !self.omitted and (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:"));
+            switch (self.section) {
+                .ended => return,
+                .stdout, .stderr => |stream| {
+                    if (stream == .stdout and heading and std.mem.eql(u8, line, "stderr tail:")) {
+                        self.section = .stderr;
+                    } else (if (stream == .stdout) &self.stdout else &self.stderr).push(line, self.omitted);
+                    return;
+                },
+                .summary => {},
+            }
             // Only complete, known informational lines are quiet. Unknown or
             // qualified diagnostics stay visible, even after successful exit.
             // Keep canonical Bash evidence and detailed inspection unchanged.
             const routine = !self.omitted and
                 (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") or
                     std.mem.eql(u8, line, "Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial."));
-            if (!self.omitted and (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:"))) {
-                self.ended = true;
+            if (heading) {
+                // Output tails matter only to explain a failure.
+                self.section = if (!failing(self.code)) .ended else if (std.mem.eql(u8, line, "stdout tail:")) .stdout else .stderr;
             } else if (line.len != 0 and !routine) {
                 var prefix_buffer: [64]u8 = undefined;
-                const prefix = switch (self.code) {
-                    .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown => try std.fmt.bufPrint(&prefix_buffer, "Bash {s}. ", .{@tagName(self.code)}),
-                    else => "",
-                };
+                const prefix = if (failing(self.code)) try std.fmt.bufPrint(&prefix_buffer, "Bash {s}. ", .{@tagName(self.code)}) else "";
                 const detail = if (!self.omitted and prefix.len != 0 and std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else line;
                 try self.escaped.feed(if (self.emitted) "\n  " else "  ");
                 try self.escaped.feed(detail);
                 if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
                 self.emitted = true;
             }
-            self.length = 0;
-            self.omitted = false;
         }
         fn finish(self: *@This()) !void {
             if (self.length != 0) try self.emit();
+            if (failing(self.code) and self.section != .ended) {
+                // Strip the canonical trailer that follows stderr bytes.
+                while (self.stderr.count != 0) {
+                    const line = self.stderr.last(0);
+                    if (line.len == 0 or std.mem.eql(u8, line, "Full output was not retained.") or
+                        std.mem.startsWith(u8, line, "Full stdout: ") or std.mem.startsWith(u8, line, "Full stderr: "))
+                    {
+                        self.stderr.dropLast();
+                    } else if (std.mem.eql(u8, line, "[earlier output omitted]")) {
+                        self.earlier_omitted = true;
+                        self.stderr.dropLast();
+                    } else break;
+                }
+                while (self.stdout.count != 0 and self.stdout.last(0).len == 0) self.stdout.dropLast();
+                const tail = if (self.stderr.total != 0) &self.stderr else &self.stdout;
+                const shown = @min(tail.count, excerpt_lines);
+                var shortened = self.earlier_omitted or tail.total > shown;
+                for (0..shown) |index| {
+                    const back = shown - 1 - index;
+                    shortened = shortened or tail.shortened[(tail.total - 1 - back) % tail.lines.len];
+                    try self.escaped.feed(if (self.emitted) "\n  " else "  ");
+                    try self.escaped.finish();
+                    try self.escaped.sink.feed(Style.quiet.code(self.colour));
+                    try self.escaped.feed(tail.last(back));
+                    try self.escaped.finish();
+                    try self.escaped.sink.feed(Style.normal.code(self.colour));
+                    self.emitted = true;
+                }
+                if (shortened) {
+                    try self.escaped.feed(if (self.emitted) "\n  " else "  ");
+                    try self.escaped.feed("/details for full output.");
+                    self.emitted = true;
+                }
+            }
             try self.escaped.finish();
         }
     };
@@ -519,11 +554,18 @@ test "tool summary hides only complete routine metadata and retains warnings" {
         .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
         .{ .succeeded, retirement ++ @as([256]u8, @splat('x')) ++ "\n" ++ warning, "  " ++ (retirement ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
         .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
+        // Failures show the last stderr lines, else stdout, without the trailer.
+        .{ .failed, "Bash failed. Exit code: 127.\nstdout tail:\n\nstderr tail:\nbash: line 1: rui: command not found\n\nFull stdout: /s/o\nFull stderr: /s/e\n", "  Exit code: 127.\n  bash: line 1: rui: command not found" },
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\nstderr tail:\n\nFull output was not retained.\n", "  Exit code: 1.\n  usage: x\n  help" },
+        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\n\nstderr tail:\none\ntwo\nthree\nfour\n\n[earlier output omitted]\n\nFull output was not retained.\n", "  Exit code: 2.\n  two\n  three\n  four\n  /details for full output." },
+        .{ .failed, "Bash failed. Exit code: 3.\nstdout tail:\n\nstderr tail:\nonly\n\n[earlier output omitted]\n", "  Exit code: 3.\n  only\n  /details for full output." },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\n\nstderr tail:\nalso hidden\n", "" },
+        .{ .failed, "Bash failed. Exit code: 4.\nstdout tail:\n\nstderr tail:\n\x1b[2Jcontrol\n", "  Exit code: 4.\n  \\x1b[2Jcontrol" },
     };
     inline for (cases) |case| {
         for (0..case[1].len + 1) |split| {
             var sink: Sink = .{};
-            var summary: Summary(*Sink) = .{ .code = case[0], .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
+            var summary: Summary(*Sink) = .{ .code = case[0], .colour = false, .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
             try summary.feed(case[1][0..split]);
             try summary.feed(case[1][split..]);
             try summary.finish();
@@ -532,7 +574,7 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     }
 }
 
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, columns: usize, colour: bool, compact_tools: *bool) !void {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
@@ -546,7 +588,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sink.feed("›");
                 try sink.feed(Style.normal.code(colour));
                 try sink.feed(" ");
-                try content(requests, store, session, item, message.content, sink, columns);
+                try content(requests, store, session, item, message.content, sink);
             },
             .user => |message| {
                 if (!historical) continue; // Live Admission already showed it.
@@ -556,34 +598,28 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sink.feed("›");
                 try sink.feed(Style.normal.code(colour));
                 try sink.feed(" ");
-                try content(requests, store, session, item, message.content, sink, columns);
+                try content(requests, store, session, item, message.content, sink);
             },
             .assistant => |reference| {
                 compact_tools.* = false;
                 try sink.feed("\n  ");
-                try content(requests, store, session, item, reference, sink, columns);
+                try content(requests, store, session, item, reference, sink);
             },
             .tool_result => |result| {
                 // Keep outcomes and warnings, not routine zero exit codes or
                 // output tails. This affects presentation only, never execution,
                 // permission or outcome classification; /details stays exact.
-                const succeeded = result.presentation.code == .succeeded;
-                try toolHeading(result.presentation, sink, columns, colour, !compact_tools.* or !succeeded);
-                const failed = toolState(result.presentation.code).style == .failure;
-                var summary: Summary(@TypeOf(sink)) = .{
-                    .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
-                    .code = result.presentation.code,
-                    .ended = switch (result.presentation.code) {
-                        .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => true,
-                        else => false,
-                    },
+                const Source = struct {
+                    requests: client.Requests,
+                    store: []const u8,
+                    session: []const u8,
+                    item: protocol.ActivityItem,
+                    reference: protocol.ActivityItem.Content,
+                    pub fn read(self: @This(), summary: anytype) !void {
+                        if (try self.requests.readActivityContent(self.store, self.session, self.item.position, self.item.ordinal, .{ .bytes = self.reference.length, .digest = self.reference.digest }, summary)) |read_failure| return self.requests.failRead(read_failure);
+                    }
                 };
-                const reference = result.content;
-                if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &summary)) |failure| return requests.failRead(failure);
-                try summary.finish();
-                if (failed) try sink.feed("\n  /details for output.");
-                if (summary.emitted or failed) try sink.feed("\n");
-                compact_tools.* = succeeded and !summary.emitted;
+                try toolResult(result.presentation, Source{ .requests = requests, .store = store, .session = session, .item = item, .reference = result.content }, sink, colour, compact_tools);
             },
             // Hidden call rows use admission-certified page metadata. Exact
             // proposal and permission inspection authenticate originals instead.

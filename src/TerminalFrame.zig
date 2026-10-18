@@ -49,10 +49,6 @@ pub const Input = struct {
     preview_complete: bool,
 };
 
-pub fn enabled(setting: []const u8, term: []const u8) bool {
-    return std.mem.eql(u8, setting, "vaxis") and !std.mem.eql(u8, term, "dumb");
-}
-
 /// Returned row decisions borrow only the supplied document/composer values.
 /// The shell consumes the plan before pumping input or changing either value.
 pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, input: Input) !void {
@@ -117,7 +113,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
                 try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
                 try self.heading.layout(input.width);
                 heading_height = @intCast(self.heading.displayRows());
-            } else heading_height = if ((if (input.selected) !input.action_visible or !input.preview_complete or document.displayRows() > available else document.origin != 0) and available -| call_rows > 1) 1 else 0;
+            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.displayRows() > available) and available -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= available) break;
             if (omitted != 0 and !compact) {
                 compact = true;
@@ -130,16 +126,11 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
         self.used -= 1;
     }
     if (self.heading.length == 0 and heading_height != 0) {
-        try self.heading.append(if (input.action_visible) "Action preview · too large to approve here" else if (input.selected)
-            (if (input.action_pending) "Browsing · Ctrl-G returns to Action" else "Browsing · PgUp/PgDn · Ctrl-G latest")
-        else
-            "Latest · PgUp browse · /history older");
+        try self.heading.append(if (input.action_visible) "Action preview · too large to approve here" else if (input.action_pending) "Browsing · Ctrl-G returns to Action" else "Browsing · PgUp/PgDn · Ctrl-G latest");
         try self.heading.layout(input.width);
         if (self.heading.displayRows() > heading_height) {
             self.heading.clear();
-            try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.selected)
-                (if (input.width < "Ctrl-G latest".len) "Ctrl-G" else if (input.action_pending) "Ctrl-G Action" else "Ctrl-G latest")
-            else if (input.width < "PgUp /help".len) "PgUp" else "PgUp /help");
+            try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Ctrl-G latest".len) "Ctrl-G" else if (input.action_pending) "Ctrl-G Action" else "Ctrl-G latest");
             try self.heading.layout(input.width);
         }
     }
@@ -164,13 +155,6 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
     self.draft_top = self.status_row + self.status_height + call_rows + self.overflow_height;
     self.caret_row = self.draft_top + @as(u16, @intCast(caret_row - self.draft_first));
     self.caret_column = @min(try composer.columnAt(input.cursor) + 2, input.width - 1);
-}
-
-test "renderer selection is explicit and dumb terminals retain inline output" {
-    for ([_][]const u8{ "", "1", "inline", "VAXIS", "vaxis" }) |setting| {
-        try std.testing.expectEqual(std.mem.eql(u8, setting, "vaxis"), enabled(setting, "xterm-256color"));
-        try std.testing.expect(!enabled(setting, "dumb"));
-    }
 }
 
 test "geometry is bounded before the shell allocates cells" {
@@ -271,7 +255,7 @@ test "Action approval requires contiguous displayed rows and resets after resize
         input.action_seen = frame.action_seen;
         // Coalesced repeat cannot scroll past the first unread row even when
         // many more keys arrive than could fit between two physical frames.
-        for (0..20) |_| document.browse(true, frame.height, if (frame.approval_ready) null else input.action_seen);
+        for (0..20) |_| document.browse(true, frame.height, frame.height, if (frame.approval_ready) null else input.action_seen);
         try frame.plan(&document, &composer, input);
     }
     try std.testing.expect(frame.approval_ready);

@@ -820,12 +820,22 @@ const NewSessionOptions = struct {
     }
 };
 
-fn newSession(init: std.process.Init, args: []const []const u8) !void {
-    const options = try NewSessionOptions.parse(args, true);
+/// Conversations draw cells on the terminal's alternate screen. Refuse before
+/// any Host or Session change when that terminal is absent or cannot draw.
+fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output to create a Session; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{});
+        TerminalText.diagnostic("rui needs terminal input and output {s}; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
+    if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
+        TerminalText.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed.\n", .{purpose});
+        return error.InteractiveTerminalRequired;
+    }
+}
+
+fn newSession(init: std.process.Init, args: []const []const u8) !void {
+    const options = try NewSessionOptions.parse(args, true);
+    try requireInteractiveTerminal(init, "to create a Session");
     const saved = (try createSession(init, options, true)) orelse return;
     const initial_text = if (options.prompt) |source| switch (source) {
         .literal => |text| text,
@@ -1484,11 +1494,10 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         const directory = requestDirectory(init, &directory_buffer) catch |err| break :run err;
         const scratch = renderScratch(init) catch |err| break :run err;
         defer scratch.close(init.io);
-        const vaxis = SessionFrontend.rendererEnabled(init.environ_map);
-        const action = if (vaxis) renderScratch(init) catch |err| break :run err else scratch;
-        defer if (vaxis) action.close(init.io);
-        const inspection = if (vaxis) renderScratch(init) catch |err| break :run err else scratch;
-        defer if (vaxis) inspection.close(init.io);
+        const action = renderScratch(init) catch |err| break :run err;
+        defer action.close(init.io);
+        const inspection = renderScratch(init) catch |err| break :run err;
+        defer inspection.close(init.io);
         break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, initial_text);
     };
     return outcome catch |err| {
@@ -1520,7 +1529,7 @@ fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
         if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session-hex") and reference == null) reference = try decodeHexIdentity(try takeValue(args, &index), &session_hex) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
     }
     if (last == (reference != null)) return usage();
-    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
+    try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback));
     const destination = paths.store.slice();
