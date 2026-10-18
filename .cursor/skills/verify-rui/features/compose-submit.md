@@ -27,7 +27,7 @@ Preconditions:
 - **Draft.** Run `$V send "$RUN" c1 --text 'Investigate the failing test'` and `$V wait "$RUN" c1 --marker '› Investigate the failing test' --after G0`. The caret row equals `› Investigate the failing test`, the cursor x is 2 plus the text length, and the provider count is unchanged.
 - **Paste.** Run `$V send "$RUN" c1 --hex 1b5b3230307e6c696e65310a6c696e65321b5b3230317e` (`ESC[200~line1\nline2ESC[201~`). The draft shows two lines and nothing is sent.
 - **Submit.** Run `$V send "$RUN" c1 --keys Enter` and `$V wait "$RUN" c1 --marker 'Fixture answer' --composer --after G1`. Exactly one new `provider.jsonl` entry exists, and its `user_text` is the exact draft.
-- **Capture.** Run `$V rui "$RUN" request list` and diff it against the earlier list. One new key appears. `request inspect --store STORE --key KEY` shows `kind: message` and `input.sha256 = sha256(text)`.
+- **Capture.** Run `$V rui "$RUN" request list` and diff it against the earlier list. One new key appears. Its capture `HOME/.config/rui/requests/KEY.json` has `text.value` equal to the draft, and `request inspect --store STORE --key KEY` shows `kind: message` with `input.bytes` equal to the text length. `input.sha256` is Rui's domain-separated digest, not a plain sha256.
 - **Proof.** Run `$V screen "$RUN" c1 --label submitted` and `$V evidence "$RUN"`. `timeline.txt` shows one `inject` Enter, one `received \r` and one `provider` line.
 
 ## Gotchas

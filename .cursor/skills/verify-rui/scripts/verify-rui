@@ -1041,11 +1041,15 @@ def cmd_journey(args):
         if len(new_keys) == 1:
             inspected = run.rui_cmd("request", "inspect", "--store", run.store, "--key", new_keys[0])
             observed = json.loads(inspected.stdout).get("observation", {}) if inspected.returncode == 0 else None
-        expected_sha = hashlib.sha256(text.encode()).hexdigest()
-        step("exactly one new capture key; its saved input is the exact text, completed",
-             observed is not None and observed.get("input", {}).get("sha256") == expected_sha
+        capture_path = run.home / ".config/rui/requests" / f"{new_keys[0]}.json" if len(new_keys) == 1 else None
+        captured = json.loads(capture_path.read_text()) if capture_path and capture_path.exists() else {}
+        # input.sha256 is Rui's domain-separated content digest, so compare the
+        # saved capture text and the inspected byte count instead.
+        step("exactly one new capture key; its saved text is the exact draft and its request completed",
+             observed is not None and captured.get("text", {}).get("value") == text and captured.get("session") == "demo"
+             and observed.get("input", {}).get("bytes") == str(len(text.encode()))
              and observed.get("kind") == "message" and observed.get("result", {}).get("status") == "completed",
-             new_keys=new_keys, input=observed and observed.get("input"), expected_sha256=expected_sha,
+             new_keys=new_keys, captured_text=captured.get("text"), input=observed and observed.get("input"),
              result=observed and observed.get("result", {}).get("status"))
         helper("send", str(run.root), name, "--text", "/exit")
         helper("send", str(run.root), name, "--keys", "Enter")
