@@ -1,6 +1,7 @@
 //! One invocation's logical drafts. Initialize in final storage; never move.
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
+const TerminalInput = @import("TerminalInput.zig");
 const Self = @This();
 
 pub const capacity = 65_536;
@@ -8,6 +9,9 @@ pub const Ticket = struct { owner: *const Self, serial: u64 };
 pub const Event = union(enum) { editor: Editor.Event, message: Ticket, command, busy };
 pub const View = struct { bytes: []const u8, cursor: usize };
 
+/// The invocation's one terminal byte stream. Draft resets, bank switches and
+/// the Session's choice editor never replace it.
+stream: TerminalInput = .{},
 banks: [2][capacity]u8 = undefined,
 editors: [2]Editor = undefined,
 command_buffer: [capacity]u8 = undefined,
@@ -27,19 +31,28 @@ pub fn composition(self: *const Self) View {
 }
 
 pub fn pending(self: *const Self) Editor.Pending {
-    return self.editors[self.active].pending();
+    return self.stream.pending();
 }
 
+/// A lone Escape completes only when no sequence follows it in time.
 pub fn expire(self: *Self) !Editor.Event {
-    return self.editors[self.active].expire();
+    return if (try self.stream.expire()) .close_view else .none;
 }
 
+/// One byte for the draft and every event it completes (tests). Returns the
+/// last event that is not an editor `.none`.
 pub fn feed(self: *Self, byte: u8) Event {
-    return self.feedSelected(byte, true);
+    var last: Event = .{ .editor = .none };
+    var decoded = self.stream.feed(byte);
+    while (decoded != .none) : (decoded = self.stream.next()) {
+        const event = self.applySelected(decoded, true);
+        if (!(event == .editor and event.editor == .none)) last = event;
+    }
+    return last;
 }
 
-pub fn feedSelected(self: *Self, byte: u8, selected: bool) Event {
-    const event = self.editors[self.active].feed(byte);
+pub fn applySelected(self: *Self, decoded: TerminalInput.Decoded, selected: bool) Event {
+    const event = self.editors[self.active].apply(decoded);
     if (event == .invalid or event == .overflow) self.clear();
     if (event != .submit) return .{ .editor = event };
     const bytes = self.composition().bytes;
@@ -147,4 +160,24 @@ test "SessionInput retained loan and stale tickets cannot consume next compositi
     const next = input.feed('\r').message;
     try std.testing.expectError(error.SubmissionChanged, input.release(ticket));
     try std.testing.expectEqualStrings("new", try input.message(next));
+}
+
+test "one stream survives draft resets and replacement editors" {
+    var input: Self = undefined;
+    input.init();
+    // A sequence split across a draft reset is decoded once: an arrow, not
+    // its final byte as typed text.
+    for ("draft\x1b[") |byte| _ = input.feed(byte);
+    input.clear();
+    try std.testing.expectEqual(Editor.Event.scroll_up, input.feed('A').editor);
+    try std.testing.expectEqualStrings("", input.composition().bytes);
+    // An editor that replaces another mid-paste, like a fresh choice field,
+    // rejects the paste's remainder instead of adopting it as typed input.
+    var storage: [16]u8 = undefined;
+    for ("\x1b[200~") |byte| _ = input.feed(byte);
+    var choice: Editor = .{ .buffer = &storage, .allow_paste = false };
+    for ("a\x1b[201~") |byte| _ = choice.feed(&input.stream, byte);
+    try std.testing.expectEqualStrings("", storage[0..choice.length]);
+    try std.testing.expectEqual(Editor.Event.invalid, choice.feed(&input.stream, '\r'));
+    try std.testing.expectEqual(Editor.Pending.none, input.pending());
 }
