@@ -13,7 +13,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 26;
+pub const schema_version: u32 = 27;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -749,9 +749,8 @@ pub const ValidatedOutput = struct {
     answer_length: u64,
     answer_digest: [32]u8,
     response_id: protocol.Bounded(256),
-    body_model: protocol.Bounded(protocol.max_model_bytes),
-    openai_model: protocol.Bounded(protocol.max_model_bytes),
-    x_openai_model: protocol.Bounded(protocol.max_model_bytes),
+    /// Adapter-certified opaque observations; Store never decodes provider grammar.
+    model_evidence: protocol.Bounded(775),
     request_id: protocol.Bounded(256),
 };
 
@@ -4820,8 +4819,8 @@ pub const Store = struct {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,body_model,openai_model,x_openai_model,request_id,usage_content_id) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,1,0)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -5990,7 +5989,7 @@ pub const Store = struct {
         {
             const update = try prepare(
                 self.database,
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
+                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer _ = c.sqlite3_finalize(update);
@@ -5998,9 +5997,7 @@ pub const Store = struct {
             try bindText(update, 2, resolution_code);
             try bindNullableI64(update, 3, answer_id);
             try bindOptionalText(update, 4, output.response_id.slice());
-            try bindOptionalText(update, 5, output.body_model.slice());
-            try bindOptionalText(update, 6, output.openai_model.slice());
-            try bindOptionalText(update, 7, output.x_openai_model.slice());
+            try bindBlob(update, 5, output.model_evidence.slice());
             try bindOptionalText(update, 8, output.request_id.slice());
             try bindNullableI64(update, 9, usage_id);
             try bindU64(update, 10, binding.attempt_ordinal);
@@ -7017,9 +7014,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR length(CAST(resolution_code AS BLOB)) BETWEEN 1 AND 96),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
         \\ response_id TEXT CHECK(response_id IS NULL OR length(CAST(response_id AS BLOB))<=256),
-        \\ body_model TEXT CHECK(body_model IS NULL OR length(CAST(body_model AS BLOB))<=256),
-        \\ openai_model TEXT CHECK(openai_model IS NULL OR length(CAST(openai_model AS BLOB))<=256),
-        \\ x_openai_model TEXT CHECK(x_openai_model IS NULL OR length(CAST(x_openai_model AS BLOB))<=256),
+        \\ model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
         \\ usage_tokens BLOB CHECK(usage_tokens IS NULL OR (length(usage_tokens)=8 AND usage_content_id IS NOT NULL)),
@@ -7610,6 +7605,11 @@ fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
     return @intCast(value);
 }
 
+const testing_absent_model_evidence: protocol.Bounded(775) = .{
+    .bytes = .{1} ++ @as([774]u8, @splat(0)),
+    .len = 7,
+};
+
 fn admitRetryForTesting(storage: *Store) !?AttemptAdmission {
     return storage.tryAdmitNextModelRetry(ActiveOperationFilter.empty(), .{});
 }
@@ -7832,9 +7832,7 @@ fn settleCallsForTestingWithFaults(
         .answer_length = 0,
         .answer_digest = protocol.contentDigest(""),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     }, faults);
 }
@@ -10112,9 +10110,7 @@ test "historical accepted assistant output completeness and provenance fence rea
                 .answer_length = validated.answer_length,
                 .answer_digest = validated.answer_digest,
                 .response_id = validated.evidence.response_id,
-                .body_model = .{},
-                .openai_model = .{},
-                .x_openai_model = .{},
+                .model_evidence = testing_absent_model_evidence,
                 .request_id = .{},
             }, .{});
         }
@@ -13241,9 +13237,7 @@ test "private-only model output never becomes public conversation" {
         .answer_length = 0,
         .answer_digest = protocol.contentDigest(""),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     }, .{});
     var request = protocol.ConversationPage{};
@@ -13350,9 +13344,7 @@ pub fn testingPublicProjection(
         .answer_length = decoded_length,
         .answer_digest = digest.finalResult(),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
@@ -13892,9 +13884,7 @@ test "continued accepted output keeps model immutable and public projection read
         .answer_length = "answer".len,
         .answer_digest = protocol.contentDigest("answer"),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     };
     try storage.settleModelSuccess(binding, &output, .{});
@@ -15329,9 +15319,7 @@ pub fn settleCompactionForTesting(storage: *Store, tmp: *std.testing.TmpDir, bin
         .answer_length = if (try storage.modelOperationKind(binding) == .compaction) 6 else 0,
         .answer_digest = protocol.contentDigest("answer"),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = testing_absent_model_evidence,
         .request_id = .{},
     }, .{});
 }
