@@ -12,6 +12,7 @@ const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
 const model_adapter = @import("model_adapter.zig");
 const named_scratch = @import("named_scratch.zig");
+const output_format = @import("output_format.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
@@ -2744,7 +2745,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     }) catch unreachable;
     var retained_metadata: ?named_scratch.Owner = null;
     const metadata_budget = host.retention.sharedBudget().narrowed(host.faults.request_scratch_limit_bytes);
-    var metadata = store_module.OutputMetadataWriter.init(
+    var metadata = output_format.OutputMetadataWriter.init(
         host.io,
         host.lease.paths.scratch.slice(),
         metadata_name,
@@ -6456,7 +6457,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expect(root_budget.charge(2));
     const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
     var retained_metadata: ?named_scratch.Owner = null;
-    var metadata = try store_module.OutputMetadataWriter.init(
+    var metadata = try output_format.OutputMetadataWriter.init(
         std.testing.io,
         root,
         "metadata",
@@ -6480,7 +6481,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     metadata.deinit();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 
-    var limited = try store_module.OutputMetadataWriter.init(
+    var limited = try output_format.OutputMetadataWriter.init(
         std.testing.io,
         root,
         "limited-metadata",
