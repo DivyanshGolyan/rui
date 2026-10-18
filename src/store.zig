@@ -7,6 +7,7 @@ const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 const output_format = @import("output_format.zig");
+const provider_output = @import("provider_output.zig");
 
 const c = @import("sqlite");
 
@@ -705,10 +706,10 @@ pub const HistoricalReader = struct {
         return count;
     }
 
-    pub fn authenticateItem(self: *HistoricalReader, validation: *const @import("provider_output.zig").ReplayValidationCursor) !void {
+    pub fn itemIdentity(self: *HistoricalReader) struct { kind: OutputItemKind, id_digest: [32]u8 } {
         std.debug.assert(self.usable() and self.verified);
         const identity = self.reference.item_identity orelse unreachable;
-        validation.authenticateIdentity(identity.kind, identity.id_digest) catch return self.malformed();
+        return .{ .kind = identity.kind, .id_digest = identity.id_digest };
     }
 
     /// Reread only after the complete canonical content digest was verified.
@@ -737,217 +738,6 @@ pub const OutputMetadataRecord = output_format.OutputMetadataRecord;
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 pub const OutputMetadataReader = output_format.OutputMetadataReader;
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
-
-const EncodedStringReader = struct {
-    io: std.Io,
-    file: std.Io.File,
-    position: u64,
-    end: u64,
-    buffer_start: u64 = 0,
-    buffer_length: usize = 0,
-    buffer: [protocol.content_window_bytes]u8 = undefined,
-    pending: [4]u8 = undefined,
-    pending_start: u3 = 0,
-    pending_end: u3 = 0,
-
-    fn init(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !EncodedStringReader {
-        return .{
-            .io = io,
-            .file = file,
-            .position = record.start,
-            .end = try std.math.add(u64, record.start, record.length),
-        };
-    }
-
-    fn raw(self: *EncodedStringReader) !?u8 {
-        if (self.position == self.end) return null;
-        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
-            self.buffer_start = self.position;
-            const wanted: usize = @intCast(@min(self.end - self.position, self.buffer.len));
-            const count = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.position);
-            if (count != wanted) return error.ShortOutputRead;
-            self.buffer_length = count;
-        }
-        const byte = self.buffer[@intCast(self.position - self.buffer_start)];
-        self.position += 1;
-        return byte;
-    }
-
-    fn requiredRaw(self: *EncodedStringReader) !u8 {
-        return try self.raw() orelse error.InvalidEncodedString;
-    }
-
-    fn hexScalar(self: *EncodedStringReader) !u21 {
-        var value: u21 = 0;
-        for (0..4) |_| {
-            const byte = try self.requiredRaw();
-            const digit = std.fmt.charToDigit(byte, 16) catch return error.InvalidEncodedString;
-            value = value * 16 + digit;
-        }
-        return value;
-    }
-
-    fn next(self: *EncodedStringReader) !?u8 {
-        if (self.pending_start < self.pending_end) {
-            const byte = self.pending[self.pending_start];
-            self.pending_start += 1;
-            return byte;
-        }
-        const byte = try self.raw() orelse return null;
-        if (byte < 0x20) return error.InvalidEncodedString;
-        if (byte != '\\') return byte;
-        const escape = try self.requiredRaw();
-        return switch (escape) {
-            '"' => '"',
-            '\\' => '\\',
-            '/' => '/',
-            'b' => 8,
-            'f' => 12,
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            'u' => blk: {
-                var scalar = try self.hexScalar();
-                if (scalar >= 0xd800 and scalar <= 0xdbff) {
-                    if (try self.requiredRaw() != '\\' or try self.requiredRaw() != 'u') {
-                        return error.InvalidEncodedString;
-                    }
-                    const low = try self.hexScalar();
-                    if (low < 0xdc00 or low > 0xdfff) return error.InvalidEncodedString;
-                    scalar = 0x10000 + ((scalar - 0xd800) << 10) + (low - 0xdc00);
-                } else if (scalar >= 0xdc00 and scalar <= 0xdfff) return error.InvalidEncodedString;
-                const count = try std.unicode.utf8Encode(scalar, &self.pending);
-                self.pending_start = 1;
-                self.pending_end = count;
-                break :blk self.pending[0];
-            },
-            else => error.InvalidEncodedString,
-        };
-    }
-};
-
-const JsonStringSource = struct {
-    encoded: EncodedStringReader,
-    lookahead: ?u8 = null,
-    has_lookahead: bool = false,
-
-    pub fn peek(self: *JsonStringSource) !?u8 {
-        if (!self.has_lookahead) {
-            self.lookahead = try self.encoded.next();
-            self.has_lookahead = true;
-        }
-        return self.lookahead;
-    }
-
-    pub fn take(self: *JsonStringSource) !u8 {
-        const byte = try self.peek() orelse return error.InvalidDescriptorJson;
-        self.has_lookahead = false;
-        return byte;
-    }
-
-    pub fn space(self: *JsonStringSource) !void {
-        while (try self.peek()) |byte| switch (byte) {
-            ' ', '\t', '\r', '\n' => _ = try self.take(),
-            else => return,
-        };
-    }
-
-    pub fn expect(self: *JsonStringSource, expected: u8) !void {
-        try self.space();
-        if (try self.take() != expected) return error.InvalidDescriptorJson;
-    }
-
-    pub fn string(self: *JsonStringSource, destination: ?*protocol.Bounded(16)) !void {
-        try self.space();
-        if (try self.take() != '"') return error.InvalidDescriptorJson;
-        if (destination) |value| value.len = 0;
-        while (true) {
-            const byte = try self.take();
-            if (byte == '"') return;
-            if (byte < 0x20) return error.InvalidDescriptorJson;
-            if (byte != '\\') {
-                if (destination) |value| {
-                    if (value.len == value.bytes.len) return error.InvalidDescriptorShape;
-                    value.bytes[value.len] = byte;
-                    value.len += 1;
-                }
-                continue;
-            }
-            const escape = try self.take();
-            const simple: ?u8 = switch (escape) {
-                '"' => '"',
-                '\\' => '\\',
-                '/' => '/',
-                'b' => 8,
-                'f' => 12,
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'u' => null,
-                else => return error.InvalidDescriptorJson,
-            };
-            if (simple) |decoded| {
-                if (destination) |value| {
-                    if (value.len == value.bytes.len) return error.InvalidDescriptorShape;
-                    value.bytes[value.len] = decoded;
-                    value.len += 1;
-                }
-                continue;
-            }
-            var scalar: u21 = 0;
-            for (0..4) |_| {
-                const hex = try self.take();
-                const digit: u8 = switch (hex) {
-                    '0'...'9' => hex - '0',
-                    'a'...'f' => hex - 'a' + 10,
-                    'A'...'F' => hex - 'A' + 10,
-                    else => return error.InvalidDescriptorJson,
-                };
-                scalar = scalar * 16 + digit;
-            }
-            if (scalar >= 0xd800 and scalar <= 0xdbff) {
-                if (try self.take() != '\\' or try self.take() != 'u') return error.InvalidDescriptorJson;
-                var low: u21 = 0;
-                for (0..4) |_| {
-                    const hex = try self.take();
-                    const digit: u8 = switch (hex) {
-                        '0'...'9' => hex - '0',
-                        'a'...'f' => hex - 'a' + 10,
-                        'A'...'F' => hex - 'A' + 10,
-                        else => return error.InvalidDescriptorJson,
-                    };
-                    low = low * 16 + digit;
-                }
-                if (low < 0xdc00 or low > 0xdfff) return error.InvalidDescriptorJson;
-                scalar = 0x10000 + ((scalar - 0xd800) << 10) + (low - 0xdc00);
-            } else if (scalar >= 0xdc00 and scalar <= 0xdfff) return error.InvalidDescriptorJson;
-            if (destination) |value| {
-                var encoded: [4]u8 = undefined;
-                const count = std.unicode.utf8Encode(scalar, &encoded) catch return error.InvalidDescriptorJson;
-                if (value.len + count > value.bytes.len) return error.InvalidDescriptorShape;
-                @memcpy(value.bytes[value.len .. value.len + count], encoded[0..count]);
-                value.len += count;
-            }
-        }
-    }
-};
-
-fn metadataStringEql(
-    io: std.Io,
-    file: std.Io.File,
-    record: OutputMetadataRecord,
-    expected: []const u8,
-) !bool {
-    if (record.decoded_length != expected.len) return false;
-    var source = try EncodedStringReader.init(io, file, record);
-    for (expected) |byte| if (try source.next() != byte) return false;
-    return try source.next() == null;
-}
-
-fn bashArguments(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !?tool_catalog.BashArguments {
-    var source = JsonStringSource{ .encoded = try EncodedStringReader.init(io, file, record) };
-    return tool_catalog.inspectBashArguments(&source);
-}
 
 pub const ValidatedOutput = struct {
     source: std.Io.File,
@@ -6176,25 +5966,12 @@ pub const Store = struct {
                     else => return error.OutputReadFailed,
                 }
 
-                const is_bash = try metadataStringEql(self.io, output.source, name, "bash");
-                const is_edit = try metadataStringEql(self.io, output.source, name, "edit");
-                const bash_arguments = if (is_bash)
-                    try bashArguments(self.io, output.source, record)
-                else
-                    null;
-                const rejection_code: ?[]const u8 = if (is_bash and frozen_tools & 1 == 0)
-                    "unknown_tool"
-                else if (is_bash and bash_arguments == null)
-                    "invalid_arguments"
-                else if (is_edit and frozen_tools & 2 != 0)
-                    "tool_unavailable"
-                else if (!is_bash)
-                    "unknown_tool"
-                else
-                    null;
+                const call_facts = try provider_output.inspectCall(self.io, output.source, name, record);
+                const bash_arguments = call_facts.bash_arguments;
+                const rejection_code = tool_catalog.classifyCall(call_facts.name, bash_arguments != null, frozen_tools);
                 var rejection_buffer: [192]u8 = undefined;
                 const rejection_text = if (rejection_code) |code|
-                    try rejectionResult(self.io, output.source, code, name, &rejection_buffer)
+                    try provider_output.rejectionResult(self.io, output.source, code, name, &rejection_buffer)
                 else
                     null;
                 const rejection_content_id = if (rejection_text) |text|
@@ -6327,36 +6104,6 @@ pub const Store = struct {
     }
 
     const ContentSlot = struct { id: i64, existing: bool };
-
-    fn rejectionResult(
-        io: std.Io,
-        source_file: std.Io.File,
-        code: []const u8,
-        name: OutputMetadataRecord,
-        buffer: *[192]u8,
-    ) ![]const u8 {
-        if (std.mem.eql(u8, code, "unknown_tool")) {
-            var decoded = try EncodedStringReader.init(io, source_file, name);
-            var prefix: [32]u8 = undefined;
-            var prefix_length: usize = 0;
-            while (prefix_length < prefix.len) {
-                prefix[prefix_length] = (try decoded.next()) orelse break;
-                prefix_length += 1;
-            }
-            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
-            if (name.decoded_length <= prefix.len) {
-                return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
-            }
-            const digest_hex = std.fmt.bytesToHex(name.content_digest, .lower);
-            return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{
-                prefix[0..prefix_length],
-                &digest_hex,
-            });
-        }
-        if (std.mem.eql(u8, code, "invalid_arguments")) return "Invalid arguments for tool 'bash'.";
-        if (std.mem.eql(u8, code, "tool_unavailable")) return "Tool 'edit' is unavailable.";
-        return error.CorruptStore;
-    }
 
     fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
         const find = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");

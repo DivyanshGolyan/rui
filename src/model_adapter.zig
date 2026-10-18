@@ -776,7 +776,8 @@ pub const Preparation = struct {
                         else => return err,
                     };
                     if (!complete) return false;
-                    try replay.reader.authenticateItem(&replay.validation);
+                    const identity = replay.reader.itemIdentity();
+                    replay.validation.authenticateIdentity(identity.kind, identity.id_digest) catch return replay.reader.malformed();
                     if (incompatible) self.continuation_unavailable = true;
                     replay.validated = true;
                 }

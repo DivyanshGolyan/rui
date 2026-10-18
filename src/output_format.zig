@@ -203,3 +203,47 @@ pub fn readHexScalar(source: anytype) !u21 {
     }
     return value;
 }
+
+/// Bounded decoded view of a certified JSON string range, excluding quotes.
+pub const EncodedStringReader = struct {
+    io: std.Io,
+    file: std.Io.File,
+    position: u64,
+    end: u64,
+    buffer_start: u64 = 0,
+    buffer_length: usize = 0,
+    buffer: [protocol.content_window_bytes]u8 = undefined,
+    pending: [4]u8 = undefined,
+    pending_start: u3 = 0,
+    pending_end: u3 = 0,
+
+    pub fn init(io: std.Io, file: std.Io.File, record: OutputMetadataRecord) !EncodedStringReader {
+        return .{ .io = io, .file = file, .position = record.start, .end = try std.math.add(u64, record.start, record.length) };
+    }
+
+    pub fn take(self: *EncodedStringReader) !u8 {
+        if (self.position == self.end) return error.InvalidEncodedString;
+        if (self.position < self.buffer_start or self.position >= self.buffer_start + self.buffer_length) {
+            self.buffer_start = self.position;
+            const wanted: usize = @intCast(@min(self.end - self.position, self.buffer.len));
+            const count = try self.file.readPositionalAll(self.io, self.buffer[0..wanted], self.position);
+            if (count != wanted) return error.ShortOutputRead;
+            self.buffer_length = count;
+        }
+        const byte = self.buffer[@intCast(self.position - self.buffer_start)];
+        self.position += 1;
+        if (byte < 0x20) return error.InvalidEncodedString;
+        return byte;
+    }
+
+    pub fn next(self: *EncodedStringReader) !?u8 {
+        if (self.pending_start == self.pending_end) {
+            if (self.position == self.end) return null;
+            self.pending_end = @intCast(try decodeScalar(self, &self.pending));
+            self.pending_start = 0;
+        }
+        const byte = self.pending[self.pending_start];
+        self.pending_start += 1;
+        return byte;
+    }
+};
