@@ -3535,8 +3535,26 @@ def renderer_cases():
                     assert frame.count(label) <= 1, (label, frame)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        completed = True
         print("renderer: delivered history and the live footer never show one call twice", flush=True)
+
+        # An open /status page follows Current: once the work ends, the page
+        # says so without another /status.
+        session = "renderer/status-follows"
+        configure(session)
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-status-follows", [
+            ("bash", "status-follows-call", json.dumps({"cmd": "sleep 1.5", "description": "Wait briefly", "timeout_ms": None}))]))
+        marker = answer("status follows")
+        with terminal(session) as tty:
+            tty.send("wait briefly\n", "• Wait briefly")
+            shown = tty.send("/status\n", "Session: ")
+            assert "Work: in_flight" in shown or "Work: runnable" in shown, shown
+            shown = tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, timeout=20)
+            assert "Session: " in shown and "Permission: bypass" in shown, shown
+            tty.send("\x07", marker)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        completed = True
+        print("renderer: an open /status page follows the work it describes", flush=True)
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
