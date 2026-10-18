@@ -34,6 +34,8 @@ Run `./install.sh` again to update. It builds the current checkout, including lo
 
 Installation preserves Stores, credentials and shell profiles. It reports the selected Store's Host status without starting or stopping anything. A running Host retains its old executable. After its work finishes, run `rui host stop`, wait for `rui host status` to report unavailable, then start `rui` again. If your shell still runs an older command, inspect `type -a rui` and run `rehash` in Zsh or `hash -r` in Bash.
 
+If the new build reports an incompatible Store format, see [Start fresh after a Store format change](#start-fresh-after-a-store-format-change).
+
 ## Build
 
 After [installation](#install-from-source) has prepared the dependencies, build a development binary and run portable checks from this repository. For build-only dependency preparation, use the [empty-cache steps](VERIFICATION.md#canonical-gates).
@@ -179,6 +181,45 @@ To shut down the Host and interrupt **all work in the selected Store**:
 If the reply is lost, use the printed retry command. It targets the same Host instance so it cannot stop a replacement. An acknowledgment means shutdown was requested, not that cleanup has finished.
 
 For foreground operation and explicit capacity, use `serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
+
+### Start fresh after a Store format change
+
+At Host startup, an incompatible build reports the Store path, its format and the format the build supports. Rui does not migrate or reset the Store. You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
+
+Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. Each `install.*` directory has a `revision` file identifying its build. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
+
+To back up the old Store, close other clients. Once the Host has stopped, run no Rui command other than `host status` against that Store until the copy finishes. Bare `rui` and `rui resume` can start a Host. Set `STORE` to the exact path printed in the error:
+
+```sh
+RUI="$HOME/.local/bin/rui"
+STORE="/absolute/path/from/the/error"
+"$RUI" host status --store "$STORE"
+```
+
+If a Host is running, let its work finish before stopping it. `host stop` interrupts all remaining work in that Store:
+
+```sh
+"$RUI" host stop --store "$STORE"
+"$RUI" host status --store "$STORE"
+```
+
+Wait until status reports `Host: unavailable`. A stop acknowledgment alone is not enough. Then copy the entire stopped Store into a new private backup directory:
+
+```sh
+BACKUP=$(mktemp -d "$HOME/rui-store-backup.XXXXXX")
+cp -R -p "$STORE" "$BACKUP/store"
+printf 'Backup: %s/store\n' "$BACKUP"
+```
+
+If the copy fails, stop here and resolve the failure. After a successful copy, create a separate empty Store and select it for future commands:
+
+```sh
+FRESH_STORE=$(mktemp -d "$HOME/rui-store.XXXXXX")
+"$RUI" host start --store "$FRESH_STORE"
+"$RUI" setup --store "$FRESH_STORE"
+```
+
+The old Store stays at its original path; its Sessions are not imported into the fresh Store. Store identity binds that original path, so neither a renamed Store nor its backup can be opened at a different path unchanged. To restore a backup, stop all owners and preserve any Store currently at the original path before restoring the complete backup there. Use a compatible build to read it. To make the restored Store your default again, run `"$RUI" setup --store "$STORE"` with that compatible build. See the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) for migration plans.
 
 <a id="try-the-implemented-development-path"></a>
 

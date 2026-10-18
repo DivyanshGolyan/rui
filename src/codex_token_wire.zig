@@ -1,9 +1,9 @@
 //! Codex device-login and token-exchange messages as values.
 //!
 //! Builds request bodies and interprets response statuses and bodies for the
-//! pinned device-code flow and refresh. `codex_auth.zig` owns curl, the clock
-//! and the polling loop, and passes each response here. Credential record
-//! decisions live in `codex_credential_policy.zig`.
+//! pinned device-code flow and refresh, and builds the login and refresh
+//! records those exchanges produce. Callers own curl, the clock and the
+//! polling loop; selection and admission live in `codex_credential_policy.zig`.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 
@@ -11,7 +11,6 @@ pub const issuer = "https://auth.openai.com";
 pub const client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const response_limit = 64 * 1024;
 pub const token_limit = policy.max_token_bytes;
-pub const account_limit = policy.max_account_id_bytes;
 const Required = policy.Required;
 const json_content = "Content-Type: application/json";
 const form_content = "Content-Type: application/x-www-form-urlencoded";
@@ -29,8 +28,27 @@ pub const Tokens = struct {
     id_token: Required(token_limit) = .{},
     access_token: Required(token_limit) = .{},
     refresh_token: Required(token_limit) = .{},
-    account_id: Required(account_limit) = .{},
 };
+
+/// Builds the record a device login installs. The generation is assigned at
+/// admission. On error the record is zeroed.
+pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Record) !void {
+    record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = refreshed_at };
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
+    try record.id_token.set(tokens.id_token.slice());
+    try record.access_token.set(tokens.access_token.slice());
+    try record.refresh_token.set(tokens.refresh_token.slice());
+    try deriveClaims(record);
+}
+
+/// A record's account, FedRAMP routing and expiry are those of its own
+/// tokens, read as `policy.validateSelected` reads them.
+fn deriveClaims(record: *policy.Record) !void {
+    const account = try policy.parseAccount(record.id_token.slice());
+    try record.account_id.set(account.id.slice());
+    record.fedramp = account.fedramp;
+    record.expires_at = try policy.expiryOf(record);
+}
 
 pub const device_start: Request = .{
     .url = issuer ++ "/api/accounts/deviceauth/usercode",
@@ -121,8 +139,6 @@ pub fn parseTokenResponse(status: u16, json: []const u8) !Tokens {
     result.id_token = wire.id;
     result.access_token = wire.access;
     result.refresh_token = wire.refresh;
-    result.account_id = (try policy.parseAccount(result.id_token.slice())).id;
-    _ = try policy.parseExpiry(result.access_token.slice());
     return result;
 }
 
@@ -154,9 +170,7 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     }
     if (wire.has_access) try replacement.access_token.set(wire.access.slice());
     if (wire.has_refresh) try replacement.refresh_token.set(wire.refresh.slice());
-    const expires_at = try policy.parseExpiry(replacement.access_token.slice());
-    replacement.fedramp = (try policy.parseAccount(replacement.id_token.slice())).fedramp;
-    replacement.expires_at = expires_at orelse 0;
+    try deriveClaims(replacement);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
 }
@@ -292,6 +306,44 @@ test "refresh keeps the account's routing claim in both directions" {
     try std.testing.expect(updated.fedramp);
 }
 
+test "a login record takes its account, routing and expiry from its tokens" {
+    var tokens: Tokens = .{};
+    var record: policy.Record = undefined;
+    for ([_]struct { id: []const u8, access: []const u8, fedramp: bool, expires_at: i64 }{
+        .{ .id = policy.fixture_id_token, .access = policy.fixture_access_token, .fedramp = false, .expires_at = 4_102_444_800 },
+        .{ .id = policy.fixture_id_token, .access = "opaque-access", .fedramp = false, .expires_at = 0 },
+        .{ .id = policy.fixture_fedramp_id_token, .access = policy.fixture_access_token, .fedramp = true, .expires_at = 4_102_444_800 },
+        .{ .id = policy.fixture_fedramp_id_token, .access = "opaque-access", .fedramp = true, .expires_at = 0 },
+    }) |case| {
+        try tokens.id_token.set(case.id);
+        try tokens.access_token.set(case.access);
+        try tokens.refresh_token.set("refresh");
+        try loginRecord(&tokens, 77, &record);
+        try std.testing.expectEqual(case.fedramp, record.fedramp);
+        try std.testing.expectEqual(case.expires_at, record.expires_at);
+        try std.testing.expectEqual(@as(i64, 77), record.refreshed_at);
+        try std.testing.expectEqual(@as(u64, 0), record.generation);
+        try std.testing.expectEqual(policy.State.ready, record.state);
+        try std.testing.expectEqualStrings(policy.fixture_account_id, record.account_id.slice());
+        try std.testing.expectEqualStrings(case.id, record.id_token.slice());
+        try std.testing.expectEqualStrings(case.access, record.access_token.slice());
+        try std.testing.expectEqualStrings("refresh", record.refresh_token.slice());
+        try policy.validateSelected(&record, false);
+        try policy.validateReplacement(&record);
+    }
+    // The id token is read before the access token.
+    for ([_]struct { id: []const u8, access: []const u8, err: anyerror }{
+        .{ .id = policy.fixture_id_token, .access = "a..c", .err = error.InvalidCompactToken },
+        .{ .id = "e30.e30.sig", .access = policy.fixture_access_token, .err = error.MissingAccountClaim },
+        .{ .id = "e30.e30.sig", .access = "a..c", .err = error.MissingAccountClaim },
+    }) |case| {
+        try tokens.id_token.set(case.id);
+        try tokens.access_token.set(case.access);
+        try std.testing.expectError(case.err, loginRecord(&tokens, 77, &record));
+        try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&record), 0));
+    }
+}
+
 test "refresh request escapes the refresh token as JSON" {
     var record: policy.Record = undefined;
     try claimedRecord(policy.fixture_id_token, "opaque-access", &record);
@@ -314,7 +366,9 @@ test "authorization exchange requires and owns all token fields" {
     var json: [512]u8 = undefined;
     const response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"{s}\",\"refresh_token\":\"refresh\"}}", .{ id, access });
     const tokens = try parseTokenResponse(200, response);
-    try std.testing.expectEqualStrings("acct_1", tokens.account_id.slice());
+    var record: policy.Record = undefined;
+    try loginRecord(&tokens, 1, &record);
+    try std.testing.expectEqualStrings("acct_1", record.account_id.slice());
     try std.testing.expectError(error.TokenExchangeRejected, parseTokenResponse(400, response));
     try std.testing.expectError(error.MissingRefreshToken, parseTokenResponse(200, "{\"id_token\":\"x\",\"access_token\":\"y\"}"));
     const opaque_response = try std.fmt.bufPrint(&json, "{{\"id_token\":\"{s}\",\"access_token\":\"opaque-access\",\"refresh_token\":\"refresh\"}}", .{id});

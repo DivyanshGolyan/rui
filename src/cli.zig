@@ -144,7 +144,7 @@ fn setup(init: std.process.Init, args: []const []const u8) !void {
         } else return usage();
     }
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+    const now = codex_auth.nowSeconds(init.io);
     const readiness: provider_selection.Readiness = blk: {
         const path = credentialPath(init, &credential_buffer, false) catch break :blk .credential_error;
         break :blk if (codex_auth.localStatus(path, now)) |state| switch (state) {
@@ -457,21 +457,9 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
             }
         }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
-    var record: codex_credentials.Record = .{
-        .generation = 0,
-        .account_id = .{},
-        .fedramp = (try codex_auth.parseAccount(tokens.id_token.slice())).fedramp,
-        .id_token = .{},
-        .access_token = .{},
-        .refresh_token = .{},
-        .expires_at = (try codex_auth.parseExpiry(tokens.access_token.slice())) orelse 0,
-        .refreshed_at = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s)),
-    };
+    var record: codex_credentials.Record = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    try record.account_id.set(tokens.account_id.slice());
-    try record.id_token.set(tokens.id_token.slice());
-    try record.access_token.set(tokens.access_token.slice());
-    try record.refresh_token.set(tokens.refresh_token.slice());
+    try codex_auth.loginRecord(&tokens, codex_auth.nowSeconds(init.io), &record);
     // Publication and SIGINT claim the same gate. Once publication wins,
     // cancellation cannot be reported as if installation were rolled back.
     if (login_state.cmpxchgStrong(.cancellable, .publishing, .acq_rel, .acquire) != null) return error.LoginInterrupted;
@@ -555,7 +543,6 @@ test "login owner preserves interruption, publication and independent defaults" 
             try tokens.id_token.set(codex_auth.fixture_id_token);
             try tokens.access_token.set(codex_auth.fixture_access_token);
             try tokens.refresh_token.set("new-synthetic-refresh");
-            try tokens.account_id.set(codex_auth.fixture_account_id);
             if (before) {
                 try std.posix.raise(.INT);
                 try std.testing.expect(cancelled());
@@ -880,7 +867,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions, interactive
         selected_store = destination.path;
         try preflightNewSession(init.io, selected_store, destination.saved);
         if (credential == null) credential = try credentialPath(init, &credential_buffer, false);
-        const now: i64 = @intCast(@divFloor(std.Io.Clock.Timestamp.now(init.io, .real).raw.nanoseconds, std.time.ns_per_s));
+        const now = codex_auth.nowSeconds(init.io);
         const readiness: provider_selection.Readiness = if (codex_auth.localStatus(credential.?, now)) |state| switch (state) {
             .missing => .missing,
             .configured => .configured,

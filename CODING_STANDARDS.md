@@ -14,7 +14,7 @@ Ground design in concrete caller behavior. Keep independent concerns independent
 
 ### Ownership and transitions
 
-Keep state, validation and transitions with their owner. Express lifecycle decisions as compact value transitions testable without OS effects; keep handles, storage, processes and accounting in a thin imperative owner preserving atomic checks and resource lifetimes. Test transitions exhaustively through the owner interface, then verify adapters and handoffs with focused native integrations.
+Keep state, validation and transitions with their owner. Express lifecycle decisions as compact value transitions testable without OS effects; keep handles, storage, processes and accounting in a thin imperative owner preserving atomic checks and resource lifetimes. Test transitions exhaustively through the owner interface, then verify adapters and handoffs with focused native integrations. A functional core takes the values its shell read (a record under its lock, rows inside the transaction, the current time) and returns the decision or action the shell applies; it keeps no copy of a fact another owner holds. List each core in `src/logic_tests.zig` so `test-logic` checks its boundary.
 
 Expose semantic intent and opaque, pointer-stable handles rather than storage rows, internal lifecycle state or generic command buses. Use closed typed variants for different authorities. Do not copy or abstract resource handles merely to make code functional.
 
