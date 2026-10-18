@@ -53,12 +53,30 @@ def wait_for(store, key, predicate, label):
     raise AssertionError(f"timed out waiting for {label}")
 
 
+def decode_model_evidence(value):
+    """Independent schema-27 oracle; keep absent sources absent."""
+    assert isinstance(value, bytes) and 7 <= len(value) <= 775
+    assert value[0] == 1, "unsupported model evidence version"
+    sources = []
+    offset = 1
+    for _ in range(3):
+        assert offset + 2 <= len(value), "truncated model evidence length"
+        length = int.from_bytes(value[offset:offset + 2], "little")
+        offset += 2
+        assert length <= 256 and offset + length <= len(value), "invalid model evidence length"
+        sources.append(value[offset:offset + length].decode("utf-8") if length else None)
+        offset += length
+    assert offset == len(value), "trailing model evidence bytes"
+    return tuple(sources)
+
+
 def evidence(store):
     with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as db:
-        return db.execute(
-            "SELECT response_id,body_model,openai_model,x_openai_model,request_id "
+        rows = db.execute(
+            "SELECT response_id,model_evidence,request_id "
             "FROM model_operation WHERE response_id IS NOT NULL ORDER BY operation_id"
         ).fetchall()
+    return [(response, *decode_model_evidence(certificate), request) for response, certificate, request in rows]
 
 
 def private_reasoning_count(store, operation):
