@@ -19,10 +19,10 @@ const Self = @This();
 
 const reads = @import("session_reads.zig");
 pub const Command = reads.Command;
-pub const Inspect = reads.Inspect;
+pub const Requests = reads.Requests;
 pub const Status = reads.Status;
 const Job = reads.Job;
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File };
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File };
 const Inspection = reads.Inspection;
 const ReadPhase = departure.ReadPhase;
 const ReadEnd = departure.ReadEnd;
@@ -35,23 +35,23 @@ directory: []const u8,
 scratch: std.Io.File,
 action_file: std.Io.File = undefined,
 inspection_file: std.Io.File = undefined,
+status_file: std.Io.File = undefined,
 command: Command,
-inspect: Inspect = undefined,
+requests: Requests = undefined,
 status: Status = undefined,
 inspection_kind: Inspection = .status,
-// The shown inspection page is /status. It reloads when anything it reports
-// changes, so it never reports finished work as running.
+// /status was asked for; the next settled scan shows it.
+status_requested: bool = false,
+// The shown inspection page is /status. Each settled scan replaces it when
+// anything it reports changed, with the history and composer status of the
+// same capture, so it never reports finished work as running.
 status_page: bool = false,
 status_digest: u64 = 0,
-status_stale: bool = false,
-// A failed reload retries no sooner than this.
-status_retry_at: i96 = 0,
-// The newest accepted Message not yet in delivered output; admission order is
-// delivery order, so it stands for every earlier one.
-echo_key: ?[36]u8 = null,
-// Keys recent live pages delivered, so a page that joined before its
-// Message's acceptance still counts as its delivery.
-delivered: Delivered = .{},
+// The newest accepted Message admission not yet in delivered output.
+// Admission order is Session order, so it stands for every earlier one.
+echo: ?u64 = null,
+// The newest Message admission live pages have delivered.
+delivered: u64 = 0,
 // Consecutive reads whose work changed while their page was read.
 unsettled: u8 = 0,
 // An inspection or Host command started and its result has not been
@@ -141,25 +141,15 @@ test "transcript boundaries survive live eviction and bounded recording" {
     try std.testing.expectEqual(@as(u64, 136), marks.from(0).?.offset);
 }
 
-const Delivered = struct {
-    keys: [16][36]u8 = undefined,
-    count: usize = 0,
-    next: usize = 0,
-
-    fn add(self: *Delivered, key: [36]u8) void {
-        self.keys[self.next] = key;
-        self.next = (self.next + 1) % self.keys.len;
-        self.count = @min(self.count + 1, self.keys.len);
-    }
-
-    fn contains(self: *const Delivered, key: [36]u8) bool {
-        for (self.keys[0..self.count]) |held| if (std.mem.eql(u8, &held, &key)) return true;
-        return false;
-    }
-};
-
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .colour = self.colour, .command = self.command, .inspect = self.inspect, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .watch_status = self.status_page and self.terminal.screen.view == .inspection, .force = self.unsettled >= 3 };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
+    if (phase == .activity or phase == .permission) {
+        job.open_status = self.status_requested;
+        job.watch_status = self.status_page and self.terminal.screen.view == .inspection;
+        job.status_shown = self.status_digest;
+        // The page reports the submission the UI shows with it.
+        if (job.open_status or job.watch_status) job.inspection_submission = self.submission.view();
+    }
     job.result.compact_tools = self.compact_tools;
     return job;
 }
@@ -184,14 +174,14 @@ fn signals(self: *Self, install: bool) void {
     }
 }
 
-pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, inspect: Inspect, status: Status, initial_text: ?[]const u8) !void {
+pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, requests: Requests, status: Status, initial_text: ?[]const u8) !void {
     const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
     const colour = no_colour.len == 0;
     const screen = try init.gpa.create(Screen);
     defer init.gpa.destroy(screen);
     try screen.init(init.io, init.environ_map, colour);
     defer screen.deinit();
-    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = files.scratch, .action_file = files.action, .inspection_file = files.inspection, .command = command, .inspect = inspect, .status = status, .terminal = undefined, .colour = colour };
+    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = files.scratch, .action_file = files.action, .inspection_file = files.inspection, .status_file = files.status, .command = command, .requests = requests, .status = status, .terminal = undefined, .colour = colour };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
     interrupted.stopped.store(false, .release);
@@ -467,6 +457,14 @@ fn driveActive(self: *Self) !void {
         const admission = try self.submission.advance();
         try self.presentAdmission(admission);
         if (admission.failure()) |err| if (err == error.CanonicalStoreFailure) return err;
+        if (self.input.command_length) |length| if (inspection(self.input.command_buffer[0..length]) == .status) {
+            // /status is the next scan's: one capture for the page, the
+            // history and the composer status.
+            self.input.command_length = null;
+            try self.terminal.screen.latest();
+            self.status_requested = true;
+            self.poll_at = 0;
+        };
         if (self.input.command_length != null and self.reader.thread != null and !self.reader.completed()) {
             // No read shows anything before it joins, so an inspection
             // supersedes it. Keep servicing input until completion; never join
@@ -480,18 +478,6 @@ fn driveActive(self: *Self) !void {
         if (self.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
         }
-        if (self.status_stale and self.reader.thread == null and self.input.command_length == null and
-            std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.status_retry_at)
-        {
-            self.status_stale = false;
-            if (self.terminal.screen.view == .inspection and self.status_page) {
-                self.inspection_kind = .status;
-                var job = self.freeze(.inspection);
-                job.inspection_submission = self.submission.view();
-                job.refresh = true;
-                try self.launch(job, reads.inspectPage);
-            }
-        }
         if (self.reader.thread == null and self.input.command_length != null) {
             const text = self.input.command_buffer[0..self.input.command_length.?];
             const kind = inspection(text).?;
@@ -503,6 +489,8 @@ fn driveActive(self: *Self) !void {
             job.command_text_length = text.len;
             job.inspection_submission = self.submission.view();
             job.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
+            // The newer inspection replaces a /status not yet shown.
+            self.status_requested = false;
             try self.launch(job, if (kind == .command) reads.runCommand else reads.inspectPage);
             self.command_running = true;
             self.input.command_length = null;
@@ -566,32 +554,15 @@ fn driveActive(self: *Self) !void {
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
-            } else if (self.echo_key != null) "Sent" else workStatus(self.current.work.status.value);
+            } else if (self.echo != null) "Sent" else workStatus(self.current.work.status.value);
             var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
             var context = std.Io.Writer.fixed(&context_buffer);
             if (self.consent.active() and action_visible)
                 try approvalContext(&context, screen.actionTopHidden(), self.action_summary);
             var status_buffer: [Frame.status_capacity]u8 = undefined;
-            var status = std.Io.Writer.fixed(&status_buffer);
-            // The notice and instructions always fit; a long context line is
-            // shortened rather than pushing them out of the status region.
-            const notice = self.notice orelse "";
-            const room = status_buffer.len - notice.len - base_status.len - "\n\n…".len;
-            var context_line = context.buffered();
-            if (context_line.len > room) {
-                var end = room;
-                while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
-                context_line = context_line[0..end];
-            }
-            // Bypass is the default and stays quiet: /status shows Permission.
-            for ([_][]const u8{ notice, context_line, base_status }, 0..) |line, index| {
-                if (line.len == 0) continue;
-                if (status.buffered().len != 0) try status.writeAll("\n");
-                try status.writeAll(line);
-                if (index == 1 and line.len < context.buffered().len) try status.writeAll("…");
-            }
+            const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status.buffered(), if (self.consent.active() and action_visible) "> " else "› ", &self.live);
+            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.consent.active() and action_visible) "> " else "› ", &self.live);
             if (!approval_ready and self.approvalReady()) {
                 // Reading completes only after delivery. Old choice text must
                 // not become a decision, but fragmented decoder/paste custody
@@ -622,6 +593,47 @@ fn driveActive(self: *Self) !void {
         }
         _ = try self.step(16);
     }
+}
+
+// Every notice and instruction line fits beside a shortened context line.
+comptime {
+    std.debug.assert(@typeInfo(@FieldType(Self, "notice_buffer")).array.len + 256 + "\n\n…".len <= Frame.status_capacity);
+}
+
+/// The notice and instructions always fit; a long context line is shortened,
+/// on a UTF-8 boundary, rather than pushing them out of the status region.
+/// Bypass is the default and stays quiet: /status shows Permission.
+fn statusLines(buffer: *[Frame.status_capacity]u8, notice: []const u8, context: []const u8, base: []const u8) []const u8 {
+    std.debug.assert(base.len <= 256);
+    var status = std.Io.Writer.fixed(buffer);
+    const room = buffer.len - notice.len - base.len - "\n\n…".len;
+    var context_line = context;
+    if (context_line.len > room) {
+        var end = room;
+        while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
+        context_line = context_line[0..end];
+    }
+    for ([_][]const u8{ notice, context_line, base }, 0..) |line, index| {
+        if (line.len == 0) continue;
+        if (status.buffered().len != 0) status.writeAll("\n") catch unreachable;
+        status.writeAll(line) catch unreachable;
+        if (index == 1 and line.len < context.len) status.writeAll("…") catch unreachable;
+    }
+    return status.buffered();
+}
+
+test "status lines keep the notice and instructions beside an oversized context" {
+    var buffer: [Frame.status_capacity]u8 = undefined;
+    const notice: [1536]u8 = @splat('n');
+    // A context whose cut falls inside a two-byte scalar.
+    var context: [4000]u8 = undefined;
+    for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
+    const lines = statusLines(&buffer, &notice, &context, "Type a + Enter");
+    try std.testing.expect(std.mem.startsWith(u8, lines, &notice));
+    try std.testing.expect(std.mem.endsWith(u8, lines, "…\nType a + Enter"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
+    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "", "Sent"));
+    try std.testing.expectEqualStrings("! x\nWorkspace: /w\nSent", statusLines(&buffer, "! x", "Workspace: /w", "Sent"));
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
@@ -885,11 +897,8 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
-            if (accepted.kind == .message) {
-                const key = self.submission.accepted.?.key;
-                // A page may have delivered it before this acceptance joined.
-                self.echo_key = if (self.delivered.contains(key)) null else key;
-            }
+            // A page may have delivered it before this acceptance joined.
+            if (accepted.admission) |admission| self.echo = if (admission > self.delivered) admission else null;
             if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         },
         .rejected => |rejected| {
@@ -907,7 +916,6 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
-    if (self.job.refresh and end.preparationFailure()) return self.refreshFailed();
     // A pending inspection supersedes a silent read it cancelled.
     const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
@@ -927,13 +935,11 @@ fn settleReader(self: *Self) !void {
         }
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();
-    } else if (end == .complete and self.job.refresh) {
-        if (self.terminal.screen.view == .inspection and self.status_page) try self.showInspection();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
         try self.showInspection();
         self.command_running = false; // Shown; exit no longer prints it.
     }
-    self.applyReader(end);
+    try self.applyReader(end);
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -955,26 +961,10 @@ fn showStaged(self: *Self) !void {
     self.reader_output_started = true;
 }
 
-/// A background /status reload the user did not ask for failed: no history
-/// row. The page stays, says it may be out of date, and retries.
-fn refreshFailed(self: *Self) void {
-    var writer = std.Io.Writer.fixed(&self.notice_buffer);
-    writer.writeAll("! /status may be out of date; retrying.") catch unreachable;
-    if (self.pending_diagnostic != null) {
-        writer.writeAll(" ") catch {};
-        self.writePendingDiagnostic(&writer) catch {};
-        self.pending_diagnostic = null;
-    }
-    self.notice = writer.buffered();
-    self.status_stale = true;
-    self.status_retry_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + std.time.ns_per_s;
-    self.dirty = true;
-}
-
 fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
     const result = self.reader.join();
-    const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.job.result.rendering, .output_owned = self.reader_output_started };
+    const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.job.result.rendering };
     const end: ReadEnd = if (result) |_| .complete else |err| if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
     if (self.reader.read_failure) |failure| {
         std.debug.assert(self.pending_diagnostic == null);
@@ -1068,7 +1058,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
     }
 }
 
-fn applyReader(self: *Self, end: ReadEnd) void {
+fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
         if (self.read_phase == .history) self.older_failed = true;
         if (self.pending_diagnostic == null)
@@ -1094,14 +1084,14 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.poll_at = 0;
         return;
     } else {
-        // History, footer, status and Sent change together, in one frame.
+        // History, footer, status, Sent and /status change together, in one frame.
         const result = &self.job.result;
         self.unsettled = 0;
-        for (result.keys[0..result.key_count]) |key| self.delivered.add(key);
-        if (self.echo_key) |key| if (self.delivered.contains(key)) {
-            self.echo_key = null;
+        self.delivered = @max(self.delivered, result.delivered);
+        if (self.echo) |admission| if (admission <= self.delivered) {
+            self.echo = null;
         };
-        if (self.job.watch_status and result.status_digest != self.status_digest) self.status_stale = true;
+        if (result.status) try self.applyStatus();
         self.current = result.current;
         self.live = result.live;
         self.cursor = result.cursor;
@@ -1112,12 +1102,13 @@ fn applyReader(self: *Self, end: ReadEnd) void {
             if (self.prepared_action == null) self.read_phase = .activity;
         }
     }
-    self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    // A /status asked for during this read is the next read's, at once.
+    self.poll_at = if (self.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
     self.dirty = true;
 }
 
 test "frontend commits spacing only for completed visible reads" {
-    const progress: ReadEnd.Progress = .{ .phase = .activity, .rendering = false, .output_owned = true };
+    const progress: ReadEnd.Progress = .{ .phase = .activity, .rendering = false };
     const Case = struct { end: ReadEnd = .complete, output: bool, prior: bool, next: bool, expected: bool };
     for ([_]Case{
         // A notice may clear UI grouping after a worker snapshots it.
@@ -1144,10 +1135,29 @@ test "frontend commits spacing only for completed visible reads" {
         };
         self.job.result = .{ .settled = true, .current = std.mem.zeroes(client.Current), .cursor = .{ .position = 12 }, .compact_tools = case.next };
         self.init.io = std.testing.io;
-        self.applyReader(case.end);
+        try self.applyReader(case.end);
         try std.testing.expectEqual(case.expected, self.compact_tools);
         try std.testing.expectEqual(@as(u64, if (case.end == .complete) 12 else 7), self.cursor.position);
     }
+}
+
+test "after three changed reads in a row the newest capture applies" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .opening = false };
+    self.init.io = std.testing.io;
+    for (0..3) |_| {
+        try std.testing.expect(!self.freeze(.activity).force);
+        self.read_phase = .activity;
+        self.job.result = .{ .settled = false, .current = std.mem.zeroes(client.Current), .cursor = .{ .position = 9 } };
+        try self.applyReader(.complete);
+        // Nothing applied; the read repeats at once.
+        try std.testing.expectEqual(@as(i96, 0), self.poll_at);
+        try std.testing.expectEqual(@as(u64, 0), self.cursor.position);
+    }
+    try std.testing.expect(self.freeze(.activity).force);
+    self.job.result = .{ .settled = true, .current = std.mem.zeroes(client.Current), .cursor = .{ .position = 3 } };
+    try self.applyReader(.complete);
+    try std.testing.expectEqual(@as(u64, 3), self.cursor.position);
+    try std.testing.expect(!self.freeze(.activity).force);
 }
 
 fn showInspection(self: *Self) !void {
@@ -1178,8 +1188,23 @@ fn showInspection(self: *Self) !void {
         }
     }
     try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
-    self.status_page = self.read_phase == .inspection and self.inspection_kind == .status;
-    if (self.status_page) self.status_digest = self.job.result.status_digest;
     // The page heading already says how to return.
     self.notice = null;
+}
+
+/// A settled scan's /status: the page asked for, or the shown page updated in
+/// place. An update keeps the reader's place, choice, notice and consent.
+fn applyStatus(self: *Self) !void {
+    const screen = self.terminal.screen;
+    if (self.job.open_status and self.status_requested) {
+        self.status_requested = false;
+        self.consent.invalidate();
+        if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        try screen.showFile(self.init.io, self.status_file, false);
+        self.notice = null;
+    } else if (self.status_page and screen.view == .inspection) {
+        try screen.refreshFile(self.init.io, self.status_file);
+    } else return;
+    self.status_page = true;
+    self.status_digest = self.job.result.status_digest;
 }

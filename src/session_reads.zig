@@ -14,7 +14,7 @@ const TerminalText = @import("TerminalText.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
-pub const Inspect = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []const u8, *std.Io.Writer) anyerror!void;
+pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 /// Writes /status from one Current capture whose attention rows are in the file.
 pub const Status = *const fn (std.Io, []const u8, []const u8, *const client.Current, std.Io.File, *std.Io.Writer) anyerror!void;
 pub const Inspection = enum { status, requests, help, command };
@@ -30,9 +30,10 @@ pub const Job = struct {
     scratch: std.Io.File = undefined,
     action_file: std.Io.File = undefined,
     inspection_file: std.Io.File = undefined,
+    status_file: std.Io.File = undefined,
     colour: bool = false,
     command: Command = undefined,
-    inspect: Inspect = undefined,
+    requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
     cursor: client.ActivityCursor = .{},
@@ -46,10 +47,11 @@ pub const Job = struct {
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
     inspection_action: ?u64 = null,
-    // A /status reload shows only while its page is still the one on screen.
-    refresh: bool = false,
-    // The /status page is shown: digest what it would now report.
+    // A settled scan renders /status from its own capture: when the user
+    // asks for it, or when the shown page (`status_shown`) would change.
+    open_status: bool = false,
     watch_status: bool = false,
+    status_shown: u64 = 0,
     // Apply the page even if the work changed while it was read.
     force: bool = false,
     result: struct {
@@ -57,10 +59,11 @@ pub const Job = struct {
         // footer and status describe one moment.
         settled: bool = false,
         current: client.Current = undefined,
+        // /status from `current` is in the status file.
+        status: bool = false,
         status_digest: u64 = 0,
-        // Message keys in this page, for Sent.
-        keys: [16][36]u8 = undefined,
-        key_count: usize = 0,
+        // The newest Message admission this page holds, for Sent.
+        delivered: u64 = 0,
         // Where this read's output begins in the conversation; null cursor at
         // its start. A page without items records no boundary.
         mark: ?struct { cursor: ?client.ConversationCursor } = null,
@@ -133,13 +136,24 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.current = try View.current(requests, job.store, job.session, job.scratch);
     if (!job.force and !sameWork(before, job.result.current)) return;
     job.result.settled = true;
-    if (job.watch_status) job.result.status_digest = try statusDigest(job, task.io);
+    // Before anything else reuses scratch, which holds this capture's rows.
+    if (job.open_status or job.watch_status) {
+        job.result.status_digest = try statusDigest(job, task.io);
+        if (job.open_status or job.result.status_digest != job.status_shown) {
+            try job.status_file.setLength(task.io, 0);
+            try task.io.vtable.fileSeekTo(task.io.userdata, job.status_file, 0);
+            var buffer: [4096]u8 = undefined;
+            var output = job.status_file.writerStreaming(task.io, &buffer);
+            try writeStatus(job, task.io, &output.interface);
+            try output.flush();
+            job.result.status = true;
+        }
+    }
     job.result.live = View.Live.init(page.facts.call_activity);
+    // Admission ids follow Session positions, so the newest one shown
+    // means every earlier Message was delivered too.
     for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-        .admission, .user => |message| if (message.key.slice().len == 36) {
-            job.result.keys[job.result.key_count] = message.key.slice()[0..36].*;
-            job.result.key_count += 1;
-        },
+        .admission, .user => |message| job.result.delivered = @max(job.result.delivered, message.admission),
         else => {},
     };
     if (job.opening) {
@@ -172,13 +186,25 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
 }
 
-/// What the /status page would now show, from the Current capture in scratch.
+/// The /status page for the Current capture whose rows are in scratch.
+fn writeStatus(job: *const Job, io: std.Io, out: *std.Io.Writer) !void {
+    try job.status(io, job.store, job.session, &job.result.current, job.scratch, out);
+    try writeSubmission(job, out);
+}
+
 fn statusDigest(job: *const Job, io: std.Io) !u64 {
     var buffer: [256]u8 = undefined;
     var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
-    try job.status(io, job.store, job.session, &job.result.current, job.scratch, &hashing.writer);
+    try writeStatus(job, io, &hashing.writer);
     try hashing.writer.flush();
     return hashing.hasher.final();
+}
+
+/// Snapshot before launch: this read cannot race Admission settlement.
+fn writeSubmission(job: *const Job, out: *std.Io.Writer) !void {
+    const submission = job.inspection_submission orelse return;
+    try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
+    if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
 }
 
 pub fn history(raw: *anyopaque, task: *Task) !void {
@@ -225,18 +251,45 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         }
         try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
-        if (job.inspection_kind == .status) {
-            // The page and its digest come from one capture, so a scan's
-            // digest of the same facts matches it exactly.
-            job.result.current = try View.current(task.requests(), job.store, job.session, job.scratch);
-            try job.status(task.io, job.store, job.session, &job.result.current, job.scratch, &output.interface);
-            job.result.status_digest = try statusDigest(job, task.io);
-        } else try job.inspect(job.init, task.requests(), job.store, job.session, "/requests", &output.interface);
-        // Snapshot before launch: this read cannot race Admission settlement.
-        if (job.inspection_submission) |submission| {
-            try output.interface.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
-            if (submission.last_error) |err| try output.interface.print("Last submission error: {s}\n", .{@errorName(err)});
-        }
+        std.debug.assert(job.inspection_kind == .requests);
+        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
+        try writeSubmission(job, &output.interface);
     }
     try output.flush();
+}
+
+test "a Host command writes its page and inherits no saved terminal descriptor" {
+    const Probe = struct {
+        var before: [256]bool = undefined;
+        var leaked: ?c_int = null;
+
+        fn inheritable() [256]bool {
+            var open: [256]bool = @splat(false);
+            for (3..open.len) |fd| {
+                const flags = std.c.fcntl(@intCast(fd), std.c.F.GETFD);
+                open[fd] = flags >= 0 and flags & std.c.FD_CLOEXEC == 0;
+            }
+            return open;
+        }
+
+        fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+            for (inheritable(), before, 0..) |now, was, fd| if (now and !was) {
+                leaked = @intCast(fd);
+            };
+            _ = std.c.write(1, "page\n", 5);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
+    defer page.close(io);
+    var interrupted: client.Cancellation = .{};
+    var job: Job = .{ .inspection_file = page, .command = Probe.command, .interrupted = &interrupted };
+    var task: Task = .{ .io = io };
+    Probe.before = Probe.inheritable();
+    try runCommand(&job, &task);
+    try std.testing.expectEqual(@as(?c_int, null), Probe.leaked);
+    var bytes: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("page\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
 }

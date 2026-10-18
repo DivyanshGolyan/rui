@@ -25,7 +25,8 @@ pub const Recovery = union(enum) {
 };
 pub const End = union(enum) {
     absent,
-    accepted: struct { kind: Kind, confirmed: bool },
+    // A Message's admission orders it among delivered ones.
+    accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null },
     rejected: struct { kind: Kind, code: protocol.Bounded(96) },
     failed: struct { err: anyerror },
 
@@ -285,7 +286,11 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const confirmed = self.state == .unconfirmed;
         self.accepted = .{ .kind = kind, .key = self.key };
         self.release();
-        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed } };
+        const admission: ?u64 = switch (answer.result.accepted) {
+            .message => |message| message.admission,
+            else => null,
+        };
+        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission } };
     }
     self.state = .rejected;
     var code: protocol.Bounded(96) = .{};
