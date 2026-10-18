@@ -36,6 +36,25 @@ def run(home, *args, success=True, environment=None):
     return result.stdout
 
 
+def terminal_safe_json(text):
+    """Metadata JSON reaches terminals as printable ASCII and still decodes exactly."""
+    unsafe = [character for character in text if not (" " <= character <= "~" or character == "\n")]
+    assert not unsafe, ("raw terminal-unsafe characters in metadata JSON", unsafe, text)
+    return json.loads(text)
+
+
+def json_strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from json_strings(item)
+
+
 CAPTURE_NOTICE = re.compile(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n")
 
 
@@ -682,7 +701,9 @@ def command_entry_cases():
         assert observation["result"] == {"status": "failed", "code": "provider_http_401"}, observation
         unavailable = subprocess.run([str(fixture.RUI), "request", "read-result", failed["request"]], env=env,
             capture_output=True, timeout=10)
-        assert unavailable.returncode == 1 and json.loads(unavailable.stdout)["error"]["code"] == "result_failed", unavailable
+        # Content stays content-only: the typed diagnostic goes to stderr.
+        assert unavailable.returncode == 1 and unavailable.stdout == b"", unavailable
+        assert json.loads(unavailable.stderr.splitlines()[0])["error"]["code"] == "result_failed", unavailable
         proxy = canonical.ReplyProxy(host, "/v1/message", lambda _: b"")
         lost = subprocess.run([str(fixture.RUI), "session", "send", "--session", selected, "lost original"], cwd=workspace,
             env=env, capture_output=True, text=True, timeout=10)
@@ -1059,6 +1080,13 @@ def persistent_opening_case():
         exported = subprocess.run(export, shell=True, env={**os.environ, "HOME": str(home),
             "PATH": str(executables) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=10)
         assert exported.returncode == 0 and exported.stdout == large_answer.encode(), (export, exported.stderr, exported.stdout)
+        # Unavailable content leaves stdout empty; its typed diagnostic is on stderr.
+        absent = list(command)
+        absent[0] = str(fixture.RUI)
+        absent[absent.index("--position") + 1] = "999999999"
+        missing = subprocess.run(absent, env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
+        assert missing.returncode == 1 and missing.stdout == b"", missing
+        assert "error" in json.loads(missing.stderr.splitlines()[0]), missing
         for flags in (("--session-hex", "0"), ("--session-hex", "zz"),
                 ("--session-hex", "61" * 129), ("--session", "persistent/opening", "--store-hex", "61" * 493),
                 ("--session", "persistent/opening", "--session-hex", "61"),
@@ -2951,7 +2979,8 @@ def main(selected="all"):
     session = "human/bash"
     counter = workspace / "effect-count"
     arguments = json.dumps({"cmd": "printf x >> effect-count", "description": "Write first effect", "timeout_ms": None}, separators=(",", ":"))
-    control_call = "human-call\x1b[1Ghidden\u202e"
+    # RLO, C1 CSI and DEL as well as ESC: each can disguise terminal output.
+    control_call = "human-call\x1b[1Ghidden\u202e\u009b\x7f"
     control_arguments = arguments + "\r  "
     sibling_started = state / "sibling-started"
     sibling_release = state / "sibling-release"
@@ -3531,6 +3560,10 @@ def main(selected="all"):
         assert json.loads(presentation) == {"action": action, "call_id": control_call, "arguments": control_arguments}, presentation
         assert "\\u001b" in presentation and "\\u202e" in presentation and "\\r  " in presentation, presentation
         assert "\x1b" not in presentation and "\u202e" not in presentation and "\r" not in presentation, presentation
+        terminal_safe_json(presentation)
+        # Full inspection exposes the same Action identities and proposal.
+        full = terminal_safe_json(run(home, "session", "inspect", "--store", store, "--session", session, "--profile", "full"))
+        assert control_call in json_strings(full) and control_arguments in json_strings(full), full
         fresh_home = state / "fresh-home"
         fresh_home.mkdir()
         assert not (fresh_home / ".config").exists()
@@ -3543,6 +3576,14 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(fresh_home), "TMPDIR": str(state / "missing-scratch")},
             capture_output=True, text=True, timeout=20)
         assert unavailable.returncode != 0 and unavailable.stdout == "", unavailable
+        # Explicit content readers keep stdout byte-exact: a missing Action
+        # reports its Host diagnostic on stderr only.
+        for field in ("call-id", "arguments"):
+            absent = subprocess.run([str(fixture.RUI), "action", f"read-{field}", "--store", str(store),
+                "--session", session, "--action", "999999"], env={**os.environ, "HOME": str(home)},
+                capture_output=True, text=True, timeout=20)
+            assert absent.returncode == 1 and absent.stdout == "", (field, absent)
+            terminal_safe_json(absent.stderr.splitlines()[0])
         processing = fixture.observe(store, first)
         assert processing["status"] == "accepted" and "result" not in processing, processing
         assert not counter.exists()
@@ -4004,8 +4045,13 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         control_session = "human/name\n\x1b[2J\u202e"
-        run(home, "session", "configure", "--store", store, "--session", control_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        terminal_safe_json(run(home, "session", "configure", "--store", store, "--session", control_session,
+            "--workspace", workspace, "--provider", "codex", "--model", "model-a"))
+        # Current inspection and listing carry the Session's own name.
+        current = terminal_safe_json(run(home, "session", "inspect", "--store", store, "--session", control_session))
+        assert control_session in json_strings(current), current
+        listed = terminal_safe_json(run(home, "session", "list", "--store", store, "--all"))
+        assert control_session in [entry["reference"] for entry in listed["sessions"]], listed
         with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", control_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):

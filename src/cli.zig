@@ -5,6 +5,7 @@ const AnswerRenderer = @import("AnswerRenderer.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
+const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -355,9 +356,8 @@ const DefaultsFacts = struct {
 // One complete JSON value: saved preferences, the prospective new-Session
 // binding and separately observed Host capabilities. No field is a Session fact.
 fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
-    var bytes: [protocol.content_window_bytes]u8 = undefined;
-    var output = std.Io.File.stdout().writerStreaming(io, &bytes);
-    const writer = &output.interface;
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"defaults\",\"changed\":{},\"store\":", .{ protocol.wire_version, facts.changed });
     try std.json.Stringify.value(facts.store, .{}, writer);
     try writer.print(",\"store_source\":\"{s}\",\"store_available\":{},\"provider\":", .{ if (facts.saved_store) "saved" else "home", facts.available_store != null });
@@ -387,7 +387,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
         else => |status| try writer.print("{{\"status\":\"{s}\"}}", .{@tagName(status)}),
     } else try writer.writeAll("{\"status\":\"store_unavailable\"}");
     try writer.writeAll("}\n");
-    try output.flush();
+    try output.finish();
 }
 
 // The caller owns buffer. Explicit destinations never consult preferences;
@@ -446,9 +446,8 @@ fn host(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn writeHostStatus(io: std.Io, status: client.HostStatus) !void {
-    var bytes: [protocol.content_window_bytes]u8 = undefined;
-    var output = std.Io.File.stdout().writerStreaming(io, &bytes);
-    const writer = &output.interface;
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
     try writer.print("{{\"version\":\"{s}\",\"type\":\"host_status\",\"status\":\"{s}\"", .{ protocol.wire_version, @tagName(status) });
     switch (status) {
         .ready => |ready| {
@@ -466,7 +465,7 @@ fn writeHostStatus(io: std.Io, status: client.HostStatus) !void {
         else => {},
     }
     try writer.writeAll("}\n");
-    try output.flush();
+    try output.finish();
 }
 
 fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.InstanceId) !void {
@@ -494,12 +493,12 @@ fn stopHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Insta
     };
     switch (outcome) {
         .acknowledged => {
-            var bytes: [protocol.content_window_bytes]u8 = undefined;
-            var output = std.Io.File.stdout().writerStreaming(io, &bytes);
-            try output.interface.print("{{\"version\":\"{s}\",\"type\":\"host_stop\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
-            try std.json.Stringify.value(paths.store.slice(), .{}, &output.interface);
-            try output.interface.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
-            try output.flush();
+            var output: JsonOutput = undefined;
+            const writer = output.init(io, .stdout);
+            try writer.print("{{\"version\":\"{s}\",\"type\":\"host_stop\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
+            try std.json.Stringify.value(paths.store.slice(), .{}, writer);
+            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
+            try output.finish();
         },
         .instance_changed => {
             TerminalText.diagnostic("rui: Host instance changed; replacement was not stopped. Inspect rui host status before any new intent.\n", .{});
@@ -1938,14 +1937,14 @@ fn observe(init: std.process.Init, args: []const []const u8) !void {
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.observeCommand(io, identity.store.slice(), target, &reply_buffer);
     const observation = try checkedObservation(io, reply, target);
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try writer.interface.writeAll("{\"version\":\"1\",\"type\":\"command_observation\",\"key\":");
-    try std.json.Stringify.value(observation.key.slice(), .{}, &writer.interface);
-    try writer.interface.writeAll(",\"observation\":");
-    try observation.writeJson(&writer.interface);
-    try writer.interface.writeAll("}\n");
-    try writer.flush();
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"command_observation\",\"key\":");
+    try std.json.Stringify.value(observation.key.slice(), .{}, writer);
+    try writer.writeAll(",\"observation\":");
+    try observation.writeJson(writer);
+    try writer.writeAll("}\n");
+    try output.finish();
 }
 
 fn inspect(init: std.process.Init, args: []const []const u8) !void {
@@ -1981,28 +1980,26 @@ fn inspect(init: std.process.Init, args: []const []const u8) !void {
         const wire_reply = try client.inspectSession(io, selected_store, reference, .current, file, &response);
         const reply = try client.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
-            try writeCommandReply(io, wire_reply.command);
+            try writeCommandReply(io, wire_reply.command, .stdout);
             return reply.failure.err();
         }
-        var buffer: [protocol.content_window_bytes]u8 = undefined;
-        var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
-        try reply.writeJson(io, file, &writer.interface);
-        try writer.interface.writeAll("\n");
-        return writer.flush();
+        var output: JsonOutput = undefined;
+        const writer = output.init(io, .stdout);
+        try reply.writeJson(io, file, writer);
+        try writer.writeAll("\n");
+        return output.finish();
     }
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.inspectSession(
-        io,
-        selected_store,
-        reference,
-        profile,
-        std.Io.File.stdout(),
-        &reply_buffer,
-    );
+    var output: JsonOutput = undefined;
+    var sink: JsonOutput.Sink = .{ .writer = output.init(io, .stdout) };
+    const reply = try (client.Requests{ .io = io }).inspectSession(selected_store, reference, profile, &sink, &reply_buffer);
     switch (reply) {
-        .report => try std.Io.File.stdout().writeStreamingAll(io, "\n"),
+        .report => {
+            try sink.writer.writeAll("\n");
+            try output.finish();
+        },
         .command => |command_reply| {
-            try writeCommandReply(io, command_reply);
+            try writeCommandReply(io, command_reply, .stdout);
             return error.HostInvocationFailed;
         },
     }
@@ -2035,7 +2032,7 @@ fn readConversation(init: std.process.Init, args: []const []const u8) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const requests_: client.Requests = .{ .io = init.io };
     if (try requests_.readConversationContent(try selectedStore(init, store_path, &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
-        try writeReadFailure(init.io, failure, reference);
+        try writeReadFailure(init.io, failure, reference, .stderr);
         return failure.err();
     }
 }
@@ -2062,7 +2059,7 @@ fn readResult(init: std.process.Init, args: []const []const u8) !void {
     switch (reply) {
         .answer => {},
         .failure => |failure| {
-            try writeReadFailure(io, failure, target);
+            try writeReadFailure(io, failure, target, .stderr);
             return failure.err();
         },
     }
@@ -2091,35 +2088,75 @@ fn readActionContent(init: std.process.Init, args: []const []const u8, field: en
     switch (reply) {
         .answer => {},
         .command => |command_reply| {
-            try writeCommandReply(io, command_reply);
+            try writeCommandReply(io, command_reply, .stderr);
             return error.HostInvocationFailed;
         },
     }
 }
 
-fn writeCommandReply(io: std.Io, reply: client.CommandReply) !void {
-    try std.Io.File.stdout().writeStreamingAll(io, reply.body);
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+/// Every JSON value Rui writes for people or callers to read passes here:
+/// metadata on stdout, and failure diagnostics of content readers on stderr.
+/// Explicit content readers stream raw bytes and never use it.
+const JsonOutput = struct {
+    file: std.Io.File.Writer,
+    escaping: json_ascii.Escaping,
+    file_buffer: [protocol.content_window_bytes]u8,
+    escape_buffer: [protocol.content_window_bytes]u8,
+
+    const Stream = enum { stdout, stderr };
+
+    /// A synchronous client sink for JSON a Host streams, such as Full reports.
+    const Sink = struct {
+        writer: *std.Io.Writer,
+        pub fn feed(self: *Sink, bytes: []const u8) !void {
+            try self.writer.writeAll(bytes);
+        }
+    };
+
+    fn init(self: *JsonOutput, io: std.Io, stream: Stream) *std.Io.Writer {
+        const file = if (stream == .stdout) std.Io.File.stdout() else std.Io.File.stderr();
+        self.file = file.writerStreaming(io, &self.file_buffer);
+        self.escaping = .init(&self.file.interface, &self.escape_buffer);
+        return &self.escaping.writer;
+    }
+
+    fn finish(self: *JsonOutput) !void {
+        self.escaping.finish() catch |err| return self.failure(err);
+    }
+
+    /// The cause behind a writer failure: invalid text or the file's error.
+    fn failure(self: *JsonOutput, err: anyerror) anyerror {
+        if (self.escaping.invalid) return error.InvalidResponse;
+        return self.file.err orelse err;
+    }
+};
+
+fn writeCommandReply(io: std.Io, reply: client.CommandReply, stream: JsonOutput.Stream) !void {
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, stream);
+    writer.writeAll(reply.body) catch |err| return output.failure(err);
+    writer.writeAll("\n") catch |err| return output.failure(err);
+    try output.finish();
     try client.checkCanonicalFailure(reply);
 }
 
-fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8) !void {
-    var buffer: [protocol.content_window_bytes]u8 = undefined;
-    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
-    try std.json.Stringify.value(.{ .key = key, .@"error" = .{
+fn writeReadFailure(io: std.Io, failure: client.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, stream);
+    std.json.Stringify.value(.{ .key = key, .@"error" = .{
         .status = failure.status,
         .type = failure.diagnostic.type.slice(),
         .code = failure.diagnostic.code.slice(),
-    } }, .{}, &writer.interface);
-    try writer.interface.writeByte('\n');
-    try writer.flush();
+    } }, .{}, writer) catch |err| return output.failure(err);
+    writer.writeByte('\n') catch |err| return output.failure(err);
+    try output.finish();
 }
 
 fn checkedObservation(io: std.Io, reply: client.ObservationReply, key: []const u8) !client.CommandObservation {
     return switch (reply) {
         .observation => |observation| observation,
         .failure => |failure| {
-            try writeReadFailure(io, failure, key);
+            try writeReadFailure(io, failure, key, .stdout);
             return failure.err();
         },
     };
@@ -2165,6 +2202,11 @@ const MutationPresentation = enum {
 };
 
 fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+    if (presentation == .json) {
+        var output: JsonOutput = undefined;
+        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
+        return output.finish();
+    }
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(io, &buffer);
     presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
@@ -2447,17 +2489,17 @@ fn sessions(init: std.process.Init, args: []const []const u8) !void {
     // Bounded pages stream into one final JSON value; no page population is
     // retained. A failed later page leaves incomplete output and exits nonzero.
     var cursor: client.SessionListCursor = .{};
-    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    try output.interface.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+    var output: JsonOutput = undefined;
+    const writer = output.init(init.io, .stdout);
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
     var first = true;
     while (true) {
-        const page = try sessionPage(init, store, workspace, cursor, first, &output.interface);
+        const page = try sessionPage(init, store, workspace, cursor, first, writer);
         if (page.count != 0) first = false;
         cursor = page.next orelse break;
     }
-    try output.interface.writeAll("],\"next\":null}\n");
-    try output.flush();
+    try writer.writeAll("],\"next\":null}\n");
+    try output.finish();
 }
 
 fn requests(init: std.process.Init, args: []const []const u8) !void {
@@ -2523,7 +2565,7 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
         break :blk answer;
     };
     if (answer == .failure) {
-        try writeReadFailure(init.io, answer.failure, saved.key.slice());
+        try writeReadFailure(init.io, answer.failure, saved.key.slice(), .stdout);
         return answer.failure.err();
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
@@ -2632,14 +2674,14 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, args: []con
     if (!interactive) {
         const call = try requester.readActionCallId(selected, reference, target, file, &buffer);
         if (call == .command) {
-            try writeCommandReply(io, call.command);
+            try writeCommandReply(io, call.command, .stdout);
             return error.ActionReadFailed;
         }
         call_bytes = call.answer.bytes;
     }
     const arguments = try requester.readActionArguments(selected, reference, target, file, &buffer);
     if (arguments == .command) {
-        try writeCommandReply(io, arguments.command);
+        try writeCommandReply(io, arguments.command, .stdout);
         return error.ActionReadFailed;
     }
     var line: [96]u8 = undefined;

@@ -38,6 +38,12 @@ def announced(result):
     return match[1]
 
 
+def content_failure(result):
+    """Content readers keep stdout content-only: the typed diagnostic is stderr's first line."""
+    assert result.returncode == 1 and result.stdout == "", result
+    return json.loads(result.stderr.splitlines()[0])
+
+
 def expect_fatal(result):
     assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr, result
     assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
@@ -333,7 +339,8 @@ def committed_cases(state):
                 expect_fatal(result)
                 expected = ERROR if route == "/v1/inspect-session" else {
                     "key": key, "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}
-                assert json.loads(result.stdout) == expected, result
+                reported = content_failure(result) if route == "/v1/read-result" else json.loads(result.stdout)
+                assert reported == expected, result
                 assert len(proxy.exchanges) == 1, (route, proxy.exchanges)
             finally:
                 proxy.close()
@@ -703,7 +710,7 @@ def store_read_cases(state):
         fixture.configure(home, store, "store-read-configure", "s", "model-a")
         fixture.message(home, store, "store-read-message", "s", "queued work")
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
-        assert json.loads(before.stdout)["error"]["code"] == "result_not_ready", before
+        assert content_failure(before)["error"]["code"] == "result_not_ready", before
         # The statement still compiles; SQLite fails it at the first step,
         # as for an I/O or corruption fault after preparation.
         database = sqlite3.connect(store / "rui.sqlite3")
@@ -716,7 +723,7 @@ def store_read_cases(state):
             database.close()
         result = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         expect_fatal(result)
-        assert json.loads(result.stdout) == {"key": "store-read-message",
+        assert content_failure(result) == {"key": "store-read-message",
             "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}, result
         fixture.wait_for(lambda: host.poll() is not None, "canonical read fault fences the Host")
         assert host.returncode == 1, host.returncode
@@ -789,10 +796,10 @@ def keyed_observation_cases(state, only="keyed"):
                 proxy.close()
         # The saved handle reads only the original answer: failed work, not a substitute.
         failed = invoke(home, "request", "read-result", key)
-        assert failed.returncode != 0 and json.loads(failed.stdout) == {
+        assert content_failure(failed) == {
             "key": key, "error": {"status": 409, "type": "result_unavailable", "code": "result_failed"}}, failed
         unavailable = invoke(home, "request", "read-result", "--store", store, "--key", "never-submitted")
-        assert unavailable.returncode != 0 and json.loads(unavailable.stdout) == {
+        assert content_failure(unavailable) == {
             "key": "never-submitted", "error": {"status": 409, "type": "result_unavailable", "code": "result_not_found"}}, unavailable
     finally:
         if host is not None:
