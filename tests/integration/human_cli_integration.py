@@ -3488,7 +3488,7 @@ def renderer_cases():
 
         # Another client decides: the choice must leave on its own, with the
         # outcome and answer shown, never an Action that still looks pending.
-        for decision in (() if os.environ.get("RUI_SKIP_D1") else ("allow", "deny")):
+        for decision in ("allow", "deny"):
             session = f"renderer/elsewhere-{decision}"
             configure(session, "ask")
             effect = workspace / f"renderer-elsewhere-{decision}"
@@ -3505,8 +3505,7 @@ def renderer_cases():
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 # Paging and a /status round trip cannot bring the choice back.
-                tty.send("\x1b[6~", predicate=lambda: tty.capture.generation > generation)
-                tty.send("/status\n", "Session: ")
+                tty.send("\x1b[6~/status\n", "Session: ")
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert "Type a + Enter" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
