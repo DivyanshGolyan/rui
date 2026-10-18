@@ -1429,31 +1429,15 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     try writeMutationReply(io, reply, .json);
 }
 
-pub fn sessionInspect(init: std.process.Init, requester: client.Requests, store: []const u8, session: []const u8, command: []const u8, out: *std.Io.Writer) anyerror!void {
-    if (std.mem.eql(u8, command, "/status"))
-        return renderSessionStatus(init, requester, store, session, .full, out);
-    if (std.mem.eql(u8, command, "/requests"))
-        return sessionRequests(init, requester, store, session, out);
-    return error.UnknownArgument;
-}
-
-const SessionStatusView = enum { opening, full };
-
-fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: SessionStatusView) !void {
+/// Entry only confirms configuration; /status renders inside the Session.
+fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
     // Keep the primary rendering/inspection error if flushing also fails.
     defer writer.flush() catch {};
-    try renderSessionStatus(init, requester, store, session_ref, view, &writer.interface);
+    const report = try inspectWorkTo(init, requester, store, session_ref, &writer.interface);
+    report.file.close(init.io);
     try writer.flush();
-}
-
-fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: SessionStatusView, out: *std.Io.Writer) !void {
-    const report = try inspectWorkTo(init, requester, store, session_ref, out);
-    defer report.file.close(init.io);
-    // Entry only confirms configuration.
-    if (view == .opening) return;
-    try writeSessionStatus(init.io, store, session_ref, &report.current, report.file, out);
 }
 
 /// Everything /status reports, from one Current capture; `file` holds the
@@ -1537,7 +1521,7 @@ fn writeSafeText(io: std.Io, value: []const u8) !void {
 fn runSession(init: std.process.Init, destination: []const u8, reference: []const u8, initial_text: ?[]const u8) anyerror!void {
     // Callers own canonical Store resolution and complete Session selection.
     const outcome: anyerror!void = run: {
-        showSessionStatus(init, .{ .io = init.io }, destination, reference, .opening) catch |err| {
+        confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
             if (err == error.SessionNotConfigured) TerminalText.diagnostic("rui: configure this Session before entering it\n", .{});
             break :run err;
         };
@@ -1549,7 +1533,9 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         defer action.close(init.io);
         const inspection = renderScratch(init) catch |err| break :run err;
         defer inspection.close(init.io);
-        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, writeSessionStatus, initial_text);
+        const status = renderScratch(init) catch |err| break :run err;
+        defer status.close(init.io);
+        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection, .status = status }, sessionCommand, sessionRequests, writeSessionStatus, initial_text);
     };
     return outcome catch |err| {
         notice: {
@@ -1745,7 +1731,7 @@ fn interactiveTokens(input: []u8, tokens: [][]const u8) !usize {
     return count;
 }
 
-fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) !void {
+pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) anyerror!void {
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);

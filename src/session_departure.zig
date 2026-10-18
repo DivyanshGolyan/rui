@@ -11,7 +11,7 @@ pub const ReadEnd = union(enum) {
     cancelled: Progress,
     failed: struct { err: anyerror, progress: Progress },
 
-    pub const Progress = struct { phase: ReadPhase, rendering: bool, output_owned: bool };
+    pub const Progress = struct { phase: ReadPhase, rendering: bool };
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
@@ -22,7 +22,9 @@ pub const ReadEnd = union(enum) {
     pub fn failure(self: ReadEnd, mode: Mode) ?anyerror {
         return switch (self) {
             .absent, .complete => null,
-            .cancelled => |progress| if (mode == .active or mode == .inspection and progress.output_owned) error.Cancelled else null,
+            // Nothing a cancelled read produced has shown: it stands only
+            // where no inspection superseded it.
+            .cancelled => if (mode == .active) error.Cancelled else null,
             .failed => |failed| if (mode != .final_exit and self.preparationFailure()) null else failed.err,
         };
     }
@@ -65,7 +67,7 @@ test "departure settlement precedence and reader exit policies retain independen
         try std.testing.expectEqual(error.CanonicalStoreFailure, restored.failure(mode, error.InteractiveInterrupted).?);
     }
     for ([_]ReadPhase{ .history, .details }) |phase| {
-        const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false, .output_owned = false } } };
+        const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false } } };
         try std.testing.expect(preparation.failure(.active) == null);
         try std.testing.expect(preparation.failure(.inspection) == null);
         try std.testing.expectEqual(error.ConnectionResetByPeer, preparation.failure(.final_exit).?);
@@ -74,11 +76,10 @@ test "departure settlement precedence and reader exit policies retain independen
         try std.testing.expectEqual(error.ConnectionResetByPeer, rendering.failure(.inspection).?);
     }
     for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
-        for ([_]bool{ false, true }) |output_owned| {
-            const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = true, .output_owned = output_owned } };
-            try std.testing.expectEqual(if (output_owned) @as(?anyerror, error.Cancelled) else null, cancelled.failure(.inspection));
-            try std.testing.expect(cancelled.failure(.final_exit) == null);
-        }
+        const cancelled: ReadEnd = .{ .cancelled = .{ .phase = phase, .rendering = true } };
+        try std.testing.expectEqual(error.Cancelled, cancelled.failure(.active).?);
+        try std.testing.expect(cancelled.failure(.inspection) == null);
+        try std.testing.expect(cancelled.failure(.final_exit) == null);
     }
 }
 
@@ -104,11 +105,11 @@ test "departure joined fact matrix preserves precedence and recovery" {
         .{ .reader = .complete, .admission = error.Cancelled },
         .{ .reader = .absent, .admission = error.ConnectionResetByPeer, .exit_error = error.ConnectionResetByPeer },
         .{ .reader = .complete, .admission = error.CanonicalStoreFailure, .cause = error.WriteFailed, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
-        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .history, .rendering = false, .output_owned = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
-        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = false, .output_owned = false } } }, .exit_error = error.ConnectionResetByPeer },
-        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = true, .output_owned = false } } }, .cause = error.WriteFailed, .inspection_error = error.ConnectionResetByPeer, .exit_error = error.WriteFailed },
-        .{ .reader = .{ .cancelled = .{ .phase = .activity, .rendering = false, .output_owned = true } }, .inspection_error = error.Cancelled },
-        .{ .reader = .{ .cancelled = .{ .phase = .permission, .rendering = false, .output_owned = false } } },
+        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .history, .rendering = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
+        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = false } } }, .exit_error = error.ConnectionResetByPeer },
+        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = true } } }, .cause = error.WriteFailed, .inspection_error = error.ConnectionResetByPeer, .exit_error = error.WriteFailed },
+        .{ .reader = .{ .cancelled = .{ .phase = .activity, .rendering = false } } },
+        .{ .reader = .{ .cancelled = .{ .phase = .permission, .rendering = false } } },
     };
     for (cases) |row| {
         for ([_]?anyerror{ null, error.TerminalCleanupFailed, error.TerminalRestoreFailed }) |restore_error| {

@@ -366,18 +366,16 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
     if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints.
-    // Only the bindings above may consume a control without rejecting input;
-    // silently ignoring another one would submit altered surrounding text.
-    if (value.mods.ctrl or value.mods.super or value.mods.hyper or value.mods.meta or
-        !validScalar(value.codepoint, false) or (!self.allow_paste and value.mods.alt))
+    // Only the bindings above may consume a modified key without rejecting
+    // input; inserting its bare character (ESC . as ".") or silently
+    // ignoring it would submit text the user did not type.
+    if (value.mods.ctrl or value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta or
+        !validScalar(value.codepoint, false))
     {
         self.reject(.invalid);
         return .none;
     }
     if (value.text) |text| return self.insertText(text, false);
-    if (value.mods.alt) {
-        if (!self.allow_paste) self.reject(.invalid) else if (value.codepoint >= 32 and value.codepoint < 127) return self.insert(@intCast(value.codepoint), false);
-    }
     return .none;
 }
 
