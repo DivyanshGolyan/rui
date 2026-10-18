@@ -14,14 +14,14 @@ pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
 
 /// Acquire a full charge, reclaiming eligible retained output if necessary.
 pub fn allocate(self: ScratchBudget, amount: u64) bool {
-    if (self.reserve(amount)) return true;
+    if (self.charge(amount)) return true;
     const reclaim = self.reclaim_fn orelse return false;
     const context = self.reclaim_context orelse return false;
     return reclaim(context, amount, self.limit);
 }
 
 /// Accounting only: failure changes no charge and never invokes reclamation.
-pub fn reserve(self: ScratchBudget, amount: u64) bool {
+pub fn charge(self: ScratchBudget, amount: u64) bool {
     if (amount > self.limit) return false;
     var current = self.used.load(.acquire);
     while (true) {
@@ -33,7 +33,7 @@ pub fn reserve(self: ScratchBudget, amount: u64) bool {
 
 /// Acquire available capacity; when full, reclaim for one byte of progress.
 pub fn allocateUpTo(self: ScratchBudget, maximum: u64) u64 {
-    const reserved = self.reserveUpTo(maximum);
+    const reserved = self.chargeUpTo(maximum);
     if (reserved != 0 or maximum == 0) return reserved;
     const reclaim = self.reclaim_fn orelse return 0;
     const context = self.reclaim_context orelse return 0;
@@ -41,7 +41,7 @@ pub fn allocateUpTo(self: ScratchBudget, maximum: u64) u64 {
 }
 
 /// Accounting-only partial reservation, with no cleanup or filesystem effects.
-pub fn reserveUpTo(self: ScratchBudget, maximum: u64) u64 {
+pub fn chargeUpTo(self: ScratchBudget, maximum: u64) u64 {
     var current = self.used.load(.acquire);
     while (current < self.limit and maximum != 0) {
         const amount = @min(maximum, self.limit - current);
@@ -59,7 +59,7 @@ pub fn release(self: ScratchBudget, amount: u64) void {
 test "concurrent scratch reservations share one ceiling" {
     const Worker = struct {
         fn run(budget: ScratchBudget, accepted: *std.atomic.Value(u64)) void {
-            if (budget.reserve(1)) _ = accepted.fetchAdd(1, .acq_rel);
+            if (budget.charge(1)) _ = accepted.fetchAdd(1, .acq_rel);
         }
     };
     var used = std.atomic.Value(u64).init(0);
@@ -83,9 +83,9 @@ test "concurrent scratch reservations share one ceiling" {
 test "partial scratch reservation owns only available capacity" {
     var used = std.atomic.Value(u64).init(7);
     const budget = ScratchBudget{ .used = &used, .limit = 10 };
-    try std.testing.expectEqual(@as(u64, 3), budget.reserveUpTo(16));
+    try std.testing.expectEqual(@as(u64, 3), budget.chargeUpTo(16));
     try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 0), budget.reserveUpTo(1));
+    try std.testing.expectEqual(@as(u64, 0), budget.chargeUpTo(1));
     budget.release(3);
     try std.testing.expectEqual(@as(u64, 7), used.load(.acquire));
 }
@@ -100,12 +100,12 @@ test "narrowing a scratch budget cannot widen its authority" {
     // used <= narrowed.limit.
     used.store(10, .release);
     try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
-    try std.testing.expect(!budget.narrowed(9).reserve(1));
+    try std.testing.expect(!budget.narrowed(9).charge(1));
     try std.testing.expectEqual(@as(u64, 10), used.load(.acquire));
 }
 
 test "shared usage is baseline-relative and failed growth reserves nothing" {
-    // Budget arithmetic only: reserve/release totals on an unrelated
+    // Budget arithmetic only: charge/release totals on an unrelated
     // baseline. The reserve-before-failed-write obligation is established
     // beside the real RequestWriter (see "request writer failure retains
     // the full reservation until the owner releases").
@@ -116,12 +116,12 @@ test "shared usage is baseline-relative and failed growth reserves nothing" {
     var used = std.atomic.Value(u64).init(41);
     const budget = ScratchBudget{ .used = &used, .limit = 100 };
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
-    try std.testing.expect(budget.reserve(5));
+    try std.testing.expect(budget.charge(5));
     try std.testing.expectEqual(@as(u64, 46), used.load(.acquire));
-    try std.testing.expect(budget.reserve(7));
+    try std.testing.expect(budget.charge(7));
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
     // Rejected growth changes neither usage nor ownership.
-    try std.testing.expect(!budget.reserve(48));
+    try std.testing.expect(!budget.charge(48));
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
     budget.release(12);
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
@@ -136,7 +136,7 @@ test "only allocation may reclaim and partial allocation preserves charged progr
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
             _ = self.used.fetchSub(4, .acq_rel);
-            return (ScratchBudget{ .used = &self.used, .limit = limit }).reserve(amount);
+            return (ScratchBudget{ .used = &self.used, .limit = limit }).charge(amount);
         }
     };
     var owner: Reclaimer = .{};
@@ -146,7 +146,7 @@ test "only allocation may reclaim and partial allocation preserves charged progr
         .reclaim_context = &owner,
         .reclaim_fn = Reclaimer.reclaim,
     };
-    try std.testing.expect(!budget.reserve(2));
+    try std.testing.expect(!budget.charge(2));
     try std.testing.expectEqual(@as(u64, 9), owner.used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), owner.calls);
     try std.testing.expect(budget.allocate(3));
@@ -154,7 +154,7 @@ test "only allocation may reclaim and partial allocation preserves charged progr
     try std.testing.expectEqual(@as(usize, 1), owner.calls);
     try std.testing.expectEqual(@as(u64, 2), budget.allocateUpTo(7));
     try std.testing.expectEqual(@as(u64, 10), owner.used.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 0), budget.reserveUpTo(7));
+    try std.testing.expectEqual(@as(u64, 0), budget.chargeUpTo(7));
     try std.testing.expectEqual(@as(u64, 0), budget.allocateUpTo(0));
     try std.testing.expectEqual(@as(usize, 1), owner.calls);
     try std.testing.expectEqual(@as(u64, 1), budget.allocateUpTo(7));

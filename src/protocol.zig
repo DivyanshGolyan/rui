@@ -2099,7 +2099,7 @@ test "failed ingress unlink retains an actionable owner and only the affected ch
     try good_file.writeStreamingAll(io, "ok");
     try tmp.dir.deleteFile(io, "good");
     const budget = ScratchBudget{ .used = &used, .limit = 8 };
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     var good_field = ContentField{ .file = good_file, .scratch_budget = budget, .charged = 2 };
     var field = ContentField{};
     try std.testing.expectError(error.AccessDenied, parser.readContentString(&field));

@@ -1266,7 +1266,7 @@ test "cleanup ownership transfers consume their source" {
     const baseline: u64 = 41;
     var used: std.atomic.Value(u64) = .init(baseline);
     const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
-    try std.testing.expect(budget.reserve(6));
+    try std.testing.expect(budget.charge(6));
     var prepared = Prepared{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1305,7 +1305,7 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     const baseline: u64 = 41;
     var used: std.atomic.Value(u64) = .init(baseline);
     const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
-    try std.testing.expect(budget.reserve(6));
+    try std.testing.expect(budget.charge(6));
     // Acquire each file before installing the aggregate guard: a later
     // acquisition failure must not leave earlier files unguarded. The
     // per-file guards live in this block so a successful break transfers
@@ -1358,7 +1358,7 @@ test "an owned file closes its descriptor before reporting removal failure" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     var file = try createOwnedFile(std.testing.io, root, budget, "owned", 1, 1, .persistent);
     file.charged = 2;
     // The fault strikes after the descriptor closes: the handle is gone
@@ -1426,7 +1426,7 @@ test "output publication closes producer aliases before making output evictable"
     var entries: [2]output_retention.Entry = undefined;
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    try std.testing.expect(budget.reserve(6));
+    try std.testing.expect(budget.charge(6));
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
     // Acquire each file before installing the execution guard: a later
     // acquisition failure must not leave earlier files unguarded.

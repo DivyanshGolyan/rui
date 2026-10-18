@@ -5543,7 +5543,7 @@ test "HTTP error capture retires before execution custody" {
         Boundary.retirement_observed = false;
         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
         try request_file.writeStreamingAll(io, "{}");
-        try std.testing.expect(budget.reserve(2));
+        try std.testing.expect(budget.charge(2));
         var writer = provider.CaptureWriter{ .io = io };
         var retained: ?named_scratch.Owner = null;
         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
@@ -5559,7 +5559,7 @@ test "HTTP error capture retires before execution custody" {
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
         const response = &slot.provider.transfer.response;
         try response.file.writeStreamingAll(io, body);
-        try std.testing.expect(budget.reserve(body.len));
+        try std.testing.expect(budget.charge(body.len));
         response.charged = body.len;
         response.length = body.len;
         try response.seal(false);
@@ -6438,7 +6438,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
 
     var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
     var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
-    try std.testing.expect(root_budget.reserve(2));
+    try std.testing.expect(root_budget.charge(2));
     const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(
@@ -6935,7 +6935,7 @@ test "retired ordinary capture still consumes its intake classification and reso
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
                 try file.writeStreamingAll(host.io, "abc");
-                try std.testing.expect(budget.reserve(3));
+                try std.testing.expect(budget.charge(3));
                 retained_fd = file.handle;
                 if (custody == .retained_scratch) {
                     // Failed reclaim must stay off intake, even with no ingress left.
