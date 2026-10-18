@@ -310,11 +310,14 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     const char *arm = getenv("RUI_TERMINAL_STREAM_ARM");
     const char *marker = "VISIBLE-CANCEL-PREFIX";
-    static size_t matched = 0;
-    static int visible = 0, stream_held = 0;
+    /* Hold only after the frame carrying the marker closes: a terminal
+       shows a synchronized frame only once its end arrives. */
+    const char *frame_end = "\033[?2026l";
+    static size_t matched = 0, ended = 0;
+    static int visible = 0, shown = 0, stream_held = 0;
     int stream = screen == 1 && fault && !strcmp(fault, "visible-stream") && arm && !access(arm, F_OK);
     int reset = count == 4 && !memcmp(bytes, "\033[0m", 4);
-    if (stream && visible && !disabled && !reset) {
+    if (stream && shown && !disabled && !reset) {
         if (!stream_held) { record("visible-stream-held\n"); stream_held = 1; }
         errno = EAGAIN;
         return -1;
@@ -331,11 +334,16 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     ssize_t result = real_write(fd, bytes, count);
     int saved_errno = errno;
-    if (stream && result > 0 && !visible) {
-        for (ssize_t i = 0; i < result; ++i) {
+    if (stream && result > 0 && !shown) {
+        for (ssize_t i = 0; i < result && !shown; ++i) {
             char byte = ((const char *)bytes)[i];
-            matched = byte == marker[matched] ? matched + 1 : (byte == marker[0] ? 1 : 0);
-            if (!marker[matched]) { visible = 1; record("visible-prefix-written\n"); break; }
+            if (!visible) {
+                matched = byte == marker[matched] ? matched + 1 : (byte == marker[0] ? 1 : 0);
+                if (!marker[matched]) { visible = 1; record("visible-prefix-written\n"); }
+            } else {
+                ended = byte == frame_end[ended] ? ended + 1 : (byte == frame_end[0] ? 1 : 0);
+                if (!frame_end[ended]) { shown = 1; record("visible-frame-closed\n"); }
+            }
         }
     }
     if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
@@ -2061,26 +2069,6 @@ def startup_reporting_cases(state, library):
             )
 
 
-def await_written(master, marker, timeout=15):
-    """`marker` reached the terminal. The probe holds every later write, so
-    the frame carrying it may never close: a PTY that accepts a frame in
-    partial writes (macOS) leaves its end held."""
-    capture = human.terminal_capture(master)
-    seen = []  # Only output after this call: the current frame may already show it.
-    capture.listener = lambda screen, x, y: seen.append(marker in screen)
-    try:
-        deadline = time.monotonic() + timeout
-        while not any(seen) and marker not in capture.frame:
-            remaining = deadline - time.monotonic()
-            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
-                marker, capture.completed, capture.frame[-2000:])
-            chunk = os.read(master, 65536)
-            assert chunk, ("terminal closed before marker", marker)
-            capture.feed(chunk)
-    finally:
-        capture.listener = None
-
-
 def visible_stream_handoff_cases(state, library):
     """A command during held visible output waits, then runs once."""
     marker = "VISIBLE-CANCEL-PREFIX"
@@ -2124,7 +2112,7 @@ def visible_stream_handoff_cases(state, library):
                 human.read_terminal(master, ready, composer=True)
                 arm.touch()
                 os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
-            await_written(master, marker)
+            human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
                 arm.unlink()
