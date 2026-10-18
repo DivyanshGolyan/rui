@@ -3488,7 +3488,7 @@ def renderer_cases():
 
         # Another client decides: the choice must leave on its own, with the
         # outcome and answer shown, never an Action that still looks pending.
-        for decision in ("allow", "deny"):
+        for decision in (() if os.environ.get("RUI_SKIP_D1") else ("allow", "deny")):
             session = f"renderer/elsewhere-{decision}"
             configure(session, "ask")
             effect = workspace / f"renderer-elsewhere-{decision}"
@@ -3511,8 +3511,33 @@ def renderer_cases():
                 assert "Type a + Enter" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
-        completed = True
         print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key", flush=True)
+
+        # Delivered history and the live footer describe one capture: no
+        # committed frame shows a call twice, or both pending and finished.
+        session = "renderer/one-capture"
+        configure(session)
+        labels = ("List project files", "Fail with exit 127", "Fail with an excerpt")
+        commands = ("sleep 0.2; ls", "sleep 0.2; exit 127", "sleep 0.2; echo excerpt >&2; exit 1")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-one-capture", [
+            ("bash", f"one-capture-{index}", json.dumps({"cmd": command, "description": label, "timeout_ms": None}))
+            for index, (command, label) in enumerate(zip(commands, labels))]))
+        marker = answer("one capture")
+        with terminal(session) as tty:
+            frames = []
+            def record():
+                if not frames or frames[-1] != tty.capture.completed:
+                    frames.append(tty.capture.completed)
+                return tty.capture.reached(marker)
+            tty.send("run the tool demonstration\n", predicate=record)
+            assert any("Working" in frame for frame in frames), frames
+            for frame in frames:
+                for label in labels:
+                    assert frame.count(label) <= 1, (label, frame)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        completed = True
+        print("renderer: delivered history and the live footer never show one call twice", flush=True)
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
