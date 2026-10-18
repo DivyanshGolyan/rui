@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shirou/gopsutil/v4/process"
 	"rui.local/qualification/measurement"
@@ -642,7 +644,7 @@ func spillVerdict(enabled, completed, naturalHostFailure bool, providerRequests 
 		custody, custodyOK := measurement.IntStringField(map[string]any{"execution": execution}, "execution", "custody_occupied")
 		unfenced, fencedOK := execution["dispatch_fenced"].(bool)
 		settledAttempt := offline.Uncertain != nil && *offline.Uncertain == 0 && offline.RetryDueAtMS == nil && offline.LastFailureCode == nil
-		semanticSuccess := offline.IntegrityCheck == "ok" && offline.CompletedTurns == 1 && offline.PartialTurns == 0 && offline.CanonicalOutputItems == 2 && offline.AssistantProjections == 1 && offline.OperationCount == 1 && attemptOne && resolution == "completed" && settledAttempt && providerRequests == 1 && scratchOK && custodyOK && scratch == 0 && custody == 0 && fencedOK && !unfenced
+		semanticSuccess := offline.IntegrityCheck == "ok" && offline.CompletedTurns == 1 && offline.PartialTurns == 0 && offline.CanonicalOutputItems == 2 && offline.AssistantProjections == 1 && offline.OperationCount == 1 && attemptOne && resolution == "answer" && settledAttempt && providerRequests == 1 && scratchOK && custodyOK && scratch == 0 && custody == 0 && fencedOK && !unfenced
 		if !semanticSuccess || writeStatus == "invalid" {
 			return "failed", false, false
 		}
@@ -956,8 +958,7 @@ type capacityAuditRow struct {
 	Uncertain            int     `json:"uncertain"`
 	ResolutionCode       string  `json:"resolution_code"`
 	ResponseID           string  `json:"response_id"`
-	BodyModel            string  `json:"body_model"`
-	OpenAIModel          string  `json:"openai_model"`
+	ModelEvidence        string  `json:"model_evidence"`
 	RequestID            string  `json:"request_id"`
 	OutputItems          int     `json:"output_items"`
 	PrivateOutputItems   int     `json:"private_output_items"`
@@ -995,13 +996,46 @@ func offlineCapacityAudits(stopHost func() error, requests []capacityAuditReques
 	return results, auditError
 }
 
+// Decode independently of the adapter; nil preserves an absent source.
+func decodeModelEvidence(encoded string) ([3]*string, error) {
+	var sources [3]*string
+	value, err := hex.DecodeString(encoded)
+	if err != nil || len(value) < 7 || len(value) > 775 || value[0] != 1 {
+		return sources, errors.New("invalid model evidence certificate")
+	}
+	offset := 1
+	for index := range sources {
+		if offset+2 > len(value) {
+			return sources, errors.New("truncated model evidence length")
+		}
+		length := int(binary.LittleEndian.Uint16(value[offset : offset+2]))
+		offset += 2
+		if length > 256 || offset+length > len(value) || !utf8.Valid(value[offset:offset+length]) {
+			return sources, errors.New("invalid model evidence source")
+		}
+		if length != 0 {
+			source := string(value[offset : offset+length])
+			sources[index] = &source
+		}
+		offset += length
+	}
+	if offset != len(value) {
+		return sources, errors.New("trailing model evidence bytes")
+	}
+	return sources, nil
+}
+
 func capacityAuditRowsValid(rows []capacityAuditRow, keys, sessions []string) bool {
 	if len(rows) != len(keys) {
 		return false
 	}
 	for index, row := range rows {
 		key := keys[index]
-		if row.Key != key || row.Session != sessions[index] || row.InputText != key || row.TurnOutcome != "completed" || row.OperationSession != sessions[index] || row.AttemptOrdinal != 1 || row.AllowanceUsed != 1 || row.Uncertain != 0 || row.ResolutionCode != "completed" || row.ResponseID != "capacity-response-"+key || row.BodyModel != "model-a-served" || row.OpenAIModel != "model-a-served" || row.RequestID != "capacity-"+key || row.OutputItems != 1 || row.PrivateOutputItems != 1 || row.AssistantProjections != 1 || row.LastFailureCode != nil {
+		sources, err := decodeModelEvidence(row.ModelEvidence)
+		if err != nil || sources[0] == nil || *sources[0] != "model-a-served" || sources[1] == nil || *sources[1] != "model-a-served" || sources[2] != nil {
+			return false
+		}
+		if row.Key != key || row.Session != sessions[index] || row.InputText != key || row.TurnOutcome != "completed" || row.OperationSession != sessions[index] || row.AttemptOrdinal != 1 || row.AllowanceUsed != 1 || row.Uncertain != 0 || row.ResolutionCode != "answer" || row.ResponseID != "capacity-response-"+key || row.RequestID != "capacity-"+key || row.OutputItems != 1 || row.PrivateOutputItems != 1 || row.AssistantProjections != 1 || row.LastFailureCode != nil {
 			return false
 		}
 	}
@@ -1016,7 +1050,7 @@ func auditCapacity(deadline measurement.Deadline, store string, keys, sessions [
 	prefix := strings.ReplaceAll(keys[0][:prefixEnd], "'", "''")
 	query := "SELECT ma.command_key AS key,ma.session_ref AS session,CAST(c.payload AS TEXT) AS input_text," +
 		"t.outcome_code AS turn_outcome,mo.session_ref AS operation_session,mo.attempt_ordinal,mo.allowance_used,mo.uncertain," +
-		"mo.resolution_code,mo.response_id,mo.body_model,mo.openai_model,mo.request_id,mo.last_failure_code," +
+		"mo.resolution_code,mo.response_id,hex(mo.model_evidence) AS model_evidence,mo.request_id,mo.last_failure_code," +
 		"(SELECT count(*) FROM model_output_item oi WHERE oi.operation_id=mo.operation_id) AS output_items," +
 		"(SELECT count(*) FROM model_output_item oi JOIN content private_content ON private_content.content_id=oi.content_id WHERE oi.operation_id=mo.operation_id AND private_content.private=1) AS private_output_items," +
 		"(SELECT count(*) FROM conversation_entry ce WHERE ce.source_operation_id=mo.operation_id AND ce.entry_kind=3) AS assistant_projections " +

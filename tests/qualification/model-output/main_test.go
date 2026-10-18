@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -98,7 +99,7 @@ func TestOutputAuditQualifiesEverySemanticCount(t *testing.T) {
 
 func TestSpillVerdictRequiresEverySuccessPredicate(t *testing.T) {
 	attempt := 1
-	resolution := "completed"
+	resolution := "answer"
 	zero := 0
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
 	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
@@ -183,7 +184,7 @@ func TestSpillVerdictFailurePrecedesMemoryEvidence(t *testing.T) {
 		}
 	}
 	zero := 0
-	resolution := "completed"
+	resolution := "answer"
 	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
 	execution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
 	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
@@ -521,7 +522,7 @@ func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
 func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
 	key := "capacity-1-round-1-0"
 	session := "measure/capacity-1/1/0"
-	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, AllowanceUsed: 1, ResolutionCode: "completed", ResponseID: "capacity-response-" + key, BodyModel: "model-a-served", OpenAIModel: "model-a-served", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
+	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, AllowanceUsed: 1, ResolutionCode: "answer", ResponseID: "capacity-response-" + key, ModelEvidence: "010e006d6f64656c2d612d7365727665640e006d6f64656c2d612d7365727665640000", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
 	if !capacityAuditRowsValid([]capacityAuditRow{row}, []string{key}, []string{session}) {
 		t.Fatal("valid capacity audit row was rejected")
 	}
@@ -535,11 +536,45 @@ func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
 		"output items":          func(row *capacityAuditRow) { row.OutputItems = 2 },
 		"private output items":  func(row *capacityAuditRow) { row.PrivateOutputItems = 0 },
 		"assistant projections": func(row *capacityAuditRow) { row.AssistantProjections = 2 },
+		"Turn outcome":          func(row *capacityAuditRow) { row.TurnOutcome = "answer" },
+		"Operation outcome":     func(row *capacityAuditRow) { row.ResolutionCode = "completed" },
+		"absent sources":        func(row *capacityAuditRow) { row.ModelEvidence = "01000000000000" },
+		"lost header":           func(row *capacityAuditRow) { row.ModelEvidence = "010e006d6f64656c2d612d73657276656400000000" },
+		"unexpected alternate": func(row *capacityAuditRow) {
+			row.ModelEvidence = row.ModelEvidence[:len(row.ModelEvidence)-4] + "010078"
+		},
 	} {
 		changed := row
 		mutate(&changed)
 		if capacityAuditRowsValid([]capacityAuditRow{changed}, []string{key}, []string{session}) {
 			t.Fatalf("mutated %s was accepted", name)
+		}
+	}
+}
+
+func TestModelEvidencePreservesSourceOrderAbsenceAndByteLengths(t *testing.T) {
+	for _, check := range []struct {
+		bytes string
+		want  [3]string
+	}{
+		{"\x01\x00\x00\x00\x00\x00\x00", [3]string{}},
+		{"\x01\x01\x00b\x00\x00\x02\x00é", [3]string{"b", "", "é"}},
+		{"\x01\x00\x00\x01\x00h\x00\x00", [3]string{"", "h", ""}},
+		{"\x01\x00\x01" + strings.Repeat("a", 256) + "\x00\x01" + strings.Repeat("b", 256) + "\x00\x01" + strings.Repeat("c", 256), [3]string{strings.Repeat("a", 256), strings.Repeat("b", 256), strings.Repeat("c", 256)}},
+	} {
+		got, err := decodeModelEvidence(hex.EncodeToString([]byte(check.bytes)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index, want := range check.want {
+			if (want == "" && got[index] != nil) || (want != "" && (got[index] == nil || *got[index] != want)) {
+				t.Fatalf("source %d: got %v, want %q", index, got[index], want)
+			}
+		}
+	}
+	for _, invalid := range []string{"", "\x02\x00\x00\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x01\x00", "\x01\x01\x00\xff\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x00\x00x", "\x01\x01\x01" + strings.Repeat("a", 257) + "\x00\x00\x00\x00"} {
+		if _, err := decodeModelEvidence(hex.EncodeToString([]byte(invalid))); err == nil {
+			t.Fatal("invalid evidence accepted")
 		}
 	}
 }
