@@ -13,14 +13,14 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 25;
+pub const schema_version: u32 = 26;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coalesce(call.acceptance_position,action.acceptance_position)) AS position " ++
     "FROM model_operation op JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-    "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' GROUP BY op.operation_id " ++
+    "WHERE op.session_ref=?1 AND op.resolution_code='tool_proposals' GROUP BY op.operation_id " ++
     "HAVING count(*)=(SELECT count(*) FROM model_output_item item WHERE item.operation_id=op.operation_id AND item.item_kind=3) " ++
     "AND count(coalesce(call.acceptance_position,action.acceptance_position))=count(*) " ++
     "AND count(coalesce(call.rejection_content_id,action.resolution_content_id))=count(*)), ";
@@ -33,7 +33,7 @@ const activity_sql = public_tool_groups_sql ++
     "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1), " ++
     "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
 const complete_tool_results_sql =
-    "current.resolution_code='tool_calls' AND EXISTS(" ++
+    "current.resolution_code='tool_proposals' AND EXISTS(" ++
     " SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
     ") AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=(" ++
     " SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3" ++
@@ -54,7 +54,7 @@ const runnable_eligibility_sql =
     ") OR EXISTS(" ++
     " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    " AND (current.resolution_code IN ('continued','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))" ++
+    " AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))" ++
     "))";
 const runnable_probe_sql =
     "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE " ++
@@ -66,7 +66,7 @@ const runnable_selection_sql =
     "SELECT m.session_ref,min(m.admission_id),max(m.admission_id),count(*),s.revision,s.next_position," ++
     "(SELECT active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
-    "AND (current.resolution_code IN ('continued','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))) " ++
+    "AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (" ++ complete_tool_results_sql ++ "))) " ++
     "FROM candidate chosen JOIN message_admission m INDEXED BY message_admission_session_order " ++
     "ON m.session_ref=chosen.session_ref JOIN session s ON s.session_ref=m.session_ref " ++
     "WHERE " ++ runnable_eligibility_sql ++
@@ -75,7 +75,7 @@ const tool_continuation_selection_sql =
     "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id " ++
     "FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
     "JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND " ++
-    "(current.resolution_code IN ('continued','context_overflow') OR " ++ complete_tool_results_sql ++ ") AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
+    "(current.resolution_code IN ('answer','compacted','context_overflow') OR " ++ complete_tool_results_sql ++ ") AND NOT EXISTS(SELECT 1 FROM message_admission m " ++
     "WHERE m.session_ref=active.session_ref AND " ++ runnable_eligibility_sql ++
     ") ORDER BY current.operation_id LIMIT 1";
 const session_stop_cutoff_sql =
@@ -401,8 +401,8 @@ pub const RetryPolicyInput = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
-pub const ModelFailureDisposition = union(enum) {
-    terminal,
+pub const ModelFailureClass = union(enum) {
+    ordinary,
     context_overflow,
     retryable: RetryPolicyInput,
 };
@@ -2426,7 +2426,7 @@ pub const Store = struct {
             break :blk @intCast(id);
         };
         const status: MessageProgress.Status = if (resolution) |code|
-            if (code.eql("continued") or code.eql("interrupted") or code.eql("context_overflow")) .runnable else if (code.eql("tool_calls") and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (code.eql("tool_calls") and unresolved == 0) .runnable else .in_flight
+            if (code.eql("answer") or code.eql("compacted") or code.eql("interrupted") or code.eql("context_overflow")) .runnable else if (code.eql("tool_proposals") and actionable != 0 and actionable == unresolved) .waiting_for_permission else if (code.eql("tool_proposals") and unresolved == 0) .runnable else .in_flight
         else
             .in_flight;
         return .{ .status = status, .action_id = action_id };
@@ -2604,7 +2604,7 @@ pub const Store = struct {
             "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
                 "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
                 "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id " ++
-                "AND o.resolution_code IN ('completed','continued','tool_calls'))) THEN 1 ELSE 0 END " ++
+                "AND o.resolution_code IN ('answer','compacted','tool_proposals'))) THEN 1 ELSE 0 END " ++
                 "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
@@ -2621,7 +2621,7 @@ pub const Store = struct {
                 "((linked.rejection_code IS NOT NULL AND a.action_id IS NULL AND rejection.private=0) OR (linked.rejection_code IS NULL AND a.action_id IS NOT NULL AND a.session_ref=op.session_ref AND result.private=0)) THEN 0 ELSE 1 END=1),op.operation_id,call.call_ordinal FROM model_operation op " ++
                 "JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
                 "LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' AND call.call_ordinal+1=?3 " ++
+                "WHERE op.session_ref=?1 AND op.resolution_code='tool_proposals' AND call.call_ordinal+1=?3 " ++
                 "AND (SELECT max(coalesce(c.acceptance_position,a.acceptance_position)) FROM model_tool_call c " ++
                 "LEFT JOIN action_operation a ON a.parent_operation_id=c.operation_id AND a.call_ordinal=c.call_ordinal WHERE c.operation_id=op.operation_id)=?2 " ++
                 "AND (SELECT count(*) FROM model_tool_call c WHERE c.operation_id=op.operation_id)=" ++
@@ -2806,7 +2806,7 @@ pub const Store = struct {
         const statement = try prepare(self.database, public_tool_groups_sql ++
             "candidates AS (SELECT op.operation_id,call.call_ordinal,groups.position FROM model_operation op " ++
             "LEFT JOIN model_tool_call call ON call.operation_id=op.operation_id " ++
-            "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND op.resolution_code='tool_calls' " ++
+            "LEFT JOIN groups ON groups.operation_id=op.operation_id WHERE op.session_ref=?1 AND op.resolution_code='tool_proposals' " ++
             "AND (groups.position IS NULL OR groups.position>?2 OR (groups.position=?2 AND ?3 IS NOT NULL AND call.call_ordinal+1>?3))) " ++
             "SELECT operation_id,call_ordinal,position FROM candidates ORDER BY operation_id,call_ordinal");
         defer _ = c.sqlite3_finalize(statement);
@@ -3015,7 +3015,7 @@ pub const Store = struct {
         const statement = try prepare(self.database, "SELECT item.operation_id,op.turn_id,call.call_ordinal,action.action_id,call.rejection_code," ++
             "call.item_id_content_id,call.name_content_id,call.call_id_content_id,call.arguments_content_id," ++
             "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
-            "op.resolution_code='tool_calls' AND op.attempt_ordinal=item.attempt_ordinal AND " ++
+            "op.resolution_code='tool_proposals' AND op.attempt_ordinal=item.attempt_ordinal AND " ++
             "source.content_id IS NOT NULL AND source.private=1 AND item_id.digest=item.item_id_digest AND " ++
             "((call.rejection_code IS NOT NULL AND action.action_id IS NULL AND call.acceptance_position IS NOT NULL AND " ++
             "rejection.content_id IS NOT NULL AND rejection.private=0) OR " ++
@@ -4095,7 +4095,7 @@ pub const Store = struct {
                 "CROSS JOIN model_operation operation INDEXED BY model_operation_turn_history " ++
                 "ON operation.turn_id=active.turn_id " ++
                 "WHERE active.session_ref=?1 " ++
-                "AND active.outcome_code IS NULL AND operation.resolution_code='tool_calls' " ++
+                "AND active.outcome_code IS NULL AND operation.resolution_code='tool_proposals' " ++
                 "ORDER BY operation.operation_id",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -4587,7 +4587,7 @@ pub const Store = struct {
         if (!facts.context_changed) return turn_policy.nextPurpose(facts);
         var usage_tokens: ?u64 = null;
         const base = try prepare(self.database, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
-            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='compacted' AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
         defer _ = c.sqlite3_finalize(base);
         try bindText(base, 1, session_ref);
         try bindU64(base, 2, current.next_position);
@@ -4599,7 +4599,7 @@ pub const Store = struct {
         var result_admission = frontier;
         const usage = try prepare(self.database, "SELECT o.usage_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
             "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-            "WHERE o.session_ref=?1 AND o.resolution_code IN ('completed','continued','tool_calls') " ++
+            "WHERE o.session_ref=?1 AND o.resolution_code IN ('answer','compacted','tool_proposals') " ++
             "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
         defer _ = c.sqlite3_finalize(usage);
         try bindText(usage, 1, session_ref);
@@ -4624,11 +4624,11 @@ pub const Store = struct {
             "(SELECT coalesce(sum(c.byte_length),0) FROM model_output_item i JOIN content c ON c.content_id=i.content_id " ++
             "WHERE i.session_ref=?1 AND i.session_position>=max(?2+1,coalesce((SELECT max(anchor.session_position) " ++
             "FROM model_operation b INDEXED BY model_operation_compaction_bases JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
-            "WHERE b.session_ref=?1 AND b.purpose=1 AND b.resolution_code='continued' AND b.admission_position=?3 AND anchor.item_kind=4),0))) + " ++
+            "WHERE b.session_ref=?1 AND b.purpose=1 AND b.resolution_code='compacted' AND b.admission_position=?3 AND anchor.item_kind=4),0))) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o INDEXED BY model_operation_context_history " ++
             "CROSS JOIN model_tool_call call ON call.operation_id=o.operation_id " ++
             "JOIN content c ON c.content_id=call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=?4 " ++
-            "AND o.resolution_code IN ('completed','continued','tool_calls') AND call.acceptance_position>max(?2,?3)) + " ++
+            "AND o.resolution_code IN ('answer','compacted','tool_proposals') AND call.acceptance_position>max(?2,?3)) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
             "WHERE a.session_ref=?1 AND a.acceptance_position>max(?2,?3)) + " ++
             "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
@@ -4652,7 +4652,7 @@ pub const Store = struct {
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
-        if (try self.readModelOperationKind(binding.operation_id) == .compaction) return false;
+        const purpose = try self.readModelOperationKind(binding.operation_id);
         const statement = try prepare(self.database, "SELECT session_ref,admission_position FROM model_operation WHERE operation_id=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
@@ -4660,14 +4660,14 @@ pub const Store = struct {
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 0, &session_ref);
         const boundary = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
-        return self.contextChangedSinceBase(session_ref.slice(), @intCast(boundary));
+        return turn_policy.recoversOverflow(purpose, try self.contextChangedSinceBase(session_ref.slice(), @intCast(boundary)));
     }
 
     fn contextChangedSinceBase(self: *Store, session_ref: []const u8, boundary: u64) !bool {
         // Any changed suffix of the newest base also belongs to every older
         // base. Older bases cannot change the answer.
         const statement = try prepare(self.database, "WITH base AS (SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
-            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 " ++
+            "WHERE session_ref=?1 AND purpose=1 AND resolution_code='compacted' AND admission_position<?2 " ++
             "ORDER BY admission_position DESC LIMIT 1) " ++
             "SELECT NOT EXISTS(SELECT 1 FROM base " ++
             "WHERE NOT EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=?1 " ++
@@ -4960,7 +4960,7 @@ pub const Store = struct {
             self.database,
             "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
                 "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
-                "AND operation.resolution_code='tool_calls' ORDER BY operation.operation_id",
+                "AND operation.resolution_code='tool_proposals' ORDER BY operation.operation_id",
         );
         defer _ = c.sqlite3_finalize(statement);
         while (true) switch (c.sqlite3_step(statement)) {
@@ -5010,7 +5010,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(binding);
         const statement = try prepare(self.database, "SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases " ++
             "ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 " ++
-            "AND base.resolution_code='continued' AND base.admission_position<current.admission_position " ++
+            "AND base.resolution_code='compacted' AND base.admission_position<current.admission_position " ++
             "ORDER BY base.admission_position DESC LIMIT 1");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, binding.operation_id);
@@ -5127,7 +5127,7 @@ pub const Store = struct {
         if (view.output_frontier == null) {
             const boundary = try prepare(self.database, "SELECT current.admission_position,coalesce((SELECT base.admission_position " ++
                 "FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 " ++
-                "AND base.resolution_code='continued' AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1),0) " ++
+                "AND base.resolution_code='compacted' AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1),0) " ++
                 "FROM model_operation current WHERE current.operation_id=?1");
             defer _ = c.sqlite3_finalize(boundary);
             try bindU64(boundary, 1, view.binding.operation_id);
@@ -5140,7 +5140,7 @@ pub const Store = struct {
             const source = try prepare(self.database, "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose " ++
                 "FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) " ++
-                "AND source.admission_position<?4 AND source.resolution_code IN ('completed','continued','tool_calls') " ++
+                "AND source.admission_position<?4 AND source.resolution_code IN ('answer','compacted','tool_proposals') " ++
                 "ORDER BY source.admission_position,source.operation_id LIMIT 1");
             defer _ = c.sqlite3_finalize(source);
             try bindU64(source, 1, view.binding.operation_id);
@@ -5222,12 +5222,12 @@ pub const Store = struct {
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
                 "SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest," ++
-                "owner.resolution_code IN ('completed','continued','tool_calls') AND owner.session_ref=item.session_ref " ++
+                "owner.resolution_code IN ('answer','compacted','tool_proposals') AND owner.session_ref=item.session_ref " ++
                 "AND owner_turn.session_ref=item.session_ref " ++
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
-                "(item.item_kind!=3 OR owner.resolution_code='tool_calls') AND " ++
-                "((owner.resolution_code='tool_calls')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner " ++
+                "(item.item_kind!=3 OR owner.resolution_code='tool_proposals') AND " ++
+                "((owner.resolution_code='tool_proposals')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
                 "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -5398,7 +5398,7 @@ pub const Store = struct {
         }
         const statement = try prepare(
             self.database,
-            "SELECT source.operation_id,current.admission_position,source.resolution_code='tool_calls',source.admission_position,source.output_item_count FROM model_operation current " ++
+            "SELECT source.operation_id,current.admission_position,source.resolution_code='tool_proposals',source.admission_position,source.output_item_count FROM model_operation current " ++
                 "JOIN model_operation source INDEXED BY model_operation_session_history " ++
                 "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 " ++
                 "AND source.operation_id>?2 AND source.operation_id<current.operation_id " ++
@@ -5452,7 +5452,7 @@ pub const Store = struct {
                 "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
                 "CROSS JOIN model_tool_call call ON call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
                 "ON action.parent_operation_id=call.operation_id AND action.call_ordinal=call.call_ordinal " ++
-                "WHERE current.operation_id=?1 AND source.resolution_code='tool_calls' " ++
+                "WHERE current.operation_id=?1 AND source.resolution_code='tool_proposals' " ++
                 "AND coalesce(call.acceptance_position,action.acceptance_position)<current.admission_position " ++
                 (if (after_call_ordinal == null)
                     "AND call.call_ordinal>=0 "
@@ -5537,7 +5537,7 @@ pub const Store = struct {
         self: *Store,
         binding: AttemptBinding,
         failure: ModelFailure,
-        disposition: ModelFailureDisposition,
+        disposition: ModelFailureClass,
         faults: Faults,
     ) !void {
         const code = failure.code();
@@ -5558,19 +5558,17 @@ pub const Store = struct {
         self: *Store,
         binding: AttemptBinding,
         failure: ModelFailure,
-        disposition: ModelFailureDisposition,
+        disposition: ModelFailureClass,
         faults: Faults,
     ) !void {
         const code = failure.code();
         try exec(self.database, "BEGIN IMMEDIATE");
         try self.validateCurrentAttempt(binding);
         switch (disposition) {
-            .terminal, .context_overflow => {
+            .ordinary, .context_overflow => {
                 const compact = disposition == .context_overflow and try self.overflowCanCompact(binding);
-                const resolution = if (disposition == .context_overflow)
-                    (if (compact) "context_overflow" else "ResourceExceeded")
-                else
-                    code;
+                const resolution = if (disposition == .context_overflow) "context_overflow" else code;
+                const outcome = if (disposition == .context_overflow) "ResourceExceeded" else code;
                 const diagnostic_id = if (failure.diagnostic()) |detail|
                     try self.importBytesContent(detail, false, faults.content_import)
                 else
@@ -5603,7 +5601,7 @@ pub const Store = struct {
                 );
                 defer _ = c.sqlite3_finalize(settle_turn);
                 try bindU64(settle_turn, 1, binding.turn_id);
-                try bindText(settle_turn, 2, resolution);
+                try bindText(settle_turn, 2, outcome);
                 try bindU64(settle_turn, 3, binding.operation_id);
                 try expectDone(settle_turn);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
@@ -5987,7 +5985,8 @@ pub const Store = struct {
             current.next_position = try std.math.add(u64, current.next_position, 1);
         }
         const pending = try self.countPendingMessages(session_ref.slice());
-        const resolution_code = if (purpose == .compaction) "continued" else if (output.call_count != 0) "tool_calls" else if (pending == 0) "completed" else "continued";
+        const output_fact = turn_policy.outputFact(purpose, output.call_count);
+        const resolution_code = @tagName(output_fact);
         {
             const update = try prepare(
                 self.database,
@@ -6014,7 +6013,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
-        if (purpose == .assistant_response and output.call_count == 0 and pending == 0) {
+        if (turn_policy.completesTurn(output_fact, pending)) {
             const update = try prepare(
                 self.database,
                 "UPDATE turn SET outcome_code='completed',outcome_content_id=?2 WHERE turn_id=?1 AND operation_id=?3 AND outcome_code IS NULL",
@@ -6034,7 +6033,7 @@ pub const Store = struct {
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.SessionUpdateFailed;
         }
-        if (purpose == .assistant_response and output.call_count == 0 and pending == 0) try self.recordTurnOutcomePosition(binding.turn_id);
+        if (turn_policy.completesTurn(output_fact, pending)) try self.recordTurnOutcomePosition(binding.turn_id);
         if (faults.output_commit) return error.InjectedOutputCommitFailure;
         try exec(self.database, "COMMIT");
     }
@@ -7136,8 +7135,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
-        \\CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE resolution_code IN ('completed','continued','tool_calls');
-        \\CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='continued';
+        \\CREATE INDEX model_operation_context_history ON model_operation(session_ref,admission_position) WHERE resolution_code IN ('answer','compacted','tool_proposals');
+        \\CREATE INDEX model_operation_compaction_bases ON model_operation(session_ref,admission_position) WHERE purpose=1 AND resolution_code='compacted';
         \\CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position);
         \\CREATE INDEX model_output_history ON model_output_item(session_ref,session_position);
         \\CREATE INDEX model_output_compaction_anchor ON model_output_item(operation_id,item_ordinal) WHERE item_kind=4;
@@ -8165,7 +8164,7 @@ test "Current selects active then queued work and bounds recent Message identiti
         var key: [48]u8 = undefined;
         try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file, "selection-file-{d}", .{index}), try std.fmt.bufPrint(&key, "selection-message-{d}", .{index}), "direct/selection", "input");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+        try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     }
     {
         const bytes = try testingSessionReport(&storage, &tmp, "direct/selection", 1024 * 1024);
@@ -8231,7 +8230,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
         defer report.deinit();
         try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
     }
-    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     try std.testing.expect((try storage.observeCommand("")).message.?.progress == null);
     try submitTestMessage(&storage, &tmp, "after-empty-file", "after-empty", "direct/empty-key", "next");
     {
@@ -9076,7 +9075,7 @@ test "canonical step faults fence rather than reading as ordinary misses" {
                             return error.TestUnexpectedResult;
                         }
                     }.run),
-                    .failure => storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_failure" }, .terminal, .{}),
+                    .failure => storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{}),
                     .result, .success => unreachable,
                 };
             },
@@ -9553,7 +9552,7 @@ test "production turn preserves skipped continuation preference through actual S
                 try settleCallsForTesting(&sustained, &sustained_tmp, model, name, if (model.turn_id == bindings[0].turn_id) &unknown else &bash_calls);
             } else {
                 progress[2] += 1;
-                try sustained.settleModelAttemptFailure(model, .{ .uncorrelated = "completed-fixture" }, .terminal, .{});
+                try sustained.settleModelAttemptFailure(model, .{ .uncorrelated = "completed-fixture" }, .ordinary, .{});
             }
         } else return error.NoProgressUnderSustainedInput;
     }
@@ -10070,7 +10069,7 @@ test "historical accepted assistant output completeness and provenance fence rea
         .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=0)" },
         .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
-        .{ .fault = "UPDATE model_operation SET resolution_code='tool_calls' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='tool_proposals' WHERE output_item_count IS NOT NULL" },
         .{ .fault = "UPDATE turn SET session_ref='foreign' WHERE turn_id=(SELECT turn_id FROM model_operation WHERE output_item_count IS NOT NULL)" },
         .{ .incompatible = .reasoning, .failure = error.ContinuationUnavailable },
         .{ .incompatible = .answer, .failure = error.ContinuationUnavailable },
@@ -10182,8 +10181,8 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
         .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_ordinal=1)", .failure = error.CorruptStore },
         .{ .controls = ",\"namespace\":\"future\"", .fault = "UPDATE model_tool_call SET arguments_content_id=name_content_id,field_metadata=CAST(substr(field_metadata,1,120)||substr(field_metadata,41,40) AS BLOB) WHERE call_ordinal=1", .failure = error.CorruptStore },
         .{ .controls = ",\"namespace\":\"future\"", .incompatible_last = true, .fault = "UPDATE model_output_item SET item_id_digest=zeroblob(32) WHERE item_ordinal=0", .failure = error.CorruptStore },
-        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='completed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
-        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='continued' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
+        .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
         .{ .controls = "", .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL", .failure = error.CorruptStore },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -10319,7 +10318,7 @@ test "Current report work is independent of terminal tool history" {
                     &calls,
                 );
                 const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-                try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+                try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
             }
             try submitTestMessage(
                 &storage,
@@ -10653,7 +10652,7 @@ test "later idle stop does not reclassify a completed Message" {
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try exec(
         storage.database,
-        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='completed'," ++
+        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='answer'," ++
             "resolution_content_id=(SELECT content_id FROM message_admission WHERE command_key='completed-stop-message');" ++
             "UPDATE turn SET outcome_code='completed',outcome_content_id=(SELECT content_id FROM message_admission " ++
             "WHERE command_key='completed-stop-message') WHERE session_ref='direct/completed-stop'",
@@ -10763,7 +10762,7 @@ test "exact model interruption continues only with applicable pending input" {
 
     try std.testing.expectError(
         error.SupersededByControl,
-        storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "late_old_failure" }, .terminal, .{}),
+        storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "late_old_failure" }, .ordinary, .{}),
     );
     const successor_observation = (try storage.observeCommand("interrupt-message-b")).message.?.queue.?;
     const observed_successor = switch (successor_observation.state) {
@@ -10783,7 +10782,7 @@ test "exact model interruption continues only with applicable pending input" {
     const replay = storage.interruptModel(&interrupt, .{});
     try std.testing.expect(replay == .accepted);
     try std.testing.expect(replay.accepted.replayed);
-    try storage.settleModelAttemptFailure(successor.permit.binding, .{ .uncorrelated = "successor_failure" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(successor.permit.binding, .{ .uncorrelated = "successor_failure" }, .ordinary, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(
         storage.database,
         "SELECT count(*) FROM model_operation WHERE resolution_code='successor_failure'",
@@ -10826,7 +10825,7 @@ test "exact model interruption rejects stale targets and replays before applicab
     );
     try std.testing.expectError(
         error.SupersededByControl,
-        storage.settleModelAttemptFailure(admitted.permit.binding, .{ .uncorrelated = "late_failure" }, .terminal, .{}),
+        storage.settleModelAttemptFailure(admitted.permit.binding, .{ .uncorrelated = "late_failure" }, .ordinary, .{}),
     );
 
     var after = try completeModelInterruption("after-interrupt", "direct/rejected-interrupt", admitted.permit.binding);
@@ -12389,14 +12388,14 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
             storage.settleModelAttemptFailure(
                 stale,
                 .{ .uncorrelated = "must-not-settle" },
-                .terminal,
+                .ordinary,
                 .{ .rollback_failure = true },
             ),
         );
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(
             error.StoreFenced,
-            storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "must-not-settle" }, .terminal, .{}),
+            storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "must-not-settle" }, .ordinary, .{}),
         );
         try storage.close();
     }
@@ -12410,7 +12409,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
             else => return error.ExpectedProcessingObservation,
         };
         try std.testing.expectEqual(binding.operation_id, observed_binding.operation_id);
-        try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+        try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
         try std.testing.expect(
             (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .failed,
         );
@@ -12904,7 +12903,7 @@ test "public conversation owner fixes end, filters settings and bounds content" 
     defer later.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.configure(&later, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "after-page", "after-page-key", "direct/public", "later public input");
-    try storage.settleModelAttemptFailure(active.permit.binding, .{ .uncorrelated = "fixture_failure" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(active.permit.binding, .{ .uncorrelated = "fixture_failure" }, .ordinary, .{});
     _ = (try storage.admitNextModelAttempt(.{})).?;
     const fixed_first = try storage.publicConversationPage(.{ .session = request.session, .end = first.end });
     try std.testing.expectEqual(first.end, fixed_first.end);
@@ -13768,7 +13767,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect(!first_input.content.?.belongsTo(&view));
     try std.testing.expect(!first_reader.usable());
 
-    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     try expectActivityOutcome(&storage, "direct/dispatch", binding, "provider_http_422");
     const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
     const failure = switch (failed.state) {
@@ -13941,7 +13940,7 @@ test "continued accepted output keeps model immutable and public projection read
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(resolution));
         var code: protocol.Bounded(96) = .{};
         try readText(resolution, 0, &code);
-        try std.testing.expectEqualStrings("continued", code.slice());
+        try std.testing.expectEqualStrings("answer", code.slice());
     }
 
     var update: protocol.ConfigureCommand = .{};
@@ -13958,6 +13957,9 @@ test "continued accepted output keeps model immutable and public projection read
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelSuccess(completion_binding, &output, .{});
+    // The same output is an answer both before and after pending input is
+    // consumed. Only the owning Turn's completion decision differs.
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'"));
     try expectBindingPreserved(&storage, "direct/continued-output", "after-output");
     const completed = (try storage.observeCommand("continued-first")).message.?.queue.?;
     const completion = switch (completed.state) {
@@ -13997,7 +13999,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
                 .stale => error.StaleAttemptBinding,
                 .import => error.InjectedContentImportFailure,
                 .commit => error.InjectedCommitFailure,
-            }, storage.settleModelAttemptFailure(delivered, failure, .terminal, .{
+            }, storage.settleModelAttemptFailure(delivered, failure, .ordinary, .{
                 .content_import = fault == .import,
                 .before_commit = fault == .commit,
             }));
@@ -14007,7 +14009,7 @@ test "model rejection diagnostic is atomic Attempt-bound provenance not Turn out
             defer storage.close() catch unreachable;
             try std.testing.expectEqual(original_content, try queryU64(storage.database, "SELECT count(*) FROM content"));
             try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NOT NULL OR resolution_content_id IS NOT NULL OR request_id IS NOT NULL"));
-            try storage.settleModelAttemptFailure(binding, failure, .terminal, .{});
+            try storage.settleModelAttemptFailure(binding, failure, .ordinary, .{});
         }
         {
             var storage = try testingStore(&tmp, std.testing.io);
@@ -14049,7 +14051,7 @@ test "model rejection diagnostic cannot masquerade as assistant content" {
             .code = "unsupported_provider_output",
             .diagnostic = "{\"reason\":\"UnsupportedMessagePhase\"}",
             .request_id = .{},
-        } }, .terminal, .{});
+        } }, .ordinary, .{});
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try session.set("direct/diagnostic");
         const healthy = try storage.publicConversationPage(.{ .session = session });
@@ -14101,7 +14103,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             storage.settleModelAttemptFailure(
                 binding,
                 .{ .uncorrelated = "request_preparation_failed" },
-                .terminal,
+                .ordinary,
                 .{ .before_commit = true },
             ),
         );
@@ -14206,7 +14208,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     // A provider answer without correlation records none.
     try submitTestMessage(&storage, &tmp, "uncorrelated-input", "uncorrelated-message", "direct/correlation", "fail");
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } }, .terminal, .{});
+    try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } }, .ordinary, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'"));
 }
 
@@ -14274,7 +14276,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expectEqual(@as(u64, 2), second.attempt_ordinal);
     try std.testing.expectError(
         error.StaleAttemptBinding,
-        storage.settleModelAttemptFailure(first, .{ .uncorrelated = "late_old_failure" }, .terminal, .{}),
+        storage.settleModelAttemptFailure(first, .{ .uncorrelated = "late_old_failure" }, .ordinary, .{}),
     );
     try std.testing.expect(!storage.isFenced());
 
@@ -14445,7 +14447,7 @@ test "canonical historical read failure fences dispatch without a fabricated out
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(
         error.StoreFenced,
-        storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "request_preparation_failed" }, .terminal, .{}),
+        storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "request_preparation_failed" }, .ordinary, .{}),
     );
 }
 
@@ -15394,6 +15396,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     }
     try storage.settleModelAttemptFailure(exhausted, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+    // Recovery eligibility changes the Turn outcome, never the failure fact.
+    try std.testing.expectEqual(@as(u64, 3), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code='context_overflow'"));
     const observation = try storage.observeCommand("input");
     try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
 }
@@ -15576,7 +15580,7 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
     try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "one", "one", "direct/compact", "original");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
     try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "pending");
     const compact = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view = try storage.openHistoricalView(compact);
@@ -15679,7 +15683,7 @@ test "compaction failed and unresolved candidates preserve the accepted base" {
         try std.testing.expect((try cursor.next(&view)) == null);
     }
     try std.testing.expectError(error.InvalidProviderEnvelope, settleCompactionForTesting(&storage, &tmp, candidate, &.{}));
-    try storage.settleModelAttemptFailure(candidate, .{ .uncorrelated = "bad_compaction" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(candidate, .{ .uncorrelated = "bad_compaction" }, .ordinary, .{});
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
     try submitTestMessage(&storage, &tmp, "three", "three", "direct/compact", "new turn");
@@ -15822,9 +15826,9 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
             try submitTestMessage(&storage, &tmp, "two", "two", "direct/compact", "bound suffix");
             try settleCompactionForTesting(&storage, &tmp, assistant, &.{.reasoning});
             const suffix = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try storage.settleModelAttemptFailure(suffix, .{ .uncorrelated = "network" }, .terminal, .{});
+            try storage.settleModelAttemptFailure(suffix, .{ .uncorrelated = "network" }, .ordinary, .{});
         } else {
-            try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "network" }, .terminal, .{});
+            try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "network" }, .ordinary, .{});
         }
         var patch: protocol.ConfigureCommand = .{};
         try patch.key.set("heuristics");
@@ -15865,7 +15869,7 @@ test "compaction does not repeat a soft trigger after a failed assistant with un
     const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleCompactionForTesting(&storage, &tmp, base, &.{.compaction});
     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "network_failure" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "network_failure" }, .ordinary, .{});
     var patch: protocol.ConfigureCommand = .{};
     try patch.key.set("heuristics");
     try patch.session.set("direct/compact");
@@ -16000,7 +16004,7 @@ test "model admission work excludes failed historical Operation population" {
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
             try expectDone(insert);
-            try storage.settleModelAttemptFailure(current, .{ .uncorrelated = if (overflow) "overflow" else "provider_http_422" }, if (overflow) .context_overflow else .terminal, .{});
+            try storage.settleModelAttemptFailure(current, .{ .uncorrelated = if (overflow) "overflow" else "provider_http_422" }, if (overflow) .context_overflow else .ordinary, .{});
             try submitTestMessage(&storage, &tmp, "pending", "pending", "direct/admission-work", "pending input");
 
             var measured: @This() = .{};
@@ -16055,7 +16059,7 @@ test "model admission work excludes accepted compaction base history" {
                 }
             }
             if (suffix == .unchanged) {
-                try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "network" }, .terminal, .{});
+                try storage.settleModelAttemptFailure(current, .{ .uncorrelated = "network" }, .ordinary, .{});
             } else {
                 const call = TestingCall{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" };
                 try settleCallsForTestingWithFaults(&storage, &tmp, current, "output", &.{call}, .{}, switch (suffix) {
@@ -16137,7 +16141,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 const binding = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureInput).permit.binding;
                 if (kind == .instruction and index != population) {
                     // Isolate revision history from accepted-output population.
-                    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+                    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
                 } else {
                     try settleCallsForTestingWithFaults(&storage, &tmp, binding, "output", &.{call}, .{}, if (index == population) (if (compact) (if (kind == .instruction) "{\"total_tokens\":99900}" else "{\"total_tokens\":99999}") else "{\"total_tokens\":1}") else null);
                 }
@@ -16148,7 +16152,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     // is after its usage/output and must remain in pressure.
                     if (index != population) {
                         const continuation = (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureContinuation).permit.binding;
-                        try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+                        try storage.settleModelAttemptFailure(continuation, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
                     }
                 }
             }
@@ -16240,7 +16244,7 @@ test "compaction purpose admission fences a missing latest Turn Operation" {
     try configureTestSession(&storage, "config", "direct/missing-current");
     try submitTestMessage(&storage, &tmp, "input", "input", "direct/missing-current", "original input");
     const original = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    try storage.settleModelAttemptFailure(original, .{ .uncorrelated = "provider_http_422" }, .terminal, .{});
+    try storage.settleModelAttemptFailure(original, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     try exec(storage.database, "UPDATE turn SET operation_id=99999");
     try submitTestMessage(&storage, &tmp, "later", "later", "direct/missing-current", "new input");
     try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
