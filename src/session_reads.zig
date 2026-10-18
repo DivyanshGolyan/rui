@@ -108,6 +108,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
+    if (!job.result.settled) return;
     if (job.result.current.first_action) |action| {
         try job.action_file.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.action_file };
