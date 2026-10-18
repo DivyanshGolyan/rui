@@ -712,3 +712,23 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     try screen.render(&out.writer, .{ .row = 10, .col = 30, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{});
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
 }
+
+test "an unchanged frame writes nothing" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
+    try screen.append("hello\n");
+    try screen.render(&out.writer, size, "", 0, "Working…", "› ", &.{});
+    const before = out.written().len;
+    // Observation polls redraw several times a second while idle.
+    try screen.render(&out.writer, size, "", 0, "Working…", "› ", &.{});
+    try std.testing.expectEqual(before, out.written().len);
+    try screen.render(&out.writer, size, "a", 1, "Working…", "› ", &.{});
+    try std.testing.expect(out.written().len > before);
+}

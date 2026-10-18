@@ -356,3 +356,15 @@ diff --git a/src/Window.zig b/src/Window.zig
                                      if (opts.commit) self.writeCell(col, row, .{
                                          .char = .{
                                              .grapheme = s,
+diff --git a/src/Vaxis.zig b/src/Vaxis.zig
+--- a/src/Vaxis.zig
++++ b/src/Vaxis.zig
+@@ -419,7 +419,7 @@
+         (self.screen.cursor.row != self.state.cursor.row or
+             self.screen.cursor.col != self.state.cursor.col);
+     const cursor_secondary_changed = self.screen.cursor_vis and
+-        std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
++        !std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
+     const needs_render = self.refresh or
+         cursor_vis_changed or
+         cursor_shape_changed or
