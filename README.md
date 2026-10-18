@@ -12,7 +12,6 @@ Supported platforms are Linux x86-64 and Apple Silicon macOS. Linux ARM64 and In
 
 Before using Rui on a project:
 
-- Bash runs without approval by default. Enable approval as shown below if you want to review commands first.
 - The project directory is not a sandbox. Commands have your user's access. Detached subprocesses and blocked I/O can outlast a stop request.
 - If a crash leaves a command's outcome unknown, Rui reports it as indeterminate and does not automatically repeat it. OS-crash and power-loss recovery are not guaranteed.
 - Full tool output is temporary. Saved results and excerpts remain available after that output is evicted or removed on restart.
@@ -69,7 +68,9 @@ cd /path/to/your/project
 "$RUI"
 ```
 
-This creates a fresh conversation in the current directory and starts or connects to Rui's background process. To review Bash commands before they run, enter this before your first request:
+This creates a fresh conversation in the current directory and starts or connects to Rui's background process.
+
+By default, Bash runs without asking (`bypass`); `/status` shows the current mode. To review Bash commands before they run, enter this before your first request:
 
 ```text
 /configure --permission-mode ask

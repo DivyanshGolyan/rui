@@ -56,6 +56,14 @@ def json_strings(value):
             yield from json_strings(item)
 
 
+# The bypass default is explained only where /status reports it.
+BYPASS_STATUS = "Permission: bypass (Bash runs without asking)"
+
+
+def permission_row(frame, mode):
+    """The exact /status row, unwrapped from a narrow page."""
+    value = BYPASS_STATUS if mode == "bypass" else f"Permission: {mode}"
+    return f"{value} Automatic compaction:" in " ".join(frame.split())
 CAPTURE_NOTICE = re.compile(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n")
 
 
@@ -589,7 +597,7 @@ def terminal_wait_oracles():
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
-    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass", "Work: completed", "", "›"]
+    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass (Bash runs without asking)", "Work: completed", "", "›"]
     def frame_after(command, chunks, read):
         reader, peer = socket.socketpair()
         with reader, peer:
@@ -2906,10 +2914,10 @@ def long_input_case(home, store, workspace, endpoint, host):
             stdin=slave, stdout=slave, stderr=slave)
         greeting = read_terminal(master, "› ")
         assert "Permission:" not in greeting, greeting
-        assert "Bash runs without approval" not in greeting, ("bypass is quiet", greeting)
+        assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
-        assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
+        assert permission_row(binding, "bypass") and "Provider: codex" in binding and "Model: model-a" in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -3868,7 +3876,7 @@ def main(selected="all"):
             saved = json.loads(record.read_bytes())
             assert saved["session"] == f"rui/{record.stem}" and saved["configuration"]["model"] == {"state": "value", "value": "gpt-6-luna"}, saved
             binding = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {saved['session']}" in binding and "Provider: codex" in binding and "Model: gpt-6-luna" in binding and "Permission: bypass" in binding, binding
+            assert f"Session: {saved['session']}" in binding and "Provider: codex" in binding and "Model: gpt-6-luna" in binding and permission_row(binding, "bypass"), binding
             assert malformed.read_text() == "version=9\n"
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert explicit.wait(timeout=5) == 0
@@ -3901,7 +3909,7 @@ def main(selected="all"):
             welcome = terminal_step(master, "d", "› ")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             binding = terminal_step(master, "/status", "Session: ", composer=True)
-            assert "Session: rui/" in binding and "Permission: bypass" in binding, binding
+            assert "Session: rui/" in binding and permission_row(binding, "bypass"), binding
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert expiring.wait(timeout=5) == 0
             assert malformed.read_text() == "version=9\n"
@@ -3963,10 +3971,10 @@ def main(selected="all"):
             ) as (caller, master):
                 welcome = read_terminal(master, "› ")
                 assert "Permission:" not in welcome, welcome
-                assert "Bash runs without approval" not in welcome, ("bypass is quiet", welcome)
+                assert "Bash runs without" not in welcome, ("bypass is quiet", welcome)
                 assert "Bash commands can run without asking you" not in welcome, welcome
                 status = status_frame(master, warning_ref)
-                assert f"Permission: {mode}\n" in status, status
+                assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert "Bash runs without approval" not in status, status
                 terminal_step(master, "/exit", "Detached.")
@@ -3993,8 +4001,8 @@ def main(selected="all"):
                 assert saved["configuration"]["tools"] == {"state": "value", "value": ["bash"]} and saved["configuration"]["permission_mode"] == {"state": "value", "value": mode}
                 assert all(noise not in welcome for noise in ("request:", "New Session intent:", reference, "Workspace:", "Provider:", "Permission:")), welcome
                 status = terminal_step(master, "/status", "Session: ", composer=True)
-                assert f"Session: {reference}" in status and "Permission: bypass" in status, status
-                assert "Bash runs without approval" not in welcome, ("bypass is quiet", welcome)
+                assert f"Session: {reference}" in status and permission_row(status, "bypass"), status
+                assert "Bash runs without" not in welcome, ("bypass is quiet", welcome)
                 assert "Bash commands can run without asking you" not in welcome, welcome
                 current = fixture.command("session", "inspect", "--store", store, "--session", reference)
                 assert current["session"]["permission_mode"] == mode, current
