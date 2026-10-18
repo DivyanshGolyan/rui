@@ -210,6 +210,8 @@ def main():
                     assert restarted.returncode == 0, "same-format upgrade must start without a fresh Store"
                     state, shown = dialect.host_status(binary, store, 5)
                     assert state == "ready", shown
+                    # Restarted from soft 256, the candidate uses its own default.
+                    assert json.loads(shown)["active_capacity"] == "100", shown
                     print(shown, flush=True)
                 else:
                     assert restarted.returncode != 0 and elapsed < 5, (elapsed, restarted)

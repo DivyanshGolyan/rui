@@ -26,10 +26,15 @@ import time
 from host_process import (canonical_fixture_root, start_ready_process, stop_process,
                           dispose_all, preserve_failure_metadata, _failure_destination)
 import codex_integration as codex_fixture
+from product_defaults import DEFAULTS
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 COMMAND_TIMEOUT = 16
+# Every unflagged start path (bare rui, host start, host serve) must resolve
+# the module's capacity; the fixture budgets below follow the same values.
+DEFAULT_ACTIVE_CAPACITY = DEFAULTS.active_capacity
+INTAKE = DEFAULTS.intake_capacity
 PTY_OUTPUT_LIMIT = 1024 * 1024
 
 
@@ -273,22 +278,108 @@ def lower_descriptor_limit():
     resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
 
 
+def assert_configure_defaults(root, store, env):
+    """Fresh CLI and Store first-configuration defaults follow the module; saved values win."""
+    home = root / "configure-defaults-home"
+    home.mkdir(mode=0o700)
+    home = home.resolve(strict=True)
+    env = {**env, "HOME": str(home)}  # No saved preferences: module defaults apply.
+
+    def configure(*arguments):
+        result = subprocess.run([RUI, "session", "configure", "--store", store, *arguments],
+            cwd=root, env=env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+        assert result.returncode == 0, result.stderr
+        answer = json.loads(result.stdout)["answer"]
+        assert answer["status"] == "accepted", answer
+        return answer["session"]
+
+    def settings(session):
+        result = subprocess.run([RUI, "session", "inspect", "--store", store, "--session", session],
+            env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        current = json.loads(result.stdout)["session"]
+        return current["model"], current["tools"], current["permission_mode"]
+
+    module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
+    assert settings(configure()) == module  # Fresh CLI capture resolves every omitted value.
+    # An addressed first configuration leaves tools and permission to the Store.
+    addressed = "defaults/addressed"
+    assert configure("--session", addressed, "--workspace", root, "--provider", "codex",
+                     "--model", "model-a") == addressed
+    assert settings(addressed) == ("model-a", *module[1:])
+    # Explicit values save; a later sparse update preserves them, not defaults.
+    configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
+    configure("--session", addressed, "--compaction-trigger", "12345")
+    assert settings(addressed) == ("model-a", [], "ask")
+
+
+def managed_descriptor_rejection(store, env, limit):
+    """Start a managed Host with soft and hard RLIMIT_NOFILE at limit; require refusal."""
+    def limits():
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
+    before = time.monotonic()
+    failed = run_start(store, env, preexec_fn=limits)
+    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    for text in ("DescriptorCapacityInsufficient", "exit status 1", "RLIMIT_NOFILE",
+                 "minimum intake", "ulimit -Hn", "rui host start"):
+        assert text in failed.stderr, (text, failed.stderr)
+    line = next(line for line in failed.stderr.splitlines() if "descriptor capacity insufficient:" in line)
+    fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", line)}
+    # Independent budget at the default capacity: macOS libmalloc may add one
+    # inherited socket; curl wakeups and authentication differ by platform.
+    inherited = fields["inherited"]
+    assert inherited in ({3, 4} if sys.platform == "darwin" else {3}), fields
+    fixed_host = 11 if sys.platform == "darwin" else 9
+    authentication = 10 if sys.platform == "darwin" else 8
+    # Other occupied slots at five descriptors plus the serial ten-descriptor
+    # Bash spawn; ordinary exchanges at four, two controls and discovery.
+    execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 4 + 3
+    expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
+                    fixed_host=fixed_host, clients=clients, execution=execution,
+                    authentication=authentication, self_wake=2,
+                    required=inherited + fixed_host + clients + execution + authentication + 2)
+    assert fields == expected, (fields, expected)
+    # Refusal precedes the lease and diagnostic writer: no ready Host remains.
+    assert not (store / "host.lock").exists() and not (store / "diagnostics").exists(), store
+    assert status(store, env)["status"] != "ready"
+    assert not matching_processes(store)
+    return fields["required"]
+
+
 def startup_limits(root, env):
-    for name, hard in (("soft-256", False), ("hard-256", True)):
+    # The default capacity cannot fit within macOS's default hard-capped 256
+    # descriptors. Refuse with the existing diagnostic instead of clamping.
+    required = managed_descriptor_rejection(root / "hard-256", env, 256)
+    minimum = required - 4 * (INTAKE - 10)
+    observed = managed_descriptor_rejection(root / "hard-below-minimum", env, minimum - 1)
+    if observed != required:  # A different macOS inherited count moves the boundary.
+        required, minimum = observed, observed - 4 * (INTAKE - 10)
+        assert managed_descriptor_rejection(root / "hard-below-minimum-again", env, minimum - 1) == required
+    print(f"default capacity refused below {minimum} descriptors (default intake needs {required})", flush=True)
+    # macOS default soft 256 below a higher hard limit, a typical Linux
+    # 1024/1024 session, then exactly the minimum as both limits.
+    for name, hard in (("soft-256", None), ("linux-1024", 1024), ("hard-minimum", minimum)):
         store = root / name
         def limits():
             _, inherited_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-            resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256 if hard else inherited_hard))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard) if hard else (256, inherited_hard))
         try:
             started = run_start(store, env, preexec_fn=limits)
             assert started.returncode == 0, started.stderr
             reported = status(store, env)
-            assert reported["status"] == "ready" and reported["active_capacity"] == "8", reported
+            assert reported["status"] == "ready", reported
+            assert reported["active_capacity"] == str(DEFAULT_ACTIVE_CAPACITY), reported
             assert json.loads(started.stdout) == reported, (started, reported)
             capacity = int(reported["intake_capacity"])
-            assert (10 <= capacity < 100) if hard else capacity == 100, reported
-            if hard:
-                assert reported["descriptor_limit"] == "256", reported
+            if hard == 1024:
+                assert required <= 1024 and capacity == INTAKE and reported["descriptor_limit"] == "1024", reported
+            elif hard:
+                # Exactly the minimum admits only the ten-client intake floor.
+                assert capacity == 10 and reported["descriptor_limit"] == str(hard), reported
+            else:
+                # The raise from a soft 256 admits default intake without reduction.
+                assert capacity == INTAKE and int(reported["descriptor_limit"]) >= required, reported
+            if hard == minimum:
                 socket_path = f"/tmp/rui-{os.getuid()}/{hashlib.sha256(str(store).encode()).hexdigest()[:32]}.sock"
                 borrowers = []
                 try:
@@ -395,7 +486,7 @@ def startup_limits(root, env):
                             borrowers.pop().close()
                         assert status(store, env)["status"] == "ready"
                     stopped = subprocess.run(
-                        [RUI, "host", "stop", "--store", store, "--instance", instance(reported, 8)],
+                        [RUI, "host", "stop", "--store", store, "--instance", instance(reported, DEFAULT_ACTIVE_CAPACITY)],
                         env=env, text=True, capture_output=True, timeout=5,
                     )
                     assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped
@@ -481,7 +572,7 @@ def startup_limits(root, env):
         assert "back up" in failed.stderr and "No migration" in failed.stderr and "exit status 1" in failed.stderr
         assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
         assert hashlib.sha256(hostile_database.read_bytes()).digest() == original
-    print("startup limits passed: soft raise, hard-limit fallback, below-minimum and unsupported-version fast failure", flush=True)
+    print("startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure", flush=True)
 
 
 def wait_for_terminal_exit(caller, master, output, deadline):
@@ -579,7 +670,7 @@ def main():
             before = instance(status(held_store, env), 3)
             attached = run_start(held_store, env)
             assert attached.returncode == 0, attached.stderr
-            # Attachment reports the existing Host, not the launcher's capacity 8.
+            # Attachment reports the existing Host, not the launcher's default.
             reported = json.loads(attached.stdout)
             assert instance(reported, 3) == before, reported
             assert reported["diagnostics"] == f"{held_store.resolve()}/diagnostics", reported
@@ -589,7 +680,7 @@ def main():
             stop_process(held)
 
         # Concurrent spelling aliases may launch candidates, but exactly one
-        # capacity-8 owner becomes ready and all callers converge on it.
+        # default-capacity owner becomes ready and all callers converge on it.
         store = root / "detached-store"
         store.mkdir(mode=0o700)
         alias = root / "detached-alias"
@@ -614,8 +705,8 @@ def main():
                 results.append((process.returncode, stdout, stderr))
             assert all(code == 0 for code, _, _ in results), results
             ready = status(alias, env)
-            identity = instance(ready, 8)
-            assert instance(status(store, env), 8) == identity
+            identity = instance(ready, DEFAULT_ACTIVE_CAPACITY)
+            assert instance(status(store, env), DEFAULT_ACTIVE_CAPACITY) == identity
             pids = wait_for_processes(store, 1)
             assert pids[0] not in launcher_pids, "Host remained the CLI launcher process"
             if sys.platform == "linux":
@@ -628,7 +719,7 @@ def main():
                 assert os.getsid(pids[0]) not in launcher_pids
             assert not credential.exists(), "Host startup opened or created credentials"
             started = [json.loads(stdout) for _, stdout, _ in results]
-            assert all(instance(value, 8) == identity for value in started), results
+            assert all(instance(value, DEFAULT_ACTIVE_CAPACITY) == identity for value in started), results
             diagnostic_lines = [value["diagnostics"] for value in started]
             for location in diagnostic_lines:
                 assert_diagnostics(store, credential, pathlib.Path(location))
@@ -644,14 +735,14 @@ def main():
             inherited = run_start(ignored_child_store, env,
                 preexec_fn=lambda: signal.signal(signal.SIGCHLD, signal.SIG_IGN))
             assert inherited.returncode == 0, inherited.stderr
-            assert instance(status(ignored_child_store, env), 8)
+            assert instance(status(ignored_child_store, env), DEFAULT_ACTIVE_CAPACITY)
         finally:
             forced_crash_cleanup(ignored_child_store)
 
         # A descriptor opened before lowering the soft limit is still owned
         # by the launcher; the detached Host must not hold its pipe open.
-        # The admitted eight-credit Host needs 460 descriptors for its
-        # supported intake burst. Keep the inherited fd above that soft limit.
+        # Keep the inherited fd above the launcher's soft limit; the Host
+        # raises its own limit for the default-capacity budget.
         inherited_store = root / "inherited-fd"
         read_fd, write_fd = os.pipe()
         inherited_fd = fcntl.fcntl(write_fd, fcntl.F_DUPFD, 768)
@@ -677,8 +768,8 @@ def main():
         # startup must fail the handshake rather than claim ready.
         clean_env = {key: value for key, value in env.items()
             if key not in ("MallocMaxMagazines", "MallocSpaceEfficient", "RUI_HOST_MALLOC_DEFAULTS")}
-        # The production default remains 1000. Its descriptor admission runs
-        # before the lease/diagnostic writer, so rejection creates no Store.
+        # Unflagged serve uses the shared default. Its descriptor admission
+        # runs before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
         rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
             env=clean_env, preexec_fn=lower_descriptor_limit,
@@ -686,9 +777,17 @@ def main():
         assert rejected.returncode != 0, rejected
         assert "DescriptorCapacityInsufficient" in rejected.stderr, rejected.stderr
         fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
-        assert fields["active_capacity"] == 1000 and fields["soft_limit"] == 64, fields
+        assert fields["active_capacity"] == DEFAULT_ACTIVE_CAPACITY and fields["soft_limit"] == 64, fields
         assert fields["required"] > fields["soft_limit"], fields
         assert not rejected.stdout and not rejected_store.exists(), rejected
+        # From macOS's default soft 256, unflagged serve raises its own limit
+        # and becomes ready at the same default as managed starts.
+        default_store = root / "default-capacity-serve"
+        served, _ = start_ready_process(
+            ["sh", "-c", 'ulimit -Sn 256; exec "$@"', "rui-soft-256", RUI, "host", "serve", "--store", default_store],
+            env=clean_env, required_fields={"active_capacity": str(DEFAULT_ACTIVE_CAPACITY), "intake_capacity": str(INTAKE)},
+        )
+        stop_process(served)
 
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
@@ -742,7 +841,8 @@ def main():
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
             assert all(noise not in output for noise in (b"Provider:", b"Model:", b"Permission:", b"request:", b"Session:", b"Workspace:")), output
-            assert b"Bash runs without approval" in output, output
+            bash_bypass = "bash" in DEFAULTS.tools.split(",") and DEFAULTS.permission_mode == "bypass"
+            assert (b"Bash runs without approval" in output) == bash_bypass, output
             assert b"Bash commands can run without asking you" not in output, output
             captures = list((bare_home / ".config/rui/requests").glob("*.json"))
             assert len(captures) == 1, captures
@@ -754,9 +854,9 @@ def main():
             configuration = captured["configuration"]
             assert configuration["workspace"] == {"state": "value", "value": str(root.resolve())}, captured
             assert configuration["provider"] == {"state": "value", "value": "codex"}, captured
-            assert configuration["model"] == {"state": "value", "value": "gpt-6-luna"}, captured
-            assert configuration["tools"] == {"state": "value", "value": ["bash"]}, captured
-            assert configuration["permission_mode"] == {"state": "value", "value": "bypass"}, captured
+            assert configuration["model"] == {"state": "value", "value": DEFAULTS.recommended_model}, captured
+            assert configuration["tools"] == {"state": "value", "value": DEFAULTS.tools.split(",")}, captured
+            assert configuration["permission_mode"] == {"state": "value", "value": DEFAULTS.permission_mode}, captured
             assert captured["require_model"] is True, captured
             assert key.encode() not in output and reference.encode() not in output, output
             assert len(wait_for_processes(bare_store, 1)) == 1
@@ -773,15 +873,17 @@ def main():
                 original_terminal[3] &= ~mask
             assert actual_terminal == original_terminal, (actual_terminal, original_terminal, output)
             assert b"host_status" not in output and b'"diagnostics"' not in output, output
-            assert instance(status(bare_store, bare_env), 8)
+            assert instance(status(bare_store, bare_env), DEFAULT_ACTIVE_CAPACITY)
             inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert inspected.returncode == 0, inspected.stderr
             current = json.loads(inspected.stdout)["session"]
             assert {name: current[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
                 "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
-                "model": "gpt-6-luna", "tools": ["bash"], "permission_mode": "bypass",
+                "model": DEFAULTS.recommended_model, "tools": DEFAULTS.tools.split(","),
+                "permission_mode": DEFAULTS.permission_mode,
             }, current
+            assert_configure_defaults(root, bare_store, bare_env)
             recovered = subprocess.run([RUI, "request", "recover", key],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert recovered.returncode == 0, recovered.stderr
@@ -821,7 +923,7 @@ def main():
         finally:
             forced_crash_cleanup(failure_store)
 
-        print("host-launch passed: held lease, 6 aliases -> 1 capacity-8 Host, detached stdio, bounded failure")
+        print(f"host-launch passed: held lease, 6 aliases -> 1 capacity-{DEFAULT_ACTIVE_CAPACITY} Host, detached stdio, bounded failure")
 
 
 if __name__ == "__main__":

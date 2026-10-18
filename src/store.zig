@@ -5,6 +5,7 @@ const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const model_capability = @import("model_capability.zig");
 const codex_model_catalog = @import("codex_model_catalog.zig");
+const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 
 const c = @import("sqlite");
@@ -1421,13 +1422,36 @@ pub const ContentReader = struct {
     }
 };
 
+const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+
+/// Persisted session.tools_mask bit for one tool.
+fn toolBit(tool: Tool) u8 {
+    return switch (tool) {
+        .bash => 1,
+        .edit => 2,
+    };
+}
+
+/// Persisted session.permission_mode for a validated mode name.
+fn permissionModeCode(mode: []const u8) u8 {
+    return if (std.mem.eql(u8, mode, "ask")) 0 else 1;
+}
+
+/// A created Session's tools when configuration omits them.
+const default_tools_mask: u8 = blk: {
+    var mask: u8 = 0;
+    var names = std.mem.splitScalar(u8, product_defaults.tools, ',');
+    while (names.next()) |name| mask |= toolBit(std.meta.stringToEnum(Tool, name).?);
+    break :blk mask;
+};
+
 const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: protocol.Provider = undefined,
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    tools_mask: u8 = 1,
-    permission_mode: u8 = 1,
+    tools_mask: u8 = default_tools_mask,
+    permission_mode: u8 = permissionModeCode(product_defaults.permission_mode),
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
     next_position: u64 = 1,
@@ -1538,14 +1562,11 @@ fn planConfigurationUpdate(
     if (requested.tools.state == .value) {
         next.tools_mask = 0;
         for (requested.tools.values[0..requested.tools.count]) |tool| {
-            next.tools_mask |= switch (tool) {
-                .bash => 1,
-                .edit => 2,
-            };
+            next.tools_mask |= toolBit(tool);
         }
     }
     if (requested.permission_mode.state == .value) {
-        next.permission_mode = if (requested.permission_mode.value.eql("ask")) 0 else 1;
+        next.permission_mode = permissionModeCode(requested.permission_mode.value.slice());
     }
     next.revision = if (created) 1 else current.?.revision + 1;
     next.compaction_trigger = configurationTokens(requested.compaction_trigger, next.compaction_trigger, false) catch unreachable;
@@ -11999,6 +12020,22 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 
     try exec(storage.database, "UPDATE session SET provider='other' WHERE session_ref='direct/provider-reopen'");
     try std.testing.expectError(error.CorruptStore, storage.inspectSession("direct/provider-reopen"));
+}
+
+test "created Session tools and permission resolve to product defaults" {
+    // Decode the persisted encoding independently of toolBit/permissionModeCode.
+    const created: CurrentConfiguration = .{};
+    var tools: [16]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&tools);
+    if (created.tools_mask & 1 != 0) try writer.writeAll("bash");
+    if (created.tools_mask & 2 != 0) try writer.writeAll(if (created.tools_mask & 1 != 0) ",edit" else "edit");
+    try std.testing.expect(created.tools_mask & ~@as(u8, 3) == 0);
+    try std.testing.expectEqualStrings(product_defaults.tools, writer.buffered());
+    try std.testing.expectEqualStrings(product_defaults.permission_mode, switch (created.permission_mode) {
+        0 => "ask",
+        1 => "bypass",
+        else => return error.TestUnexpectedResult,
+    });
 }
 
 test "configuration planning preserves sparse defaults and rejection precedence" {

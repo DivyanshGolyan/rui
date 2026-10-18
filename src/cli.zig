@@ -18,6 +18,7 @@ const provider = @import("provider.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const server = @import("server.zig");
+const product_defaults = @import("product_defaults.zig");
 
 // Zig otherwise reserves an alternate signal stack on every thread even when
 // the release build has no default crash handler to use it.
@@ -337,7 +338,7 @@ fn setup(init: std.process.Init, args: []const []const u8, interactive: bool) !v
         } else if (err == error.PreferenceProviderRequired) {
             TerminalText.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
         } else if (err == error.UnsupportedPreferenceModel) {
-            TerminalText.diagnostic("rui: setup supports only exact model gpt-6-luna for Codex; no preferences saved. Existing Sessions are unchanged.\n", .{});
+            TerminalText.diagnostic("rui: setup supports only exact model " ++ product_defaults.recommended_model ++ " for Codex; no preferences saved. Existing Sessions are unchanged.\n", .{});
         } else if (err == error.InvalidPreferenceModel) {
             TerminalText.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
@@ -377,8 +378,8 @@ fn setup(init: std.process.Init, args: []const []const u8, interactive: bool) !v
     try std.Io.File.stdout().writeStreamingAll(init.io, local_status);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&.{codex}, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
         const advice: []const u8 = switch (err) {
-            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider codex --model gpt-6-luna`.\n",
-            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider codex --model gpt-6-luna`.\n",
+            error.UnsupportedSelectionProvider => "Next Session: saved provider is unsupported; no fallback. Repair with `rui defaults configure --provider codex --model " ++ product_defaults.recommended_model ++ "`.\n",
+            error.UnsupportedSelectionModel => "Next Session: saved model is unsupported; no fallback. Repair with `rui defaults configure --provider codex --model " ++ product_defaults.recommended_model ++ "`.\n",
         };
         try std.Io.File.stdout().writeStreamingAll(init.io, advice);
         break :blk null;
@@ -603,10 +604,10 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
     const store_z = try std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0);
     // Application policy lives here. The synchronous native launcher borrows
     // these terminated strings and pointer framing through exec/error handoff;
-    // all storage is prepared before any detach fork.
+    // all storage is prepared before any detach fork. Omitting
+    // --active-capacity keeps product_defaults.active_capacity the only default.
     const argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve",   "--store", store_z.ptr,
-        "--active-capacity",          "8",    "--codex",
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--codex",
     };
     var startup_read: c_int = -1;
     const launched = rui_launch_detached_observed(argv[0].?, &argv, argv.len, &startup_read);
@@ -1120,7 +1121,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         const selection = snapshot.resolve(readiness) catch |err| {
             if (after_choice) {
                 TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
-            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / gpt-6-luna. No Session created.\n", .{@errorName(err)});
+            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
             return err;
         };
         if (selection) |binding| break binding;
@@ -1151,8 +1152,8 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         .workspace = .{ .present = true, .value = workspace },
         .provider = .{ .present = true, .value = selected.provider.slice() },
         .model = .{ .present = true, .value = selected.model.slice() },
-        .tools = "bash",
-        .permission_mode = .{ .present = true, .value = "bypass" },
+        .tools = product_defaults.tools,
+        .permission_mode = .{ .present = true, .value = product_defaults.permission_mode },
     }, .{ .generated = try requestDirectory(init, &directory_buffer) });
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
@@ -1194,7 +1195,7 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
     var fixture_endpoint: ?[]const u8 = null;
     var bash_path: []const u8 = server.default_bash_path;
     var bash_timeout_ms: u64 = server.default_bash_timeout_ms;
-    var active_capacity: usize = server.default_active_capacity;
+    var active_capacity: usize = product_defaults.active_capacity;
     var faults: server.Faults = .{};
     var index: usize = 0;
     while (index < args.len) {
@@ -1398,15 +1399,15 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
             defaults = try preferences.load(home);
         }
         if (!input.provider.present) input.provider = .{ .present = true, .value = if (defaults.provider.len != 0) defaults.provider.slice() else model_adapter.provider_label };
-        if (!input.model.present) input.model = .{ .present = true, .value = if (defaults.model.len != 0 and defaults.provider.eql(input.provider.value)) defaults.model.slice() else model_adapter.recommended_model };
+        if (!input.model.present) input.model = .{ .present = true, .value = if (defaults.model.len != 0 and defaults.provider.eql(input.provider.value)) defaults.model.slice() else product_defaults.recommended_model };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
             input.workspace = .{ .present = true, .value = workspace_buffer[0..length] };
         }
-        if (input.tools == null) input.tools = "bash";
-        if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = "bypass" };
+        if (input.tools == null) input.tools = product_defaults.tools;
+        if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
@@ -1701,7 +1702,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
     if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
         var setup_args: [6][]const u8 = undefined;
         const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model gpt-6-luna | --clear-model]; no changes saved.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model " ++ product_defaults.recommended_model ++ " | --clear-model]; no changes saved.\n");
             return;
         };
         setup(init, setup_args[0..count], true) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});

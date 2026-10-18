@@ -17,7 +17,6 @@ const PreparedRequest = provider.PreparedRequest;
 // and managed-route authentication. The Host owns only effect scheduling and
 // the provider transport owns only curl and sealed byte lifetimes.
 pub const provider_label = @import("model_capability.zig").provider_label;
-pub const recommended_model = @import("model_capability.zig").recommended_model;
 pub const validModel = @import("model_capability.zig").validModel;
 pub const capability = @import("model_capability.zig").capability;
 
