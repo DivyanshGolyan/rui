@@ -70,6 +70,7 @@ def main():
     prove_peer_census()
     prove_one_reply()
     prove_terminal_capture_budget()
+    prove_renderer_comparison_retention()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
     prove_required_capture_receipts()
@@ -1229,6 +1230,56 @@ def prove_control_disposal_oracle(dispose):
                     assert not failing_body and not broken
             assert closed == {"connection", "stop", "gate", "diagnostics", "release", "shutdown", "server", "join"}, closed
     print("Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal")
+
+
+def prove_renderer_comparison_retention():
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import terminal_restoration_integration as terminal
+
+    before = b"\x1b[?1049h\x1b[?2026hConfigured.\r\n\xe2\x80\xba \x1b[?2026l"
+    for delta in (b"\x1b[?2026hConfigured.\x1b[?2026l", b"\x1b[?1049lREPLAY\x00\xff"):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = pathlib.Path(directory) / "retained"
+            after = before + delta
+            events = ({"at_ns": 123, "phase": "first-snapshot"},
+                      {"at_ns": 789, "phase": "second-snapshot"})
+            with tempfile.TemporaryDirectory() as state, \
+                    patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(destination)), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                terminal.preserve_renderer_comparison(pathlib.Path(state), before, after, 47, events, 0)
+            path, = destination.rglob("pty-failure.json")
+            data = json.loads(path.read_bytes())
+            assert bytes.fromhex(data["before_hex"]) == before
+            assert bytes.fromhex(data["after_hex"]) == after
+            assert data["first_difference"] == len(before)
+            assert data["before_delta_hex"] == ""
+            assert bytes.fromhex(data["after_delta_hex"]) == delta
+            assert not data["equal"] and data["screen_start"] == 47
+            assert data["events"] == list(events) and data["omitted_events"] == 0
+            assert data["phase"] == "idle-after-configure"
+            assert destination.stat().st_mode & 0o777 == 0o700
+
+    # Evidence failures must neither replace the primary assertion nor skip
+    # mandatory disposal. The existing writer/copy caps also apply here.
+    import run_selected  # Loaded by the real retention helper above.
+    for failure in ("write", "copy"):
+        with tempfile.TemporaryDirectory() as state, \
+                patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(pathlib.Path(state) / "retained")), \
+                contextlib.redirect_stderr(io.StringIO()), contextlib.ExitStack() as patches:
+            if failure == "write":
+                patches.enter_context(patch.object(terminal, "preserve_failure_metadata", side_effect=OSError("write")))
+            else:
+                patches.enter_context(patch.object(run_selected, "retain_failure_logs", side_effect=OSError("copy")))
+            primary, disposed = AssertionError("original comparison"), []
+            try:
+                try:
+                    raise primary
+                finally:
+                    dispose_all(lambda: terminal.preserve_renderer_comparison(
+                        pathlib.Path(state), before, after, 47, events, 0), lambda: disposed.append(True))
+            except AssertionError as error:
+                assert error is primary and disposed == [True]
+    print("Renderer comparison retention: exact redraw/exit operands and timing survive root deletion; evidence faults preserve assertion and disposal")
 
 
 def prove_terminal_capture_budget():
