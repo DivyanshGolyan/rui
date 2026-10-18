@@ -38,6 +38,19 @@ class EvidenceTest(unittest.TestCase):
                     self.assertEqual(before, ['src/gen.sh'])
                     self.assertEqual(after, before)
                     self.assertNotEqual(first, second)
+                    # A generator can produce several files. Swapping their
+                    # contents changes the program, not the set of byte hashes.
+                    other = generated.with_name('other.zig')
+                    other_path = str(other) if prefix == 0 else 'o/generated/other.zig'
+                    manifests['binary'].append(dict(prefix=prefix, path=other_path))
+                    generated.write_text('first value')
+                    other.write_text('second value')
+                    first, second = {}, {}
+                    collect_inputs.closure(root, manifests, 'binary', external=first)
+                    generated.write_text('second value')
+                    other.write_text('first value')
+                    collect_inputs.closure(root, manifests, 'binary', external=second)
+                    self.assertNotEqual(first, second)
 
     def test_suite_inputs_follow_generated_imports_and_fail_closed(self):
         import collect_inputs

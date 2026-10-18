@@ -20,9 +20,16 @@ def closure(root, manifests, output, active=(), external=None, generated=None):
     if generated is not None:
         if external is None or generated.is_symlink():
             raise ValueError(f"Unowned generated contents {output}")
+        cache, scope = root / '.zig-cache/o', 'local'
+        if not generated.is_relative_to(cache):
+            cache = Path(os.environ.get('ZIG_GLOBAL_CACHE_DIR', Path.home() / '.cache/zig')) / 'o'
+            scope = 'global'
+        identity = generated.relative_to(cache)
+        if identity.parts[0] != output:
+            raise ValueError(f"Unowned generated contents {output}")
         with generated.open('rb') as stream:
             value = hashlib.file_digest(stream, 'sha256').hexdigest()
-        external['generated/' + value] = value
+        external[f'generated/{scope}/{identity.as_posix()}'] = value
     if not manifests[output]:
         if generated is None:
             raise ValueError(f"Unowned generated contents {output}")
