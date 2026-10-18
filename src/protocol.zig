@@ -23,27 +23,7 @@ pub const max_json_depth = 64;
 pub const max_sqlite_content_bytes: u64 = 1024 * 1024 * 1024 - 4096;
 pub const session_list_page_size: usize = 8;
 
-pub fn Bounded(comptime capacity: usize) type {
-    return struct {
-        bytes: [capacity]u8 = undefined,
-        len: usize = 0,
-
-        pub fn slice(self: *const @This()) []const u8 {
-            return self.bytes[0..self.len];
-        }
-
-        pub fn set(self: *@This(), value: []const u8) !void {
-            if (value.len > capacity) return error.ValueTooLong;
-            if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
-            @memcpy(self.bytes[0..value.len], value);
-            self.len = value.len;
-        }
-
-        pub fn eql(self: *const @This(), value: []const u8) bool {
-            return std.mem.eql(u8, self.slice(), value);
-        }
-    };
-}
+pub const Bounded = @import("bounded.zig").Bounded;
 
 pub const FieldState = enum { omitted, value, explicit_null };
 

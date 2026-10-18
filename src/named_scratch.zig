@@ -1,5 +1,6 @@
 const std = @import("std");
-const protocol = @import("protocol.zig");
+const Bounded = @import("bounded.zig").Bounded;
+const ScratchBudget = @import("ScratchBudget.zig");
 
 /// Format private evaluator output and recognize exactly the names startup
 /// may reclaim after a crash between creation and removal.
@@ -41,12 +42,12 @@ pub const Removal = union(enum) {
 pub const Owner = struct {
     io: std.Io,
     resources: ?Resources,
-    budget: ?protocol.ScratchBudget,
+    budget: ?ScratchBudget,
 
     const Resources = struct {
         primary: std.Io.File,
         secondary: ?std.Io.File,
-        name: protocol.Bounded(96),
+        name: Bounded(96),
         charged: u64,
         removal: Removal,
     };
@@ -56,7 +57,7 @@ pub const Owner = struct {
         primary: std.Io.File,
         secondary: ?std.Io.File,
         name: []const u8,
-        budget: ?protocol.ScratchBudget,
+        budget: ?ScratchBudget,
         charged: u64,
         removal: Removal,
     ) Owner {
@@ -108,6 +109,7 @@ pub fn removeNameWith(
 }
 
 test "owner retains every resource after retryable removal failure" {
+    const protocol = @import("protocol.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
@@ -152,6 +154,7 @@ test "owner retains every resource after retryable removal failure" {
 }
 
 test "an already absent name reclaims handles and accounting" {
+    const protocol = @import("protocol.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
@@ -188,6 +191,7 @@ test "an already absent name reclaims handles and accounting" {
 }
 
 test "injected removal failure retains ownership until the same owner can retry" {
+    const protocol = @import("protocol.zig");
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
