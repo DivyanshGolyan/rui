@@ -205,7 +205,7 @@ def mixed_effect_drain(provider_first):
             # user cancellation, a provider failure or a new continuation.
             assert bash_fixture.rows(store, "SELECT attempt_ordinal,resolution_code FROM action_operation") == [(1, "infrastructure_shutdown")]
             assert bash_fixture.rows(store, "SELECT session_ref,attempt_ordinal,resolution_code FROM model_operation ORDER BY session_ref") == [
-                ("bash/session", 1, "tool_calls"), ("provider/session", 1, None),
+                ("bash/session", 1, "tool_proposals"), ("provider/session", 1, None),
             ]
             print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; retained model cleanup, lease held, scratch=0")
         finally:

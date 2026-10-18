@@ -1644,7 +1644,7 @@ test "request preparation escapes instructions and user content" {
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
     const first = try drainPreparation(&preparation, 2, 2, 4096);
     defer std.testing.allocator.free(first.bytes);
-    try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .terminal, .{});
+    try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
 
     // Independent escape expectations: quotes, backslashes, newline and
     // control bytes use short or \u00xx forms; UTF-8 bytes pass through.

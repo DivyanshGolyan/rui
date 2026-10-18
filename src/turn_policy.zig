@@ -18,6 +18,10 @@ pub fn completesTurn(output: OutputFact, pending_messages: u64) bool {
     return output == .answer and pending_messages == 0;
 }
 
+pub fn recoversOverflow(purpose: Purpose, context_changed: bool) bool {
+    return purpose == .assistant_response and context_changed;
+}
+
 pub const Previous = struct {
     purpose: Purpose,
     context_overflow: bool,
@@ -62,6 +66,10 @@ test "output facts do not encode the Turn continuation decision" {
             try std.testing.expect(!completesTurn(fact, 3));
         }
     }
+    try std.testing.expect(recoversOverflow(.assistant_response, true));
+    try std.testing.expect(!recoversOverflow(.assistant_response, false));
+    try std.testing.expect(!recoversOverflow(.compaction, true));
+    try std.testing.expect(!recoversOverflow(.compaction, false));
 }
 
 test "compaction purpose respects recovery prefix and both sides of pressure" {
