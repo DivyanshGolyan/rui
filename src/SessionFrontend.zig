@@ -450,12 +450,14 @@ fn pump(raw: *anyopaque) !void {
 
 fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     // Input can arrive with Enter before any redraw, including inside output
-    // pumping. Validate the exact sealed loan before reservation or capture.
-    const bytes = try self.input.message(ticket);
-    if (self.terminal.screen) |screen| screen.prepareDraft(bytes, Terminal.geometry()) catch |err| {
-        self.input.release(ticket) catch unreachable;
-        return err;
-    };
+    // pumping. Sealed bytes render in the escaped transcript, not the composer.
+    if (self.terminal.screen != null) {
+        const size = Terminal.geometry();
+        Frame.validateGeometry(size.col, size.row) catch |err| {
+            self.input.release(ticket) catch unreachable;
+            return err;
+        };
+    }
     try self.submission.begin(.{ .message = ticket });
 }
 
