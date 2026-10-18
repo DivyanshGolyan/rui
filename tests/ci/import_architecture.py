@@ -10,11 +10,13 @@ import argparse
 import json
 from pathlib import Path
 import re
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
 ROOTS = ("src/cli.zig",)
 BASELINE = Path(__file__).with_name("import_cycles.json")
+BOOTSTRAP_BASE = "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff"
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
 
@@ -49,7 +51,8 @@ def production_imports(source):
     return imports
 
 
-def graph(root, roots=ROOTS):
+def graph(root, roots=ROOTS, read_source=None):
+    read_source = read_source or (lambda name: (root / name).read_text())
     result = {}
     pending = list(roots)
     while pending:
@@ -58,13 +61,19 @@ def graph(root, roots=ROOTS):
             continue
         path = root / name
         dependencies = set()
-        for imported in production_imports(path.read_text()):
-            if not imported.endswith(".zig"):
+        try:
+            source = read_source(name)
+        except OSError as error:
+            raise ValueError(f"missing first-party source: {name}") from error
+        for imported in production_imports(source):
+            if imported == "root":
+                # Zig's special module alias refers to addRui's executable root.
+                target = (root / roots[0]).resolve()
+            elif imported.endswith(".zig"):
+                target = (path.parent / imported).resolve()
+            else:
                 continue
-            target = (path.parent / imported).resolve()
             relative = target.relative_to(root.resolve()).as_posix()
-            if not target.is_file():
-                raise ValueError(f"{name}: missing first-party import {imported}")
             dependencies.add(relative)
         result[name] = dependencies
         pending.extend(dependencies)
@@ -89,6 +98,24 @@ def cyclic_edges(dependencies):
                   for target in targets if reaches(target, source))
 
 
+def git(root, *args):
+    result = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True)
+    if result.returncode:
+        raise ValueError("import allowance requires complete trusted Git history: " + result.stderr.strip())
+    return result.stdout.strip()
+
+
+def trusted_allowance(root, baseline, roots):
+    review_base = git(root, "merge-base", "HEAD", "origin/main")
+    name = baseline.resolve().relative_to(root.resolve()).as_posix()
+    if git(root, "ls-tree", "--name-only", review_base, "--", name):
+        return json.loads(git(root, "show", f"{review_base}:{name}"))["cyclic_edges"]
+    # First introduction: derive the original exceptions from the authorized
+    # immutable source, never from the candidate's self-declared measurement.
+    git(root, "merge-base", "--is-ancestor", BOOTSTRAP_BASE, review_base)
+    return cyclic_edges(graph(root, roots, lambda path: git(root, "show", f"{BOOTSTRAP_BASE}:{path}")))
+
+
 def check(root=ROOT, baseline=BASELINE, roots=ROOTS):
     dependencies = graph(root, roots)
     actual = cyclic_edges(dependencies)
@@ -97,6 +124,11 @@ def check(root=ROOT, baseline=BASELINE, roots=ROOTS):
     if added:
         raise ValueError("new production cyclic imports:\n" + "\n".join(
             f"  {source} -> {target}" for source, target in added))
+    if any(edge not in actual for edge in allowed):
+        raise ValueError("remove stale cycle allowance for eliminated production cycles")
+    trusted = trusted_allowance(root, baseline, roots)
+    if any(edge not in trusted for edge in allowed):
+        raise ValueError("production cycle allowance grew beyond the trusted review base")
     return {"modules": len(dependencies), "cyclic_edges": actual}
 
 

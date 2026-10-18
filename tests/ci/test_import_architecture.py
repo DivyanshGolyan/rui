@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from import_architecture import check, cyclic_edges, graph, production_imports
+from import_architecture import check, cyclic_edges, production_imports
 
 
 class ImportArchitectureTest(unittest.TestCase):
@@ -11,7 +13,10 @@ class ImportArchitectureTest(unittest.TestCase):
         check()
 
     def test_baseline_test_only_and_new_cycle_controls(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "import_architecture.trusted_allowance", create=True,
+            return_value=[["a.zig", "b.zig"], ["b.zig", "a.zig"]],
+        ):
             root = Path(directory)
             baseline = root / "baseline.json"
             (root / "a.zig").write_text('const b = @import("b.zig");')
@@ -23,10 +28,58 @@ class ImportArchitectureTest(unittest.TestCase):
             with (root / "a.zig").open("a") as output:
                 output.write('\ntest "nested { braces }" { if (true) { _ = @import("c.zig"); } }')
             check(root, baseline, ("a.zig",))
-            # A new cyclic edge inside an existing SCC is also a regression.
+            # Extending an existing cycle through another module is a regression.
             with (root / "a.zig").open("a") as output:
                 output.write('\nconst c = @import("c.zig");')
             with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
+                check(root, baseline, ("a.zig",))
+
+    def test_root_alias_and_explicit_root_return_paths_are_both_cycles(self):
+        for imported in ("root", "a.zig"):
+            with self.subTest(imported=imported), tempfile.TemporaryDirectory() as directory, patch(
+                "import_architecture.trusted_allowance", create=True, return_value=[],
+            ):
+                root = Path(directory)
+                baseline = root / "baseline.json"
+                baseline.write_text('{"cyclic_edges": []}')
+                (root / "a.zig").write_text('const b = @import("b.zig");')
+                (root / "b.zig").write_text(f'test {{ _ = @import("{imported}"); }}')
+                check(root, baseline, ("a.zig",))
+                (root / "b.zig").write_text(f'const a = @import("{imported}");')
+                with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
+                    check(root, baseline, ("a.zig",))
+
+    def test_candidate_cannot_enlarge_allowance_from_trusted_git_base(self):
+        for bootstrap in (True, False):
+            with self.subTest(bootstrap=bootstrap), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                baseline = root / "baseline.json"
+                if not bootstrap:
+                    baseline.write_text('{"cyclic_edges": []}')
+                (root / "a.zig").write_text('const b = @import("b.zig");')
+                (root / "b.zig").write_text('const value = 1;')
+                git = ["git", "-C", str(root)]
+                subprocess.run(git + ["init", "-q"], check=True)
+                subprocess.run(git + ["add", "."], check=True)
+                subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                      "commit", "-qm", "trusted baseline"], check=True)
+                subprocess.run(git + ["update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+                trusted = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+                baseline.write_text('{"cyclic_edges": []}')
+                with patch("import_architecture.BOOTSTRAP_BASE", trusted):
+                    check(root, baseline, ("a.zig",))
+                    (root / "b.zig").write_text('const a = @import("a.zig");')
+                    baseline.write_text(json.dumps({"cyclic_edges": [["a.zig", "b.zig"], ["b.zig", "a.zig"]]}))
+                    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
+                        check(root, baseline, ("a.zig",))
+
+    def test_removed_cycles_must_also_remove_their_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.zig").write_text('const value = 1;')
+            baseline = root / "baseline.json"
+            baseline.write_text('{"cyclic_edges": [["a.zig", "a.zig"]]}')
+            with self.assertRaisesRegex(ValueError, "remove stale cycle allowance"):
                 check(root, baseline, ("a.zig",))
 
     def test_lexical_noise_and_anonymous_tests_do_not_create_dependencies(self):
