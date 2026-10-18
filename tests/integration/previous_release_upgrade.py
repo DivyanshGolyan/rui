@@ -217,7 +217,8 @@ def main():
                     assert restarted.returncode != 0 and elapsed < 5, (elapsed, restarted)
                     for text in (str(store), f"found schema {previous_format}",
                                  f"supports schema {candidate_format}", "compatible Rui build",
-                                 "original path", "back up", "fresh Store", "No migration was performed"):
+                                 "original path", "back up", "fresh Store", "No migration was performed",
+                                 "https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change"):
                         assert text in restarted.stderr, (text, restarted.stderr)
                     assert "HostReadinessUnconfirmed" not in restarted.stderr
                     assert database_hashes(store) == before_hashes, "refusal changed SQLite data or file membership"
