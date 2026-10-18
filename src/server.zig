@@ -2626,90 +2626,60 @@ fn completeTransfer(
         }) catch unreachable;
         writeTestTrace(host, &trace, &publication);
     }
-    const evidence = switch (completion.outcome) {
-        .response_capture_failed => |failure| {
-            const code = switch (failure) {
-                .scratch_exhausted => "response_scratch_exhausted",
-                .write_failed => "response_write_failed",
-                .seal_failed => "response_seal_failed",
-            };
-            settleUnansweredFailure(host, owner.token, owner.binding, code, .terminal);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        },
-        .request_source_failed => {
-            fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        },
-        .transport_finished => |evidence| evidence,
-    };
-    if (evidence.disposition == .success) {
-        switch (completeSuccessfulTransfer(host, active)) {
-            .cleanup => beginCleanup(host, slot, owner),
-            .named_scratch => |scratch| {
-                host.custody.detach(owner.token) catch unreachable;
-                slot.* = .{ .named_scratch = .{
-                    .token = owner.token,
-                    .owner = scratch,
-                } };
+    var error_response: model_adapter.ErrorResponse = .ordinary;
+    switch (completion.outcome) {
+        .transport_finished => |evidence| switch (evidence.disposition) {
+            .permanent_http, .temporary_http => {
+                // The transport has sealed this HTTP answer. Interpretation
+                // borrows it; this owner still disposes it before settlement.
+                var response = active.transfer.takeResponse();
+                defer response.deinit();
+                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+                if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             },
-        }
-        return;
+            else => {},
+        },
+        else => {},
     }
-    // An HTTP status is the provider's answer; keep whatever correlation it sent.
-    const answered: ?AnsweredAttempt = if (evidence.disposition == .permanent_http or evidence.disposition == .temporary_http)
-        .init(host, owner, &active.transfer)
-    else
-        null;
-    if (answered) |attempt| {
-        const overflow_result = classify: {
-            var response = active.transfer.takeResponse();
-            defer response.deinit();
-            break :classify model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status);
-        };
-        const overflow = overflow_result catch |err| {
-            stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-            attempt.fail("response_read_failed", .terminal);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
+    switch (execution.transferDecision(completion.outcome, switch (error_response) {
+        .ordinary => .ordinary,
+        .context_overflow => .context_overflow,
+        .unreadable => .unreadable,
+    })) {
+        .interpret_output => {
+            switch (completeSuccessfulTransfer(host, active)) {
+                .cleanup => beginCleanup(host, slot, owner),
+                .named_scratch => |scratch| {
+                    host.custody.detach(owner.token) catch unreachable;
+                    slot.* = .{ .named_scratch = .{
+                        .token = owner.token,
+                        .owner = scratch,
+                    } };
+                },
+            }
             return;
-        };
-        if (overflow) {
-            attempt.fail("provider_context_overflow", .context_overflow);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        }
+        },
+        .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
+        .fail => |failure| {
+            var code_buffer: [96]u8 = undefined;
+            const code = failure.codeText(&code_buffer);
+            const disposition: store_module.ModelFailureDisposition = switch (failure.kind) {
+                .permanent => .terminal,
+                .context_overflow => .context_overflow,
+                .temporary => .{ .retryable = .{
+                    .waits_ms = host.faults.retry_waits_ms,
+                    .retry_after_ms = failure.retry_after_ms,
+                    .retry_after_deadline_ms = failure.retry_after_deadline_ms,
+                } },
+            };
+            if (failure.answered) {
+                const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
+                answered.fail(code, disposition);
+            } else {
+                settleUnansweredFailure(host, owner.token, owner.binding, code, disposition);
+            }
+        },
     }
-    var code_buffer: [96]u8 = undefined;
-    const code = switch (evidence.disposition) {
-        .success => unreachable,
-        .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
-        .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
-        .temporary_connection => "provider_transport_failure",
-        .permanent_transport => "provider_transport_permanent",
-        .unsupported_http_version => "provider_http2_required",
-        .authentication_failure => "provider_authentication_failed",
-        .tls_verification_failure => "provider_tls_verification_failed",
-        .invalid_headers => "invalid_provider_headers",
-    };
-    const failure_disposition: store_module.ModelFailureDisposition =
-        if (evidence.disposition == .temporary_http or
-        evidence.disposition == .temporary_connection)
-            .{ .retryable = .{
-                .waits_ms = host.faults.retry_waits_ms,
-                .retry_after_ms = evidence.retry_after_ms,
-                .retry_after_deadline_ms = evidence.retry_after_deadline_ms,
-            } }
-        else
-            .terminal;
-    if (answered) |attempt|
-        attempt.fail(code, failure_disposition)
-    else
-        settleUnansweredFailure(host, owner.token, owner.binding, code, failure_disposition);
     active.transfer.deinit();
     beginCleanup(host, slot, owner);
 }
@@ -2730,10 +2700,9 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
-    if (structured_output) {
-        const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+    if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
         var detail: [512]u8 = undefined;
-        answered.reject("unsupported_output_schema", rejection.format(error.UnsupportedOutputSchema, &detail), .terminal);
+        answered.reject(rejection.code, rejection.format(&detail), .terminal);
         return .cleanup;
     }
 
@@ -2761,34 +2730,30 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     };
     defer metadata.deinit();
-    var rejection: model_adapter.Output.Rejection = .{};
     traceOperation(host, "validation_started", owner.binding);
     const operation = host.store.modelOperationKind(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, &rejection, .{
+    const validated = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, operation, .{
+        .openai = openai_model.slice(),
+        .alternate = x_openai_model.slice(),
+    }, .{
         .metadata = host.faults.response_metadata,
-    }) catch |err| {
-        traceOperation(host, "validation_failed", owner.binding);
-        stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        var detail: [512]u8 = undefined;
-        answered.reject(model_adapter.Output.failureCode(err), rejection.format(err, &detail), if (err == error.ContextOverflow) .context_overflow else .terminal);
-        return .cleanup;
+    })) {
+        .accepted => |validated| validated,
+        .rejected => |rejection| {
+            traceOperation(host, "validation_failed", owner.binding);
+            stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
+            var detail: [512]u8 = undefined;
+            answered.reject(rejection.code, rejection.format(&detail), switch (rejection.kind) {
+                .invalid_output => .terminal,
+                .context_overflow => .context_overflow,
+            });
+            return .cleanup;
+        },
     };
     traceOperation(host, "validation_completed", owner.binding);
-    // Cross-response and transactional envelope checks run after parsing the
-    // complete capture; their coordinate is its end, not the parser's last item.
-    rejection = .{ .stage = .response, .byte_offset = response.length };
-    if (!modelObservationsAgree(
-        validated.evidence.served_model.slice(),
-        openai_model.slice(),
-        x_openai_model.slice(),
-    )) {
-        var detail: [512]u8 = undefined;
-        answered.reject("contradictory_provider_output", rejection.format(error.ContradictoryProviderOutput, &detail), .terminal);
-        return .cleanup;
-    }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
         traceOperation(host, "sealed_before_settlement", owner.binding);
         if (host.faults.model_result_gate_path) |path| waitAtTestGate(host, path);
@@ -2818,6 +2783,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
+            const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
@@ -2833,18 +2799,6 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     };
     traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
-}
-
-fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []const u8) bool {
-    const values = [_][]const u8{ body, openai, x_openai };
-    var observed: ?[]const u8 = null;
-    for (values) |value| {
-        if (value.len == 0) continue;
-        if (observed) |prior| {
-            if (!std.mem.eql(u8, prior, value)) return false;
-        } else observed = value;
-    }
-    return true;
 }
 
 fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
