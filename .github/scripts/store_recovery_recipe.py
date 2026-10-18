@@ -66,12 +66,12 @@ def qualify(previous, candidate):
         first = blocks[0].replace('STORE="/absolute/path/from/the/error"', 'STORE=' + shlex.quote(str(store)))
         script = '\n'.join([
             'set -euo pipefail', 'printf "Recipe phase: initial status\\n"', first,
-            'if "$RUI" host status --store "$STORE" | grep -q "Host: ready"; then',
+            'if "$RUI" host status --store "$STORE" | grep "Host: ready" >/dev/null; then',
             'printf "Ready probe pipeline statuses: %s\\n" "${PIPESTATUS[*]}"',
             'printf "Recipe phase: stopping original Host\\n"', blocks[1],
             'else', 'printf "Ready probe declined; pipeline statuses: %s\\n" "${PIPESTATUS[*]}"', 'fi',
             'printf "Recipe phase: waiting for original ownership release\\n"',
-            'until "$RUI" host status --store "$STORE" | grep -q "Host: unavailable"; do sleep 0.025; done',
+            'until "$RUI" host status --store "$STORE" | grep "Host: unavailable" >/dev/null; do sleep 0.025; done',
             'printf "Recipe phase: stopped Store snapshot and backup\\n"',
             '"$QUAL_PYTHON" "$QUAL_SCRIPT" snapshot "$STORE" "$QUAL_BASELINE"',
             blocks[2], 'printf "Recipe phase: fresh Store start and selection\\n"', blocks[3],
@@ -87,10 +87,10 @@ def qualify(previous, candidate):
                 probe = subprocess.run(['bash', '-c', '''set -o pipefail
 bad=0
 for ((i=0; i<100; i++)); do
-  if "$1" host status --store "$2" | grep -q "Host: ready"; then :
+  if "$1" host status --store "$2" | grep "Host: ready" >/dev/null; then :
   else printf 'Ready pipeline misclassified: %s\n' "${PIPESTATUS[*]}"; ((bad++)); fi
 done
-printf 'Diagnostic ready pipeline misclassifications: %s/100\n' "$bad"
+printf 'Ready pipeline misclassifications: %s/100\n' "$bad"
 test "$bad" -eq 0
 ''', 'ready-pipeline-probe', str(binary), str(store)], capture_output=True, text=True, timeout=20)
                 print(probe.stdout + probe.stderr, flush=True)
