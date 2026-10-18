@@ -39,4 +39,6 @@ OpenAI does not publish this endpoint. Rui depends on these assumptions, and eac
 
 No inspected field definitively states that inference will reject a slug for a ChatGPT-authenticated account. `supported_in_api` does not apply to this route, `hide` is picker presentation, and absence carries no rejection meaning. The first-party client never rejects an explicit model from catalog data.
 
+Rui's approved policy treats absence from a fresh catalog as unavailability and hidden rows as allowed; see [Codex model catalog](../ARCHITECTURE.md#codex-model-catalog). That is Rui's choice, not first-party behavior.
+
 These sources do not show live responses, account-specific rows, `client_version` filtering or the cause of any provider rejection. Rui's own `gpt-5-codex` HTTP 400 diagnosis is separate evidence. The bundled `models.json` at the current pin does not list `gpt-5-codex`.
