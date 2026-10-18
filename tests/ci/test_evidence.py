@@ -16,6 +16,93 @@ import build_artifact
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_suite_inputs_follow_generated_imports_and_fail_closed(self):
+        import collect_inputs
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'src').mkdir()
+            (root / 'src/logic.zig').write_text('logic')
+            (root / 'src/prepare.sh').write_text('generator')
+            manifests = {
+                'binary': [dict(prefix=4, path='src/logic.zig'),
+                           dict(prefix=2, path='o/generated/options.zig')],
+                'generated': [dict(prefix=4, path='src/prepare.sh')],
+            }
+            closure = collect_inputs.closure(root, manifests, 'binary')
+            self.assertEqual(closure, ['src/logic.zig', 'src/prepare.sh'])
+            # An orphan generated file cannot be treated as independent source.
+            del manifests['generated']
+            with self.assertRaisesRegex(ValueError, 'generated'):
+                collect_inputs.closure(root, manifests, 'binary')
+            manifests['generated'] = [dict(prefix=2, path='o/binary/cycle')]
+            with self.assertRaisesRegex(ValueError, 'cycle'):
+                collect_inputs.closure(root, manifests, 'binary')
+            manifests['generated'] = [dict(prefix=0, path='/unowned/native.h')]
+            with self.assertRaisesRegex(ValueError, 'unowned'):
+                collect_inputs.closure(root, manifests, 'binary')
+            # WriteFile manifests have no file dependencies: their generated
+            # contents, not an empty closure, carry configuration identity.
+            generated = root / '.zig-cache/o/generated/options.zig'
+            generated.parent.mkdir(parents=True)
+            generated.write_text('first build option')
+            manifests['generated'] = []
+            first, second = {}, {}
+            collect_inputs.closure(root, manifests, 'binary', external=first)
+            generated.write_text('changed build option')
+            collect_inputs.closure(root, manifests, 'binary', external=second)
+            self.assertTrue(first)
+            self.assertNotEqual(first, second)
+
+    def test_unrelated_rebase_preserves_suite_key_but_inputs_and_bootstrap_invalidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            self.addCleanup(os.chdir, previous)
+            os.chdir(directory)
+
+            def commit(message):
+                evidence.git('add', 'src', 'build.zig', 'build.zig.zon')
+                evidence.git('-c', 'user.name=Evidence test', '-c', 'user.email=test@example.invalid',
+                             'commit', '-m', message)
+
+            evidence.git('init', '-b', 'main')
+            Path('src').mkdir()
+            for name in ('logic.zig', 'host.zig', 'actor.zig'):
+                Path('src', name).write_text(name)
+            Path('build.zig').write_text('build')
+            Path('build.zig.zon').write_text('pins')
+            commit('base')
+            evidence.git('branch', 'candidate')
+            # A separate base commit really moves the tree; this is not an
+            # empty-commit/same-tree test or a path-overlap assertion.
+            Path('src/host.zig').write_text('unrelated Host correction')
+            commit('base moves')
+            evidence.git('checkout', 'candidate')
+            Path('src/logic.zig').write_text('candidate logic change')
+            commit('candidate change')
+            root = Path('.zig-cache/o/ci-compiled')
+            root.mkdir(parents=True)
+            root.joinpath('ci-targets.json').write_text(json.dumps([
+                dict(target='test-logic', executables=['logic', 'actor'])]))
+            root.joinpath('ci-inputs.json').write_text(json.dumps({
+                'logic': dict(files=['src/logic.zig'], external={'compiler/std': 'full-sha256'}),
+                'actor': dict(files=['src/actor.zig'], external={}),
+            }))
+            before = evidence.suite_sources(['test-logic'])
+            origin = evidence.git('rev-parse', 'HEAD')
+            evidence.git('rebase', 'main')
+            self.assertNotEqual(evidence.git('rev-parse', 'HEAD'), origin)
+            self.assertEqual(evidence.suite_sources(['test-logic']), before)
+            for path in ('src/logic.zig', 'src/actor.zig', 'build.zig', 'build.zig.zon'):
+                old = Path(path).read_text()
+                Path(path).write_text(old + ' changed')
+                commit('changed ' + path)
+                self.assertNotEqual(evidence.suite_sources(['test-logic']), before)
+                Path(path).write_text(old)
+                commit('restore ' + path)
+            # The base movement is genuinely outside this suite's source set.
+            self.assertNotEqual(evidence.source_files(origin)['src/host.zig'],
+                                evidence.source_files('HEAD')['src/host.zig'])
+
     def test_acceptance_requires_the_complete_target_closure_not_the_entire_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
             previous = Path.cwd()
@@ -355,3 +442,25 @@ class EvidenceTest(unittest.TestCase):
                 with patch.object(evidence, 'api', return_value=forged), \
                         self.assertRaisesRegex(ValueError, 'merge tree mismatch'):
                     evidence.verify(data, artifact, other, inputs)
+                # Narrow identities still independently verify origin blobs,
+                # both for real merge refs and direct push sources.
+                for event in ('push', 'pull_request'):
+                    scoped = dict(inputs, tree=None, event=event, sources=dict(
+                        tracked={'feature': evidence.source_files(source)['feature']}, external={}))
+                    origin_run = dict(run, event=event, head_sha=source if event == 'push' else head)
+                    for valid in (True, False):
+                        current = copy.deepcopy(scoped)
+                        if not valid:
+                            current['sources']['tracked']['feature'][1] = '0' * 40
+                        value = dict(receipt, inputs=current)
+                        stream = io.BytesIO()
+                        with zipfile.ZipFile(stream, 'w') as zipped:
+                            zipped.writestr('evidence.json', json.dumps(value))
+                            zipped.writestr('executables/test', binary.read_bytes())
+                        payload = stream.getvalue()
+                        metadata = dict(artifact, digest='sha256:' + hashlib.sha256(payload).hexdigest())
+                        if valid:
+                            self.assertEqual(evidence.verify(payload, metadata, origin_run, current), value)
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'transitive source inputs mismatch'):
+                                evidence.verify(payload, metadata, origin_run, current)

@@ -1,4 +1,5 @@
-"""Verify same-tree Actions evidence; qualification always executes afresh."""
+"""Verify input- and artifact-bound Actions evidence; qualification executes afresh."""
+import fnmatch
 import hashlib
 import importlib.metadata
 import io
@@ -35,6 +36,35 @@ def target_executables(targets):
     return sorted(result)
 
 
+def source_files(revision):
+    entries = git('ls-tree', '-r', revision).splitlines()
+    return {path: metadata.split()[::2] for entry in entries
+            for metadata, path in [entry.split('\t', 1)]}
+
+
+def suite_sources(targets):
+    inventory = json.loads(Path('.zig-cache/o/ci-compiled/ci-inputs.json').read_text())
+    tracked = source_files('HEAD')
+    # Build options, bootstrap, pins, generated-input policy and the evidence
+    # implementation can affect every gate, even without a compiler import.
+    common = ('build.zig', 'build.zig.zon', '.github/*', 'tests/ci/*',
+              'src/build_*', 'src/fetch_dependencies.sh', 'src/prepare_*', 'src/*.patch')
+    files = {path for path in tracked if any(fnmatch.fnmatchcase(path, pattern) for pattern in common)}
+    external = {}
+    for executable in target_executables(targets):
+        row = inventory[Path(executable).name]
+        if not row.get('files') or 'external' not in row:
+            raise ValueError('Compiler input closure unavailable: ' + row.get('unavailable', 'empty inventory'))
+        files.update(row['files'])
+        for name, value in row['external'].items():
+            if name in external and external[name] != value:
+                raise ValueError('Inconsistent external input')
+            external[name] = value
+    if any(path not in tracked or tracked[path][0] not in ('100644', '100755') for path in files):
+        raise ValueError('Compiler input is not an ordinary tracked source')
+    return dict(tracked={path: tracked[path] for path in sorted(files)}, external=external)
+
+
 def identity(targets, part, *, compiled=False):
     # Go's test runner discards its executable. Unrelated restored Zig binaries
     # cannot establish that test artifact's identity, so run these cheap checks.
@@ -45,8 +75,8 @@ def identity(targets, part, *, compiled=False):
     # Only native unit gates retain their complete executable set today.
     if not compiled and set(targets) - {"test", "test-full", "test-logic"}:
         raise ValueError("Process/sanitizer gates require fresh execution: temporary native helpers are not retained")
-    # The complete tree covers fixtures, policy, pins and workflow inputs, not
-    # just production sources. Runner image and native tools cover SDK changes.
+    # A source inventory narrows only known closures. Otherwise the complete
+    # tree remains required. Runner image and native tools also bind SDK changes.
     if git("status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Evidence requires an unchanged tracked source tree")
     system, machine = platform.system(), platform.machine()
@@ -59,7 +89,14 @@ def identity(targets, part, *, compiled=False):
         if any(manifest.get(key) != value for key, value in cpu.items()):
             raise ValueError("CI CPU identity mismatch")
         cpu = manifest
-    return dict(format=2, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
+    sources = None
+    if not compiled and system == 'Linux':
+        try:
+            sources = suite_sources(targets)
+        except (OSError, ValueError, KeyError) as error:
+            print(f'Whole-tree evidence only: {error}', flush=True)
+    return dict(format=3, tree=None if sources else git("rev-parse", "HEAD^{tree}"), sources=sources,
+                targets=targets, part=part,
                 executables=target_executables(targets) if not compiled else None,
                 system=system, machine=machine, cpu=cpu,
                 image=[os.environ.get("ImageOS"), os.environ.get("ImageVersion")],
@@ -120,7 +157,7 @@ def verify(archive, artifact, run, inputs):
                 if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
                     raise ValueError("Test executable missing or changed")
     commit = api(f"repos/{repository}/git/commits/{receipt['source_sha']}")
-    if commit["tree"]["sha"] != inputs["tree"]:
+    if not inputs.get('sources') and commit["tree"]["sha"] != inputs["tree"]:
         raise ValueError("Origin source tree mismatch")
     if run["event"] == "push":
         if receipt["source_sha"] != run["head_sha"]:
@@ -139,10 +176,18 @@ def verify(archive, artifact, run, inputs):
         subprocess.run(["git", "fetch", "--quiet", "--no-tags", "origin", base, head],
                        check=True, capture_output=True, timeout=90)
         merged = git("merge-tree", "--write-tree", base, head).splitlines()[0]
-        if merged != inputs["tree"]:
+        if merged != commit['tree']['sha']:
             raise ValueError("Origin run merge tree mismatch")
     else:
         raise ValueError("Only selected push and PR checks support reuse")
+    if inputs.get('sources'):
+        # Resolve origin blobs independently of the receipt, at the exact source
+        # bound above to the successful run. A receipt cannot name its own oracle.
+        subprocess.run(['git', 'fetch', '--quiet', '--no-tags', 'origin', receipt['source_sha']],
+                       check=True, capture_output=True, timeout=90)
+        origin = source_files(receipt['source_sha'])
+        if any(origin.get(path) != value for path, value in inputs['sources']['tracked'].items()):
+            raise ValueError('Origin transitive source inputs mismatch')
     return receipt
 
 
@@ -161,9 +206,10 @@ def restore(inputs):
         except (ValueError, KeyError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
             print(f"Evidence not reusable: {error}", flush=True)
             continue
-        print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
+        scope = 'suite-input' if inputs.get('sources') else 'same-tree'
+        print(f"Verified {scope} evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-            print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']}). "
+            print(f"Verified {scope} evidence: {run['html_url']} (artifact {artifact['id']}). "
                   "Source and platform inputs match; the retained target executables match their exact passing hashes. "
                   "No new execution; this run's rebuilt executables are not accepted by this evidence.", file=summary)
         return True

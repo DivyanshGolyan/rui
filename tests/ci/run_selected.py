@@ -112,7 +112,7 @@ def main():
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
     parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
     parser.add_argument("--reuse-evidence", action="store_true",
-                        help="Verify identical-tree Actions evidence; never use for qualification")
+                        help="Verify suite-input Actions evidence; never use for qualification")
     args = parser.parse_args()
     targets = json.loads(args.targets)
     inputs = None

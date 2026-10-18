@@ -211,7 +211,7 @@ jobs:
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
-      - name: Run selected targets or verify identical-tree evidence
+      - name: Run selected targets or verify suite-input evidence
         id: gates
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}

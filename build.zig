@@ -737,6 +737,10 @@ pub fn build(b: *std.Build) void {
     if (ci_targets) |selected| {
         const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
         ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
+        const inputs = b.addSystemCommand(&.{"python3"});
+        inputs.addFileArg(b.path("tests/ci/collect_inputs.py"));
+        const inputs_manifest = inputs.addOutputFileArg("ci-inputs.json");
+        inputs.addFileInput(b.path("tests/ci/cache_inputs.zig"));
         var names = std.mem.splitScalar(u8, selected, ',');
         var installed: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
         var inventory: std.ArrayList(struct { target: []const u8, executables: []const []const u8 }) = .empty;
@@ -745,18 +749,20 @@ pub fn build(b: *std.Build) void {
             if (&root.step == ci_build) @panic("ci-build cannot select itself");
             var visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
             var files: std.ArrayList([]const u8) = .empty;
-            collectCiCompiles(b, ci_build, &root.step, &visited, &installed, &files);
+            collectCiCompiles(b, ci_build, inputs, &root.step, &visited, &installed, &files);
             inventory.append(b.allocator, .{ .target = name, .executables = files.toOwnedSlice(b.allocator) catch @panic("OOM") }) catch @panic("OOM");
         }
         const target_json = std.json.Stringify.valueAlloc(b.allocator, inventory.items, .{}) catch @panic("OOM");
         const target_manifest = b.addWriteFiles().add("ci-targets.json", target_json);
         ci_build.dependOn(&b.addInstallBinFile(target_manifest, "ci-targets.json").step);
+        ci_build.dependOn(&b.addInstallBinFile(inputs_manifest, "ci-inputs.json").step);
     }
 }
 
 fn collectCiCompiles(
     b: *std.Build,
     destination: *std.Build.Step,
+    inputs: *std.Build.Step.Run,
     source: *std.Build.Step,
     visited: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
     installed: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
@@ -768,11 +774,14 @@ fn collectCiCompiles(
         const name = ciName(b, compile);
         files.append(b.allocator, name) catch @panic("OOM");
         const installation = installed.getOrPut(b.allocator, source) catch @panic("OOM");
-        if (!installation.found_existing)
+        if (!installation.found_existing) {
             destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), name).step);
+            inputs.addArg(name);
+            inputs.addFileArg(compile.getEmittedBin());
+        }
         return;
     }
-    for (source.dependencies.items) |dependency| collectCiCompiles(b, destination, dependency, visited, installed, files);
+    for (source.dependencies.items) |dependency| collectCiCompiles(b, destination, inputs, dependency, visited, installed, files);
 }
 
 fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
