@@ -95,6 +95,7 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     if (fd == 1 && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")))
         marker = "Rui: Configured.";
     else if (fd == 1 && !strcmp(fault, "configure-rejected")) marker = "admitted: rejected";
+    else if (fd == 1 && !strcmp(fault, "requests")) marker = "Rui: Local recovery handles (not Host work status):";
     else if (fd == 2 && !strcmp(fault, "configure-canonical")) {
         marker = "rui: Configuration ";
         prefix = 1;
@@ -1280,6 +1281,7 @@ def command_interruption_cases(state, library):
         human.admit(home, "message", "--store", store, "--session", "command/signals", "propose tool")
         records = home / ".config/rui/requests"
         for case, command, route, signal_number in (
+                ("requests", "/requests", "", signal.SIGINT),
                 ("configure-before", "/configure --permission-mode ask", None, signal.SIGINT),
                 ("configure-inflight", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
                 ("configure-commit-int", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
@@ -1346,6 +1348,8 @@ def command_interruption_cases(state, library):
                     assert caller.returncode == 1 and b"error: " + primary in errors and b"Resume: " in errors, (case, output, errors)
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
+                if case == "requests":
+                    assert message["request"].encode() in output and b"Cancelled" not in errors, (output, errors)
                 assert not reply_release.is_set(), "command needed peer release to exit"
                 added = set(records.glob("*.json")) - before
                 if case.startswith("configure"):

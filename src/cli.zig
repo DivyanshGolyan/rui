@@ -1610,11 +1610,10 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         };
     } else if (std.mem.eql(u8, text, "/requests")) {
         // Inline enumeration was unbuffered: preserve partial-output ordering
-        // and keep output failures inside the original requests diagnostic.
+        // and finish the local listing before normal interruption detaches.
         var buffer: [0]u8 = .{};
         var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-        sessionInspect(init, requests_context, destination, reference, text, &writer.interface) catch |err| {
-            if (err == error.Cancelled) return err;
+        sessionInspect(init, .{ .io = init.io }, destination, reference, text, &writer.interface) catch |err| {
             TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
             return;
         };
