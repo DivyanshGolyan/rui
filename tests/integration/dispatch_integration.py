@@ -118,6 +118,10 @@ def compaction_cases(state, processes, endpoints, releases):
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
         assert compaction["input"][-1] == {"type": "compaction_trigger"}, compaction
+        # The originating Operation's address and baseline survive overflow
+        # into its compaction Operation.
+        address = model_instructions(ROOT, "baseline", store=store, session=session)
+        assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
         assert user_texts(compaction) == ["covered user input"], compaction
@@ -132,6 +136,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert len(endpoint.requests) == 3, endpoint.requests
         successor = json.loads(endpoint.requests[2])
         assert user_texts(successor) == ["covered user input", "pending input"], successor
+        assert successor["instructions"] == address, successor
         assert [item["content"][0]["text"] for item in successor["input"] if item.get("role") == "developer"] == ["arrived during compaction"], successor
         assert not any(item.get("id") == items[0]["id"] for item in successor["input"]), successor
         replay_anchor = dict(items[1])
@@ -163,6 +168,7 @@ def compaction_cases(state, processes, endpoints, releases):
         restarted = json.loads(endpoint.requests[3])
         assert replay_anchor in restarted["input"] and items[2] in restarted["input"], restarted
         assert user_texts(restarted) == ["covered user input", "pending input", "followup input"], restarted
+        assert restarted["instructions"] == address, restarted
         execution = wait_for(lambda: (value := command("session", "inspect", "--store", store, "--session", session)["execution"])["custody_occupied"] == "0" and value, "compaction custody release")
         assert execution["scratch_used_bytes"] == "0" and not execution["dispatch_fenced"], execution
         stop_host(host)
@@ -182,12 +188,15 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.remove(host)
         stop_endpoint(endpoint, endpoints)
 
-    # Proactive compaction holds the new input outside its frozen view.
+    # Proactive compaction holds the new input outside its frozen view. The
+    # multibyte, quote- and backslash-bearing Store and Session prove the
+    # address is carried exactly, without normalization or re-escaping. The
+    # Store path stays space-free because Host readiness is space-delimited.
     first, _, _ = sse_answer("auto-first", "auto-r", "auto-m", "original answer")
     compact, _ = compact_response("auto")
     last, _, _ = sse_answer("auto-last", "auto-r2", "auto-m2", "automatic answer")
     endpoint, url = endpoint_for([first, compact, last])
-    store, session = state / "compaction-auto", "direct/compact-auto"
+    store, session = state / 'compaction-auto-雪"q"\\', 'direct/雪 "q" \\ é'
     host = start_host(store, url)
     processes.append(host)
     configure(state, store, "auto-config", session, "model-a")
@@ -201,6 +210,9 @@ def compaction_cases(state, processes, endpoints, releases):
     assert len(endpoint.requests) == 3, endpoint.requests
     assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
+    address = model_instructions(ROOT, store=store, session=session)
+    assert '雪\\"q\\"\\\\"' in address and '雪 \\"q\\" \\\\ é' in address, address
+    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -217,6 +229,8 @@ def compaction_cases(state, processes, endpoints, releases):
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
     assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
+    address = model_instructions(ROOT, store=store, session=session)
+    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -239,6 +253,8 @@ def compaction_cases(state, processes, endpoints, releases):
     report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
     assert report["actions"]["count"] == "0" and not forbidden_effect.exists(), report
     assert len(endpoint.requests) == 2, endpoint.requests
+    address = model_instructions(ROOT, store=store, session=session)
+    assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 2, endpoint.requests
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -1045,6 +1061,7 @@ def main():
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
+        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session="direct/retry")
         database = sqlite3.connect(retry_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
@@ -1403,6 +1420,10 @@ def main():
         wait_for(lambda: len(continued_endpoint.requests) >= 3, "replacement continued Attempt")
         assert continued_endpoint.requests[1] == continued_endpoint.requests[2]
         frozen_retry = json.loads(continued_endpoint.requests[2])
+        # Later settings cannot re-address or re-baseline the replacement Attempt.
+        assert frozen_retry["instructions"] == model_instructions(
+            ROOT, "original instructions", store=continued_store, session="direct/continued-retry"
+        ), frozen_retry
         expected_private = dict(continued_reasoning)
         expected_private.pop("created_by")
         assert expected_private in frozen_retry["input"], frozen_retry["input"]

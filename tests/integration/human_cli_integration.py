@@ -108,6 +108,49 @@ def help_case():
         )
         assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
+        send_help = run(home, "session", "send", "--help")
+        assert "\nRequires: --session REF or --session-hex HEX; --text FILE|- or TEXT|-.\n" in send_help, send_help
+        assert "\nRequires: PROVIDER.\n" in run(home, "auth", "login", "--help")
+        # Each syntactically valid call lacks one declared requirement and
+        # fails before capture with scoped help, never the root usage.
+        record = home / "explicit.json"
+        for args, missing in (
+                (("session", "send", "hi"), "missing --session REF or --session-hex HEX"),
+                (("session", "send", "--session", "help/half", "--key", "half-key", "hi"), "missing --record FILE"),
+                (("session", "send", "--session", "help/half", "--record", record, "hi"), "missing --key KEY or --key-hex HEX"),
+                (("auth", "login"), "missing PROVIDER")):
+            result = subprocess.run([str(fixture.RUI), *map(str, args)], env={**os.environ, "HOME": str(home)},
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+            operation = " ".join(args[:2])
+            assert result.returncode == 1 and result.stdout == "", (args, result)
+            assert (f"rui: {operation}: {missing}. Nothing was captured or sent. "
+                f"Usage: rui {operation} --help\n") in result.stderr, (args, result.stderr)
+            assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
+            assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
+            assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
+        # Retired names are refused before any entry path, even with a
+        # terminal that could otherwise reach the provider chooser.
+        master, slave = pty.openpty()
+        try:
+            caller = subprocess.Popen([str(fixture.RUI), "setup"],
+                env={**os.environ, "HOME": str(home), "TERM": "xterm-256color"},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            output, errors = terminal_exit(caller, master)
+        finally:
+            dispose_all(lambda: os.close(master), lambda: os.close(slave))
+        assert caller.returncode == 1, (output, errors)
+        assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
+            "Nothing was captured or sent. To start a conversation with this text, use rui -- setup.\n").encode() in errors, errors
+        assert b"Provider:" not in output + errors and b"Codex login" not in output + errors, (output, errors)
+        assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
+        assert list(home.iterdir()) == [], "retired name created runtime state"
+        # After --, the same word is a prompt: it reaches bare entry, which
+        # refuses here only because no terminal is attached.
+        literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        assert literal.returncode == 1 and "InteractiveTerminalRequired" in literal.stderr, literal
+        assert "is now" not in literal.stderr, literal.stderr
+        assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
 
 def compaction_settings_case(home, store, workspace):
@@ -638,7 +681,7 @@ def command_entry_cases():
         assert observation["result"] == {"status": "failed", "code": "provider_http_401"}, observation
         unavailable = subprocess.run([str(fixture.RUI), "request", "read-result", failed["request"]], env=env,
             capture_output=True, timeout=10)
-        assert unavailable.returncode != 0 and json.loads(unavailable.stdout)["error"]["code"] == "result_failed", unavailable
+        assert unavailable.returncode == 1 and json.loads(unavailable.stdout)["error"]["code"] == "result_failed", unavailable
         proxy = canonical.ReplyProxy(host, "/v1/message", lambda _: b"")
         lost = subprocess.run([str(fixture.RUI), "session", "send", "--session", selected, "lost original"], cwd=workspace,
             env=env, capture_output=True, text=True, timeout=10)
@@ -899,13 +942,19 @@ def persistent_opening_case():
                     + b"\r\nConnection: close\r\n\r\n" + body)
 
             proxy = canonical.ReplyProxy(host, "/v1/read-result", truncate_result)
-            # Content reads stream bytes, so a truncated reply may leave a
-            # prefix, but it fails typed and never appears complete or retried.
+            # Content reads stream earlier windows, so a truncated reply may
+            # leave a prefix, but it fails typed and never appears complete or
+            # retried. The final window is released only after its advertised
+            # length is bound, so neither tail marker can reach stdout.
             failed_result = subprocess.run([str(fixture.RUI), "request", "read-result", message["request"]],
                 env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=5)
-            assert failed_result.returncode != 0 and b"TruncatedResponse" in failed_result.stderr, failed_result
+            assert failed_result.returncode == 1 and b"TruncatedResponse" in failed_result.stderr, failed_result
             served = (b"# " + b"x" * 5000 + b"\n*UNVERIFIED") if buffered_reset else large_answer.encode()[:-1]
-            assert served.startswith(failed_result.stdout) and failed_result.stdout != large_answer.encode(), failed_result.stdout[-64:]
+            final_window = len(served) // 4096 * 4096
+            assert served.startswith(failed_result.stdout) and len(failed_result.stdout) <= final_window, (
+                "truncated result released its final window", len(failed_result.stdout), failed_result.stdout[-64:])
+            assert b"OPENING-COMPLET" not in failed_result.stdout and b"UNVERIFIED" not in failed_result.stdout, (
+                "truncated result flushed its unverified tail", failed_result.stdout[-64:])
             assert len(endpoint.requests) == 1 and len(proxy.exchanges) == 1, "failed keyed result restarted work"
             proxy.close()
             proxy = None
@@ -1010,12 +1059,12 @@ def persistent_opening_case():
             "PATH": str(executables) + os.pathsep + os.environ["PATH"]}, capture_output=True, timeout=10)
         assert exported.returncode == 0 and exported.stdout == large_answer.encode(), (export, exported.stderr, exported.stdout)
         for flags in (("--session-hex", "0"), ("--session-hex", "zz"),
-                ("--session-hex", "61" * 129), ("--store-hex", "61" * 493),
+                ("--session-hex", "61" * 129), ("--session", "persistent/opening", "--store-hex", "61" * 493),
                 ("--session", "persistent/opening", "--session-hex", "61"),
                 ("--store", store, "--store-hex", "61")):
             rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
-            assert rejected.returncode != 0 and not rejected.stdout, (flags, rejected)
+            assert rejected.returncode == 1 and not rejected.stdout, (flags, rejected)
             assert any(code in rejected.stderr for code in (b"InvalidHexIdentity", b"DuplicateArgument", b"ConflictingArguments")), rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
         assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"

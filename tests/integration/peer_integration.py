@@ -4,9 +4,10 @@
 A real Host runs from a nondefault installation with unrelated secrets in its
 environment. Session A's model reads its own address from the request
 context, then its Bash call configures Session B and sends B a Message that
-carries A's address. The sender returns after admission while B is held. B's
-Bash later sends an ordinary reply to A's address, which A receives as a new
-User Message. The generated capture recovers the original send exactly.
+carries A's address. A's send returns after admission and A finishes its Turn
+while B's own Bash call is held. B's Bash then sends an ordinary reply to A's
+address, which A receives as a new User Message. The generated capture
+recovers the original send exactly, with no login or idle peer process.
 """
 import json
 import os
@@ -62,7 +63,6 @@ class PeerModel(TestHTTPServer):
         self.requests = []
         self.lock = threading.Lock()
         self.b_received = threading.Event()
-        self.b_release = threading.Event()
         self.a_continued = threading.Event()
         self.a_reply_received = threading.Event()
 
@@ -74,10 +74,10 @@ class PeerModel(TestHTTPServer):
             if outputs:
                 return answer("b-done", "replied")
             self.b_received.set()
-            if not self.b_release.wait(20):
-                raise RuntimeError("B was never released")
             reply_to = json.loads(text.split("reply-to: ", 1)[1].splitlines()[0])
+            # B's execution waits for the test's release file, then replies.
             return bash_call("b-reply", (
+                "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 f"rui session send --store {shlex.quote(reply_to['store'])} --session {shlex.quote(reply_to['session'])} "
                 f"-- 'from peer/b: 42' > b-reply.json 2> b-reply.err"
             ))
@@ -149,7 +149,7 @@ def main():
         home.mkdir()
         workspace = (state / "workspace").resolve()
         workspace.mkdir()
-        store = state / "store"
+        store = state / "store-雪"
         canonical_store = os.path.realpath(store)
         endpoint = PeerModel(workspace)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -168,18 +168,15 @@ def main():
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
 
-        # B is held inside its first model request, yet A's Bash call has
-        # already exited with B's admission receipt as its saved result. (The
-        # plaintext fixture shares one provider connection, so A's model
-        # continuation queues behind B; that transport limit is not under test.)
+        # B's Bash call is held, yet A's Bash send already returned B's
+        # admission receipt and A finished its Turn with it.
         assert endpoint.b_received.wait(20), "B never received the peer Message"
-
-        def settled_send():
-            actions = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, "--profile", "full", home=home)["full"]["actions"]
-            return actions[0] if actions and actions[0]["resolution"] == "succeeded" else None
-        settled = wait_for(settled_send, "A's Bash send to settle while B is held")
-        assert not endpoint.b_release.is_set() and not endpoint.a_continued.is_set()
-        assert settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
+        wait_for(lambda: run(installed, "request", "inspect", "--store", store, "--key", ask_key, home=home)["observation"].get("result", {}).get("status") == "completed", "A's first Turn while B is held")
+        assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
+        b_held = run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)
+        assert b_held["work"]["status"] != "completed", b_held
+        settled = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, "--profile", "full", home=home)["full"]["actions"][0]
+        assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
         receipt = json.loads((workspace / "b-send.json").read_text())
         assert receipt["answer"]["status"] == "accepted" and receipt["context"]["session"] == SESSION_B, receipt
         assert json.loads((workspace / "b-config.json").read_text())["answer"]["status"] == "accepted"
@@ -209,8 +206,7 @@ def main():
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
         assert recovered["context"]["key"] == receipt["context"]["key"], recovered
 
-        endpoint.b_release.set()
-        wait_for(lambda: run(installed, "request", "inspect", "--store", store, "--key", ask_key, home=home)["observation"].get("result", {}).get("status") == "completed", "A's first Turn")
+        (workspace / "b-release").write_text("")
         assert endpoint.a_reply_received.wait(20), "A never received B's reply"
         a_continuation = next(request for request in endpoint.requests if address_of(request)["session"] == SESSION_A and tool_outputs(request))
         assert tool_outputs(a_continuation) == [settled["result"]["text"]], a_continuation
@@ -229,15 +225,19 @@ def main():
         b_requests = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_B]
         assert len(b_requests) == 2 and [len(tool_outputs(request)) for request in b_requests] == [0, 1], b_requests
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
+        # Peers left nothing running beside the Host, and nobody signed in or
+        # saved defaults: HOME holds only generated request captures.
+        processes = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout.splitlines()
+        running = {int(line.split(None, 1)[0]) for line in processes if line.split(None, 1)[1].startswith(str(installed))}
+        assert running == {host.pid}, processes
+        assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
-              "B replied to A's runtime address, original capture recovered without duplicate, controlled PATH/HOME")
+              "B replied to A's runtime address, original capture recovered without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME")
     except BaseException:
         print(f"retained peer integration failure state: {state}", file=sys.stderr)
         state = None
         raise
     finally:
-        if endpoint is not None:
-            endpoint.b_release.set()
         if host is not None:
             stop_process(host)
         if endpoint is not None:

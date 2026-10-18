@@ -3374,7 +3374,7 @@ fn readResultResponseSink(
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .result_text) return error.InvalidResponse;
-    try readResponseBody(requests, fd, head.content_length, sink);
+    try readResponseBody(requests, fd, head.content_length, sink, .withhold_final_window);
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
@@ -3391,25 +3391,33 @@ fn readReportResponse(
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .command_json) return error.InvalidResponse;
-    try readResponseBody(requests, fd, head.content_length, sink);
+    try readResponseBody(requests, fd, head.content_length, sink, .stream);
     return .{ .report = .{ .bytes = head.content_length } };
 }
 
 // One delivery policy for answer/report windows. The socket caller and sink
 // keep custody through the last feed; completion has no retrospective stop.
-fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: anytype) !void {
+// Answers withhold their final window until every advertised byte and EOF
+// arrived, so a truncated answer never ends in complete-looking bytes.
+fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: anytype, delivery: enum { stream, withhold_final_window }) !void {
     const io = requests.io;
     var remaining = length;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, buffer.len));
-        const count = try readRequest(requests, fd, buffer[0..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
-        if (count == 0) return error.TruncatedResponse;
+        var filled: usize = 0;
+        while (filled != wanted) {
+            const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
+            if (count == 0) return error.TruncatedResponse;
+            filled += count;
+            if (delivery == .stream) break;
+        }
+        remaining -= filled;
+        if (remaining == 0 and delivery == .withhold_final_window) try completeContentEOF(requests, fd, undefined, null);
         if (@TypeOf(sink) == std.Io.File)
-            try sink.writeStreamingAll(io, buffer[0..count])
+            try sink.writeStreamingAll(io, buffer[0..filled])
         else
-            try sink.feed(buffer[0..count]);
-        remaining -= count;
+            try sink.feed(buffer[0..filled]);
     }
 }
 
@@ -4982,7 +4990,8 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
         error.TruncatedResponse,
         readResultResponse(std.testing.io, descriptors[0], destination, &buffer),
     );
-    try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
+    // The final window is withheld until every advertised byte arrives.
+    try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
 }
 
 test "keyed observation retains request acceptance independently of later work" {
@@ -5577,6 +5586,8 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         const content_type = if (kind == .result) "text/plain; charset=utf-8" else "application/json";
         var response: [256]u8 = undefined;
         try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\na", .{ content_type, length }));
+        // An answer's final window is delivered only after its EOF.
+        if (kind == .result) try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(peer.socket.handle, std.c.SHUT.WR));
         const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
         while (!worker.sink.entered.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
             try std.Io.sleep(io, .fromMilliseconds(1), .awake);
