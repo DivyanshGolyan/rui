@@ -326,17 +326,21 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     const char *pressure_arm = getenv("RUI_TERMINAL_BACKPRESSURE_ARM");
     static int pressure_stopped = 0;
-    if (screen == 1 && fault && !strcmp(fault, "renderer-backpressure") &&
-        pressure_arm && !access(pressure_arm, F_OK) && !pressure_stopped) {
+    int pressured = fault && (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"));
+    if (screen == 1 && pressured && pressure_arm && !access(pressure_arm, F_OK) && !pressure_stopped) {
         /* Stop the real PTY before a bounded repaint, independently of input
-           queue pressure. The syscall must encounter actual kernel EAGAIN. */
+           queue pressure. The syscall must encounter actual kernel EAGAIN.
+           Arming after opening keeps a transient opening EAGAIN, drained by
+           the test's own reader, from standing in for this one. */
         if (tcflow(fd, TCOOFF)) _exit(92);
         /* A stopped Darwin tty still queues a small frame. Fill the queue
-           with ignored NULs until the kernel itself reports EAGAIN. */
+           with ignored NULs, then single bytes, until the kernel itself
+           reports EAGAIN. */
         int pressure_flags = fcntl(fd, F_GETFL);
         if (pressure_flags < 0 || fcntl(fd, F_SETFL, pressure_flags | O_NONBLOCK)) _exit(93);
         static const char filler[256];
         while (real_write(fd, filler, sizeof filler) > 0) {}
+        while (errno == EAGAIN && real_write(fd, filler, 1) > 0) {}
         if (errno != EAGAIN || fcntl(fd, F_SETFL, pressure_flags)) _exit(94);
         pressure_stopped = 1;
         record("output-stopped\n");
@@ -357,24 +361,12 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
     static int blocked = 0, progressed = 0;
-    if (screen == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
-        (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"))) {
+    if (screen == 1 && pressure_stopped && result < 0 && saved_errno == EAGAIN && !blocked) {
         blocked = 1;
         record("output-blocked\n");
-        if (!strcmp(fault, "backpressure")) {
-            /* Darwin later accepts screen output without a reader. Hold the
-               actual EAGAIN: stop the PTY and fill its queue to the byte. */
-            if (tcflow(fd, TCOOFF)) _exit(95);
-            int held_flags = fcntl(fd, F_GETFL);
-            if (held_flags < 0 || fcntl(fd, F_SETFL, held_flags | O_NONBLOCK)) _exit(96);
-            static const char held_filler[256];
-            while (real_write(fd, held_filler, sizeof held_filler) > 0) {}
-            while (errno == EAGAIN && real_write(fd, held_filler, 1) > 0) {}
-            if (errno != EAGAIN || fcntl(fd, F_SETFL, held_flags)) _exit(97);
-        }
     }
-    /* Whether the kernel later accepted screen output without a reader
-       distinguishes a drained queue from work done while still blocked. */
+    /* Later accepted screen output would mean the stopped queue drained,
+       distinguishing that from work done while still blocked. */
     if (screen == 1 && blocked && !progressed && result > 0 && !strcmp(fault, "backpressure")) {
         progressed = 1;
         record("output-progressed\n");
@@ -998,7 +990,8 @@ def persistent_cases(state, library, home, store, host):
             fault = "backpressure" if case.startswith("backpressure") else case.removeprefix("incomplete-")
             environment = {**os.environ, "HOME": str(home),
                 "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
-                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault}
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": fault,
+                "RUI_TERMINAL_BACKPRESSURE_ARM": str(state / f"persistent-{case}" / "arm")}
             if case.startswith("sync-"):
                 environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 if case == "sync-handoff":
@@ -1071,8 +1064,10 @@ def persistent_cases(state, library, home, store, host):
                 assert received.wait(10)
                 caller.send_signal(signal.SIGINT)
             elif case.startswith("backpressure"):
-                # An external caller admits large exact content after opening;
-                # the frontend's actual activity reader fills stdout's PTY.
+                # After opening, the next screen write stops and fills stdout's
+                # PTY; an external caller's large content then keeps the
+                # frontend's actual activity reader writing into it.
+                (state / f"persistent-{case}" / "arm").touch()
                 human.run(home, "session", "send", "--store", store, "--session", "terminal/restoration", "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
                 if case == "backpressure-command":
