@@ -128,7 +128,7 @@ test "provider interpretation preserves accepted bytes and rejects every model d
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         var metadata_owned = true;
         defer if (metadata_owned) metadata.deinit();
-        const bytes = try std.testing.allocator.print("{s}data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[]{s}}}}}\n\n", .{ prefix, case.body });
+        const bytes = try std.testing.allocator.print("{s}data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[],\"usage\":{{\"input_tokens\":7,\"output_tokens\":4}}{s}}}}}\n\n", .{ prefix, case.body });
         defer std.testing.allocator.free(bytes);
         const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
         defer file.close(std.testing.io);
@@ -139,6 +139,12 @@ test "provider interpretation preserves accepted bytes and rejects every model d
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.answer_length);
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.answer_digest);
             try std.testing.expectEqualStrings("r", interpreted.accepted.evidence.response_id.slice());
+            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.item_count);
+            var pressure: ?u64 = null;
+            while (try reader.next()) |record| if (record.tag == .usage) {
+                pressure = record.usage_tokens;
+            };
+            try std.testing.expectEqual(@as(?u64, 11), pressure);
         } else {
             try std.testing.expect(interpreted == .rejected);
             try std.testing.expectEqualStrings("contradictory_provider_output", interpreted.rejected.code);
