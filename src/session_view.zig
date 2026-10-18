@@ -135,6 +135,17 @@ pub fn Indented(comptime Sink: type) type {
                     self.grapheme_state = 0;
                     continue;
                 }
+                if (self.columns == 0) {
+                    // Cell layout owns geometry in the alternate screen.
+                    // Preserve hanging indentation without a second UTF-8,
+                    // grapheme or width pass through the same output.
+                    if (self.line_start) {
+                        try out.writeAll("  ");
+                        self.line_start = false;
+                    }
+                    try out.writeByte(byte);
+                    continue;
+                }
                 self.scalar[self.used] = byte;
                 self.used += 1;
                 const length = try std.unicode.utf8ByteSequenceLength(self.scalar[0]);

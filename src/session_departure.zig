@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, history, details, permission };
+pub const ReadPhase = enum { activity, history, details, inspection, permission };
 pub const Mode = enum { active, handoff, final_exit };
 pub const ReadEnd = union(enum) {
     absent,
@@ -14,7 +14,7 @@ pub const ReadEnd = union(enum) {
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .history or self.failed.progress.phase == .details) and
+            (self.failed.progress.phase == .history or self.failed.progress.phase == .details or self.failed.progress.phase == .inspection) and
             !self.failed.progress.rendering;
     }
 

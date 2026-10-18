@@ -41,6 +41,12 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/logic_tests.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
 
+    def test_response_timing_keeps_native_timeout_consumers(self):
+        result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertEqual(result[family], ["admission-debug-integration", "check", "test-full", "test-logic"])
+        self.assertTrue(result["native_required"])
+
     def test_frontend_policy_keeps_value_and_native_handoff_checks(self):
         for path in ("src/SessionFrontend.zig", "src/SessionSubmission.zig",
                      "src/session_consent.zig", "src/session_departure.zig"):
@@ -48,9 +54,21 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
 
+    def test_terminal_values_keep_logic_and_native_checks(self):
+        for path in ("src/ConversationViewport.zig", "src/TerminalFrame.zig",
+                     "src/TerminalInput.zig", "src/TerminalEditor.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("test-logic", result[family])
+                    self.assertIn("check", result[family])
+                    if path != "src/ConversationViewport.zig":
+                        self.assertIn("admission-debug-integration", result[family])
+
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
-                      "src/request_encoding.zig", "src/execution_turn.zig"):
+                      "src/request_encoding.zig", "src/execution_turn.zig",
+                      "src/ResponseTiming.zig"):
             for composed in ("src/server.zig", "src/store.zig", "build.zig"):
                 with self.subTest(logic=logic, composed=composed):
                     result = select([logic, composed], "review", AVAILABLE)
