@@ -8,6 +8,7 @@ const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 const output_format = @import("output_format.zig");
 const provider_output = @import("provider_output.zig");
+const turn_policy = @import("turn_policy.zig");
 
 const c = @import("sqlite");
 
@@ -484,7 +485,7 @@ fn containsNoActiveOperation(_: *const anyopaque, _: u64) bool {
     return false;
 }
 
-pub const ModelOperationKind = output_format.ModelOperationKind;
+const ModelOperationKind = output_format.ModelOperationKind;
 
 pub const HistoricalSettings = struct {
     operation: ModelOperationKind = .assistant_response,
@@ -732,11 +733,11 @@ pub const HistoricalReader = struct {
     }
 };
 
-pub const OutputItemKind = output_format.OutputItemKind;
-pub const OutputRecordTag = output_format.OutputRecordTag;
-pub const OutputMetadataRecord = output_format.OutputMetadataRecord;
-pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
-pub const OutputMetadataReader = output_format.OutputMetadataReader;
+const OutputItemKind = output_format.OutputItemKind;
+const OutputRecordTag = output_format.OutputRecordTag;
+const OutputMetadataRecord = output_format.OutputMetadataRecord;
+const OutputMetadataWriter = output_format.OutputMetadataWriter;
+const OutputMetadataReader = output_format.OutputMetadataReader;
 const output_metadata_record_bytes = output_format.output_metadata_record_bytes;
 
 pub const ValidatedOutput = struct {
@@ -4564,15 +4565,26 @@ pub const Store = struct {
         var resolution: protocol.Bounded(96) = .{};
         try readText(last, 1, &resolution);
         const active = c.sqlite3_column_type(last, 3) == c.SQLITE_NULL;
-        if (active and resolution.eql("context_overflow")) return .compaction;
-        if (c.sqlite3_column_int(last, 0) == 1) {
-            const previous_first = try readNullablePositiveI64(last, 4) orelse return error.CorruptStore;
-            // Apply the same pending prefix after compaction, including failure
-            // before projection. A stop excludes that prefix, not future work.
-            if (active or previous_first == first_admission) return .assistant_response;
-        }
-        const trigger = policy.compaction_trigger orelse return .assistant_response;
-        if (!try self.contextChangedSinceBase(session_ref, current.next_position)) return .assistant_response;
+        var facts: turn_policy.CompactionFacts = .{
+            .previous = .{
+                .purpose = switch (c.sqlite3_column_int(last, 0)) {
+                    0 => .assistant_response,
+                    1 => .compaction,
+                    else => return error.CorruptStore,
+                },
+                .context_overflow = resolution.eql("context_overflow"),
+                .turn_active = active,
+                .same_input_prefix = (try readNullablePositiveI64(last, 4) orelse return error.CorruptStore) == first_admission,
+            },
+            .trigger = policy.compaction_trigger,
+            .context_changed = false,
+            .usage_tokens = null,
+            .uncovered_bytes = 0,
+            .output_reservation = policy.output_reservation,
+        };
+        if (turn_policy.forcedPurpose(facts.previous, facts.trigger)) |purpose| return purpose;
+        facts.context_changed = try self.contextChangedSinceBase(session_ref, current.next_position);
+        if (!facts.context_changed) return turn_policy.nextPurpose(facts);
         var usage_tokens: ?u64 = null;
         const base = try prepare(self.database, "SELECT coalesce((SELECT admission_position FROM model_operation INDEXED BY model_operation_compaction_bases " ++
             "WHERE session_ref=?1 AND purpose=1 AND resolution_code='continued' AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1),0)");
@@ -4634,8 +4646,9 @@ pub const Store = struct {
         if (c.sqlite3_step(estimate) != c.SQLITE_ROW) return error.CorruptStore;
         const bytes = c.sqlite3_column_int64(estimate, 0);
         if (bytes < 0) return error.CorruptStore;
-        const pressure = (usage_tokens orelse 0) +| (@as(u64, @intCast(bytes)) / 4) +| policy.output_reservation;
-        return if (pressure >= trigger) .compaction else .assistant_response;
+        facts.usage_tokens = usage_tokens;
+        facts.uncovered_bytes = @intCast(bytes);
+        return turn_policy.nextPurpose(facts);
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {

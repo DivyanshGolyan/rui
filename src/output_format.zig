@@ -3,7 +3,7 @@ const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 
-pub const ModelOperationKind = enum { assistant_response, compaction };
+pub const ModelOperationKind = @import("turn_policy.zig").Purpose;
 pub const OutputItemKind = enum(u8) { reasoning = 1, message = 2, function_call = 3, compaction = 4 };
 pub const OutputRecordTag = enum(u8) {
     item = 1,
