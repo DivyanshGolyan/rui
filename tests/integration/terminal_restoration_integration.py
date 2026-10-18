@@ -1348,6 +1348,7 @@ def command_interruption_cases(state, library):
                 ("requests", "/requests", "", signal.SIGINT),
                 ("configure-before", "/configure --permission-mode ask", None, signal.SIGINT),
                 ("configure-stopped-stderr", "/configure --permission-mode ask", None, signal.SIGINT),
+                ("configure-full-stderr", "/configure --permission-mode ask", None, signal.SIGINT),
                 ("configure-inflight", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
                 ("configure-commit-int", "/configure --permission-mode ask", "/v1/configure", signal.SIGINT),
                 ("configure-commit-term", "/configure --permission-mode ask", "/v1/configure", signal.SIGTERM),
@@ -1359,13 +1360,25 @@ def command_interruption_cases(state, library):
                 ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
                 ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
                 ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
-                ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
+                ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT),
+                ("inspect-full-stderr", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
-            # Exit guidance is optional: stopped stderr drops it, never holds exit.
-            stopped = case == "configure-stopped-stderr"
-            error_master, error_slave = open_pty() if stopped else (None, None)
+            # Exit guidance is optional: a stopped terminal or a full blocking
+            # pipe on stderr drops it and never holds the restored caller.
+            stopped = case.endswith(("-stopped-stderr", "-full-stderr"))
+            error_master, error_slave = (open_pty() if case.endswith("-stopped-stderr")
+                else os.pipe() if stopped else (None, None))
+            if case.endswith("-full-stderr"):
+                os.set_blocking(error_slave, False)
+                try:
+                    while os.write(error_slave, b"x" * 65536):
+                        pass
+                except BlockingIOError:
+                    pass
+                os.set_blocking(error_slave, True)
+            unread_read, unread_write = os.pipe() if stopped else (None, None)
             release = root / f"{case}.release"
             log = root / f"{case}.log"
             received, reply_release = threading.Event(), threading.Event()
@@ -1427,14 +1440,14 @@ def command_interruption_cases(state, library):
                 # raw until the signal's restoration (checked after exit).
                 if route != "":
                     caller.send_signal(signal_number)
-                if stopped:
+                if case.endswith("-stopped-stderr"):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 if route is None:
                     release.touch()  # File custody is nonpreemptible, transport is cancellable.
-                if stopped:
-                    caller.stderr = open(os.dup(error_master), "rb", buffering=0)
+                if stopped:  # Never readable: exit cannot depend on stderr credit.
+                    caller.stderr = open(os.dup(unread_read), "rb", buffering=0)
                 output, errors = human.terminal_exit(caller, master)
-                if stopped:
+                if case.endswith("-stopped-stderr"):
                     termios.tcflow(error_slave, termios.TCOON)
                 if case == "configure-canonical":
                     assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
@@ -1498,7 +1511,7 @@ def command_interruption_cases(state, library):
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     lambda: proxy.close() if proxy is not None else None,
                     *(lambda fd=fd: os.close(fd) for fd in (master, slave, ready_read, ready_write)
-                        + ((error_master, error_slave) if stopped else ())),
+                        + ((error_master, error_slave, unread_read, unread_write) if stopped else ())),
                 )
                 proxy = None
     finally:
