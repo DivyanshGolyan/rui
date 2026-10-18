@@ -533,13 +533,7 @@ fn driveActive(self: *Self) !void {
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
-            } else switch (self.current.work.status.value) {
-                .runnable, .in_flight => "Working…",
-                .waiting_for_permission => "Needs approval",
-                .failed => "Work failed · /status",
-                .cancelled => "Work stopped · /status",
-                .idle, .completed => "",
-            };
+            } else workStatus(self.current.work.status.value);
             var status_buffer: [2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
             // Bypass is the default and stays quiet: /status shows Permission.
@@ -580,6 +574,27 @@ fn driveActive(self: *Self) !void {
         }
         _ = try self.step(16);
     }
+}
+
+const WorkStatus = @FieldType(@FieldType(client.Current.Work, "status"), "value");
+
+fn workStatus(status: WorkStatus) []const u8 {
+    return switch (status) {
+        .runnable, .in_flight => "Working…",
+        .waiting_for_permission => "Needs approval",
+        .failed => "Work failed · /status",
+        .cancelled => "Work stopped · /status",
+        .idle, .completed => "",
+    };
+}
+
+test "the composer status shows only live work, not an ending the transcript already shows" {
+    // The ended Turn's line sits directly above the composer; a second
+    // copy pointing at /status would add nothing /status does not repeat.
+    for ([_]WorkStatus{ .failed, .cancelled, .idle, .completed }) |ended|
+        try std.testing.expectEqualStrings("", workStatus(ended));
+    try std.testing.expectEqualStrings("Working…", workStatus(.in_flight));
+    try std.testing.expectEqualStrings("Needs approval", workStatus(.waiting_for_permission));
 }
 
 fn pump(raw: *anyopaque) !void {

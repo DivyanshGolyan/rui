@@ -615,6 +615,25 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     }
 }
 
+fn workEnded(sink: anytype, code: []const u8) !void {
+    try print(sink, "\n! Work ended: {s}. /status for details.\n", .{code});
+}
+
+test "an ended Turn says what happened and what to do next where it ended" {
+    var buffer: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var sink: Sink = .{ .out = &out };
+    try workEnded(&sink, "retry_exhausted");
+    // /status only repeats the code, so the line itself carries the next step.
+    try std.testing.expectEqualStrings("\n! Work ended: retry_exhausted. Send a message to continue.\n", out.buffered());
+}
+
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
@@ -669,7 +688,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // Successful content aggregates assistant rows, never a second answer.
                 if (outcome.code.eql("completed")) continue;
                 compact_tools.* = false;
-                try print(sink, "\n! Work ended: {s}. /status for details.\n", .{outcome.code.slice()});
+                try workEnded(sink, outcome.code.slice());
             },
             .stop => {
                 compact_tools.* = false;
