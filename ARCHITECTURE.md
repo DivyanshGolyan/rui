@@ -103,6 +103,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Codex authentication and credential storage | `src/codex_auth.zig` sequences Host credential acquisition and local status and owns the device-login and refresh transport; `src/codex_credentials.zig` owns private records and cross-process credential leases. `src/codex_credential_policy.zig` owns the value decisions those owners follow: record format, selection, refresh claim and replacement admission. `src/codex_token_wire.zig` builds and interprets device-login and token-exchange messages and the records they produce. |
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
+| Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 | Private evaluator lifecycle | `src/evaluator.zig`: child execution, cancellation, output handoff and cleanup. This is not the public Workflow Runtime. |
 
 ## Admission and public requests

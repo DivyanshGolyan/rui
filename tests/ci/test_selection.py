@@ -38,8 +38,24 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(result["native_required"])
 
     def test_logic_root_selects_its_executable_root(self):
-        result = select(["src/logic_tests.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["test-logic"])
+        for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
+            result = select([path], "review", AVAILABLE)
+            self.assertEqual(result["targets"], ["test-logic"])
+
+    def test_every_functional_core_selects_the_boundary_check(self):
+        source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
+        listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
+        cores = re.findall(r'\.\{ "([^"]+\.zig)", @import', listed)
+        self.assertIn("BashLifecycle.zig", cores)
+        for core in cores:
+            with self.subTest(core=core):
+                self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_portable_roots_keep_their_native_owner_checks(self):
+        for path in ("src/SessionInput.zig", "src/tools.zig"):
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertEqual(result[family], ["check", "test-logic"])
 
     def test_response_timing_keeps_native_timeout_consumers(self):
         result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)
