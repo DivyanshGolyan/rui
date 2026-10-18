@@ -48,6 +48,17 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
 
+    def test_terminal_values_keep_logic_and_native_checks(self):
+        for path in ("src/ConversationViewport.zig", "src/TerminalFrame.zig",
+                     "src/TerminalInput.zig", "src/TerminalEditor.zig"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("test-logic", result[family])
+                    self.assertIn("check", result[family])
+                    if path != "src/ConversationViewport.zig":
+                        self.assertIn("admission-debug-integration", result[family])
+
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
                       "src/request_encoding.zig", "src/execution_turn.zig"):
