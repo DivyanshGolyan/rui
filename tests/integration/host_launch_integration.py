@@ -735,9 +735,9 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS)
             until = time.monotonic() + COMMAND_TIMEOUT
-            # The bypass notice is in-frame state above the composer; the
-            # committed screen, not a byte match, establishes the prompt.
-            while not ("Bash runs without approval." in screen.completed
+            # The committed screen, not a byte match, establishes the prompt:
+            # the opening frame has drawn and the cursor sits at the composer.
+            while not (screen.completed and "Opening…" not in screen.completed
                     and screen.screen.display[screen.screen.cursor.y].startswith("›")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
