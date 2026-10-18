@@ -582,9 +582,7 @@ fn workStatus(status: WorkStatus) []const u8 {
     return switch (status) {
         .runnable, .in_flight => "Working…",
         .waiting_for_permission => "Needs approval",
-        .failed => "Work failed · /status",
-        .cancelled => "Work stopped · /status",
-        .idle, .completed => "",
+        .idle, .completed, .failed, .cancelled => "",
     };
 }
 
