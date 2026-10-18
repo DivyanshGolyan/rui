@@ -662,7 +662,7 @@ def read_result(store, key, *, deadline=None):
 
 def read_action(store, session, action, field):
     completed = subprocess.run(
-        [str(RUI), f"read-action-{field}", "--store", str(store), "--session", session, "--action", action],
+        [str(RUI), "action", f"read-{field}", "--store", str(store), "--session", session, "--action", action],
         capture_output=True,
         timeout=15,
     )

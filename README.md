@@ -57,7 +57,7 @@ Sign in once, unless you already signed in with Rui:
 
 ```sh
 RUI="$HOME/.local/bin/rui"
-"$RUI" login codex
+"$RUI" auth login codex
 ```
 
 Follow the device-code instructions. Your account must have Codex access. Rui stores its credentials privately under `~/.config/rui/codex.json`.
@@ -86,7 +86,7 @@ Type a request at `›`, such as `Investigate the failing test`. In approval mod
 | `/requests` | Lists saved requests for recovery. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `message --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
+You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `rui session send --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
 
 The experimental libvaxis renderer is off by default. Run `RUI_RENDERER=vaxis "$RUI"` to try it. It uses an alternate screen, so conversation output does not enter your terminal's scrollback. PgUp/PgDn browse the retained view, Ctrl-G returns to the latest view, and `/history` reads older saved content. Unset `RUI_RENDERER` to return to inline scrollback; `TERM=dumb` always uses inline output. Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup; use your terminal's reset command if needed.
 
@@ -95,10 +95,10 @@ The experimental libvaxis renderer is off by default. Run `RUI_RENDERER=vaxis "$
 Rui calls a saved conversation a **Session**. To return to the newest Session created in your current project:
 
 ```sh
-"$RUI" resume --last
+"$RUI" session resume --last
 ```
 
-Use `"$RUI" sessions` to list this project's Sessions, or `sessions --all` to include other projects. `"$RUI" resume SESSION_REF` opens an exact Session. Rui also prints an exact resume command when you leave.
+Use `"$RUI" session list` to list this project's Sessions as JSON, or `session list --all` to include other projects. `"$RUI" session resume SESSION_REF` opens an exact Session. Rui also prints an exact resume command when you leave.
 
 Bare `rui` always creates a new Session. Existing Sessions keep their saved settings, including approval mode. `/setup` changes defaults for future Sessions, not the current one.
 
@@ -121,46 +121,41 @@ To return to provider/model defaults, enter:
 /configure --compaction-trigger default --output-reservation default
 ```
 
-Omitting either flag preserves its current setting. Scripts can use the same flags with `rui configure`; `rui inspect-session` reports effective values and overrides. Changes affect new model requests, not requests already admitted. If retained input still cannot fit after compaction, the request fails explicitly rather than repeatedly compacting unchanged input.
+Omitting either flag preserves its current setting. Scripts can use the same flags with `rui session configure`; `rui session inspect` reports effective values and overrides. Changes affect new model requests, not requests already admitted. If retained input still cannot fit after compaction, the request fails explicitly rather than repeatedly compacting unchanged input.
 
 ## Use Rui from scripts
 
-For a fresh conversation that waits for an answer:
-
-```sh
-"$RUI" exec "Explain the build"
-printf '%s' 'Explain the build' | "$RUI" exec -
-```
-
-`exec` writes answer text to stdout and recovery handles to stderr. It returns nonzero on failure, uncertainty or a permission block. It uses the same new-Session defaults, including Bash without approval. Use `--` before flag-like prompts or text equal to a command name.
-
-For repeated work in an explicitly named Session with approval enabled:
+Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options without a Host or credentials. Metadata goes to stdout as one JSON value. Recovery handles and diagnostics go to stderr. One-shot commands never start a Host or sign in, so start the Host explicitly:
 
 ```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-"$RUI" configure --store "$STORE" --session my/project --workspace "$PWD" \
-  --provider codex --model gpt-6-luna --permission-mode ask
-"$RUI" message --store "$STORE" --session my/project "Investigate the failing test"
-"$RUI" follow SAVED_MESSAGE_HANDLE
-"$RUI" result SAVED_MESSAGE_HANDLE
+"$RUI" session configure --store "$STORE" --permission-mode ask
 ```
 
-Replace `SAVED_MESSAGE_HANDLE` with the handle printed by `message`. Unlike `exec`, `message` returns after acceptance, not completion. `follow` and `result` stay attached to that message even after the Session does newer work. Add `--json` for machine-readable output where supported.
+Without `--session`, `session configure` creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference. Configure a named Session by adding `--session my/project`. A new named Session also needs `--workspace "$PWD" --provider codex --model gpt-6-luna`; later changes to it keep any settings you omit. Then send it a message:
+
+```sh
+"$RUI" session send --store "$STORE" --session my/project "Investigate the failing test"
+"$RUI" request inspect SAVED_HANDLE
+"$RUI" request read-result SAVED_HANDLE
+```
+
+Replace `SAVED_HANDLE` with the handle that `session send` prints on stderr. `session send` returns once the message is admitted, not when the work finishes. `request inspect` reports that message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. To wait, run `request inspect` again later.
 
 If approval is needed, inspect the reported Action ID before allowing it:
 
 ```sh
-"$RUI" inspect-action --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action inspect --store "$STORE" --session my/project --action ACTION_ID
 ```
 
 After reviewing the command, approve it once:
 
 ```sh
-"$RUI" allow-action --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action allow --store "$STORE" --session my/project --action ACTION_ID
 ```
 
-Use `deny-action` instead to reject it, then `follow` the original message again. If a command loses its reply, use `requests` and `recover HANDLE` to retry the saved request. Do not submit a new message to guess whether the first arrived.
+Use `action deny` to reject it instead. If a command loses its reply or exits nonzero, its work may still have been accepted. Use `request inspect HANDLE` to check, and `request recover HANDLE` to resend the same saved request. `request list` lists saved handles. Do not submit a new message to guess whether the first arrived.
 
 ## Manage the background process
 
@@ -180,7 +175,7 @@ To shut down the Host and interrupt **all work in the selected Store**:
 
 If the reply is lost, use the printed retry command. It targets the same Host instance so it cannot stop a replacement. An acknowledgment means shutdown was requested, not that cleanup has finished.
 
-For foreground operation and explicit capacity, use `serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
+For foreground operation and explicit capacity, use `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
 
 ### Start fresh after a Store format change
 

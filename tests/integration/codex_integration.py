@@ -110,7 +110,7 @@ def run():
         instruction_file.write_text("Use the approved tool result.")
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
-            "--key", "session", "configure", "--session", "managed/session", "--workspace", fixture.ROOT,
+            "--key", "configure", "--session", "managed/session", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "model-a", "--tools", "bash",
             "--permission-mode", "ask", "--instructions", instruction_file,
         )

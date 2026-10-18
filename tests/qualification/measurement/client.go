@@ -170,11 +170,11 @@ func (c Client) Inspect(session string) (map[string]any, error) {
 }
 
 func (c Client) ReadAction(session, action, field string) ([]byte, error) {
-	command := "read-action-" + field
+	command := "read-" + field
 	if field != "call-id" && field != "arguments" {
 		return nil, fmt.Errorf("unsupported Action field %q", field)
 	}
-	return Run(c.Deadline, c.Binary, command, "--store", c.Store, "--session", session, "--action", action)
+	return Run(c.Deadline, c.Binary, "action", command, "--store", c.Store, "--session", session, "--action", action)
 }
 
 func (c Client) WaitResult(key string) (map[string]any, error) {
