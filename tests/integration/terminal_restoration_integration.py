@@ -241,6 +241,8 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         struct iovec iov = { (void *)bytes, count };
         return probe_writev(fd, &iov, 1);
     }
+    if (screen == 1 && count == 8 && !memcmp(bytes, "\033[?1007h", 8)) record("scroll-enabled\n");
+    if (screen == 1 && count == 8 && !memcmp(bytes, "\033[?1007l", 8)) record("scroll-reset\n");
 #ifdef __APPLE__
     ssize_t (*real_write)(int, const void *, size_t) = write;
 #else
@@ -986,6 +988,11 @@ def persistent_cases(state, library, home, store, host):
                 "--", "terminal/restoration"], env=environment,
                 stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
             human.read_terminal(output_master, "› ")
+            if fault in ("disable", "both"):
+                # The terminal reports alternate scroll reset, so Rui owns
+                # enabling it and must reset it even when paste disable fails.
+                os.write(master, b"\x1b[?1007;2$y")
+                fixture.wait_for(lambda: log.exists() and "scroll-enabled\n" in log.read_text(), "owned alternate scroll")
             if case.startswith("sync-"):
                 os.write(master, b"original synchronously captured\n")
                 fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "real capture directory sync")
@@ -1065,6 +1072,8 @@ def persistent_cases(state, library, home, store, host):
             errors = caller.stderr.read().decode()
             if expected:
                 assert ("TerminalRestoreFailed" if fault in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+            if fault in ("disable", "both"):
+                assert log.read_text().count("scroll-reset\n") == 1, ("failed paste disable skipped the owned scroll reset", log.read_text())
             if case.startswith("incomplete-"):
                 assert set(records.glob("*.json")) == before, "incomplete input created a capture"
             if case == "backpressure-command":

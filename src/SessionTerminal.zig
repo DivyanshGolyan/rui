@@ -66,8 +66,9 @@ pub fn finish(self: *Self) !void {
     // Attempt controls independently; neither may hold restoration on output credit.
     const synchronized = std.c.write(self.output, "\x1b[?2026l", 8) == 8;
     const reset = std.c.write(self.output, "\x1b[0m", 4) == 4;
-    const disabled = std.c.write(self.output, "\x1b[?2004l", 8) == 8 and
-        (!self.alternate_scroll or std.c.write(self.output, "\x1b[?1007l", 8) == 8);
+    // Each owned mode is reset even when an earlier reset fails.
+    const paste_disabled = std.c.write(self.output, "\x1b[?2004l", 8) == 8;
+    const scroll_reset = !self.alternate_scroll or std.c.write(self.output, "\x1b[?1007l", 8) == 8;
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
         if (std.c.write(self.output, sequence.ptr, sequence.len) != @as(isize, @intCast(sequence.len))) screen_ok = false;
@@ -82,7 +83,7 @@ pub fn finish(self: *Self) !void {
     }
     // The duplicate shares stdout's description: flags already apply to fd 1.
     if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
-    self.result = if (restored) |_| if (flags_ok and reset and disabled and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and reset and paste_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
 
