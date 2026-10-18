@@ -70,7 +70,7 @@ cd /path/to/your/project
 
 This creates a fresh conversation in the current directory and starts or connects to Rui's background process.
 
-By default, Bash runs without asking (`bypass`); `/status` shows the current mode. To review Bash commands before they run, enter this before your first request:
+By default, Bash runs without asking (`bypass`); `/status` shows the current mode. To review Bash commands before they run, enter this before your first request in each new conversation:
 
 ```text
 /configure --permission-mode ask
