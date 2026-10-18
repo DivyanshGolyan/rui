@@ -287,14 +287,18 @@ def compaction_cases(state, processes, endpoints, releases):
 
 def failure_correlation_cases(state, processes, endpoints, selected="all"):
     """Bounded Debug coverage for inline failure provenance through SQLite."""
-    request_id = 'correlated-"request"\\path'
-    for label, status, schema, code in (
-        ("rejected", 200, {"type": "object"}, "unsupported_output_schema"),
-        ("correlated", 401, None, "provider_http_401"),
-        ("exhausted", 503, None, "retry_exhausted"),
+    for label, status, schema, code, request_id in (
+        (*variant, request_id)
+        for variant in (
+            ("rejected", 200, {"type": "object"}, "unsupported_output_schema"),
+            ("correlated", 401, None, "provider_http_401"),
+            ("exhausted", 503, None, "retry_exhausted"),
+        )
+        for request_id in ('correlated-"request"\\path', "")
     ):
         if selected not in ("all", label):
             continue
+        identity = label + ("-present" if request_id else "-absent")
         body = sse_answer("response", "reasoning", "message", "private answer")[0] if schema else b'{"error":"synthetic"}'
         request_ids = ["attempt-1", "", "attempt-3", request_id] if status == 503 else [request_id]
         endpoint = SuccessEndpoint([
@@ -304,19 +308,19 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         endpoints[endpoint] = thread
         thread.start()
-        store = state / label
+        store = state / identity
         flags = ["--test-phase-trace", "--test-retry-waits-ms", "1,1,1"]
         if schema:
             flags += ["--fault", "response-metadata-unlink"]
         host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", *flags, observations="control")
         processes.append(host)
         diagnostics = HostDiagnostics(host)
-        configure(state, store, label + "-config", "direct/correlation", "model-a", schema)
-        message(state, store, label + "-message", "direct/correlation", "input")
+        configure(state, store, identity + "-config", "direct/correlation", "model-a", schema)
+        message(state, store, identity + "-message", "direct/correlation", "input")
         deadline = time.monotonic() + 15
 
         def settled():
-            value = observe(store, label + "-message", deadline=deadline)
+            value = observe(store, identity + "-message", deadline=deadline)
             return value if value.get("result") else None
 
         result = wait_for(settled, label + " failure settlement", deadline=deadline)
@@ -337,7 +341,8 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
             saved = database.execute(
                 "SELECT CAST(request_id AS BLOB),resolution_code,attempt_ordinal FROM model_operation"
             ).fetchone()
-        assert saved == (request_id.encode(), code, len(request_ids)), ("failure correlation must preserve exact provider bytes", label, saved)
+        expected_id = request_id.encode() if request_id else None
+        assert saved == (expected_id, code, len(request_ids)), ("failure correlation must preserve exact provider bytes", identity, saved)
         reopened = start_host(store, None)
         processes.append(reopened)
         report = command(
@@ -345,14 +350,14 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
             "--session", "direct/correlation", "--profile", "full",
         )
         operation = report["full"]["model_operations"][0]
-        assert operation["request_id"] == request_id, operation
+        assert operation["request_id"] == (request_id or None), operation
         assert operation["resolution"]["code"] == code, operation
-        assert observe(store, label + "-message")["result"] == result["result"]
+        assert observe(store, identity + "-message")["result"] == result["result"]
         stop_host(reopened)
         processes.remove(reopened)
         assert len(endpoint.requests) == len(request_ids), endpoint.requests
         stop_endpoint(endpoint, endpoints)
-    print(f"Failure correlation ({selected}): exact provider bytes preserved through reopen")
+    print(f"Failure correlation ({selected}): exact provider bytes and absence preserved through reopen")
 
 
 def main(mode="all", correlation_case="all"):
