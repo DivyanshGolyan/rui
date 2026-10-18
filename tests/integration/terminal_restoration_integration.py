@@ -356,11 +356,17 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         }
     }
     if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
-    static int blocked = 0;
+    static int blocked = 0, progressed = 0;
     if (screen == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
         (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"))) {
         blocked = 1;
         record("output-blocked\n");
+    }
+    /* Whether the kernel later accepted screen output without a reader
+       distinguishes a drained queue from work done while still blocked. */
+    if (screen == 1 && blocked && !progressed && result > 0 && !strcmp(fault, "backpressure")) {
+        progressed = 1;
+        record("output-progressed\n");
     }
     errno = saved_errno;
     return result;
@@ -971,7 +977,9 @@ def persistent_cases(state, library, home, store, host):
         master, slave = open_pty()
         output_master, output_slave = open_pty()
         original = termios.tcgetattr(slave)
-        log, release = state / f"persistent-{case}.log", state / f"persistent-{case}.release"
+        # probe.log under a case directory is retained on failure.
+        (state / f"persistent-{case}").mkdir()
+        log, release = state / f"persistent-{case}" / "probe.log", state / f"persistent-{case}.release"
         caller = proxy = None
         reply_release = threading.Event()
         before = set(records.glob("*.json"))
@@ -1059,8 +1067,12 @@ def persistent_cases(state, library, home, store, host):
                 if case == "backpressure-command":
                     # Blocked output defers the command; it is no
                     # cancellation trigger. Ctrl-C then retires without it.
+                    with log.open("a") as marks:
+                        marks.write("test-command-sent\n")
                     os.write(master, b"/configure --permission-mode ask\n")
                     time.sleep(0.5)
+                    with log.open("a") as marks:
+                        marks.write(f"test-interrupt-sent records={len(set(records.glob('*.json')) - before)}\n")
                     assert caller.poll() is None, "blocked output turned a command into cancellation"
                 os.write(master, b"\x03")
             elif case.startswith("incomplete-"):
