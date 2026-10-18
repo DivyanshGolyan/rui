@@ -73,7 +73,7 @@ OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 +
                       "bash_pipes": 1 + 2}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
-# Checked against native FieldId and legacy IDs by test_harness_contracts.py.
+# Checked against native FieldId and the current schema by test_harness_contracts.py.
 OBSERVATION_FIELDS = {
     0: "rui_test_phase",
     1: "at_ns",

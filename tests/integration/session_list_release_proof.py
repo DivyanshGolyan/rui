@@ -93,10 +93,10 @@ def remaining(invocation):
     return value
 
 
-def listing(store):
+def listing(client, store):
     began_ns = time.monotonic_ns()
     deadline = time.monotonic() + 10
-    result = subprocess.run([fixture.CLIENT, store, "-", "0", "0"], capture_output=True, timeout=10)
+    result = subprocess.run([client, store, "-", "0", "0"], capture_output=True, timeout=10)
     invocation = (began_ns, time.monotonic_ns(), deadline)
     assert result.returncode == 0, (result.returncode, result.stderr)
     assert json.loads(result.stdout) == {"version": "1", "type": "session_list", "sessions": [], "next": None}
@@ -130,7 +130,7 @@ def retained_report(process, diagnostics, store, request, mode, invocation):
     return receipt, census
 
 
-def case(binary, probe, mode):
+def case(binary, client, probe, mode):
     with tempfile.TemporaryDirectory(prefix="rui-list-release-") as directory:
         store = pathlib.Path(directory) / "store"
         store.mkdir(mode=0o700)
@@ -152,10 +152,10 @@ def case(binary, probe, mode):
         worker = None
         outcome = {}
         try:
-            invocation = listing(store)
+            invocation = listing(client, store)
             if mode == "leak":
                 baseline = fixture.released_resources(process.pid, diagnostics, invocation)
-                invocation = listing(store)
+                invocation = listing(client, store)
                 current = fixture.released_resources(process.pid, diagnostics, invocation)
                 receipt, retained = retained_report(process, diagnostics, store, 1, "leaked", invocation)
                 assert current["identities"][receipt["fd"]] == retained["identities"][receipt["fd"]]
@@ -195,7 +195,7 @@ def case(binary, probe, mode):
                     diagnostics.condition.wait = original_wait
                 else:
                     fixture.released_resources(process.pid, diagnostics, invocation)
-                invocation = listing(store)
+                invocation = listing(client, store)
                 current = fixture.released_resources(process.pid, diagnostics, invocation)
                 if mode == "premature":
                     assert receipt["fd"] not in current["identities"], current
@@ -224,7 +224,7 @@ def case(binary, probe, mode):
             fixture.stop_process(process)
 
 
-def charge_negative(binary):
+def charge_negative(binary, client):
     # Use a disposable binary whose release sample alone is actual charge + 1.
     # This is separate from schema rejection and requires real native Client I/O.
     with tempfile.TemporaryDirectory(prefix="rui-list-charge-") as directory:
@@ -235,7 +235,7 @@ def charge_negative(binary):
             required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = host_process.HostDiagnostics(process)
         try:
-            invocation = listing(store)
+            invocation = listing(client, store)
             failure = expect_failure(lambda: fixture.released_resources(process.pid, diagnostics, invocation), "retained scratch charge")
             releases = diagnostics.matching("connection_resources_released", subject="0")
             assert len(releases) == 1 and releases[0]["scratch_used_bytes"] == "1", releases
@@ -253,12 +253,13 @@ def main():
         print("SKIP: real report-close and /proc proof requires native Linux")
         return
     binary = pathlib.Path(sys.argv[1]).resolve()
+    client = pathlib.Path(sys.argv[2]).resolve()
     print(json.dumps({"rui_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                      "client_sha256": hashlib.sha256(fixture.CLIENT.read_bytes()).hexdigest()}))
+                      "client_sha256": hashlib.sha256(client.read_bytes()).hexdigest()}))
     oracle_controls()
     if len(sys.argv) == 4:
         assert sys.argv[3] == "--charge-negative"
-        charge_negative(binary)
+        charge_negative(binary, client)
         return
     assert len(sys.argv) == 3, "usage: session_list_release_proof.py RUI CLIENT [--charge-negative]"
     with tempfile.TemporaryDirectory(prefix="rui-list-probe-") as directory:
@@ -269,7 +270,7 @@ def main():
         print(json.dumps({"probe_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                           "probe_sha256": hashlib.sha256(probe.read_bytes()).hexdigest()}))
         for mode in ("premature", "held", "leak"):
-            case(binary, probe, mode)
+            case(binary, client, probe, mode)
 
 
 if __name__ == "__main__":
