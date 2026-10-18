@@ -49,6 +49,11 @@ fn run(init: std.process.Init) !void {
         return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
+    if (cli_args.retired(args[1])) |replacement| {
+        const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
+        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a conversation with this text, use rui -- {s}.\n", .{ args[1], replacement, replacement_resource, args[1] });
+        return error.InvalidArguments;
+    }
     const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return newSession(init, args[1..]);
     var help_buffer: [4096]u8 = undefined;
     var help_writer = std.Io.File.stdout().writerStreaming(init.io, &help_buffer);
@@ -76,6 +81,13 @@ fn run(init: std.process.Init) !void {
         try definition.help(&help_writer.interface);
         return help_writer.flush();
     }
+    if (definition.missing(args[3..])) |group| {
+        var missing_buffer: [256]u8 = undefined;
+        var missing_writer: std.Io.Writer = .fixed(&missing_buffer);
+        try definition.writeGroup(&missing_writer, group);
+        TerminalText.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, missing_writer.buffered(), @tagName(resource), definition.name });
+        return error.InvalidArguments;
+    }
     // Decode only selector arguments, never an option-looking value or literal
     // message. Handlers consume the same bounded identities regardless of their
     // shell-safe spelling; the arena outlives this invocation.
@@ -98,7 +110,12 @@ fn run(init: std.process.Init) !void {
             break;
         }
     }
+    dispatching = true;
     dispatch(init, command, args) catch |err| {
+        if (err == error.InvalidArguments) {
+            TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
+            return err;
+        }
         // Missing sockets and named files share FileNotFound; say both rather
         // than guess. One-shot commands never start a Host implicitly.
         if (err == error.FileNotFound or err == error.ConnectionRefused)
@@ -1352,7 +1369,11 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
 
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
     const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
-    TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request. Recover only its original intent if unconfirmed.\n", .{ status, @errorName(err), key });
+    if (admitted == null) {
+        TerminalText.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @errorName(err), key, key });
+        return;
+    }
+    TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
 }
 
 fn message(init: std.process.Init, args: []const []const u8) !void {
@@ -2622,10 +2643,13 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, args: []con
     }
     var line: [96]u8 = undefined;
     if (!interactive) {
+        // People review this before `action allow`; escaping every non-ASCII
+        // code point keeps provider-chosen control and bidi characters from
+        // disguising the proposal, while JSON still decodes the exact bytes.
         try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
-        try writeJsonFileAt(io, file, 0, call_bytes, false);
+        try writeJsonFileAt(io, file, 0, call_bytes, true);
         try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
-        try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, false);
+        try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
         return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
     }
     // Quote provider-controlled fields so control and bidi bytes cannot alter the
@@ -2676,13 +2700,7 @@ fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
     return args[index.*];
 }
 
-const compaction_help =
-    \\--compaction-trigger TOKENS|default sets a positive estimated context pressure threshold.
-    \\--output-reservation TOKENS|default sets nonnegative extra compaction headroom, not a guaranteed output budget.
-    \\Omission preserves the Session setting; default resets it to model policy.
-    \\Changes apply to new model requests. Requests already accepted keep their original settings, even when retried.
-    \\Unknown models have no automatic threshold. Inspect settings with /status or rui session inspect.
-;
+const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
 const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ compaction_help ++ "\n";
 
@@ -2710,8 +2728,12 @@ const usage_text =
     \\
 ;
 
+/// Set while a resource operation runs; its failure names that operation's
+/// help instead of printing the root summary.
+var dispatching = false;
+
 fn usage() error{InvalidArguments} {
-    std.debug.print("{s}", .{usage_text});
+    if (!dispatching) std.debug.print("{s}", .{usage_text});
     return error.InvalidArguments;
 }
 

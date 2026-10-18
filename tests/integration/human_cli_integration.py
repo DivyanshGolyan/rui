@@ -3479,8 +3479,8 @@ def main(selected="all"):
         render_environment = {"TMPDIR": str(scratch)}
         presentation = run(home, "action", "inspect", "--store", store, "--session", session, "--action", action)
         assert json.loads(presentation) == {"action": action, "call_id": control_call, "arguments": control_arguments}, presentation
-        assert "\\u001b" in presentation and "\\r  " in presentation, presentation
-        assert "\x1b" not in presentation and "\r" not in presentation, presentation
+        assert "\\u001b" in presentation and "\\u202e" in presentation and "\\r  " in presentation, presentation
+        assert "\x1b" not in presentation and "\u202e" not in presentation and "\r" not in presentation, presentation
         fresh_home = state / "fresh-home"
         fresh_home.mkdir()
         assert not (fresh_home / ".config").exists()

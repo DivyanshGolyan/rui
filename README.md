@@ -130,10 +130,11 @@ Scripts and agents use one-shot commands grouped by resource: `session`, `reques
 ```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-"$RUI" session configure --store "$STORE" --permission-mode ask
+"$RUI" session configure --store "$STORE" --session my/project \
+  --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask
 ```
 
-Without `--session`, `session configure` creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference. Configure a named Session by adding `--session my/project`. A new named Session also needs `--workspace "$PWD" --provider codex --model gpt-6-luna`; later changes to it keep any settings you omit. Then send it a message:
+A new named Session needs its Workspace, provider and model; later changes to it keep any settings you omit. Without `--session`, `session configure` instead creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference to use below. Then send the Session a message:
 
 ```sh
 "$RUI" session send --store "$STORE" --session my/project "Investigate the failing test"
