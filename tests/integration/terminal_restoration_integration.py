@@ -2249,7 +2249,9 @@ def visible_stream_handoff_cases(state, library):
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
                 arm.unlink()
-                human.read_terminal(master, "VISIBLE-END", composer=True)
+                # A live page shows whole, so its marker frame may already end
+                # the content; that frame is not drawn again.
+                human.await_screen(master, "VISIBLE-END", composer=True)
                 os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
                 human.read_terminal(master, "Configured.", composer=True)
                 human.await_screen(master, "› UNREAD suffix", composer=True)
