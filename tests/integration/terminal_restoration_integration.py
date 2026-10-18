@@ -1011,6 +1011,48 @@ def persistent_cases(state, library, home, store, host):
             )
 
 
+def preserve_renderer_comparison(state, before, after, main_start, events, omitted_events):
+    """Keep exact synthetic-fixture operands outside disposal's temporary root.
+
+    Hex is lossless encoding, not redaction. This case has only fixture-owned
+    configuration text, no model request/response or user-provided content.
+    Never generalize this capture to other terminal journeys. Existing whole-
+    file/job caps refuse oversized evidence rather than truncating operands.
+    """
+    try:
+        root = state / "renderer-comparison"
+        root.mkdir(mode=0o700)
+        difference = next((index for index, (left, right) in enumerate(zip(before, after))
+                           if left != right), min(len(before), len(after)))
+        path = root / "pty-failure.json"
+        if not preserve_failure_metadata(path, lambda: {
+            "case": "renderer-backpressure", "phase": "before-fresh-enter",
+            "retained_at_ns": time.monotonic_ns(), "main_start": main_start,
+            "equal": before == after, "before_hex": before.hex(), "after_hex": after.hex(),
+            "first_difference": difference,
+            "before_delta_hex": before[difference:].hex(),
+            "after_delta_hex": after[difference:].hex(),
+            "events": events, "omitted_events": omitted_events,
+        }):
+            return
+        ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
+        sys.path.insert(0, ci)
+        try:
+            from run_selected import retain_failure_logs
+            destination = pathlib.Path(os.environ.get("RUI_FAILURE_ARTIFACTS", ".amp/failure-artifacts"))
+            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+            retain_failure_logs([root], destination)
+            print(f"renderer comparison destination: {destination}", file=sys.stderr, flush=True)
+        finally:
+            sys.path.remove(ci)
+    except Exception as error:
+        # Optional evidence cannot replace the assertion or prevent disposal.
+        try:
+            print(f"Renderer comparison unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
 def renderer_backpressure_case(state, library, home, store):
     """A real blocked frame must hand off a command, not become cancellation."""
     from terminal_screen import ScreenCapture
@@ -1034,6 +1076,19 @@ def renderer_backpressure_case(state, library, home, store):
     output, errors = bytearray(), bytearray()
     echo_bytes = 0
     stderr_open = True
+    events, omitted_events = [], 0
+    comparison = None
+
+    def event(phase, **facts):
+        nonlocal omitted_events
+        if len(events) < 256:
+            events.append({"at_ns": time.monotonic_ns(), "phase": phase, **facts})
+        else:
+            omitted_events += 1
+
+    def append_output(chunk, phase):
+        event(phase, channel="output", start=len(output), end=len(output) + len(chunk))
+        output.extend(chunk)
 
     def drain_until(predicate, description, timeout=15):
         nonlocal echo_bytes, stderr_open
@@ -1054,9 +1109,13 @@ def renderer_backpressure_case(state, library, home, store):
                 if fd == master:
                     # Fresh Enter echoes on the separate input PTY after
                     # restoration. Darwin's next TCSAFLUSH waits for its peer.
+                    event(description, channel="input-echo", count=len(chunk))
                     echo_bytes += len(chunk)
+                elif fd == output_master:
+                    append_output(chunk, description)
                 else:
-                    (output if fd == output_master else errors).extend(chunk)
+                    event(description, channel="stderr", count=len(chunk))
+                    errors.extend(chunk)
             assert len(output) + len(errors) + echo_bytes < 1024 * 1024, "unbounded renderer witness"
 
     try:
@@ -1078,21 +1137,25 @@ def renderer_backpressure_case(state, library, home, store):
             return screen.draft("", 2)
         drain_until(composer_ready, "opening alternate-screen composer")
         arm.touch()
+        event("arm-backpressure")
         assert os.write(master, b"x") == 1
         fixture.wait_for(lambda: log.exists() and "output-blocked\n" in log.read_text(),
             "renderer actual kernel EAGAIN")
         command = b"\x15/configure --permission-mode ask\n"
+        event("send-configure")
         assert os.write(master, command) == len(command)
         fixture.wait_for(lambda: "handoff-cleanup-entered\n" in log.read_text(),
             "command unwound blocked renderer before restoring output credit")
         termios.tcflow(output_slave, termios.TCOON)
         while select.select([output_master], [], [], 0)[0]:
-            output.extend(os.read(output_master, 65536))
+            append_output(os.read(output_master, 65536), "restore-output-credit")
         release.touch()
+        event("release-handoff")
         drain_until(lambda: b"Press Enter to return" in output, "main-screen command return")
         main_start = output.rfind(b"\x1b[?1049l")
         assert main_start >= 0, bytes(output[-4096:])
         main_output = bytes(output[main_start:])
+        event("first-snapshot", output_end=len(output), main_start=main_start)
         assert b"Rui: Configured." in main_output, main_output
         assert b"\x1b[?1049h" not in main_output, "returned before fresh Enter"
         actual = termios.tcgetattr(slave)
@@ -1113,11 +1176,16 @@ def renderer_backpressure_case(state, library, home, store):
             "--session", session)["session"]["permission_mode"] == "ask"
         # Canonical reads above provide work while no consent is sent. Neither
         # screen switching nor command replay may occur in that interval.
+        event("canonical-reads-complete")
         while select.select([output_master], [], [], 0)[0]:
-            output.extend(os.read(output_master, 65536))
-        assert bytes(output[main_start:]) == main_output, "main-screen output changed without fresh Enter"
+            append_output(os.read(output_master, 65536), "no-consent-drain")
+        compared_output = bytes(output[main_start:])
+        event("second-snapshot", output_end=len(output))
+        comparison = (main_output, compared_output, main_start, tuple(events), omitted_events)
+        assert compared_output == main_output, "main-screen output changed without fresh Enter"
         assert caller.poll() is None
         refresh_start = len(output)
+        event("fresh-enter")
         assert os.write(master, b"\n") == 1
         refreshed = ScreenCapture()
         refresh_consumed = refresh_start
@@ -1151,14 +1219,22 @@ def renderer_backpressure_case(state, library, home, store):
         assert log.read_text().count("handoff-cleanup-entered\n") == 1
         print("renderer backpressure: actual EAGAIN; one accepted Configure/capture; main screen held until fresh Enter; refreshed composer; exact termios/fd restoration", flush=True)
     finally:
-        dispose_all(
-            lambda: termios.tcflow(output_slave, termios.TCOON),
-            release.touch,
-            lambda: stop_process(caller, timeout=5) if caller is not None else None,
-            lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
-            lambda: termios.tcflush(slave, termios.TCIFLUSH),
-            lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-            *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)))
+        try:
+            dispose_all(
+                lambda: termios.tcflow(output_slave, termios.TCOON),
+                release.touch,
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)))
+        finally:
+            # Operands were frozen before assertion/disposal, including when
+            # disposal itself fails. No live PTY or process sampling is needed.
+            # Ordinary successful gates do not collect terminal content.
+            if comparison is not None and (sys.exception() is not None or
+                    os.environ.get("RUI_RENDERER_RETAIN_COMPARISON") == "1"):
+                preserve_renderer_comparison(state, *comparison)
 
 
 def consent_boundary_cases(state, library):
