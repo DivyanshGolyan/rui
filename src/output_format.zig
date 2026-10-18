@@ -24,6 +24,7 @@ pub const OutputMetadataRecord = struct {
     decoded_length: u64 = 0,
     id_digest: [32]u8 = @splat(0),
     content_digest: [32]u8 = @splat(0),
+    usage_tokens: ?u64 = null,
 };
 
 pub const output_metadata_record_bytes = 104;
@@ -85,7 +86,10 @@ pub const OutputMetadataWriter = struct {
         var bytes: [output_metadata_record_bytes]u8 = @splat(0);
         bytes[0] = @backingInt(record.tag);
         bytes[1] = @backingInt(record.kind);
-        std.mem.writeInt(u64, bytes[8..16], record.ordinal, .little);
+        std.debug.assert(record.usage_tokens == null or record.tag == .usage);
+        bytes[2] = @intFromBool(record.usage_tokens != null);
+        // Usage has no item ordinal; this slot holds its certified pressure.
+        std.mem.writeInt(u64, bytes[8..16], record.usage_tokens orelse record.ordinal, .little);
         std.mem.writeInt(u64, bytes[16..24], record.start, .little);
         std.mem.writeInt(u64, bytes[24..32], record.length, .little);
         std.mem.writeInt(u64, bytes[32..40], record.decoded_length, .little);
@@ -130,6 +134,7 @@ pub const OutputMetadataReader = struct {
         const count = try self.file.readPositionalAll(self.io, &bytes, self.offset);
         if (count != bytes.len) return error.CorruptOutputMetadata;
         self.offset += bytes.len;
+        if (bytes[2] > 1 or (bytes[2] == 1 and bytes[0] != @backingInt(OutputRecordTag.usage))) return error.CorruptOutputMetadata;
         return .{
             .tag = switch (bytes[0]) {
                 1 => .item,
@@ -148,12 +153,13 @@ pub const OutputMetadataReader = struct {
                 4 => .compaction,
                 else => return error.CorruptOutputMetadata,
             },
-            .ordinal = std.mem.readInt(u64, bytes[8..16], .little),
+            .ordinal = if (bytes[0] == @backingInt(OutputRecordTag.usage)) 0 else std.mem.readInt(u64, bytes[8..16], .little),
             .start = std.mem.readInt(u64, bytes[16..24], .little),
             .length = std.mem.readInt(u64, bytes[24..32], .little),
             .decoded_length = std.mem.readInt(u64, bytes[32..40], .little),
             .id_digest = bytes[40..72].*,
             .content_digest = bytes[72..104].*,
+            .usage_tokens = if (bytes[2] == 1) std.mem.readInt(u64, bytes[8..16], .little) else null,
         };
     }
 
