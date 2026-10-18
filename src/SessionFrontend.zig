@@ -35,9 +35,10 @@ inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
 command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
 command_text_length: usize = 0,
-// A Host command's worker started and its output has not been presented.
-// It may change configuration, so Messages and consent wait for it; exit
-// prints its output, which can carry recovery warnings.
+// An inspection or Host command started and its result has not been
+// presented. A command may change configuration, so Messages and consent wait
+// for every inspection; exit prints an unshown command's output, which can
+// carry recovery warnings.
 command_running: bool = false,
 inspection_submission: ?Submission.View = null,
 inspection_action: ?u64 = null,
@@ -162,7 +163,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const cause: ?anyerror = if (result) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
-    if (self.command_running) self.commandOutputGuide();
+    if (self.command_running and self.inspection_kind == .command) self.commandOutputGuide();
     if (plan.failure) |err| {
         switch (err) {
             error.TerminalTooSmall => @import("TerminalText.zig").diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
@@ -186,6 +187,8 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
 }
 
 fn quiesce(self: *Self) Settled {
+    // A running command observes exit as an interruption, exactly as a signal.
+    if (self.command_running) interrupted.requestStop();
     const restored = self.terminal.finish();
     self.reader.cancel();
     self.submission.cancel();
@@ -277,6 +280,19 @@ fn inspection(text: []const u8) ?Inspection {
         if (std.mem.startsWith(u8, text, prefix)) return .command;
     }
     return null;
+}
+
+/// A slash command typed in the choice field, which never decides.
+fn choiceCommand(self: *Self, text: []const u8) void {
+    if (std.mem.eql(u8, text, "/exit")) {
+        self.detached = true;
+    } else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
+        self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+    } else if (self.input.command_length == null) {
+        @memcpy(self.input.command_buffer[0..text.len], text);
+        self.input.command_length = text.len;
+        self.admitCommand();
+    } else self.notice = "! Preparing inspection; try again when it finishes.";
 }
 
 /// Answers local commands at once. Inspections, including Host commands,
@@ -441,7 +457,7 @@ fn driveActive(self: *Self) !void {
             self.history_render_started = false;
             self.reader_output_started = false;
             try self.reader.start(self.init.io, self, if (kind == .command) runCommand else inspectPage);
-            self.command_running = kind == .command;
+            self.command_running = true;
             self.input.command_length = null;
         }
         if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null or self.olderWanted()) and self.prepared_action == null) {
@@ -660,7 +676,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 self.detached = true;
             }
             try self.navigation(event, &self.choice);
-            if (self.choice.pending() == .none) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            // Only a slash command survives: it can never become a decision.
+            const text = self.choice.buffer[0..self.choice.length];
+            const command = text.len != 0 and text[0] == '/';
+            if (event == .submit and command) self.choiceCommand(text);
+            if (self.choice.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.dirty = true;
             return .byte;
         }
@@ -679,14 +699,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 if (decision) |selected| {
                     self.terminal.screen.releaseAction();
                     try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
-                } else if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
-                    self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
                 } else if (std.mem.startsWith(u8, text, "/")) {
-                    if (self.input.command_length == null) {
-                        @memcpy(self.input.command_buffer[0..text.len], text);
-                        self.input.command_length = text.len;
-                        self.admitCommand();
-                    } else self.notice = "! Preparing inspection; try again when it finishes.";
+                    self.choiceCommand(text);
                 } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
                 self.consent.invalidate();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
@@ -1005,7 +1019,7 @@ fn runCommand(raw: *anyopaque, task: *Task) !void {
     // Redirected descriptors are output custody: any failure now is fatal.
     self.history_render_started = true;
     const page = self.inspection_file.handle;
-    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, .{ .io = task.io, .cancellation = &task.cancellation }, self.store, self.session, self.command_text[0..self.command_text_length]);
+    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, .{ .io = task.io, .cancellation = &interrupted }, self.store, self.session, self.command_text[0..self.command_text_length]);
     if (std.c.dup2(saved[0], 1) < 0 or std.c.dup2(saved[1], 2) < 0) return error.TerminalCleanupFailed;
     return result;
 }
