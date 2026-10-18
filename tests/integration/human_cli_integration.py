@@ -2307,7 +2307,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                             os.write(master, b"\x00\n")
                             read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             before_notice = current_screen(master)
-                            assert f"✓ {prior_label}\n" in before_notice, before_notice
+                            # A page read under the stale Current shows only with a
+                            # settled one: neither its success nor an approval yet.
+                            assert f"✓ {prior_label}\n" not in before_notice and "? Run Bash" not in before_notice, before_notice
                             prefix = b""
                         refreshed_release.set()
                         await_screen(master, f"✓ {label}", composer=True)
