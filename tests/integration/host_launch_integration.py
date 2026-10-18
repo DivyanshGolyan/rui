@@ -177,7 +177,8 @@ def status(store, env):
     observation = json.dumps(dict(store=str(store), returncode=result.returncode,
                                   stdout=result.stdout, stderr=result.stderr)) + "\n"
     assert len(observation.encode()) <= 1024 * 1024, "status observation exceeds artifact bound"
-    (store.parent / "probe.log").write_text(observation)
+    root = next((parent for parent in store.parents if parent.name.startswith("rui-host-launch-")), store.parent)
+    (root / "probe.log").write_text(observation)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -517,15 +518,19 @@ def launch_fixture_root():
     except BaseException:
         failure_name = type(sys.exception()).__name__
         def cleanup():
+            # Bare entry owns its Store below the fixture HOME, not directly
+            # below root. Include every actual lease as well as early starts.
+            stores = {path.parent for path in root.rglob("host.lock")}
+            stores.update(store for store in root.iterdir() if store.is_dir() and not store.is_symlink()
+                          and store.name not in ("home", "credentials"))
             dispose_all(*(lambda store=store: forced_crash_cleanup(store)
-                          for store in root.iterdir() if store.is_dir() and not store.is_symlink()
-                          and store.name not in ("home", "credentials")))
+                          for store in sorted(stores)))
 
         def retain():
             def metadata():
                 diagnostics = {}
                 remaining = 128 * 1024
-                for path in sorted(root.glob("*/diagnostics/host-*.jsonl")):
+                for path in sorted(root.glob("**/diagnostics/host-*.jsonl")):
                     if path.is_symlink():
                         continue
                     with path.open("rb") as stream:

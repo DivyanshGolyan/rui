@@ -23,15 +23,17 @@ def check_failure_retention(root_owner, read_status):
     with tempfile.TemporaryDirectory(prefix="rui-launch-retention-test-") as directory:
         base = Path(directory)
         command = base / "rui"
-        for status_code, cleanup_fails in ((0, False), (7, False), (0, True)):
+        for status_code, cleanup_fails, nested in ((0, False, False), (7, False, False), (0, True, False), (0, False, True)):
             command.write_text(f"#!{sys.executable}\nimport sys\nprint('Host: owned but unavailable')\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
             command.chmod(0o700)
-            destination = base / f"{status_code}-{cleanup_fails}"
+            destination = base / f"{status_code}-{cleanup_fails}-{nested}"
             child = None
             root = None
             failure = AssertionError("ready observation failed")
             output = io.StringIO()
-            def cleanup(_):
+            def cleanup(selected):
+                if selected != store:
+                    return
                 if child.poll() is None:
                     child.kill()
                 child.wait(timeout=5)
@@ -44,8 +46,9 @@ def check_failure_retention(root_owner, read_status):
                     try:
                         with root_owner() as value:
                             root = Path(value)
-                            store = root / "store"
+                            store = root / ("bare-home/.local/share/rui/store" if nested else "store")
                             (store / "diagnostics").mkdir(parents=True)
+                            (store / "host.lock").touch()
                             (store / "rui.sqlite3").write_bytes(b"private saved work")
                             (store / "diagnostics/host-1.jsonl").write_text('{"phase":"ready","detail":"serving"}\n')
                             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -69,7 +72,7 @@ def check_failure_retention(root_owner, read_status):
                 assert captured["stderr"] == "status diagnostic\n" and captured["returncode"] == status_code
                 metadata = json.loads(next(root.glob("observation-failure-*.json")).read_text())
                 assert metadata["failure"] == "AssertionError"
-                assert metadata["host_diagnostics"]["store/diagnostics/host-1.jsonl"] == '{"phase":"ready","detail":"serving"}\n'
+                assert metadata["host_diagnostics"][str(store.relative_to(root) / "diagnostics/host-1.jsonl")] == '{"phase":"ready","detail":"serving"}\n'
                 assert list(destination.rglob("probe.log")), "status missing from bounded CI artifacts"
                 assert list(destination.rglob("observation-failure-*.json")), "diagnostics missing from bounded CI artifacts"
                 assert not list(destination.rglob("rui.sqlite3")), "private Store was uploaded"
