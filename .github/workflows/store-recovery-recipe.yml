@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: b7a0c54cee0e1f952fcf73b18fa7caeaf732a8ae
+          ref: b818700808d704a49ea96914b6bddbdc222b1a70
           persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -32,7 +32,7 @@ jobs:
       - uses: ./.github/actions/setup
       - name: Execute the exact candidate recipe in disposable HOME and Stores
         env:
-          DOCS_CANDIDATE_SHA: b7a0c54cee0e1f952fcf73b18fa7caeaf732a8ae
+          DOCS_CANDIDATE_SHA: b818700808d704a49ea96914b6bddbdc222b1a70
           RECIPE_EVIDENCE: ${{ runner.temp }}/recipe-evidence
           RUI_UPGRADE_FAILURES: ${{ runner.temp }}/recipe-state
         run: |
