@@ -922,7 +922,7 @@ pub fn serve(
             var path_text: TerminalText = .{ .mode = .line };
             try path_text.feed(&output, lease.paths.store.slice());
             try path_text.finish(&output);
-            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.\n", .{
+            try output.print(": found schema {d}, this build supports schema {d} (wire {s}). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work. See https://github.com/DivyanshGolyan/rui#start-fresh-after-a-store-format-change\n", .{
                 found_schema_version, store_module.schema_version, protocol.wire_version,
             });
             const text = output.buffered();
@@ -2762,34 +2762,31 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         return .cleanup;
     };
     defer metadata.deinit();
-    var rejection: model_adapter.Output.Rejection = .{};
     traceOperation(host, "validation_started", owner.binding);
     const operation = host.store.modelOperationKind(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    const validated = model_adapter.Output.validate(host.io, response.file, response.length, &metadata, operation, &rejection, .{
+    const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, operation, .{
+        .openai = openai_model.slice(),
+        .alternate = x_openai_model.slice(),
+    }, .{
         .metadata = host.faults.response_metadata,
-    }) catch |err| {
-        traceOperation(host, "validation_failed", owner.binding);
-        stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        var detail: [512]u8 = undefined;
-        answered.reject(model_adapter.Output.failureCode(err), rejection.format(err, &detail), if (err == error.ContextOverflow) .context_overflow else .ordinary);
-        return .cleanup;
+    })) {
+        .accepted => |value| value,
+        .rejected => |rejection| {
+            traceOperation(host, "validation_failed", owner.binding);
+            stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
+            var detail: [512]u8 = undefined;
+            answered.reject(rejection.code, rejection.format(&detail), switch (rejection.kind) {
+                .invalid_output => .ordinary,
+                .context_overflow => .context_overflow,
+            });
+            return .cleanup;
+        },
     };
+    const validated = accepted.output;
     traceOperation(host, "validation_completed", owner.binding);
-    // Cross-response and transactional envelope checks run after parsing the
-    // complete capture; their coordinate is its end, not the parser's last item.
-    rejection = .{ .stage = .response, .byte_offset = response.length };
-    if (!modelObservationsAgree(
-        validated.evidence.served_model.slice(),
-        openai_model.slice(),
-        x_openai_model.slice(),
-    )) {
-        var detail: [512]u8 = undefined;
-        answered.reject("contradictory_provider_output", rejection.format(error.ContradictoryProviderOutput, &detail), .ordinary);
-        return .cleanup;
-    }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
         traceOperation(host, "sealed_before_settlement", owner.binding);
         if (host.faults.model_result_gate_path) |path| waitAtTestGate(host, path);
@@ -2806,9 +2803,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .answer_length = validated.answer_length,
         .answer_digest = validated.answer_digest,
         .response_id = validated.evidence.response_id,
-        .body_model = validated.evidence.served_model,
-        .openai_model = openai_model,
-        .x_openai_model = x_openai_model,
+        .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
     }, .{
         .output_read = host.faults.response_read,
@@ -2819,6 +2814,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         if (err == error.SupersededByControl) {
             traceOperation(host, "model_settlement_superseded", owner.binding);
         } else if (err == error.InvalidProviderEnvelope) {
+            const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
@@ -2834,18 +2830,6 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     };
     traceOperation(host, "model_settlement_committed", owner.binding);
     return .cleanup;
-}
-
-fn modelObservationsAgree(body: []const u8, openai: []const u8, x_openai: []const u8) bool {
-    const values = [_][]const u8{ body, openai, x_openai };
-    var observed: ?[]const u8 = null;
-    for (values) |value| {
-        if (value.len == 0) continue;
-        if (observed) |prior| {
-            if (!std.mem.eql(u8, prior, value)) return false;
-        } else observed = value;
-    }
-    return true;
 }
 
 fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
