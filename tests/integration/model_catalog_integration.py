@@ -16,7 +16,8 @@ import model_fixture as fixture
 from host_process import TestHTTPServer
 
 CLIENT_VERSION = "0.163.0"
-SECRETS = (codex.ACCESS, codex.ACCOUNT, "synthetic-not-real")
+ROTATED = "synthetic-rotated-not-real"
+SECRETS = (codex.ACCESS, ROTATED, codex.ACCOUNT, "synthetic-not-real")
 
 
 def catalog_body(*rows):
@@ -212,10 +213,27 @@ def run():
         still, _ = configure(store, state, "after-timeout", "catalog/after-timeout", "gpt-5-codex", expect=1)
         assert still["error"]["code"] == "model_unavailable", still
 
-        # Another account in the credential snapshot makes the catalog
-        # unusable for rejection.
+        # A rotated credential for the same account (new generation and
+        # refresh token) keeps the catalog authoritative. Fixture Hosts accept
+        # only the canary access token, so the bearer itself cannot change here.
         with endpoint.lock:
             endpoint.catalog = (200, GOOD, 0)
+        credential_file.write_text(credential_file.read_text()
+                                   .replace("generation=1", "generation=2")
+                                   .replace("refresh_token=synthetic-not-real", f"refresh_token={ROTATED}"))
+        rotated, _ = configure(store, state, "rotated", "catalog/rotated", "gpt-5-codex", expect=1)
+        assert rotated["error"]["code"] == "model_unavailable", rotated
+        rotated_listing = refresh_to(store, endpoint, (200, GOOD, 0))
+        assert rotated_listing["last_failure"] is None and rotated_listing["available"], rotated_listing
+
+        # FedRAMP state is part of the account identity.
+        codex.credentials(credential_file, fedramp=True)
+        fedramp, _ = configure(store, state, "fedramp", "catalog/fedramp", "gpt-5-codex")
+        assert fedramp["model_catalog"]["reason"] == "other_account", fedramp
+        codex.credentials(credential_file)
+
+        # Another account in the credential snapshot makes the catalog
+        # unusable for rejection.
         record = credential_file.read_text().replace("account_id=" + codex.ACCOUNT, "account_id=other-account")
         credential_file.write_text(record)
         other, _ = configure(store, state, "other-account", "catalog/other-account", "gpt-5-codex")

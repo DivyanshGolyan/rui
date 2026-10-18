@@ -127,7 +127,7 @@ RULES = (
 CHECK_COVERS = {
     "test", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
-    "bash-integration", "codex-integration", "control-integration",
+    "bash-integration", "codex-integration", "model-catalog-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
     "descriptor-capacity-integration", "workflow-check", "evaluator-host-integration",
     "proposal-integration", "activity-integration", "preference-policy-integration",

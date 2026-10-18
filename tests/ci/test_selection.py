@@ -1008,7 +1008,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             "bash_owner_integration.py release", "bash_integration.py release",
             "peer_integration.py release", "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
-            "codex_integration.py release", "control_integration.py release",
+            "codex_integration.py release", "model_catalog_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
             "proposal_integration.py release", "activity_integration.py release",
             "descriptor_capacity_integration.py release", "host_status_integration.py release",
