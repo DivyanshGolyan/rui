@@ -81,6 +81,9 @@ pub const ProtocolObservation = struct {
     http_version: c_long,
     connection_id: c.curl_off_t,
     new_connections: c_long,
+    curl_result: c.CURLcode,
+    os_errno: c_long,
+    local_port: c_long,
 };
 
 pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
@@ -594,6 +597,7 @@ pub const Transfer = struct {
     response_owned: bool = true,
     header_context: HeaderContext = .{},
     error_buffer: [c.CURL_ERROR_SIZE]u8 = @splat(0),
+    curl_result: c.CURLcode = c.CURLE_OK,
     timeout_context: TimeoutContext,
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
@@ -698,6 +702,7 @@ pub const Transfer = struct {
     }
 
     fn completionOutcome(self: *Transfer, result: c.CURLcode) !CompletionOutcome {
+        self.curl_result = result;
         if (self.captureFailure()) |failure| return .{ .response_capture_failed = failure };
         if (self.read_context.failed) return .request_source_failed;
         return .{ .transport_finished = try self.transportEvidence(result) };
@@ -844,13 +849,22 @@ pub const Transfer = struct {
         return self.header_context.request_id.slice();
     }
 
-    /// Payload-free curl observations for a completed managed transfer.
+    /// Payload-free curl observations for a completed transfer.
     /// Connection IDs are meaningful only inside one Reactor/Host lifetime.
     pub fn protocolObservation(self: *const Transfer) ProtocolObservation {
-        var result: ProtocolObservation = .{ .http_version = 0, .connection_id = -1, .new_connections = -1 };
+        var result: ProtocolObservation = .{
+            .http_version = 0,
+            .connection_id = -1,
+            .new_connections = -1,
+            .curl_result = self.curl_result,
+            .os_errno = -1,
+            .local_port = -1,
+        };
         _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &result.http_version);
         _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_CONN_ID, &result.connection_id);
         _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_NUM_CONNECTS, &result.new_connections);
+        _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_OS_ERRNO, &result.os_errno);
+        _ = c.curl_easy_getinfo(self.easy, c.CURLINFO_LOCAL_PORT, &result.local_port);
         return result;
     }
 

@@ -55,10 +55,23 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.offered_bytes = 0
         self.ready = threading.Event()
         self.lock = threading.Lock()
+        # socketserver drops get_request errors silently; keep each accepted
+        # TCP connection and any handshake failure type as fixture evidence.
+        self.accepts = []
 
     def get_request(self):
         sock, address = super().get_request()
-        return self.tls.wrap_socket(sock, server_side=True), address
+        try:
+            wrapped = self.tls.wrap_socket(sock, server_side=True)
+        except Exception as error:
+            with self.lock:
+                if len(self.accepts) < 64:
+                    self.accepts.append((address, type(error).__name__))
+            raise
+        with self.lock:
+            if len(self.accepts) < 64:
+                self.accepts.append((address, None))
+        return wrapped, address
 
 
 class H1Endpoint(TestHTTPServer):
@@ -1192,6 +1205,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
             streams = [{"connection": connections.index(address), "stream": stream_id, "text": text}
                        for address, stream_id, text, _ in endpoint.streams]
             dropped = endpoint.dropped
+            accepts = [{"peer_port": address[1], "handshake_error": error} for address, error in endpoint.accepts]
         with sqlite3.connect(store / "rui.sqlite3") as database:
             operations = database.execute(
                 "SELECT operation_id,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,"
@@ -1201,8 +1215,12 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
         return {
             "case": "connection_failure", "collected_at_unix_ms": int(time.time() * 1000),
             "dropped": dropped, "connections": len(connections), "streams": streams,
+            "accepts": accepts,
             "operations": operations, "execution": execution, "last_observation": observed,
-            "milestones": [{name: record.get(name) for name in ("sequence", "rui_test_phase", "operation", "attempt", "at_ns")}
+            "milestones": [{name: record.get(name) for name in (
+                                "sequence", "rui_test_phase", "operation", "attempt", "at_ns",
+                                "disposition", "http_status", "curl_result", "os_errno", "connection_id",
+                                "new_connections", "local_port") if name in record}
                            for record in records
                            if "attempt" in record or record["rui_test_phase"] == "attempt_admission_rolled_back"],
             "first_lost_sequence": next((record.get("sequence") for record in records

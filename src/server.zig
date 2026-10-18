@@ -2640,6 +2640,8 @@ fn completeTransfer(
         },
         .transport_finished => |evidence| evidence,
     };
+    if (host.faults.test_phase_trace and evidence.disposition != .success)
+        traceTransferFailure(host, owner.binding, evidence, active.transfer.protocolObservation());
     if (evidence.disposition == .success) {
         switch (completeSuccessfulTransfer(host, active)) {
             .cleanup => beginCleanup(host, slot, owner),
@@ -3201,6 +3203,36 @@ fn traceOperation(host: *Host, phase: []const u8, binding: store_module.AttemptB
         binding.turn_id,
         binding.operation_id,
         binding.attempt_ordinal,
+    }) catch return;
+    writeTestTrace(host, &trace, &publication);
+}
+
+/// Which connection a failed transfer used and how curl ended it, so a retry
+/// that never reaches the peer can be told apart from a refused new connect.
+/// curl_result is CURLE_OK for HTTP-status and Rui-made inactivity failures;
+/// read it with disposition.
+fn traceTransferFailure(
+    host: *Host,
+    binding: store_module.AttemptBinding,
+    evidence: provider.TransportEvidence,
+    observation: provider.ProtocolObservation,
+) void {
+    if (!host.faults.test_phase_trace) return;
+    var publication = beginTestObservation(host, "provider_transfer_failed", null);
+    defer if (publication) |*value| value.finish();
+    var trace: protocol.ResponseBuffer = .{};
+    trace.appendFmt("{{\"rui_test_phase\":\"provider_transfer_failed\",\"at_ns\":\"{d}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\",\"disposition\":\"{s}\",\"http_status\":{d},\"curl_result\":{d},\"os_errno\":{d},\"connection_id\":{d},\"new_connections\":{d},\"local_port\":{d}}}", .{
+        nowNs(host),
+        binding.turn_id,
+        binding.operation_id,
+        binding.attempt_ordinal,
+        @tagName(evidence.disposition),
+        evidence.http_status,
+        observation.curl_result,
+        observation.os_errno,
+        observation.connection_id,
+        observation.new_connections,
+        observation.local_port,
     }) catch return;
     writeTestTrace(host, &trace, &publication);
 }
