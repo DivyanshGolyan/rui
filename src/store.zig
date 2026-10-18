@@ -450,8 +450,8 @@ pub const ModelFailure = union(enum) {
     fn requestId(self: *const ModelFailure) []const u8 {
         return switch (self.*) {
             .uncorrelated => "",
-            .correlated => |value| value.request_id.slice(),
-            .rejected => |value| value.request_id.slice(),
+            .correlated => |*value| value.request_id.slice(),
+            .rejected => |*value| value.request_id.slice(),
         };
     }
 };
@@ -3137,7 +3137,7 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, request.after);
         try bindU64(statement, 2, ceiling);
-        if (request.workspace) |workspace| try bindText(statement, 3, workspace.slice());
+        if (request.workspace) |*workspace| try bindText(statement, 3, workspace.slice());
         try capture.append("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
         var count: usize = 0;
         var last: u64 = 0;
@@ -5928,7 +5928,7 @@ pub const Store = struct {
                 try bindNullableI64(insert_call, 9, rejection_content_id);
                 try bindNullableU64(insert_call, 10, acceptance_position);
                 if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
-                try bindOptionalText(insert_call, 12, if (bash_arguments) |args| args.description.slice() else "");
+                try bindOptionalText(insert_call, 12, if (bash_arguments) |*args| args.description.slice() else "");
                 var field_metadata: [160]u8 = undefined;
                 for ([_]OutputMetadataRecord{ item_id, name, call_id, record }, 0..) |field, index| {
                     std.mem.writeInt(u64, field_metadata[index * 40 ..][0..8], field.decoded_length, .little);
@@ -14193,6 +14193,23 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
             try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
             try std.testing.expectEqualStrings(request_id, recorded.slice());
         }
+    }
+
+    // An ordinary HTTP failure retains the source bytes too, not a slice of
+    // a copied union payload which expires before the SQLite step.
+    try submitTestMessage(&storage, &tmp, "correlated-input", "correlated-message", "direct/correlation", "fail with correlation");
+    const correlated = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var ordinary: ModelFailure = .{ .correlated = .{ .code = "provider_http_403", .request_id = .{} } };
+    try ordinary.correlated.request_id.set("terminal-\"request\"-é");
+    try storage.settleModelAttemptFailure(correlated, ordinary, .ordinary, .{});
+    {
+        const statement = try prepare(storage.database, "SELECT request_id FROM model_operation WHERE operation_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, correlated.operation_id);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        var recorded: protocol.Bounded(256) = .{};
+        try readText(statement, 0, &recorded);
+        try std.testing.expectEqualStrings("terminal-\"request\"-é", recorded.slice());
     }
 
     // A provider answer without correlation records none.
