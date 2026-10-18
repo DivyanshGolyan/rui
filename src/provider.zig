@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const TestObservation = @import("TestObservation.zig");
+const http_failure_diagnostic = @import("http_failure_diagnostic.zig");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
@@ -526,6 +527,9 @@ const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     alternate_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    /// The final response's Content-Type, for an HTTP failure's summary.
+    content_type: http_failure_diagnostic.ContentType = .absent,
+    content_type_bytes: protocol.Bounded(128) = .{},
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
     invalid: bool = false,
@@ -844,6 +848,13 @@ pub const Transfer = struct {
         return self.header_context.request_id.slice();
     }
 
+    pub fn contentType(self: *const Transfer) http_failure_diagnostic.ContentType {
+        return switch (self.header_context.content_type) {
+            .value => .{ .value = self.header_context.content_type_bytes.slice() },
+            else => |other| other,
+        };
+    }
+
     /// Payload-free curl observations for a completed managed transfer.
     /// Connection IDs are meaningful only inside one Reactor/Host lifetime.
     pub fn protocolObservation(self: *const Transfer) ProtocolObservation {
@@ -963,6 +974,15 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
             .delay_ms => |delay| context.retry_after_ms = @max(context.retry_after_ms orelse 0, delay),
             .deadline_ms => |deadline| context.retry_after_deadline_ms = @max(context.retry_after_deadline_ms orelse 0, deadline),
         };
+        return bytes;
+    }
+    if (std.ascii.eqlIgnoreCase(name, "content-type")) {
+        // Interim responses can precede the final one; the last header wins.
+        context.content_type_bytes.set(value) catch {
+            context.content_type = .{ .oversized = value.len };
+            return bytes;
+        };
+        context.content_type = .{ .value = "" };
         return bytes;
     }
     const destination = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
@@ -1108,6 +1128,18 @@ test "response observations use caller-selected names and reject contradictions"
     try std.testing.expectEqualStrings("alpha", context.model.slice());
     try std.testing.expectEqualStrings("beta", context.alternate_model.slice());
     try std.testing.expectEqualStrings("ref-1", context.request_id.slice());
+    try std.testing.expectEqual(http_failure_diagnostic.ContentType.absent, context.content_type);
+    const interim = "Content-Type: text/plain\r\n";
+    const final = "content-type: application/json; charset=utf-8\r\n";
+    for ([_][]const u8{ interim, final }) |line|
+        try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
+    try std.testing.expectEqualStrings("application/json; charset=utf-8", context.content_type_bytes.slice());
+    var oversized: ["Content-Type: ".len + 200 + 2]u8 = undefined;
+    @memcpy(oversized[0.."Content-Type: ".len], "Content-Type: ");
+    @memset(oversized["Content-Type: ".len..][0..200], 'x');
+    @memcpy(oversized[oversized.len - 2 ..], "\r\n");
+    try std.testing.expectEqual(oversized.len, headerCallback(&oversized, 1, oversized.len, &context));
+    try std.testing.expectEqual(http_failure_diagnostic.ContentType{ .oversized = 200 }, context.content_type);
     const contradictory = "served-model: gamma\r\n";
     try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(contradictory.ptr), 1, contradictory.len, &context));
     try std.testing.expect(context.invalid);

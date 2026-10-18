@@ -124,7 +124,6 @@ const Host = struct {
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
     capture_writer: ?*provider.CaptureWriter = null,
-    diagnostics: ?*HostDiagnostics = null,
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
@@ -1006,8 +1005,6 @@ pub fn serve(
     try intake.init(&host);
     defer intake.deinit();
     host.intake = &intake;
-    // The writer's defer runs after execution joins below.
-    if (diagnostics) |*writer| host.diagnostics = writer;
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -1054,8 +1051,10 @@ pub fn serve(
     if (diagnostic_open_error) |err|
         stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
     if (diagnostics) |*writer| {
-        writer.reportFailure();
+        if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
+        writer.close();
+        diagnostics = null;
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
@@ -2676,7 +2675,8 @@ fn completeTransfer(
             const wanted: usize = @intCast(@min(response.length, window.len));
             const count = response.file.readPositionalAll(host.io, window[0..wanted], 0) catch |err| break :classify err;
             if (count != wanted) break :classify error.ShortSealedRead;
-            summary = http_failure_diagnostic.summarize(evidence.http_status, response.length, window[0..wanted], &summary_buffer);
+            var workspace: http_failure_diagnostic.Workspace = undefined;
+            summary = http_failure_diagnostic.summarize(evidence.http_status, response.length, window[0..wanted], active.transfer.contentType(), &workspace, &summary_buffer);
             break :classify overflow;
         };
         const overflow = overflow_result catch |err| {
@@ -3087,16 +3087,37 @@ fn settleFailure(
         if (err != error.SupersededByControl) fenceDispatch(host, "model failure save", err);
         return;
     };
-    if (host.diagnostics) |writer| writer.recordModelFailure(.{
-        .turn = binding.turn_id,
-        .operation = binding.operation_id,
-        .attempt = binding.attempt_ordinal,
-        .code = failure.code(),
-        .disposition = @tagName(disposition),
-        .request_id = failure.requestId(),
-        .diagnostic = failure.diagnostic(),
-    });
+    reportModelFailure(binding, failure, disposition);
 }
+
+/// One optional Host stderr line locating a settled model failure. Settlement
+/// is canonical; a dropped line changes no Host work.
+fn reportModelFailure(binding: store_module.AttemptBinding, failure: store_module.ModelFailure, disposition: store_module.ModelFailureDisposition) void {
+    // Code, shown ID and printable-ASCII classification at worst doubling.
+    var bytes: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    var request_id: store_module.FailureEvidence.ShownRequestId = .{};
+    formatModelFailure(&out, binding, failure.code(), @tagName(disposition), request_id.of(failure.requestId()), failure.diagnostic()) catch return;
+    _ = stderr.write(out.buffered());
+}
+
+fn formatModelFailure(
+    out: *std.Io.Writer,
+    binding: store_module.AttemptBinding,
+    code: []const u8,
+    disposition: []const u8,
+    request_id: ?[]const u8,
+    diagnostic: ?[]const u8,
+) !void {
+    try out.print("rui: model failure turn={d} operation={d} attempt={d} code=", .{ binding.turn_id, binding.operation_id, binding.attempt_ordinal });
+    try std.json.Stringify.value(code, .{ .escape_unicode = true }, out);
+    try out.print(" disposition={s} request_id=", .{disposition});
+    try std.json.Stringify.value(request_id, .{ .escape_unicode = true }, out);
+    try out.writeAll(" diagnostic=");
+    try std.json.Stringify.value(diagnostic, .{ .escape_unicode = true }, out);
+    try out.writeAll("\n");
+}
+
 
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
@@ -4597,10 +4618,7 @@ fn renderCommandObservation(
                         try renderProcessingBinding(response, failed.binding);
                         try response.append(",\"result\":{\"status\":\"failed\",\"code\":");
                         try response.appendJsonString(failed.code.slice());
-                        try response.append(",\"request_id\":");
-                        if (failed.evidence.request_id) |*value| try response.appendJsonString(value.slice()) else try response.append("null");
-                        try response.append(",\"diagnostic\":");
-                        if (failed.evidence.diagnostic) |*value| try response.appendJsonString(value.slice()) else try response.append("null");
+                        try renderFailureEvidence(response, &failed.evidence);
                         try response.append("}");
                     },
                 }
@@ -4637,6 +4655,36 @@ fn renderCommandObservation(
         }
     }
     try response.append("}}");
+}
+
+/// Old clients reject replies above `protocol.max_response_bytes`, so failure
+/// evidence uses only the space this observation leaves: the shown request ID
+/// always fits, and the classification is cut with a marker when it does not.
+fn renderFailureEvidence(response: *protocol.ResponseBuffer, evidence: *const store_module.FailureEvidence) !void {
+    var view: store_module.FailureEvidence.ShownRequestId = .{};
+    try response.append(",\"request_id\":");
+    if (evidence.request_id) |*value| try response.appendJsonString(view.of(value.slice()).?) else try response.append("null");
+    try response.append(",\"diagnostic\":");
+    const detail = if (evidence.diagnostic) |*value| value.slice() else return response.append("null");
+    // This result's brace, the largest progress member and the closing braces.
+    const reserved = "}".len + ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"".len + 20 + "\"}".len + "}}".len;
+    const room = response.bytes.len -| (response.len + reserved);
+    const marker = "...[truncated]";
+    var encoded: usize = 2;
+    for (detail) |value| encoded += if (value == '"' or value == '\\') 2 else 1;
+    if (encoded <= room) return response.appendJsonString(detail);
+    if (room < 2 + marker.len) return error.BufferTooLarge;
+    // Classification is printable ASCII: only quote and backslash escape.
+    try response.append("\"");
+    var used: usize = 2 + marker.len;
+    for (detail) |value| {
+        const escaped = value == '"' or value == '\\';
+        used += if (escaped) 2 else 1;
+        if (used > room) break;
+        if (escaped) try response.append("\\");
+        try response.append(&.{value});
+    }
+    try response.append(marker ++ "\"");
 }
 
 fn renderProcessingBinding(response: *protocol.ResponseBuffer, binding: store_module.AttemptBinding) !void {
@@ -6530,6 +6578,56 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
+test "failed observations with retained evidence fit the old client reply bound" {
+    // Clients before retained evidence reject replies above this bound.
+    try std.testing.expectEqual(@as(usize, 3239), protocol.max_response_bytes);
+    const max = std.math.maxInt(u64);
+    var observation = store_module.CommandObservation{
+        .status = .accepted,
+        .kind = .message,
+        .message = .{
+            .content = .{ .length = max, .digest = @splat(0xff) },
+            .progress = .{ .status = .waiting_for_permission, .action_id = max },
+        },
+    };
+    // Control bytes take the six-byte JSON escape.
+    const controls: [protocol.max_session_bytes]u8 = @splat(0x01);
+    try observation.target.set(&controls);
+    var failed: @FieldType(store_module.AcceptedMessageQueue.State, "failed") = .{
+        .binding = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max },
+        .code = .{},
+    };
+    try failed.code.set(controls[0..96]);
+    const id: [128]u8 = @splat('r');
+    const quotes: [store_module.FailureEvidence.max_diagnostic_bytes]u8 = @splat('"');
+    failed.evidence = .{ .request_id = .{}, .diagnostic = .{} };
+    try failed.evidence.request_id.?.set(&id);
+    try failed.evidence.diagnostic.?.set(&quotes);
+    observation.message.?.queue = .{ .admission_id = max, .state = .{ .failed = failed } };
+    var response: protocol.ResponseBuffer = .{};
+    try renderCommandObservation(&response, &controls, observation);
+    const Evidence = struct { observation: struct { result: struct { request_id: []const u8, diagnostic: []const u8 } } };
+    const parsed = try std.json.parseFromSlice(Evidence, std.testing.allocator, response.slice(), .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(&id, parsed.value.observation.result.request_id);
+    const diagnostic = parsed.value.observation.result.diagnostic;
+    try std.testing.expect(std.mem.endsWith(u8, diagnostic, "...[truncated]"));
+    // Worst-case framing still leaves a usable prefix.
+    try std.testing.expect(diagnostic.len > 128 and std.mem.allEqual(u8, diagnostic[0 .. diagnostic.len - 14], '"'));
+
+    // An ordinary reply keeps the whole classification.
+    try observation.target.set("s");
+    try failed.code.set("provider_http_400");
+    failed.evidence.diagnostic.?.len = 0;
+    try failed.evidence.diagnostic.?.set(&quotes);
+    observation.message.?.queue.?.state = .{ .failed = failed };
+    response = .{};
+    try renderCommandObservation(&response, "k", observation);
+    const whole = try std.json.parseFromSlice(Evidence, std.testing.allocator, response.slice(), .{ .ignore_unknown_fields = true });
+    defer whole.deinit();
+    try std.testing.expectEqualStrings(&quotes, whole.value.observation.result.diagnostic);
+}
+
 test "message observation renders every closed queue state without fabricated rejection state" {
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
@@ -6597,12 +6695,19 @@ test "message observation renders every closed queue state without fabricated re
         accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":null,\"diagnostic\":null}}}",
     );
     var evidence: store_module.FailureEvidence = .{ .request_id = .{}, .diagnostic = .{} };
-    try evidence.request_id.?.set("req\"1");
-    try evidence.diagnostic.?.set("{\"excerpt\":\"x\"}");
+    try evidence.request_id.?.set("req_1.a:b-C");
+    try evidence.diagnostic.?.set("{\"detail\":\"x\"}");
     observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code, .evidence = evidence } };
     try Expect.rendered(
         observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":\"req\\\"1\",\"diagnostic\":\"{\\\"excerpt\\\":\\\"x\\\"}\"}}}",
+        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":\"req_1.a:b-C\",\"diagnostic\":\"{\\\"detail\\\":\\\"x\\\"}\"}}}",
+    );
+    // An ID that is not identifier-shaped is shown only as its length.
+    try evidence.request_id.?.set("req\"1");
+    observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code, .evidence = evidence } };
+    try Expect.rendered(
+        observation,
+        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\",\"request_id\":\"<redacted 5 bytes>\",\"diagnostic\":\"{\\\"detail\\\":\\\"x\\\"}\"}}}",
     );
 
     try code.set("cancelled");

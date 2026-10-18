@@ -127,6 +127,58 @@ def stop_detached(dialect, binary, store):
         time.sleep(.025)
 
 
+def old_client_reads_worst_case_failure(root, previous_artifact, previous_cli, candidate, candidate_cli):
+    """The previous client reads the candidate Host's largest failure reply.
+
+    Control-byte key and Session names take the six-byte JSON escape, the
+    request ID is the longest shown verbatim, and the redacted summary is cut
+    at its cap. Old clients reject replies above their response bound.
+    """
+    store = root / "compatibility-store"
+    key = session = "\x01" * 128
+    request_id = "r" * 128
+    body = json.dumps({"detail": " ".join(["unsupported"] * 80)}).encode()
+    endpoint = fixture.SuccessEndpoint([
+        fixture.ResponseSpec(body, {"Content-Type": "application/json", "X-Request-Id": request_id}, 400),
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    try:
+        fixture.RUI = candidate
+        host, _ = start_ready_process(
+            candidate_cli.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+            required_fields={"execution": "enabled"},
+        )
+        fixture.command("session", "configure", "--store", store, "--record", root / "compatibility-configure.json",
+                        "--key", "compatibility-configure", "--session", session, "--workspace", fixture.ROOT,
+                        "--provider", "codex", "--model", "model-a")
+        text = root / "compatibility-message.txt"
+        text.write_text("fail once")
+        fixture.command("session", "send", "--store", store, "--record", root / "compatibility-message.json",
+                        "--key", key, "--session", session, "--text", text)
+        current = fixture.wait_for(
+            lambda: (value if (value := candidate_cli.observe(store, key)).get("result") else None),
+            "worst-case failure", deadline=time.monotonic() + 15)["result"]
+        assert current["status"] == "failed" and current["code"] == "provider_http_400", current
+        assert current["request_id"] == request_id, current
+        assert json.loads(current["diagnostic"])["detail"].startswith("unsupported unsupported"), current
+        command = ("request", "inspect") if previous_cli.resource_first else ("observe-command",)
+        old = subprocess.run([str(previous_artifact), *command, "--store", str(store), "--key", key],
+                             capture_output=True, text=True, timeout=15)
+        assert old.returncode == 0, ("previous client rejected the failure reply", old.stderr)
+        result = json.loads(old.stdout)["observation"]["result"]
+        assert result["status"] == "failed" and result["code"] == "provider_http_400", result
+        print("Previous client read the candidate Host's worst-case failure reply", flush=True)
+    finally:
+        dispose_all(
+            lambda: stop_process(host) if host is not None else None,
+            endpoint.shutdown,
+            endpoint.server_close,
+            lambda: thread.join(timeout=5),
+        )
+
+
 def main():
     previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
     previous_format, candidate_format = supported_format(previous), supported_format(candidate)
@@ -239,6 +291,7 @@ def main():
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
+            old_client_reads_worst_case_failure(root, previous_artifact, previous_cli, binary, candidate_cli)
         finally:
             dispose_all(
                 lambda: stop_detached(dialect, binary, store) if attempted_restart else None,

@@ -378,6 +378,25 @@ pub const FailureEvidence = struct {
     pub const max_diagnostic_bytes = 512;
     request_id: ?protocol.Bounded(256) = null,
     diagnostic: ?protocol.Bounded(max_diagnostic_bytes) = null,
+
+    /// The request ID as failure evidence shows it: identifier-shaped IDs of
+    /// at most 128 bytes verbatim, any other ID as its redacted length, and
+    /// null when the provider sent none. Full inspection keeps the exact ID.
+    pub const ShownRequestId = struct {
+        buffer: [32]u8 = undefined,
+
+        pub fn of(self: *ShownRequestId, request_id: []const u8) ?[]const u8 {
+            if (request_id.len == 0) return null;
+            if (request_id.len <= 128) {
+                const shown = for (request_id) |value| switch (value) {
+                    'a'...'z', 'A'...'Z', '0'...'9', '-', '_', '.', ':' => {},
+                    else => break false,
+                } else true;
+                if (shown) return request_id;
+            }
+            return std.fmt.bufPrint(&self.buffer, "<redacted {d} bytes>", .{request_id.len}) catch unreachable;
+        }
+    };
 };
 
 pub const AttemptBinding = attempt.AttemptBinding;
@@ -3730,7 +3749,8 @@ pub const Store = struct {
         if (!code.eql("completed") and !code.eql("cancelled")) {
             const evidence = try self.readFailureEvidence(@intCast(operation_id));
             try capture.append(",\"request_id\":");
-            if (evidence.request_id) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
+            var shown: FailureEvidence.ShownRequestId = .{};
+            if (evidence.request_id) |*value| try capture.appendJsonString(shown.of(value.slice()).?) else try capture.append("null");
             try capture.append(",\"diagnostic\":");
             if (evidence.diagnostic) |*value| try capture.appendJsonString(value.slice()) else try capture.append("null");
         }

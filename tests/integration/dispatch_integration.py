@@ -162,8 +162,8 @@ def compaction_cases(state, processes, endpoints, releases):
                 assert database.execute(
                     "SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id "
                     "WHERE o.operation_id=1"
-                ).fetchone() == (b'{"http_status":"400","body":"json","body_bytes":"44",'
-                                 b'"excerpt":"error.code=context_length_exceeded","truncated":false}',)
+                ).fetchone() == (b'{"http_status":"400","body_bytes":"44","content_type":"text/event-stream",'
+                                 b'"code":"context_length_exceeded"}',)
             assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
             assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
         # Reset recovers default selection, then restart reconstructs the same base.
@@ -1127,38 +1127,46 @@ def main():
 
         # A permanent request/authentication-class HTTP failure is terminal
         # after one Attempt and is never blindly retried. It keeps the
-        # provider's own request correlation, or none, and a redacted body
-        # summary through restart. The body echoes a quoted prompt, a
+        # provider's own request correlation, or none, and a fail-closed body
+        # summary through restart. The first body echoes a quoted prompt, a
         # credential-shaped token and a tool argument; none may be retained.
-        permanent_request_ids = ('permanent-"quoted"\\request', None)
-        permanent_body = (
+        # The second is the exact body of the incident that motivated #531.
+        sentinel_body = (
             b'{"error":{"message":"The \'model-a\' model is not supported. Echo: \'LEAKPROMPT do not keep\' '
             b'Bearer LEAKTOKEN0123456789abcdef","type":"invalid_request_error","arguments":"cat LEAKARGS"}}'
         )
-        permanent_diagnostic = json.dumps({
-            "http_status": "401",
-            "body": "json",
-            "body_bytes": str(len(permanent_body)),
-            "excerpt": "error.message=The 'model-a' model is not supported. Echo: '<redacted 22 bytes>' "
-                       "Bearer <redacted 25 bytes>; error.type=invalid_request_error; error.arguments=<redacted 12 bytes>",
-            "truncated": False,
-        }, separators=(",", ":"))
+        incident_body = b'{"detail":"The \'gpt-5-codex\' model is not supported when using Codex with a ChatGPT account."}'
+        permanent_cases = (
+            ('permanent-"quoted"\\request', "<redacted 26 bytes>", sentinel_body, 401, {
+                "type": "invalid_request_error",
+                "message": "The 'model-a' model is not supported. Echo: '<redacted 22 bytes>' Bearer <redacted 25 bytes>",
+            }),
+            (None, None, incident_body, 400, {
+                "detail": "The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.",
+            }),
+        )
         permanent_endpoint = SuccessEndpoint([
-            ResponseSpec(permanent_body, {"X-Request-Id": request_id} if request_id else {}, 401)
-            for request_id in permanent_request_ids
+            # The default event-stream type precedes this final Content-Type.
+            ResponseSpec(body, {"Content-Type": "application/json", **({"X-Request-Id": request_id} if request_id else {})}, status)
+            for request_id, _, body, status, _ in permanent_cases
         ])
         permanent_thread = threading.Thread(
             target=permanent_endpoint.serve_forever, daemon=True
         )
         endpoints[permanent_endpoint] = permanent_thread
         permanent_thread.start()
-        for index, request_id in enumerate(permanent_request_ids):
+        for index, (request_id, shown_request_id, body, status, fields) in enumerate(permanent_cases):
+            code = f"provider_http_{status}"
+            permanent_diagnostic = json.dumps({
+                "http_status": str(status), "body_bytes": str(len(body)), "content_type": "application/json", **fields,
+            }, separators=(",", ":"))
             permanent_store = state / f"permanent-store-{index}"
             permanent_host = start_host(
                 permanent_store,
                 f"http://127.0.0.1:{permanent_endpoint.server_port}/responses",
             )
             processes.append(permanent_host)
+            permanent_stderr = HostDiagnostics(permanent_host)
             configure(
                 state, permanent_store, f"permanent-config-{index}", "direct/permanent", "model-a"
             )
@@ -1178,8 +1186,8 @@ def main():
             )
             assert permanent_failure["result"] == {
                 "status": "failed",
-                "code": "provider_http_401",
-                "request_id": request_id,
+                "code": code,
+                "request_id": shown_request_id,
                 "diagnostic": permanent_diagnostic,
             }, permanent_failure
             time.sleep(1.2)
@@ -1188,23 +1196,12 @@ def main():
                 assert database.execute(
                     "SELECT o.resolution_code,c.payload,o.request_id FROM model_operation o "
                     "JOIN content c ON c.content_id=o.resolution_content_id"
-                ).fetchone() == ("provider_http_401", permanent_diagnostic.encode(), request_id)
-            log_records = [
-                json.loads(line)
-                for path in sorted((permanent_store / "diagnostics").glob("host-*.jsonl"))
-                for line in path.read_text().splitlines()
-            ]
-            failures = [record for record in log_records if record["classification"] == "model_failure"]
-            assert [
-                {key: record[key] for key in ("code", "disposition", "attempt", "request_id", "diagnostic")}
-                for record in failures
-            ] == [{
-                "code": "provider_http_401",
-                "disposition": "terminal",
-                "attempt": "1",
-                "request_id": request_id,
-                "diagnostic": permanent_diagnostic,
-            }], failures
+                ).fetchone() == (code, permanent_diagnostic.encode(), request_id)
+            # One Host stderr line locates the settlement with the same evidence.
+            located = (f'code="{code}" disposition=terminal request_id={json.dumps(shown_request_id)} '
+                       f"diagnostic={json.dumps(permanent_diagnostic)}\n").encode()
+            wait_for(lambda: located in permanent_stderr.tail(), "model failure stderr line")
+            assert permanent_stderr.tail().count(b"rui: model failure ") == 1, permanent_stderr.tail()
             stop_host(permanent_host)
             processes.remove(permanent_host)
             reopened = start_host(permanent_store, None)
@@ -1214,23 +1211,23 @@ def main():
                 "--session", "direct/permanent", "--profile", "full",
             )
             operation = report["full"]["model_operations"][0]
+            # Full inspection keeps the exact correlation; new surfaces show it redacted.
             assert operation["request_id"] == request_id, operation
-            assert operation["resolution"]["code"] == "provider_http_401", operation
+            assert operation["resolution"]["code"] == code, operation
             assert operation["resolution"]["content"]["text"] == permanent_diagnostic, operation
             current = command(
                 "session", "inspect", "--store", permanent_store, "--session", "direct/permanent",
             )
             assert current["work"]["latest_outcome"] == {
-                "code": "provider_http_401",
+                "code": code,
                 "content": None,
-                "request_id": request_id,
+                "request_id": shown_request_id,
                 "diagnostic": permanent_diagnostic,
             }, current["work"]
             assert observe(permanent_store, f"permanent-message-{index}")["result"] == permanent_failure["result"]
-            for path in [permanent_store / "rui.sqlite3", *sorted((permanent_store / "diagnostics").glob("*"))]:
-                retained = path.read_bytes()
+            for retained in [path.read_bytes() for path in permanent_store.rglob("*") if path.is_file()] + [permanent_stderr.tail()]:
                 for leak in (b"LEAKPROMPT", b"LEAKTOKEN", b"LEAKARGS"):
-                    assert leak not in retained, (path, leak)
+                    assert leak not in retained, leak
             assert len(permanent_endpoint.requests) == index + 1
             stop_host(reopened)
             processes.remove(reopened)
@@ -1687,7 +1684,7 @@ def main():
         assert restarted_failure["result"] == {
             "status": "failed",
             "code": "contradictory_provider_output",
-            "request_id": contradictory_request_id,
+            "request_id": "<redacted 27 bytes>",
             "diagnostic": restarted_failure["result"]["diagnostic"],
         }, restarted_failure
         report = command(
