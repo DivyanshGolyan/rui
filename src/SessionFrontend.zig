@@ -772,9 +772,11 @@ fn settleReader(self: *Self) !void {
     const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
-    const command = self.command_running;
-    self.command_running = false;
-    if (command and end != .complete) self.consent.invalidate();
+    if (end != .complete and self.command_running) {
+        // Nothing to show: the command failed before writing output.
+        self.command_running = false;
+        self.consent.invalidate();
+    }
     if (end == .complete and self.read_phase == .history) {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
@@ -785,6 +787,7 @@ fn settleReader(self: *Self) !void {
         }
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
         try self.showInspection();
+        self.command_running = false; // Shown; exit no longer prints it.
     }
     self.applyReader(end);
 }
