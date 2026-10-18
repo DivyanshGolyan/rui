@@ -522,13 +522,13 @@ def startup_limits(root, env):
     failed = run_start(store, env)
     assert failed.returncode != 0 and time.monotonic() - before < 5, failed
     assert str(store.resolve()) in failed.stderr, failed.stderr
-    assert "found schema 21" in failed.stderr and "supports schema 24" in failed.stderr, failed.stderr
+    assert "found schema 21" in failed.stderr and "supports schema 27" in failed.stderr, failed.stderr
     assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
     for wire in (None, "future"):
         with sqlite3.connect(database) as connection:
-            connection.execute("PRAGMA user_version=24")
+            connection.execute("PRAGMA user_version=27")
             connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
             if wire is not None:
                 connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
@@ -560,7 +560,7 @@ def startup_limits(root, env):
     with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
         source.backup(destination)
     hostile_database.chmod(0o600)
-    for schema, wire in ((21, "1"), (24, None), (24, "future")):
+    for schema, wire in ((21, "1"), (27, None), (27, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
             connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
