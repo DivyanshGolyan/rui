@@ -1,6 +1,7 @@
 //! Installed command grammar. Help and pre-effect syntax validation use the
 //! same definitions; semantic values remain with the client/Store owners.
 const std = @import("std");
+const product_defaults = @import("product_defaults.zig");
 
 pub const Resource = enum { session, request, action, host, defaults, auth };
 pub const Command = enum {
@@ -58,10 +59,10 @@ pub const Command = enum {
             .action_deny => .{ .resource = .action, .name = "deny", .description = "Admit denial of this exact inspected Action.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
             .action_read_call_id => .{ .resource = .action, .name = "read-call-id", .description = "Stream the exact saved Action call ID bytes.", .options = destination ++ session ++ action, .requires = need_action },
             .action_read_arguments => .{ .resource = .action, .name = "read-arguments", .description = "Stream the exact saved Action argument bytes.", .options = destination ++ session ++ action, .requires = need_action },
-            .host_start => .{ .resource = .host, .name = "start", .description = "Explicitly start or connect to a managed capacity-8 Host. Existing Host settings win.", .options = destination },
+            .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets active capacity {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports.", .{product_defaults.active_capacity}), .options = destination },
             .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
-            .host_serve => .{ .resource = .host, .name = "serve", .description = "Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests.", .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } },
+            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
@@ -375,4 +376,20 @@ test "complete syntax still names the first missing requirement" {
     try std.testing.expect(Command.session_configure.definition().missing(&.{}) == null);
     try std.testing.expectEqualStrings("defaults inspect|configure", retired("setup").?);
     try std.testing.expect(retired("session") == null and retired("fix the build") == null);
+}
+
+test "Host start help states the product default capacity and existing-Host precedence" {
+    const capacity = std.fmt.comptimePrint("{d}", .{product_defaults.active_capacity});
+    inline for (.{ Command.host_start, Command.host_serve }) |command| {
+        var bytes: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try command.definition().help(&writer);
+        const text = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, text, capacity ++ ".") != null or std.mem.indexOf(u8, text, capacity ++ ";") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "capacity-8") == null and std.mem.indexOf(u8, text, "1000") == null);
+    }
+    var bytes: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try Command.host_start.definition().help(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "already-running Host keeps its original settings, including capacity") != null);
 }

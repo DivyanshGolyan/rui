@@ -168,7 +168,7 @@ The **Host** runs work in the background. The **Store** is its private directory
 "$RUI" host status
 ```
 
-`host start` starts a Host with capacity for eight active executions, or connects to an existing one without changing its settings. It prints the diagnostic-log location. Rui does not install an OS service or restart a crashed Host automatically. If startup times out, inspect status and diagnostics; a timeout does not prove the Host stopped.
+`host start` starts a Host with capacity for 100 active executions, or connects to an existing one without changing its settings. A running Host keeps the capacity it started with, even after you upgrade Rui; stop it and start a new one to use the current default. The Host raises its own open-file soft limit when the hard limit allows. If the hard limit is too low, startup fails and names the limit to raise. It prints the diagnostic-log location. Rui does not install an OS service or restart a crashed Host automatically. If startup times out, inspect status and diagnostics; a timeout does not prove the Host stopped.
 
 To shut down the Host and interrupt **all work in the selected Store**:
 
@@ -178,7 +178,7 @@ To shut down the Host and interrupt **all work in the selected Store**:
 
 If the reply is lost, use the printed retry command. It targets the same Host instance so it cannot stop a replacement. An acknowledgment means shutdown was requested, not that cleanup has finished.
 
-For foreground operation and explicit capacity, use `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
+For foreground operation, use `host serve --store PATH --codex`. It uses the same default capacity; add `--active-capacity N` to choose another, for example `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
 
 ### Start fresh after a Store format change
 
