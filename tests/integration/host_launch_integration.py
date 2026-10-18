@@ -334,10 +334,12 @@ def managed_descriptor_rejection(store, env, limit):
     # Other occupied slots at five descriptors plus the serial ten-descriptor
     # Bash spawn; ordinary exchanges at four, two controls and discovery.
     execution, clients = (DEFAULT_ACTIVE_CAPACITY - 1) * 5 + 10, INTAKE * 4 + 3
+    # The model catalog worker budgets the same as the authentication worker.
+    model_catalog = authentication
     expected = dict(active_capacity=DEFAULT_ACTIVE_CAPACITY, soft_limit=limit, inherited=inherited,
                     fixed_host=fixed_host, clients=clients, execution=execution,
-                    authentication=authentication, self_wake=2,
-                    required=inherited + fixed_host + clients + execution + authentication + 2)
+                    authentication=authentication, model_catalog=model_catalog, self_wake=2,
+                    required=inherited + fixed_host + clients + execution + authentication + model_catalog + 2)
     assert fields == expected, (fields, expected)
     # Refusal precedes the lease and diagnostic writer: no ready Host remains.
     assert not (store / "host.lock").exists() and not (store / "diagnostics").exists(), store
