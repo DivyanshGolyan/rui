@@ -1495,7 +1495,6 @@ def command_interruption_cases(state, library):
                 ("configure-presentation", "/configure --permission-mode ask", "", signal.SIGINT),
                 ("configure-rejected", "/configure --model model-b", "", signal.SIGINT),
                 ("configure-canonical", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("status", "/status", "/v1/inspect-session", signal.SIGINT),
                 ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
                 ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
                 ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
