@@ -61,10 +61,11 @@ class EvidenceTest(unittest.TestCase):
 
             def commit(message):
                 evidence.git('add', 'src', 'build.zig', 'build.zig.zon')
-                evidence.git('-c', 'user.name=Evidence test', '-c', 'user.email=test@example.invalid',
-                             'commit', '-m', message)
+                evidence.git('commit', '-m', message)
 
             evidence.git('init', '-b', 'main')
+            evidence.git('config', 'user.name', 'Evidence test')
+            evidence.git('config', 'user.email', 'test@example.invalid')
             Path('src').mkdir()
             for name in ('logic.zig', 'host.zig', 'actor.zig'):
                 Path('src', name).write_text(name)
