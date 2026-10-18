@@ -498,10 +498,12 @@ fn driveActive(self: *Self) !void {
             };
             var status_buffer: [2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
-            if (self.notice) |notice| try status.print("{s}\n", .{notice});
-            try status.writeAll(base_status);
-            if (!self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass)
-                try status.writeAll("\nBash runs without approval.");
+            const bypass = !self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass;
+            for ([_][]const u8{ self.notice orelse "", base_status, if (bypass) "Bash runs without approval." else "" }) |line| {
+                if (line.len == 0) continue;
+                if (status.buffered().len != 0) try status.writeAll("\n");
+                try status.writeAll(line);
+            }
             self.dirty = false;
             try self.terminal.redraw(view.bytes, view.cursor, status.buffered(), if (self.consent.active() and action_visible) "> " else "› ", &self.live);
             if (!approval_ready and self.approvalReady()) {
