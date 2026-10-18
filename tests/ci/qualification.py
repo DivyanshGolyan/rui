@@ -11,7 +11,7 @@ RESOURCES = (
     "measure-execution-service",
 )
 NATIVE = (
-    "check-full", "test-logic", "admission-debug-integration",
+    "check-full", "test-logic", "admission-debug-integration", "dispatch-debug-integration",
     "transport-h2-integration", "codex-h2-integration", "codex-credential-integration",
     "current-facts-integration", "server-delivery-integration", "test-full",
     "evaluator-churn", "measurement-check",
