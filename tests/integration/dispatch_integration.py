@@ -285,7 +285,7 @@ def compaction_cases(state, processes, endpoints, releases):
     stop_endpoint(endpoint, endpoints)
 
 
-def failure_correlation_cases(state, processes, endpoints):
+def failure_correlation_cases(state, processes, endpoints, selected="all"):
     """Bounded Debug coverage for inline failure provenance through SQLite."""
     request_id = 'correlated-"request"\\path'
     for label, status, schema, code in (
@@ -293,6 +293,8 @@ def failure_correlation_cases(state, processes, endpoints):
         ("correlated", 401, None, "provider_http_401"),
         ("exhausted", 503, None, "retry_exhausted"),
     ):
+        if selected not in ("all", label):
+            continue
         body = sse_answer("response", "reasoning", "message", "private answer")[0] if schema else b'{"error":"synthetic"}'
         request_ids = ["attempt-1", "", "attempt-3", request_id] if status == 503 else [request_id]
         endpoint = SuccessEndpoint([
@@ -350,10 +352,10 @@ def failure_correlation_cases(state, processes, endpoints):
         processes.remove(reopened)
         assert len(endpoint.requests) == len(request_ids), endpoint.requests
         stop_endpoint(endpoint, endpoints)
-    print("Failure correlation: rejected, HTTP and four-Attempt exhaustion preserve exact bytes through reopen")
+    print(f"Failure correlation ({selected}): exact provider bytes preserved through reopen")
 
 
-def main(mode="all"):
+def main(mode="all", correlation_case="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -374,7 +376,7 @@ def main(mode="all"):
     completed = False
     try:
         if mode == "failure-correlation":
-            failure_correlation_cases(state, processes, endpoints)
+            failure_correlation_cases(state, processes, endpoints, correlation_case)
             completed = True
             return
         endpoint_thread.start()
@@ -4650,7 +4652,10 @@ def main(mode="all"):
 
 
 if __name__ == "__main__":
-    mode = sys.argv[2] if len(sys.argv) == 3 else "all"
-    if mode not in ("all", "failure-correlation") or len(sys.argv) not in (2, 3):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|failure-correlation]")
-    main(mode)
+    mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
+    correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation")
+            or correlation_case not in ("all", "rejected", "correlated", "exhausted")
+            or (len(sys.argv) == 4 and mode != "failure-correlation")):
+        raise SystemExit("usage: dispatch_integration.py RUI [all|failure-correlation [all|rejected|correlated|exhausted]]")
+    main(mode, correlation_case)
