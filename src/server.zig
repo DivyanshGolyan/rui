@@ -6,6 +6,7 @@ const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
+const product_defaults = @import("product_defaults.zig");
 const descriptor_limit = @import("descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
@@ -18,7 +19,6 @@ const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 
-pub const default_active_capacity = 1000;
 pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
@@ -135,7 +135,7 @@ const Host = struct {
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
     intake: ?*Intake = null,
-    intake_capacity: usize = descriptor_capacity.default_intake,
+    intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
     launch_mutex: std.Io.Mutex = .init,
@@ -385,7 +385,7 @@ const Intake = struct {
                     const header = self.header_bytes.items;
                     if (self.route == null and std.mem.endsWith(u8, header, "\r\n")) {
                         self.route = try HeaderReader.parseRoute(header[0 .. header.len - 2]);
-                        if (self.host.intake_capacity < descriptor_capacity.default_intake) {
+                        if (self.host.intake_capacity < product_defaults.intake_capacity) {
                             var ordinary: usize = 0;
                             var control: usize = 0;
                             var discovery: usize = 0;
@@ -701,7 +701,7 @@ const Intake = struct {
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             // Accept a bounded batch, then return to existing exchanges.
             for (0..16) |_| {
-                if (self.host.intake_capacity < descriptor_capacity.default_intake and
+                if (self.host.intake_capacity < product_defaults.intake_capacity and
                     self.exchanges.items.len >= self.host.intake_capacity + 3)
                 {
                     // Unknown routes cannot hold all reserved progress places.
@@ -745,7 +745,7 @@ const Intake = struct {
                 }
                 // Give a newly acquired reserved place a classification turn
                 // before considering it for pressure-driven turnover.
-                if (self.host.intake_capacity < descriptor_capacity.default_intake and
+                if (self.host.intake_capacity < product_defaults.intake_capacity and
                     self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
         }
@@ -832,7 +832,7 @@ pub fn serve(
     var descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
         active_capacity,
-        descriptor_capacity.default_intake,
+        product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
         provider_endpoint != null,
         authentication != null,
@@ -848,7 +848,7 @@ pub fn serve(
         if (err == error.DescriptorCapacityInsufficient) {
             stderr.print(
                 "rui: Host cannot start: descriptor soft limit {d} is below the minimum intake requirement {d} (10 ordinary clients). Rui already tried raising it. Inspect limits with ulimit -Sn and ulimit -Hn; raise the hard limit in your system/session settings (ask your administrator if needed), then retry rui host start.\n",
-                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (descriptor_capacity.default_intake - descriptor_capacity.minimum_intake) },
+                .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (product_defaults.intake_capacity - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
                 "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
@@ -897,8 +897,9 @@ pub fn serve(
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
     if (diagnostics) |*writer| {
         var detail: [256]u8 = undefined;
-        writer.record("capacity", try std.fmt.bufPrint(&detail, "ordinary_intake={d} default_intake=100 minimum_intake=10 descriptor_requirement={d} descriptor_limit={s}", .{
-            intake_capacity, descriptor_requirement.total, descriptor_limit_text,
+        writer.record("capacity", try std.fmt.bufPrint(&detail, "ordinary_intake={d} default_intake={d} minimum_intake={d} descriptor_requirement={d} descriptor_limit={s}", .{
+            intake_capacity,              product_defaults.intake_capacity, descriptor_capacity.minimum_intake,
+            descriptor_requirement.total, descriptor_limit_text,
         }));
     }
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");

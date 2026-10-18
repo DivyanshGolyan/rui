@@ -1,6 +1,6 @@
 const std = @import("std");
+const default_intake = @import("product_defaults.zig").intake_capacity;
 
-pub const default_intake: usize = 100;
 pub const minimum_intake: usize = 10;
 
 pub fn fitIntake(default_requirement: usize, soft_limit: ?usize) !usize {

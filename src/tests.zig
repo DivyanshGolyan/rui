@@ -3,6 +3,7 @@ test {
     _ = @import("codex_auth.zig");
     _ = @import("codex_credentials.zig");
     _ = @import("model_adapter.zig");
+    _ = @import("model_capability.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("descriptor_limit.zig");
     _ = @import("execution_turn.zig");
