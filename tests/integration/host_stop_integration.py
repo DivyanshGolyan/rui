@@ -171,7 +171,7 @@ def mixed_effect_drain(provider_first):
                 launch_bash()
                 hold_provider()
 
-            occupied = fixture.command("inspect-session", "--store", store, "--session", "bash/session")["execution"]
+            occupied = fixture.command("session", "inspect", "--store", store, "--session", "bash/session")["execution"]
             assert int(occupied["custody_occupied"]) == 3, occupied
             assert actor("stop", store, instance(store)) == "acknowledged"
             fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held capture")
@@ -185,7 +185,7 @@ def mixed_effect_drain(provider_first):
             diagnostics.wait("cleanup_completed", action=action["action"], timeout=3)
             assert gate.fd is not None and host.poll() is None
             assert status(store) == "owned_unavailable"
-            contender = subprocess.run([RUI, "serve", "--store", store, "--active-capacity", "1"],
+            contender = subprocess.run([RUI, "host", "serve", "--store", store, "--active-capacity", "1"],
                                        capture_output=True, timeout=10)
             assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
             gate.release()
@@ -285,11 +285,11 @@ def main():
             bash_fixture.allow(state, store, "stop-allow", "direct/stop", action["action"])
             diagnostics.wait("cleanup_started", action=str(action["action"]))
             assert not diagnostics.matching("cleanup_completed", action=str(action["action"]))
-            occupied = fixture.command("inspect-session", "--store", store, "--session", "direct/stop")["execution"]
+            occupied = fixture.command("session", "inspect", "--store", store, "--session", "direct/stop")["execution"]
             assert int(occupied["custody_occupied"]) > 0, occupied
             report_release = ReleaseGate(reply_gate)
             began = time.monotonic_ns()
-            inspector = fixture.start_command("inspect-session", "--store", store, "--session", "direct/stop")
+            inspector = fixture.start_command("session", "inspect", "--store", store, "--session", "direct/stop")
             exchange_phase(diagnostics, "test_gate_waiting", began, time.monotonic() + 5,
                            subject=str(reply_gate))
             held_fds = len(os.listdir(f"/proc/{host.pid}/fd")) if sys.platform == "linux" else None
@@ -354,7 +354,7 @@ def main():
             assert status(store) == "owned_unavailable"
             assert host.poll() is None, "acknowledgement was mistaken for completion"
             contender = subprocess.run(
-                [RUI, "serve", "--store", store, "--active-capacity", "1"],
+                [RUI, "host", "serve", "--store", store, "--active-capacity", "1"],
                 capture_output=True, timeout=10,
             )
             assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
@@ -391,12 +391,17 @@ def main():
             assert instance(store) == newer
             stale_cli = subprocess.run([RUI, "host", "stop", "--store", store, "--instance", target],
                                        capture_output=True, text=True, timeout=10)
-            assert stale_cli.returncode != 0 and "Host instance changed" in stale_cli.stderr, stale_cli
+            assert stale_cli.returncode != 0 and "Host instance changed" in stale_cli.stderr and stale_cli.stdout == "", stale_cli
             assert instance(store) == newer
             current_cli = subprocess.run([RUI, "host", "stop", "--store", store],
                                          capture_output=True, text=True, timeout=10)
-            assert current_cli.returncode == 0 and "Stop acknowledged; completion and lease release are not confirmed" in current_cli.stdout, current_cli
-            assert f"Host instance: {newer} (retry with --instance {newer})" in current_cli.stdout
+            assert current_cli.returncode == 0 and json.loads(current_cli.stdout) == {
+                "version": "1", "type": "host_stop", "status": "acknowledged", "store": str(store.resolve()),
+                "instance": newer, "retirement": "unconfirmed",
+            }, current_cli
+            notice = current_cli.stderr
+            assert notice.startswith("rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store "), current_cli
+            assert notice.endswith(f" --instance {newer}\n") and notice.count("\n") == 1, current_cli
             assert replacement.wait(timeout=10) != 0
             replacement.stdout.close()
             replacement.stderr.close()

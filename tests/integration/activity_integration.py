@@ -98,7 +98,7 @@ def main():
         provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
         try:
             process, fields = start_host(store, provider)
-            command("configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
+            command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
                 "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask")
             configure(state, store, "foreign-config", "direct/foreign")
             empty_end, empty = history(store)
@@ -133,9 +133,9 @@ def main():
             queued_end, queued = history(store)
             assert queued[-1]["value"]["admission"]["state"] == "queued" and queued[-1]["value"]["admission"]["turn"] is None
             action = calls[0]["value"]["call"]["action"]
-            exact = subprocess.run([str(sys.argv[1]), "read-action-arguments", "--store", str(store), "--session", SESSION, "--action", action], capture_output=True, timeout=10)
+            exact = subprocess.run([str(sys.argv[1]), "action", "read-arguments", "--store", str(store), "--session", SESSION, "--action", action], capture_output=True, timeout=10)
             assert exact.returncode == 0 and exact.stdout == CALLS[0][2].encode()
-            command("deny-action", "--store", store, "--record", state / "deny", "--key", "deny", "--session", SESSION, "--action", action)
+            command("action", "deny", "--store", store, "--record", state / "deny", "--key", "deny", "--session", SESSION, "--action", action)
             wait_for(lambda: observe(store, "first").get("result", {}).get("status") == "completed", "complete Turn")
             complete_end, complete = history(store)
             assert history(store, pending_end)[1] == pending and history(store, queued_end)[1] == queued
@@ -327,7 +327,7 @@ def performance_case(item_bytes):
         worker = threading.Thread(target=endpoint.serve_forever)
         worker.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        command("configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
+        command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
             "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask")
         configure(state, store, "second-config", "direct/independent")
         admitted_start = time.monotonic()
@@ -362,7 +362,7 @@ def performance_case(item_bytes):
                 for index in range(30):
                     if done.is_set(): return
                     tick = time.monotonic()
-                    current = command("inspect-session", "--store", store, "--session", SESSION)
+                    current = command("session", "inspect", "--store", store, "--session", SESSION)
                     current_end = time.monotonic()
                     if done.is_set(): return
                     observed = page(store)["page"]["call_activity"]

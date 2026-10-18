@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import pty
+import re
 import subprocess
 import sys
 import tempfile
@@ -41,8 +42,11 @@ def capture(state, binary, label, size, repetition):
         for offset in range(0, size, 4096):
             output.write(b"x" * min(4096, size - offset))
     gate = home / "gate"
-    process = subprocess.Popen([str(binary), "message", "--store", str(state / "offline-store"),
-        "--session", "resources/original", "--text", str(source), "--json"],
+    # Keep the historical baseline's original syntax; migrate only the candidate.
+    send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
+        "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
+        str(state / "offline-store"), "--session", "resources/original", "--text", str(source)])
+    process = subprocess.Popen([str(binary), *send],
         env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -51,7 +55,15 @@ def capture(state, binary, label, size, repetition):
         pathlib.Path(f"{gate}.release").touch()
         output, errors = process.communicate(timeout=20)
         assert process.returncode != 0 and "FileNotFound" in errors, (output, errors)
-        handle = json.loads(output)["request"]
+        if label == "baseline":
+            handle = json.loads(output)["request"]
+        else:
+            # The candidate announces its generated capture on stderr only.
+            assert output == "", output
+            announced = re.search(r"^request: (\S+) \(inspect: rui request inspect \1; "
+                r"if unconfirmed: rui request recover \1\)$", errors, re.MULTILINE)
+            assert announced, errors
+            handle = announced[1]
         record = home / ".config/rui/requests" / f"{handle}.json"
         expected = hashlib.sha256()
         prefix = ('{"version":"1","kind":"message","store":' + json.dumps(str((state / "offline-store").resolve()))
@@ -82,7 +94,7 @@ def retained(state, binary, label):
     master, slave = pty.openpty()
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "live-store"), "--session", "resources/original"]
-        if label == "baseline" else ["resume", "--store", str(state / "live-store"), "--", "resources/original"])
+        if label == "baseline" else ["session", "resume", "--store", str(state / "live-store"), "--", "resources/original"])
     process = subprocess.Popen([str(binary), *entry], env={**os.environ, "HOME": str(home)},
         stdin=slave, stdout=slave, stderr=slave)
     os.close(slave)

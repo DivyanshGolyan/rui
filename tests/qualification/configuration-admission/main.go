@@ -21,7 +21,7 @@ var peakCounter = regexp.MustCompile(`(?m)^\s*([0-9]+)\s+maximum resident set si
 
 func clientPeak(binary, store string) (uint64, error) {
 	var stderr bytes.Buffer
-	command := exec.Command("/usr/bin/time", "-l", binary, "inspect-session", "--store", store, "--session", "measure/00000000")
+	command := exec.Command("/usr/bin/time", "-l", binary, "session", "inspect", "--store", store, "--session", "measure/00000000")
 	command.Stdout = io.Discard
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {

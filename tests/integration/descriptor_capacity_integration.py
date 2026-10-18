@@ -170,7 +170,7 @@ def configure(state, store, ordinal):
     session = f"direct/descriptors-{ordinal}"
     result = command(
         state,
-        "configure",
+        "session", "configure",
         "--store",
         store,
         "--record",
@@ -195,7 +195,7 @@ def message(state, store, session, ordinal):
     text.write_text(f"descriptor fill {ordinal}")
     result = command(
         state,
-        "message",
+        "session", "send",
         "--store",
         store,
         "--record",
@@ -213,7 +213,7 @@ def message(state, store, session, ordinal):
 def observe(state, store, ordinal):
     return command(
         state,
-        "observe-command",
+        "request", "inspect",
         "--store",
         store,
         "--key",
@@ -237,7 +237,7 @@ def failed_result(state, store, ordinal):
 
 
 def execution_idle(state, store, session):
-    report = command(state, "inspect-session", "--store", store, "--session", session)
+    report = command(state, "session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
 
@@ -358,7 +358,7 @@ def prove_bash_spawn_with_full_client_population(state, required):
         host, ready = start_ready_process(
             limited_host(
                 witness_limit,
-                "serve",
+                "host", "serve",
                 "--store",
                 store,
                 "--active-capacity",
@@ -591,7 +591,7 @@ def prove_accept_pressure(state):
             # the selected fixture Python to set this child's limit and exec.
             host, ready = start_ready_process([sys.executable, "-c",
                 "import os, resource, sys; resource.setrlimit(resource.RLIMIT_NOFILE, (512, 512)); os.execv(sys.argv[1], sys.argv[1:])",
-                str(RUI), "serve", "--store", str(store), "--active-capacity", "2",
+                str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
                 "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses"], env=env)
             diagnostics = HostDiagnostics(host)
             session = configure(root, store, 0)
@@ -723,7 +723,7 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
         env = {**os.environ, "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                "RUI_ACCEPT_LOG": str(root / "accept.log"), "RUI_ACCEPT_ARM": str(root / "unused"),
                "RUI_ACCEPT_HOLD": str(hold), "RUI_ACCEPT_READY": str(ready), "RUI_ACCEPT_RELEASE": str(release)}
-        host, fields = start_ready_process([str(RUI), "serve", "--store", str(store), "--active-capacity", "2",
+        host, fields = start_ready_process([str(RUI), "host", "serve", "--store", str(store), "--active-capacity", "2",
             "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-path", str(wrapper),
             "--test-transition", "prepared-before-handoff", "--test-transition-gate-path", str(gate)], env=env)
         diagnostics = HostDiagnostics(host)
@@ -790,7 +790,7 @@ def main():
         rejected = subprocess.run(
             limited_host(
                 minimum_required - 1,
-                "serve",
+                "host", "serve",
                 "--store",
                 rejected_store,
                 "--active-capacity",
@@ -816,7 +816,7 @@ def main():
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if fields["inherited"] != 3:
             rejected = subprocess.run(
-                limited_host(required - clients + 10 * 4 + 3 - 1, "serve", "--store", rejected_store,
+                limited_host(required - clients + 10 * 4 + 3 - 1, "host", "serve", "--store", rejected_store,
                     "--active-capacity", "2", "--provider-endpoint",
                     f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 text=True, capture_output=True, timeout=10)
@@ -830,7 +830,7 @@ def main():
         host, ready = start_ready_process(
             limited_host(
                 required,
-                "serve",
+                "host", "serve",
                 "--store",
                 store,
                 "--active-capacity",
@@ -876,7 +876,7 @@ def main():
         documented, _ = start_ready_process(
             limited_host(
                 1024,
-                "serve",
+                "host", "serve",
                 "--store",
                 documented_store,
                 "--active-capacity",

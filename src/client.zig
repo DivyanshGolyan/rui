@@ -634,20 +634,14 @@ pub const MessageInput = struct {
 
 pub const SessionStopInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
-    drop_reply: ?[]const u8 = null,
 };
 
 pub const ModelInterruptionInput = struct {
     store: []const u8,
-    record: []const u8,
-    key: []const u8,
     session: []const u8,
     turn_id: u64,
     operation_id: u64,
-    drop_reply: ?[]const u8 = null,
 };
 
 pub const PermissionDecisionInput = struct {
@@ -1512,6 +1506,13 @@ pub const SessionListPage = struct {
 
     pub fn writeJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
+        try self.writeRowsJson(writer);
+        if (self.next) |next| try writer.print("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling }) else try writer.writeAll("],\"next\":null}");
+    }
+
+    /// Rows borrow this validated page. A caller may stream many bounded pages
+    /// into one list without retaining the Session population or raw wire text.
+    pub fn writeRowsJson(self: *const SessionListPage, writer: *std.Io.Writer) !void {
         for (self.rows[0..self.count], 0..) |*row, index| {
             if (index != 0) try writer.writeAll(",");
             try writer.writeAll("{\"reference\":");
@@ -1525,7 +1526,6 @@ pub const SessionListPage = struct {
             if (row.tools.edit) try writer.writeAll(if (row.tools.bash) ",\"edit\"" else "\"edit\"");
             try writer.print("],\"permission_mode\":\"{s}\"}}", .{@tagName(row.permission_mode)});
         }
-        if (self.next) |next| try writer.print("],\"next\":{{\"after\":\"{d}\",\"ceiling\":\"{d}\"}}}}", .{ next.after, next.ceiling }) else try writer.writeAll("],\"next\":null}");
     }
 };
 
@@ -1561,23 +1561,23 @@ fn renderReadRequest(
     try body.append("}");
 }
 
-pub fn stopSession(io: std.Io, input: SessionStopInput, reply_buffer: *ReplyBuffer) !MutationReply {
-    reply_buffer.len = 0;
+pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
-    var captured = try captureSessionStop(io, &paths, input);
-    defer captured.close(io);
-    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
+    return writeSessionStopCapture(io, &paths, input, location);
 }
 
-pub fn interruptModel(io: std.Io, input: ModelInterruptionInput, reply_buffer: *ReplyBuffer) !MutationReply {
-    reply_buffer.len = 0;
+pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
-    try validateIdentityInputs(input.key, input.session);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try validateIdentityInputs(location.key, input.session);
     if (input.turn_id == 0 or input.operation_id == 0) return error.InvalidTarget;
-    var captured = try captureModelInterruption(io, &paths, input);
-    defer captured.close(io);
-    return sendCaptured(io, &captured, input.drop_reply, reply_buffer);
+    return writeModelInterruptionCapture(io, &paths, input, location);
 }
 
 pub fn retry(
@@ -1967,7 +1967,7 @@ fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
 }
 
 /// The five durable mutations. Tag names are the captured-record and
-/// observation spelling; `rui retry --kind` uses the hyphenated spelling.
+/// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const MutationKind = enum {
     configure,
     message,
@@ -1982,15 +1982,6 @@ pub const MutationKind = enum {
             .session_stop => "/v1/control/session-stop",
             .model_interruption => "/v1/control/model-interruption",
             .permission_decision => "/v1/control/permission-decision",
-        };
-    }
-
-    /// Generated recovery (`requests`, `recover`, `follow`) reopens only these
-    /// records; controls retain the explicit retry route.
-    fn recoversGenerated(self: MutationKind) bool {
-        return switch (self) {
-            .configure, .message, .permission_decision => true,
-            .session_stop, .model_interruption => false,
         };
     }
 
@@ -2584,19 +2575,18 @@ pub fn openCaptured(io: std.Io, directory: []const u8, handle: []const u8) !Capt
     var file = try std.Io.Dir.cwd().openFile(io, path, .{});
     errdefer file.close(io);
     const binding = try readCapturedBinding(io, &file);
-    if (!binding.saved.key.eql(handle) or !std.meta.activeTag(binding.target).recoversGenerated()) return error.InvalidRequestRecord;
+    if (!binding.saved.key.eql(handle)) return error.InvalidRequestRecord;
     return .{ .file = file, .length = try file.length(io), .saved = binding.saved, .target = binding.target };
 }
 
-/// Metadata-only projection for listing/following; cannot authorize a send or
+/// Metadata-only projection for listing/inspection; cannot authorize a send or
 /// an admission. Historical payloads are not traversed by these callers.
 pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !CapturedIdentity {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var file = try std.Io.Dir.cwd().openFile(io, try requestPath(directory, handle, &path_buffer), .{});
     defer file.close(io);
     const saved = try readCapturedIdentity(io, &file, handle);
-    const kind = std.meta.stringToEnum(MutationKind, saved.kind.slice()) orelse return error.InvalidRequestRecord;
-    if (!kind.recoversGenerated()) return error.InvalidRequestRecord;
+    _ = std.meta.stringToEnum(MutationKind, saved.kind.slice()) orelse return error.InvalidRequestRecord;
     return saved;
 }
 
@@ -2711,7 +2701,9 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
         std.mem.indexOf(u8, prefix, ",\"text\"") orelse
         std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
-        return error.InvalidRequestRecord;
+        // Stop/interruption records contain only bounded identities. There is
+        // no variable payload to exclude from their complete metadata object.
+        if (count > 0 and prefix[count - 1] == '}') count - 1 else return error.InvalidRequestRecord;
     var head: [header_bytes]u8 = undefined;
     if (kind_marker + 1 > head.len) return error.InvalidRequestRecord;
     @memcpy(head[0..kind_marker], prefix[0..kind_marker]);
@@ -2721,7 +2713,8 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
         kind: []const u8,
         store: []const u8,
         key: []const u8,
-        session: []const u8,
+        session: ?[]const u8 = null,
+        target: ?struct { session: []const u8 } = null,
     };
     const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
@@ -2729,7 +2722,8 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     var identity: CapturedIdentity = .{};
     try identity.store.set(parsed.value.store);
     try identity.key.set(parsed.value.key);
-    try identity.session.set(parsed.value.session);
+    const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
+    try identity.session.set(session);
     try identity.kind.set(parsed.value.kind);
     return identity;
 }
@@ -2800,32 +2794,33 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
 }
 
-fn captureSessionStop(io: std.Io, paths: *const platform.Paths, input: SessionStopInput) !CapturedRecord {
+fn writeSessionStopCapture(io: std.Io, paths: *const platform.Paths, input: SessionStopInput, location: @FieldType(CaptureTarget, "explicit")) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writeHeader(.session_stop);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write("}");
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, .session_stop);
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .session_stop);
 }
 
-fn captureModelInterruption(
+fn writeModelInterruptionCapture(
     io: std.Io,
     paths: *const platform.Paths,
     input: ModelInterruptionInput,
+    location: @FieldType(CaptureTarget, "explicit"),
 ) !CapturedRecord {
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
-    var capture = try Capture.open(io, input.record, &output_buffer);
+    var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
     try capture.writeHeader(.model_interruption);
     try capture.writeJsonString(paths.store.slice());
     try capture.write(",\"key\":");
-    try capture.writeJsonString(input.key);
+    try capture.writeJsonString(location.key);
     try capture.write(",\"target\":{\"session\":");
     try capture.writeJsonString(input.session);
     var ids: [96]u8 = undefined;
@@ -2834,7 +2829,7 @@ fn captureModelInterruption(
         input.operation_id,
     });
     try capture.write(suffix);
-    return finishCapture(io, &capture, paths.store.slice(), input.key, input.session, .model_interruption);
+    return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .model_interruption);
 }
 
 pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, target: CaptureTarget) !CapturedRecord {
@@ -3379,7 +3374,7 @@ fn readResultResponseSink(
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .result_text) return error.InvalidResponse;
-    try readResponseBody(requests, fd, head.content_length, sink);
+    try readResponseBody(requests, fd, head.content_length, sink, .withhold_final_window);
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
@@ -3396,25 +3391,34 @@ fn readReportResponse(
         return .{ .command = try readCommandBodyUntil(requests, fd, head, reply_buffer, .{}, null) };
     }
     if (head.kind != .command_json) return error.InvalidResponse;
-    try readResponseBody(requests, fd, head.content_length, sink);
+    try readResponseBody(requests, fd, head.content_length, sink, .stream);
     return .{ .report = .{ .bytes = head.content_length } };
 }
 
 // One delivery policy for answer/report windows. The socket caller and sink
 // keep custody through the last feed; completion has no retrospective stop.
-fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: anytype) !void {
+// Answers withhold their final window until every advertised byte and EOF
+// arrived, so a truncated answer never ends in complete-looking bytes.
+fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: anytype, delivery: enum { stream, withhold_final_window }) !void {
     const io = requests.io;
     var remaining = length;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
+    if (length == 0 and delivery == .withhold_final_window) try completeContentEOF(requests, fd, undefined, null);
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, buffer.len));
-        const count = try readRequest(requests, fd, buffer[0..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
-        if (count == 0) return error.TruncatedResponse;
+        var filled: usize = 0;
+        while (filled != wanted) {
+            const count = try readRequest(requests, fd, buffer[filled..wanted], ResponseTiming.transfer.deadline(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds, null, true));
+            if (count == 0) return error.TruncatedResponse;
+            filled += count;
+            if (delivery == .stream) break;
+        }
+        remaining -= filled;
+        if (remaining == 0 and delivery == .withhold_final_window) try completeContentEOF(requests, fd, undefined, null);
         if (@TypeOf(sink) == std.Io.File)
-            try sink.writeStreamingAll(io, buffer[0..count])
+            try sink.writeStreamingAll(io, buffer[0..filled])
         else
-            try sink.feed(buffer[0..count]);
-        remaining -= count;
+            try sink.feed(buffer[0..filled]);
     }
 }
 
@@ -3952,18 +3956,30 @@ test "retry and generated recovery select captured mutations by kind" {
     const stop_key = "00000000-0000-4000-8000-000000000001";
     var stop_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const stop_record = try requestPath(root, stop_key, &stop_path);
-    var stop = try captureSessionStop(io, &paths, .{ .store = root, .record = stop_record, .key = stop_key, .session = "s" });
+    _ = paths;
+    var stop = try captureSessionStop(io, .{ .store = root, .session = "s" }, .{ .explicit = .{ .record = stop_record, .key = stop_key } });
     stop.close(io);
+    var interruption = try captureModelInterruption(io, .{ .store = root, .session = "i/µ", .turn_id = 3, .operation_id = 5 }, .{ .generated = root });
+    const interruption_key = interruption.saved.key;
+    interruption.close(io);
     var message = try captureMessage(io, .{ .store = root, .session = "s", .text = "m", .text_path = "" }, .{ .generated = root });
     const message_key = message.saved.key;
     message.close(io);
     var message_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const message_record = try requestPath(root, message_key.slice(), &message_path);
 
-    // Controls are retried explicitly; generated recovery reopens only
-    // configure, message and permission-decision records.
-    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, stop_key));
-    try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, stop_key));
+    // Every captured mutation kind, including controls whose records hold only
+    // bounded identities, reopens through its generated handle.
+    var stop_recovered = try openCaptured(io, root, stop_key);
+    try std.testing.expect(stop_recovered.target == .session_stop);
+    stop_recovered.close(io);
+    const stop_saved = try inspectCaptured(io, root, stop_key);
+    try std.testing.expect(stop_saved.isKind(.session_stop));
+    try std.testing.expectEqualStrings("s", stop_saved.session.slice());
+    var interruption_recovered = try openCaptured(io, root, interruption_key.slice());
+    try std.testing.expectEqual(@as(u64, 5), interruption_recovered.target.model_interruption.operation);
+    interruption_recovered.close(io);
+    try std.testing.expectEqualStrings("i/µ", (try inspectCaptured(io, root, interruption_key.slice())).session.slice());
     var recovered = try openCaptured(io, root, message_key.slice());
     recovered.close(io);
     try std.testing.expect((try inspectCaptured(io, root, message_key.slice())).isKind(.message));
@@ -4221,8 +4237,9 @@ test "capture recovery closes rejected records and retains only its reader lifet
     Probe.closed = 0;
     for ([_][]const u8{
         "not json",
-        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\"}",
-        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
+        // Control records are recoverable, but never with another kind's payload.
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"x\",\"operation\":\"2\"}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
@@ -4754,12 +4771,10 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/stop-record",
         .{root_buffer[0..root_length]},
     );
-    var stop_capture = try captureSessionStop(std.testing.io, &paths, .{
+    var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = stop_path,
-        .key = &escaped_key,
         .session = &escaped_session,
-    });
+    }, .{ .record = stop_path, .key = &escaped_key });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -4774,14 +4789,12 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/interruption-record",
         .{root_buffer[0..root_length]},
     );
-    var interruption_capture = try captureModelInterruption(std.testing.io, &paths, .{
+    var interruption_capture = try writeModelInterruptionCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = interruption_path,
-        .key = &escaped_key,
         .session = &escaped_session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    });
+    }, .{ .record = interruption_path, .key = &escaped_key });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
@@ -4978,7 +4991,23 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
         error.TruncatedResponse,
         readResultResponse(std.testing.io, descriptors[0], destination, &buffer),
     );
-    try std.testing.expectEqual(@as(u64, 2), try destination.length(std.testing.io));
+    // The final window is withheld until every advertised byte arrives.
+    try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
+}
+
+test "result body publishes nothing unless EOF follows the advertised bytes" {
+    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 1\r\n\r\nX" }) |tail| {
+        const descriptors = try testPipe();
+        defer closeTestDescriptor(descriptors[0]);
+        try writeTestResponse(descriptors[1], "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" ++ tail);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const destination = try tmp.dir.createFile(std.testing.io, "answer", .{ .read = true });
+        defer destination.close(std.testing.io);
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.InvalidResponse, readResultResponse(std.testing.io, descriptors[0], destination, &buffer));
+        try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
+    }
 }
 
 test "keyed observation retains request acceptance independently of later work" {
@@ -5573,6 +5602,8 @@ test "transport cancellation retains synchronous sink loans and respects deliver
         const content_type = if (kind == .result) "text/plain; charset=utf-8" else "application/json";
         var response: [256]u8 = undefined;
         try writeAll(peer.socket.handle, try std.fmt.bufPrint(&response, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\na", .{ content_type, length }));
+        // An answer's final window is delivered only after its EOF.
+        if (kind == .result) try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(peer.socket.handle, std.c.SHUT.WR));
         const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
         while (!worker.sink.entered.load(.acquire) and std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until)
             try std.Io.sleep(io, .fromMilliseconds(1), .awake);

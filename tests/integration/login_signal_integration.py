@@ -86,7 +86,7 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
             witness.flush()
             environment.update(HOME=str(root), TMPDIR=str(root), LD_PRELOAD=str(library),
                                RUI_LOGIN_WITNESS_FD=str(witness.fileno()))
-            child = subprocess.run([str(binary), "login", "codex"], env=environment,
+            child = subprocess.run([str(binary), "auth", "login", "codex"], env=environment,
                                    capture_output=True, timeout=10, pass_fds=(witness.fileno(),),
                                    preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
             witness.seek(0)

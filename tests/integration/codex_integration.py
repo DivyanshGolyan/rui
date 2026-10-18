@@ -73,7 +73,7 @@ def proposal_with_private_reasoning(command):
 
 def start(store, endpoint, *extra):
     host, _ = start_ready_process(
-        [fixture.RUI, "serve", "--store", store, "--active-capacity", "2",
+        [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "2",
          "--test-codex-fixture-endpoint", endpoint, *extra],
         required_fields={"execution": "enabled", "curl": "8.22.0"},
         observations="managed" if "--test-phase-trace" in extra else None,
@@ -109,7 +109,7 @@ def run():
         instruction_file = state / "instructions.txt"
         instruction_file.write_text("Use the approved tool result.")
         configured = fixture.command(
-            "configure", "--store", store, "--record", state / "configure.json",
+            "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--session", "managed/session", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "model-a", "--tools", "bash",
             "--permission-mode", "ask", "--instructions", instruction_file,
@@ -147,7 +147,7 @@ def run():
         assert fixture.read_result(store, "message") == b"managed answer"
         assert proof.read_text() == "once\n"
         public_report = json.dumps(fixture.command(
-            "inspect-session", "--store", store, "--session", "managed/session", "--profile", "full",
+            "session", "inspect", "--store", store, "--session", "managed/session", "--profile", "full",
         ))
         assert "synthetic-private-reasoning" not in public_report
         assert ACCESS not in public_report
@@ -158,7 +158,7 @@ def run():
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])
-        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.")
+        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session="managed/session")
 
         fixture.stop_host(host)
         host = start(store, url)
@@ -198,7 +198,7 @@ def run():
         host = start(stop_store, url, "--test-phase-trace")
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
-            "configure", "--store", stop_store, "--record", state / "stop-config.json",
+            "session", "configure", "--store", stop_store, "--record", state / "stop-config.json",
             "--key", "stop-config", "--session", "managed/stop", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "model-a", "--tools", "none",
         )
@@ -208,7 +208,7 @@ def run():
             fixture.message(state, stop_store, "stop-message", "managed/stop", "do not launch")
             diagnostics.wait("preparation_completed", timeout=10)
             stopped = fixture.command(
-                "stop-session", "--store", stop_store, "--record", state / "stop.json",
+                "session", "stop", "--store", stop_store, "--record", state / "stop.json",
                 "--key", "stop", "--session", "managed/stop",
             )
             assert stopped["answer"]["status"] == "accepted"
@@ -224,7 +224,7 @@ def run():
         host = start(stop_store, url, "--test-phase-trace", "--test-before-launch-delay-ms", "1500")
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
-            "configure", "--store", stop_store, "--record", state / "handoff-config.json",
+            "session", "configure", "--store", stop_store, "--record", state / "handoff-config.json",
             "--key", "handoff-config", "--session", "managed/handoff", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "model-a", "--tools", "none",
         )
@@ -237,7 +237,7 @@ def run():
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
             assert not lock_available(lock), "authenticated handoff released its credential lease early"
         stopped = fixture.command(
-            "stop-session", "--store", stop_store, "--record", state / "handoff-stop.json",
+            "session", "stop", "--store", stop_store, "--record", state / "handoff-stop.json",
             "--key", "handoff-stop", "--session", "managed/handoff",
         )
         assert stopped["answer"]["status"] == "accepted"
@@ -253,7 +253,7 @@ def run():
                                       ("schema", "none", ["--output-schema", schema])):
             session = f"managed/{feature}"
             configured = fixture.command(
-                "configure", "--store", stop_store,
+                "session", "configure", "--store", stop_store,
                 "--record", state / f"{feature}-config.json", "--key", f"{feature}-config",
                 "--session", session, "--workspace", fixture.ROOT, "--provider", "codex",
                 "--model", "model-a", "--tools", tools, *extra,

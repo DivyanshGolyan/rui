@@ -21,7 +21,7 @@ pub const Prepared = struct {
             if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour, true);
             if (item.content.bytes > item_bytes) {
                 var buffer: [192]u8 = undefined;
-                try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
+                try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui session read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
                 try writeHex(sink, store);
                 try sink.feed(" --session-hex ");
                 try writeHex(sink, session);
@@ -139,7 +139,7 @@ test "historical export preserves opaque identities without terminal or shell in
     var sink: Sink = .{};
     try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, 0, false);
     // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
-    try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {
@@ -183,7 +183,7 @@ test "history body limit preserves contextual tool outcomes" {
                 try std.testing.expect(std.mem.endsWith(u8, output, body ++ "\n"));
                 try std.testing.expect(std.mem.indexOf(u8, output, "Historical item omitted") == null);
             } else {
-                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui read-conversation --store-hex 73746f7265 --session-hex 73657373696f6e --position 7 --ordinal 2\n", output[case.heading.len..]);
+                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 73746f7265 --session-hex 73657373696f6e --position 7 --ordinal 2\n", output[case.heading.len..]);
             }
         }
     }

@@ -46,7 +46,7 @@ trap 'exit 143' TERM
 start_host() {
     : >"$ready"
     : >"$server_log"
-    "$rui" serve --store "$store" "$@" >"$ready" 2>"$server_log" &
+    "$rui" host serve --store "$store" "$@" >"$ready" 2>"$server_log" &
     host_pid=$!
     attempts=0
     while ! grep -q '^ready ' "$ready"; do
@@ -96,6 +96,18 @@ contains() {
     esac
 }
 
+# A saved rejection or conflict is delivered on stdout but exits 1.
+not_accepted() {
+    status=0
+    reply=$("$@") || status=$?
+    if [ "$status" -ne 1 ]; then
+        echo "expected a saved non-acceptance with exit 1, got $status: $*" >&2
+        printf '%s\n' "$reply" >&2
+        return 1
+    fi
+    printf '%s' "$reply"
+}
+
 require_test() {
     description=$1
     shift
@@ -115,7 +127,7 @@ python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
 import json, pathlib, subprocess, sys, time
 binary, store, records, workspace = sys.argv[1:]
 record = pathlib.Path(records) / 'capture-recovery.json'
-args = [binary, 'configure', '--store', store, '--record', str(record),
+args = [binary, 'session', 'configure', '--store', store, '--record', str(record),
         '--key', 'capture-recovery', '--session', 'direct/capture-recovery',
         '--workspace', workspace, '--provider', 'codex', '--model', 'model-a', '--instructions', '-']
 writer = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -148,7 +160,7 @@ assert record.with_name('.' + record.name + '.capture.lock').exists()
 PYCAPTURE
 
 # The OS-held lock rejects a competing owner without relying on PID/socket state.
-if "$rui" serve --store "$store" >"$state/competing.out" 2>"$state/competing.err"; then
+if "$rui" host serve --store "$store" >"$state/competing.out" 2>"$state/competing.err"; then
     echo "competing Host acquired the Store" >&2
     exit 1
 fi
@@ -158,17 +170,17 @@ contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
 # second copy of the complete ReleaseSafe fault matrix. Keep `full` opt-in.
 if [ "$mode" = artifact-smoke ]; then
     printf 'original message\n' >"$state/message.txt"
-    if "$rui" message --store "$store" --record "$records/smoke-message.json" --key smoke-message --session direct/capture-recovery --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+    if "$rui" session send --store "$store" --record "$records/smoke-message.json" --key smoke-message --session direct/capture-recovery --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
         echo "lost message reply unexpectedly completed" >&2
         exit 1
     fi
     printf 'replacement input\n' >"$state/message.txt"
     stop_host
     start_host
-    replayed=$($rui retry --store "$store" --record "$records/capture-recovery.json" --kind configure)
+    replayed=$($rui request recover --store "$store" --record "$records/capture-recovery.json" --kind configure)
     contains "$replayed" '"status":"accepted"'
     contains "$replayed" '"replayed":true'
-    replayed=$($rui retry --store "$store" --record "$records/smoke-message.json" --kind message)
+    replayed=$($rui request recover --store "$store" --record "$records/smoke-message.json" --kind message)
     python3 - "$replayed" <<'PYSMOKE'
 import hashlib, json, sys
 reply = json.loads(sys.argv[1])
@@ -182,7 +194,7 @@ digest = hashlib.sha256(len(domain).to_bytes(8, 'big') + domain + payload).hexdi
 assert reply['input']['bytes'] == str(len(payload)), reply
 assert reply['input']['sha256'] == digest, reply
 PYSMOKE
-    inspected=$($rui inspect-session --store "$store" --session direct/capture-recovery)
+    inspected=$($rui session inspect --store "$store" --session direct/capture-recovery)
     contains "$inspected" '"pending_messages":"1"'
     stop_host
     echo 'admission artifact smoke passed: capture errors, Store lease, lost reply and restart replay'
@@ -194,7 +206,7 @@ fi
 drain_store="$state/drain-store"
 drain_ready="$state/drain-ready"
 drain_error="$state/drain-error"
-"$rui" serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
+"$rui" host serve --store "$drain_store" --fault shutdown-after-accept >"$drain_ready" 2>"$drain_error" &
 extra_pid=$!
 attempts=0
 while ! grep -q '^ready ' "$drain_ready"; do
@@ -342,68 +354,68 @@ finally:
     dispose_all(*(client.close for client in classification + ordinary), lambda: stop_process(host))
 PY
 start_host
-partial=$($rui observe-command --store "$store" --key partial-key)
+partial=$($rui request inspect --store "$store" --key partial-key)
 contains "$partial" '"status":"absent"'
 
 # Messages to unknown Sessions are saved rejections and create no Session.
 printf 'hello' >"$state/message.txt"
-if "$rui" message --store "$store" --record "$records/unknown-message.json" --key msg-unknown --session direct/unknown --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session send --store "$store" --record "$records/unknown-message.json" --key msg-unknown --session direct/unknown --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost unknown-Session rejection unexpectedly produced a complete reply" >&2
     exit 1
 fi
-unknown_session=$($rui inspect-session --store "$store" --session direct/unknown)
+unknown_session=$($rui session inspect --store "$store" --session direct/unknown)
 contains "$unknown_session" '"session":null'
-unknown_created=$($rui configure --store "$store" --record "$records/unknown-created.json" --key unknown-created --session direct/unknown --workspace "$root" --provider codex --model model-a)
+unknown_created=$($rui session configure --store "$store" --record "$records/unknown-created.json" --key unknown-created --session direct/unknown --workspace "$root" --provider codex --model model-a)
 contains "$unknown_created" '"status":"accepted"'
 stop_host
 start_host
-unknown=$($rui retry --store "$store" --record "$records/unknown-message.json" --kind message)
+unknown=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-message.json" --kind message)
 contains "$unknown" '"status":"rejected"'
 contains "$unknown" '"replayed":true'
 contains "$unknown" '"code":"unknown_session"'
 contains "$unknown" '"bytes":"5"'
-unknown_after_creation=$($rui inspect-session --store "$store" --session direct/unknown)
+unknown_after_creation=$($rui session inspect --store "$store" --session direct/unknown)
 contains "$unknown_after_creation" '"pending_messages":"0"'
 
 # A lost rejection remains the original answer even after another key creates the Session.
-if "$rui" configure --store "$store" --record "$records/incomplete.json" --key incomplete-key --session direct/rejected --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session configure --store "$store" --record "$records/incomplete.json" --key incomplete-key --session direct/rejected --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost rejection unexpectedly produced a complete reply" >&2
     exit 1
 fi
-created=$($rui configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --session direct/rejected --workspace "$root" --provider codex --model model-a)
+created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --session direct/rejected --workspace "$root" --provider codex --model model-a)
 contains "$created" '"status":"accepted"'
-defaults=$($rui inspect-session --store "$store" --session direct/rejected)
+defaults=$($rui session inspect --store "$store" --session direct/rejected)
 contains "$defaults" '"tools":["bash"]'
 contains "$defaults" '"permission_mode":"bypass"'
 contains "$defaults" '"instructions":{"bytes":"0"'
 contains "$defaults" '"output_schema":null'
-rejected=$($rui retry --store "$store" --record "$records/incomplete.json" --kind configure)
+rejected=$(not_accepted "$rui" request recover --store "$store" --record "$records/incomplete.json" --kind configure)
 contains "$rejected" '"status":"rejected"'
 contains "$rejected" '"replayed":true'
 contains "$rejected" '"code":"incomplete_initial_configuration"'
 
 # Store tests own all eight initial-field combinations. Keep a partially filled
 # wire request and closed-provider rejection with real request-scratch cleanup.
-missing_provider=$($rui configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model model-a)
+missing_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model model-a)
 contains "$missing_provider" '"code":"incomplete_initial_configuration"'
 printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
-unknown_provider=$($rui configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model model-a --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
+unknown_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model model-a --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
 contains "$unknown_provider" '"code":"unsupported_provider"'
-contains "$($rui inspect-session --store "$store" --session direct/unknown-provider)" '"session":null'
+contains "$($rui session inspect --store "$store" --session direct/unknown-provider)" '"session":null'
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
 # Equal and omitted binding fields preserve the initial binding. An unequal
 # model rejects the entire mixed update before work and across Host restart.
-binding=$($rui configure --store "$store" --record "$records/binding.json" --key binding --session direct/binding --workspace "$root" --provider codex --model model-a)
+binding=$($rui session configure --store "$store" --record "$records/binding.json" --key binding --session direct/binding --workspace "$root" --provider codex --model model-a)
 contains "$binding" '"revision":"1"'
-equal_binding=$($rui configure --store "$store" --record "$records/equal-binding.json" --key equal-binding --session direct/binding --provider codex --model model-a --tools none)
+equal_binding=$($rui session configure --store "$store" --record "$records/equal-binding.json" --key equal-binding --session direct/binding --provider codex --model model-a --tools none)
 contains "$equal_binding" '"revision":"2"'
-omitted_binding=$($rui configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session direct/binding --permission-mode bypass)
+omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session direct/binding --permission-mode bypass)
 contains "$omitted_binding" '"revision":"3"'
-mixed_model=$($rui configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session direct/binding --model model-b --tools bash --permission-mode ask)
+mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session direct/binding --model model-b --tools bash --permission-mode ask)
 contains "$mixed_model" '"code":"model_is_immutable"'
-binding_current=$($rui inspect-session --store "$store" --session direct/binding --profile current)
+binding_current=$($rui session inspect --store "$store" --session direct/binding --profile current)
 contains "$binding_current" '"provider":"codex"'
 contains "$binding_current" '"model":"model-a"'
 contains "$binding_current" '"revision":"3"'
@@ -411,30 +423,30 @@ contains "$binding_current" '"tools":[]'
 contains "$binding_current" '"permission_mode":"bypass"'
 stop_host
 start_host
-unknown_replay=$($rui retry --store "$store" --record "$records/unknown-provider.json" --kind configure)
+unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
 contains "$unknown_replay" '"code":"unsupported_provider"'
 contains "$unknown_replay" '"replayed":true'
-binding_full=$($rui inspect-session --store "$store" --session direct/binding --profile full)
+binding_full=$($rui session inspect --store "$store" --session direct/binding --profile full)
 contains "$binding_full" '"provider":"codex"'
 contains "$binding_full" '"model":"model-a"'
 contains "$binding_full" '"revision":"3"'
 printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==3; assert all(r["provider"]=="codex" and r["model"]=="model-a" for r in rows)'
-restarted_model=$($rui configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session direct/binding --model model-b --tools bash)
+restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session direct/binding --model model-b --tools bash)
 contains "$restarted_model" '"code":"model_is_immutable"'
-binding_rechecked=$($rui inspect-session --store "$store" --session direct/binding --profile current)
+binding_rechecked=$($rui session inspect --store "$store" --session direct/binding --profile current)
 contains "$binding_rechecked" '"revision":"3"'
 contains "$binding_rechecked" '"tools":[]'
 
 # Lose an accepted reply, change current settings, and kill both processes.
 printf 'initial instructions\n' >"$state/instructions.txt"
 printf '{"type":"object"}\n' >"$state/schema.json"
-if "$rui" configure --store "$store" --record "$records/first.json" --key first-key --session direct/main --workspace "$root" --provider codex --model model-a --instructions "$state/instructions.txt" --output-schema "$state/schema.json" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session configure --store "$store" --record "$records/first.json" --key first-key --session direct/main --workspace "$root" --provider codex --model model-a --instructions "$state/instructions.txt" --output-schema "$state/schema.json" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost acceptance unexpectedly produced a complete reply" >&2
     exit 1
 fi
-updated=$($rui configure --store "$store" --record "$records/update.json" --key update-key --session direct/main --tools none --permission-mode bypass)
+updated=$($rui session configure --store "$store" --record "$records/update.json" --key update-key --session direct/main --tools none --permission-mode bypass)
 contains "$updated" '"revision":"2"'
-preserved=$($rui inspect-session --store "$store" --session direct/main)
+preserved=$($rui session inspect --store "$store" --session direct/main)
 contains "$preserved" '"bytes":"21"'
 case "$preserved" in
     *'"output_schema":{"bytes":'*) ;;
@@ -444,16 +456,16 @@ esac
 # change the request that is replayed.
 printf 'mutated after durable capture\n' >"$state/instructions.txt"
 : >"$state/empty.txt"
-cleared=$($rui configure --store "$store" --record "$records/clear.json" --key clear-key --session direct/main --instructions "$state/empty.txt" --text-output)
+cleared=$($rui session configure --store "$store" --record "$records/clear.json" --key clear-key --session direct/main --instructions "$state/empty.txt" --text-output)
 contains "$cleared" '"revision":"3"'
 stop_host
 start_host
 
-replayed=$($rui retry --store "$store" --record "$records/first.json" --kind configure)
+replayed=$($rui request recover --store "$store" --record "$records/first.json" --kind configure)
 contains "$replayed" '"status":"accepted"'
 contains "$replayed" '"replayed":true'
 contains "$replayed" '"revision":"1"'
-current=$($rui inspect-session --store "$store" --session direct/main)
+current=$($rui session inspect --store "$store" --session direct/main)
 contains "$current" '"provider":"codex"'
 contains "$current" '"model":"model-a"'
 contains "$current" '"revision":"3"'
@@ -463,24 +475,24 @@ contains "$current" '"instructions":{"bytes":"0"'
 contains "$current" '"output_schema":null'
 
 # The same Store-wide key conflicts across changed inputs, targets, and kinds.
-changed=$($rui configure --store "$store" --record "$records/changed.json" --key first-key --session direct/main --model model-c)
+changed=$(not_accepted "$rui" session configure --store "$store" --record "$records/changed.json" --key first-key --session direct/main --model model-c)
 contains "$changed" '"status":"conflict"'
-retargeted=$($rui configure --store "$store" --record "$records/retargeted.json" --key first-key --session direct/other --workspace "$root" --provider codex --model model-a)
+retargeted=$(not_accepted "$rui" session configure --store "$store" --record "$records/retargeted.json" --key first-key --session direct/other --workspace "$root" --provider codex --model model-a)
 contains "$retargeted" '"status":"conflict"'
-changed_kind=$($rui message --store "$store" --record "$records/changed-kind.json" --key first-key --session direct/main --text "$state/message.txt")
+changed_kind=$(not_accepted "$rui" session send --store "$store" --record "$records/changed-kind.json" --key first-key --session direct/main --text "$state/message.txt")
 contains "$changed_kind" '"status":"conflict"'
 
 # Sealed-but-unadmitted input has no saved answer; its captured record can be
 # retried by a fresh client after Host restart and then admits once.
-if "$rui" configure --store "$store" --record "$records/before.json" --key before-key --session direct/before --workspace "$root" --provider codex --model model-a --test-drop-reply before-admission >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session configure --store "$store" --record "$records/before.json" --key before-key --session direct/before --workspace "$root" --provider codex --model model-a --test-drop-reply before-admission >"$state/drop.out" 2>"$state/drop.err"; then
     echo "pre-admission disconnect unexpectedly produced a complete reply" >&2
     exit 1
 fi
-before_observation=$($rui observe-command --store "$store" --key before-key)
+before_observation=$($rui request inspect --store "$store" --key before-key)
 contains "$before_observation" '"status":"absent"'
 stop_host
 start_host
-before_retry=$($rui retry --store "$store" --record "$records/before.json" --kind configure)
+before_retry=$($rui request recover --store "$store" --record "$records/before.json" --kind configure)
 contains "$before_retry" '"status":"accepted"'
 contains "$before_retry" '"replayed":false'
 
@@ -512,19 +524,19 @@ client.close()
 PY
 stop_host
 start_host
-partial_message=$($rui observe-command --store "$store" --key partial-message-key)
+partial_message=$($rui request inspect --store "$store" --key partial-message-key)
 contains "$partial_message" '"status":"absent"'
-partial_session=$($rui inspect-session --store "$store" --session direct/main)
+partial_session=$($rui session inspect --store "$store" --session direct/main)
 contains "$partial_session" '"pending_messages":"0"'
 
 # Invalid schemas are definite saved rejections. A known-Session message keeps
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$($rui configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
+invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
 contains "$invalid_schema" '"code":"invalid_output_schema"'
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
-if "$rui" message --store "$store" --record "$records/known-message.json" --key msg-known --session direct/main --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session send --store "$store" --record "$records/known-message.json" --key msg-known --session direct/main --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost message acceptance unexpectedly produced a complete reply" >&2
     exit 1
 fi
@@ -532,27 +544,27 @@ printf 'mutated after caller capture' >"$state/message-source.txt"
 mv "$state/message-source.txt" "$state/message-source-moved.txt"
 stop_host
 start_host
-known_message=$($rui retry --store "$store" --record "$records/known-message.json" --kind message)
+known_message=$($rui request recover --store "$store" --record "$records/known-message.json" --kind message)
 contains "$known_message" '"status":"accepted"'
 contains "$known_message" '"replayed":true'
 contains "$known_message" '"admission":"1"'
 contains "$known_message" '"status":"queued"'
-known_observation=$($rui observe-command --store "$store" --key msg-known)
+known_observation=$($rui request inspect --store "$store" --key msg-known)
 contains "$known_observation" '"kind":"message"'
 contains "$known_observation" '"status":"queued"'
 contains "$known_observation" '"type":"text"'
-known_session=$($rui inspect-session --store "$store" --session direct/main)
+known_session=$($rui session inspect --store "$store" --session direct/main)
 contains "$known_session" '"pending_messages":"1"'
 
 # Complete stdin is captured into the durable caller record before transport;
 # the multi-window pipe then disappears, and a restart retry retains its exact
 # independently calculated length/digest and second position.
-stdin_message=$(python3 -c 'import sys; sys.stdout.write("stdin🙂line\n" * 1000)' | "$rui" message --store "$store" --record "$records/stdin-message.json" --key msg-stdin --session direct/main --text -)
+stdin_message=$(python3 -c 'import sys; sys.stdout.write("stdin🙂line\n" * 1000)' | "$rui" session send --store "$store" --record "$records/stdin-message.json" --key msg-stdin --session direct/main --text -)
 contains "$stdin_message" '"status":"accepted"'
 contains "$stdin_message" '"admission":"2"'
 stop_host
 start_host
-stdin_replay=$($rui retry --store "$store" --record "$records/stdin-message.json" --kind message)
+stdin_replay=$($rui request recover --store "$store" --record "$records/stdin-message.json" --kind message)
 contains "$stdin_replay" '"replayed":true'
 contains "$stdin_replay" '"admission":"2"'
 python3 - "$stdin_replay" <<'PY'
@@ -566,18 +578,18 @@ if answer["input"]["bytes"] != str(len(payload)):
 if answer["input"]["sha256"] != digest:
     raise SystemExit("stdin capture digest differs from independent oracle")
 PY
-ordered_session=$($rui inspect-session --store "$store" --session direct/main)
+ordered_session=$($rui session inspect --store "$store" --session direct/main)
 contains "$ordered_session" '"pending_messages":"2"'
 
 # The accepted message binding conflicts across target, canonical input and
 # kind without replacing or duplicating the original admission.
-retargeted_message=$($rui message --store "$store" --record "$records/message-retargeted.json" --key msg-known --session direct/rejected --text "$state/message.txt")
+retargeted_message=$(not_accepted "$rui" session send --store "$store" --record "$records/message-retargeted.json" --key msg-known --session direct/rejected --text "$state/message.txt")
 contains "$retargeted_message" '"status":"conflict"'
-changed_message=$($rui message --store "$store" --record "$records/message-changed.json" --key msg-known --session direct/main --text "$state/message.txt")
+changed_message=$(not_accepted "$rui" session send --store "$store" --record "$records/message-changed.json" --key msg-known --session direct/main --text "$state/message.txt")
 contains "$changed_message" '"status":"conflict"'
-message_changed_kind=$($rui configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model model-a)
+message_changed_kind=$(not_accepted "$rui" session configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model model-a)
 contains "$message_changed_kind" '"status":"conflict"'
-still_two=$($rui inspect-session --store "$store" --session direct/main)
+still_two=$($rui session inspect --store "$store" --session direct/main)
 contains "$still_two" '"pending_messages":"2"'
 
 # Closing the connection after complete ingress and sealing cannot revoke an
@@ -587,13 +599,13 @@ python3 - "$state/during-admission-message.txt" <<'PY'
 import pathlib, sys
 pathlib.Path(sys.argv[1]).write_bytes(b"d" * (512 * 1024))
 PY
-if "$rui" message --store "$store" --record "$records/during-admission-message.json" --key msg-disconnected-during-admission --session direct/main --text "$state/during-admission-message.txt" --test-drop-reply during-admission >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session send --store "$store" --record "$records/during-admission-message.json" --key msg-disconnected-during-admission --session direct/main --text "$state/during-admission-message.txt" --test-drop-reply during-admission >"$state/drop.out" 2>"$state/drop.err"; then
     echo "during-admission disconnect unexpectedly produced a complete reply" >&2
     exit 1
 fi
 attempts=0
 while :; do
-    during_observation=$($rui observe-command --store "$store" --key msg-disconnected-during-admission)
+    during_observation=$($rui request inspect --store "$store" --key msg-disconnected-during-admission)
     case "$during_observation" in
         *'"status":"accepted"'*) break ;;
     esac
@@ -614,15 +626,15 @@ for fault in content-acquire content-write content-seal; do
     record="$records/$key.json"
     stop_host
     start_host --fault "$fault"
-    if "$rui" message --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/message.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+    if "$rui" session send --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/message.txt" >"$state/fault.out" 2>"$state/fault.err"; then
         echo "injected $fault unexpectedly admitted a message" >&2
         exit 1
     fi
     stop_host
     start_host
-    absent=$($rui observe-command --store "$store" --key "$key")
+    absent=$($rui request inspect --store "$store" --key "$key")
     contains "$absent" '"status":"absent"'
-    recovered=$($rui retry --store "$store" --record "$record" --kind message)
+    recovered=$($rui request recover --store "$store" --record "$record" --kind message)
     contains "$recovered" '"status":"accepted"'
     contains "$recovered" '"replayed":false'
 done
@@ -636,16 +648,16 @@ for fault in content-read content-import before-commit; do
     printf '%s unique canonical import bytes\n' "$key" >"$state/$key.txt"
     stop_host
     start_host --fault "$fault"
-    if "$rui" message --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/$key.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+    if "$rui" session send --store "$store" --record "$record" --key "$key" --session direct/main --text "$state/$key.txt" >"$state/fault.out" 2>"$state/fault.err"; then
         echo "injected $fault unexpectedly admitted a message" >&2
         exit 1
     fi
     contains "$(cat "$state/fault.out")" '"code":"canonical_store_failure"'
     wait_host_failure
     start_host
-    absent=$($rui observe-command --store "$store" --key "$key")
+    absent=$($rui request inspect --store "$store" --key "$key")
     contains "$absent" '"status":"absent"'
-    recovered=$($rui retry --store "$store" --record "$record" --kind message)
+    recovered=$($rui request recover --store "$store" --record "$record" --kind message)
     contains "$recovered" '"status":"accepted"'
     contains "$recovered" '"replayed":false'
 done
@@ -653,14 +665,14 @@ done
 # A failed commit is not a saved rejection or acceptance and fences the Host.
 stop_host
 start_host --fault before-commit
-if "$rui" configure --store "$store" --record "$records/commit-fault.json" --key commit-fault --session direct/commit-fault --workspace "$root" --provider codex --model model-a >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/commit-fault.json" --key commit-fault --session direct/commit-fault --workspace "$root" --provider codex --model model-a >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected commit failure returned success" >&2
     exit 1
 fi
 contains "$(cat "$state/fault.out")" '"code":"canonical_store_failure"'
 wait_host_failure
 start_host
-commit_retry=$($rui retry --store "$store" --record "$records/commit-fault.json" --kind configure)
+commit_retry=$($rui request recover --store "$store" --record "$records/commit-fault.json" --kind configure)
 contains "$commit_retry" '"status":"accepted"'
 contains "$commit_retry" '"replayed":false'
 
@@ -668,28 +680,28 @@ contains "$commit_retry" '"replayed":false'
 stop_host
 start_host --fault content-read
 printf 'faulted content' >"$state/fault-content.txt"
-if "$rui" configure --store "$store" --record "$records/read-fault.json" --key read-fault --session direct/read-fault --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/read-fault.json" --key read-fault --session direct/read-fault --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected content read failure returned success" >&2
     exit 1
 fi
 wait_host_failure
 start_host
-read_retry=$($rui retry --store "$store" --record "$records/read-fault.json" --kind configure)
+read_retry=$($rui request recover --store "$store" --record "$records/read-fault.json" --kind configure)
 contains "$read_retry" '"status":"accepted"'
 contains "$read_retry" '"replayed":false'
 
 # Receive-side content-write failure never reaches admission.
 stop_host
 start_host --fault content-write
-if "$rui" configure --store "$store" --record "$records/write-fault.json" --key write-fault --session direct/write-fault --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/write-fault.json" --key write-fault --session direct/write-fault --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected ingress write failure returned success" >&2
     exit 1
 fi
-write_observation=$($rui observe-command --store "$store" --key write-fault)
+write_observation=$($rui request inspect --store "$store" --key write-fault)
 contains "$write_observation" '"status":"absent"'
 stop_host
 start_host
-write_retry=$($rui retry --store "$store" --record "$records/write-fault.json" --kind configure)
+write_retry=$($rui request recover --store "$store" --record "$records/write-fault.json" --kind configure)
 contains "$write_retry" '"status":"accepted"'
 
 # Crash the first request while its streamed instructions still have a name.
@@ -721,7 +733,7 @@ require_test 'first streamed request scratch survives Host crash' -f "$store/scr
 printf unrelated >"$store/scratch/request-00-1.tmp"
 printf diagnostic >"$store/scratch/diagnostic.log"
 printf unrelated >"$store/scratch/unrelated.data"
-if "$rui" serve --store "$store" --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
+if "$rui" host serve --store "$store" --fault startup-cleanup >"$state/startup.out" 2>"$state/startup.err"; then
     echo "Host admitted after failed startup cleanup" >&2
     exit 1
 fi
@@ -732,7 +744,7 @@ require_test 'restart preserves noncanonical request lookalike' -f "$store/scrat
 require_test 'restart preserves diagnostic file' -f "$store/scratch/diagnostic.log"
 require_test 'restart preserves unrelated file' -f "$store/scratch/unrelated.data"
 require_test 'restart preserves canonical Store' -f "$store/rui.sqlite3"
-recovered=$($rui configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt")
+recovered=$($rui session configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --provider codex --model model-a --instructions "$state/fault-content.txt")
 contains "$recovered" '"status":"accepted"'
 
 # A canonical owned name with the wrong filesystem type is neither deleted nor
@@ -740,7 +752,7 @@ contains "$recovered" '"status":"accepted"'
 # can acquire it after the operator-visible obstruction is removed.
 stop_host
 mkdir "$store/scratch/request-1-1.tmp"
-if "$rui" serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err"; then
+if "$rui" host serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err"; then
     echo "Host admitted an owned temporary name with the wrong type" >&2
     exit 1
 fi
@@ -756,10 +768,10 @@ require_test 'restart after wrong-type repair preserves canonical Store' -f "$st
 # Exact public identity bounds are independent and count decoded UTF-8 bytes.
 key128=$(python3 -c 'print("k" * 128)')
 session128=$(python3 -c 'print("s" * 128)')
-bounded=$($rui configure --store "$store" --record "$records/bounded.json" --key "$key128" --session "$session128" --workspace "$root" --provider codex --model model-a)
+bounded=$($rui session configure --store "$store" --record "$records/bounded.json" --key "$key128" --session "$session128" --workspace "$root" --provider codex --model model-a)
 contains "$bounded" '"status":"accepted"'
 key129=$(python3 -c 'print("k" * 129)')
-if "$rui" configure --store "$store" --record "$records/too-long.json" --key "$key129" --session direct/too-long --workspace "$root" --provider codex --model model-a >"$state/bounds.out" 2>"$state/bounds.err"; then
+if "$rui" session configure --store "$store" --record "$records/too-long.json" --key "$key129" --session direct/too-long --workspace "$root" --provider codex --model model-a >"$state/bounds.out" 2>"$state/bounds.err"; then
     echo "129-byte key was admitted" >&2
     exit 1
 fi
@@ -769,19 +781,19 @@ require_test 'oversized Configure key creates no request record' ! -e "$records/
 # Unicode and transport escaping without normalization.
 message_key128=$(python3 -c 'print("é" * 64, end="")')
 printf 'bounded message with controls\t"quote"\\slash\n' >"$state/bounded-message.txt"
-bounded_message=$($rui message --store "$store" --record "$records/bounded-message.json" --key "$message_key128" --session "$session128" --text "$state/bounded-message.txt")
+bounded_message=$($rui session send --store "$store" --record "$records/bounded-message.json" --key "$message_key128" --session "$session128" --text "$state/bounded-message.txt")
 contains "$bounded_message" '"status":"accepted"'
 message_key129=$(python3 -c 'print("é" * 64 + "x", end="")')
-if "$rui" message --store "$store" --record "$records/message-too-long.json" --key "$message_key129" --session "$session128" --text "$state/message.txt" >"$state/bounds.out" 2>"$state/bounds.err"; then
+if "$rui" session send --store "$store" --record "$records/message-too-long.json" --key "$message_key129" --session "$session128" --text "$state/message.txt" >"$state/bounds.out" 2>"$state/bounds.err"; then
     echo "129-byte message key was admitted" >&2
     exit 1
 fi
 require_test 'oversized Message key creates no request record' ! -e "$records/message-too-long.json"
 
 escaped_key=$(python3 -c 'print("".join(map(chr, (34, 92, 10, 9))) * 32, end="")')
-escaped_message=$($rui message --store "$store" --record "$records/escaped-message.json" --key "$escaped_key" --session "$session128" --text "$state/message.txt")
+escaped_message=$($rui session send --store "$store" --record "$records/escaped-message.json" --key "$escaped_key" --session "$session128" --text "$state/message.txt")
 contains "$escaped_message" '"status":"accepted"'
-escaped_observation=$($rui observe-command --store "$store" --key "$escaped_key")
+escaped_observation=$($rui request inspect --store "$store" --key "$escaped_key")
 python3 - "$escaped_key" "$escaped_observation" <<'PY'
 import json, sys
 expected, encoded = sys.argv[1:]
@@ -794,8 +806,8 @@ PY
 
 nfc_key=$(python3 -c 'print("é", end="")')
 nfd_key=$(python3 -c 'print("e\u0301", end="")')
-nfc_message=$($rui message --store "$store" --record "$records/nfc-message.json" --key "$nfc_key" --session "$session128" --text "$state/message.txt")
-nfd_message=$($rui message --store "$store" --record "$records/nfd-message.json" --key "$nfd_key" --session "$session128" --text "$state/message.txt")
+nfc_message=$($rui session send --store "$store" --record "$records/nfc-message.json" --key "$nfc_key" --session "$session128" --text "$state/message.txt")
+nfd_message=$($rui session send --store "$store" --record "$records/nfd-message.json" --key "$nfd_key" --session "$session128" --text "$state/message.txt")
 contains "$nfc_message" '"status":"accepted"'
 contains "$nfd_message" '"status":"accepted"'
 
@@ -813,7 +825,7 @@ database.commit()
 database.close()
 PY
 start_host
-if "$rui" inspect-session --store "$store" --session direct/main >"$state/corrupt-read.out" 2>"$state/corrupt-read.err"; then
+if "$rui" session inspect --store "$store" --session direct/main >"$state/corrupt-read.out" 2>"$state/corrupt-read.err"; then
     echo "canonical corruption produced a successful observation" >&2
     exit 1
 fi
@@ -840,7 +852,7 @@ db.close()
 PY
 
 # Clients do not auto-start the Host or infer absence as a saved answer.
-if "$rui" observe-command --store "$store" --key first-key >"$state/no-host.out" 2>"$state/no-host.err"; then
+if "$rui" request inspect --store "$store" --key first-key >"$state/no-host.out" 2>"$state/no-host.err"; then
     echo "client auto-started an absent Host" >&2
     exit 1
 fi
@@ -849,7 +861,7 @@ fi
 # before its stale socket is reclaimed.
 insecure_store="$state/insecure-store"
 mkdir -m 755 "$insecure_store"
-if "$rui" serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err"; then
+if "$rui" host serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err"; then
     echo "Host accepted an insecure Store directory" >&2
     exit 1
 fi
@@ -858,7 +870,7 @@ contains "$(cat "$state/insecure.err")" "InsecureDirectoryPermissions"
 wire_store="$state/wire-store"
 wire_ready="$state/wire-ready"
 wire_error="$state/wire-error"
-"$rui" serve --store "$wire_store" >"$wire_ready" 2>"$wire_error" &
+"$rui" host serve --store "$wire_store" >"$wire_ready" 2>"$wire_error" &
 extra_pid=$!
 attempts=0
 while ! grep -q '^ready ' "$wire_ready"; do
@@ -885,7 +897,7 @@ database.execute("UPDATE store_meta SET value='future' WHERE key='wire_version'"
 database.commit()
 database.close()
 PY
-if "$rui" serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err"; then
+if "$rui" host serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err"; then
     echo "Host accepted an incompatible wire version" >&2
     exit 1
 fi

@@ -774,14 +774,14 @@ def stalled_capture(root, endpoint, after_progress=False):
         assert (int(gate_event["written_bytes"]) >= 10_000) == after_progress, gate_event
         processing = dispatch.observe(store, "stalled-message-0")["processing"]
         reply = dispatch.command(
-            "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
+            "session", "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
             "--key", "stalled-interrupt", "--session", "direct/stalled-0",
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
         diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15,
                          turn=processing["turn"], operation=processing["operation"], attempt=processing["attempt"])
-        held = dispatch.command("inspect-session", "--store", store,
+        held = dispatch.command("session", "inspect", "--store", store,
                                 "--session", "direct/stalled-0")["execution"]
         assert int(held["custody_occupied"]) > 0, held
         assert dispatch.observe(store, "stalled-message-1").get("result") is None
@@ -804,7 +804,7 @@ def stalled_capture(root, endpoint, after_progress=False):
                 assert result["status"] == "completed", result
                 assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"stalled-{index}"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/stalled-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -863,7 +863,7 @@ def paused_capture_inactivity(root, endpoint):
             assert result["status"] == "completed", result
             assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"paused-{index}"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/paused-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -933,7 +933,7 @@ def capture_failure_on_resume(root, endpoint):
         assert later["status"] == "completed", later
         assert dispatch.read_result(store, "resume-after-message", deadline=result_deadline) == endpoint.answers["resume-after"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/resume-0", timeout=remaining)["execution"],
             min(population_deadline, result_deadline),
         )
@@ -1041,7 +1041,7 @@ def isolated_bad_header(root, endpoint):
         assert len(endpoint.streams) == 2
         assert len(endpoint.connections) == 1
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/sibling-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -1065,7 +1065,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         if mode == "cancel":
             processing = dispatch.observe(store, "cancel-target-message")["processing"]
             reply = dispatch.command(
-                "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
+                "session", "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
                 "--key", "cancel-interrupt", "--session", "direct/target",
                 "--turn", processing["turn"], "--operation", processing["operation"],
             )
@@ -1092,7 +1092,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         assert len(endpoint.connections) == 1 and len(endpoint.streams) == 2
         assert {text for _, _, text, _ in endpoint.streams} == {"isolation-target", "isolation-sibling"}
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/target", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -1140,7 +1140,7 @@ def connection_failure(root, endpoint):
         assert len(endpoint.streams) == 4, endpoint.streams
         assert sorted(text for _, _, text, _ in endpoint.streams) == ["drop-0", "drop-0", "drop-1", "drop-1"]
         wait_for_drain(
-            lambda remaining: dispatch.command("inspect-session", "--store", store,
+            lambda remaining: dispatch.command("session", "inspect", "--store", store,
                                               "--session", "direct/drop-0", timeout=remaining)["execution"],
             result_deadline,
         )
@@ -1180,7 +1180,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
         for index in range(2):  # Live facts first; a fence is visible only here.
             try:
                 execution[index] = dispatch.command(
-                    "inspect-session", "--store", store, "--session", f"direct/drop-{index}", timeout=2,
+                    "session", "inspect", "--store", store, "--session", f"direct/drop-{index}", timeout=2,
                 )["execution"]
             except Exception as error:
                 execution[index] = type(error).__name__

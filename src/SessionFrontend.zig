@@ -118,7 +118,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
         if (screen != null) switch (err) {
             error.TerminalTooSmall => @import("TerminalText.zig").diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
             error.TerminalTooLarge => @import("TerminalText.zig").diagnostic("rui: The vaxis renderer supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged.\n", .{}),
-            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds the bounded renderer. Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged. Ordinary message, result and inspect-action commands remain available.\n", .{}),
+            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds the bounded renderer. Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
             else => {},
         };
         if (screen) |value| if (value.action_view != null) {
@@ -157,16 +157,16 @@ fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
     switch (self.submission.recovery()) {
         .none => {},
         .not_sent => |kind| try out.print("rui: {s} was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", .{if (kind == .decision) "Decision" else "Message"}),
-        .uncertain => |key| try out.print("rui: Capture not confirmed. Inspect rui requests for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{key}),
+        .uncertain => |key| try out.print("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; reservation does not prove publication. Recover only that original, never replacement input.\n", .{key}),
         .saved => |saved| {
             if (saved.rejected) {
-                try out.print("rui: Original request rejected. Use rui recover {s} to inspect its saved outcome.\n", .{saved.original.key});
-            } else try out.print("rui: {s} not confirmed. Use rui recover {s} to retry the exact original; do not resubmit it.\n", .{ if (saved.original.kind == .decision) "Decision" else "Message", saved.original.key });
+                try out.print("rui: Original request rejected. Use rui request inspect {s} to inspect its saved outcome.\n", .{saved.original.key});
+            } else try out.print("rui: {s} not confirmed. Use rui request recover {s} to retry the exact original; do not resubmit it.\n", .{ if (saved.original.kind == .decision) "Decision" else "Message", saved.original.key });
         },
         .accepted => |accepted| {
             if (accepted.kind == .message) {
-                try out.print("rui: Message accepted; do not resubmit it. Use rui result {s} to inspect the same Message.\n", .{accepted.key});
-            } else try out.print("rui: Decision accepted; do not repeat it. Use rui recover {s} to inspect the same saved admission.\n", .{accepted.key});
+                try out.print("rui: Message accepted; do not resubmit it. Use rui request read-result {s} for the same Message's answer.\n", .{accepted.key});
+            } else try out.print("rui: Decision accepted; do not repeat it. Use rui request inspect {s} to inspect the same saved admission.\n", .{accepted.key});
         },
     }
 }
@@ -174,8 +174,8 @@ fn writeRecoveryGuide(self: *const Self, out: *std.Io.Writer) !void {
 test "frontend exit guidance preserves accepted identity and never substitutes it for current intent" {
     const key = "01234567-89ab-4cde-8012-0123456789ab";
     const cases = .{
-        .{ Submission.Kind.message, "rui: Message accepted; do not resubmit it. Use rui result " ++ key ++ " to inspect the same Message.\n" },
-        .{ Submission.Kind.decision, "rui: Decision accepted; do not repeat it. Use rui recover " ++ key ++ " to inspect the same saved admission.\n" },
+        .{ Submission.Kind.message, "rui: Message accepted; do not resubmit it. Use rui request read-result " ++ key ++ " for the same Message's answer.\n" },
+        .{ Submission.Kind.decision, "rui: Decision accepted; do not repeat it. Use rui request inspect " ++ key ++ " to inspect the same saved admission.\n" },
     };
     inline for (cases) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
@@ -831,9 +831,9 @@ fn dispatchCommand(self: *Self) !void {
         } else if (std.mem.eql(u8, text, "/wait")) {
             self.notice = "Work continues while you compose.";
         } else if (std.mem.eql(u8, text, "/login")) {
-            self.notice = "Login uses rui login codex in your shell.";
+            self.notice = "Login uses rui auth login codex in your shell.";
         } else if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui login codex in your shell.\n");
+            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui auth login codex in your shell.\n");
         } else {
             try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
             if (self.submission.view()) |submission| if (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests")) {
@@ -943,15 +943,15 @@ fn inspectPage(raw: *anyopaque, task: *Task) !void {
         if (self.inspection_action) |action| {
             const Text = @import("TerminalText.zig");
             try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
-            for ([_][]const u8{ "inspect-action", "allow-action", "deny-action" }) |command| {
-                try output.interface.print("rui {s} --store ", .{command});
+            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
+                try output.interface.print("rui action {s} --store ", .{command});
                 try Text.writeShellWord(&output.interface, self.store);
                 try Text.writeShellSession(&output.interface, self.session, false);
                 try output.interface.print(" --action {d}\n", .{action});
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn browse · Ctrl-G returns to latest or the pending Action\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn browse · Ctrl-G returns to latest or the pending Action\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.

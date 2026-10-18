@@ -284,7 +284,7 @@ def command(*args, expect=0, timeout=15):
 def start_host(store, endpoint=None, *extra, active_capacity=2, observations=None):
     args = [
         str(RUI),
-        "serve",
+        "host", "serve",
         "--store",
         str(store),
         "--active-capacity",
@@ -303,7 +303,7 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
 
 def configure(state, store, key, session):
     result = command(
-        "configure",
+        "session", "configure",
         "--store",
         store,
         "--record",
@@ -326,7 +326,7 @@ def message(state, store, key, session, text):
     text_path = state / f"{key}.txt"
     text_path.write_text(text)
     result = command(
-        "message",
+        "session", "send",
         "--store",
         store,
         "--record",
@@ -343,7 +343,7 @@ def message(state, store, key, session, text):
 
 def stop_session(state, store, key, session):
     return command(
-        "stop-session",
+        "session", "stop",
         "--store",
         store,
         "--record",
@@ -357,7 +357,7 @@ def stop_session(state, store, key, session):
 
 def interrupt_model(state, store, key, session, processing):
     return command(
-        "interrupt-model",
+        "session", "interrupt-model",
         "--store",
         store,
         "--record",
@@ -376,7 +376,7 @@ def interrupt_model(state, store, key, session, processing):
 def observe(store, key, *, deadline=None):
     remaining = 15 if deadline is None else min(15, deadline - time.monotonic())
     assert remaining > 0, "result observation exhausted original deadline"
-    return command("observe-command", "--store", store, "--key", key,
+    return command("request", "inspect", "--store", store, "--key", key,
                    timeout=remaining)["observation"]
 
 
@@ -537,7 +537,7 @@ def fill_complete_inspections(socket_path, store, session, peers):
 
 def inspect_execution(store, session, *, timeout=15):
     return command(
-        "inspect-session",
+        "session", "inspect",
         "--store",
         store,
         "--session",
@@ -573,7 +573,7 @@ def wait_execution_release(diagnostics, store, session, deadline, *, peers=None)
 
 def retry(state, store, record_key, kind):
     return command(
-        "retry",
+        "request", "recover",
         "--store",
         store,
         "--record",
@@ -588,7 +588,7 @@ def result_digest(store, key, destination):
         completed = subprocess.run(
             [
                 str(RUI),
-                "read-result",
+                "request", "read-result",
                 "--store",
                 str(store),
                 "--key",
@@ -976,7 +976,7 @@ def prove_sealed_interruption_and_cleanup(state):
         unavailable = subprocess.run(
             [
                 str(RUI),
-                "read-result",
+                "request", "read-result",
                 "--store",
                 str(store),
                 "--key",
@@ -1538,7 +1538,7 @@ def prove_idle_stop_wire_recovery(state):
         dropped = subprocess.run(
             [
                 str(RUI),
-                "stop-session",
+                "session", "stop",
                 "--store",
                 str(store),
                 "--record",
@@ -1564,7 +1564,7 @@ def prove_idle_stop_wire_recovery(state):
         assert "processing" not in excluded, excluded
 
         replayed = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1584,7 +1584,7 @@ def prove_idle_stop_wire_recovery(state):
         process = None
         process, _ = start_host(store)
         restarted = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1628,7 +1628,7 @@ def prove_retry_wait_control(state, kind):
         def retry_wait_observation():
             observation = observe(store, f"retry-wait-{kind}-message")
             execution = command(
-                "inspect-session", "--store", store, "--session", session
+                "session", "inspect", "--store", store, "--session", session
             )["execution"]
             if (
                 observation.get("processing", {}).get("attempt") == "1"
@@ -1647,7 +1647,8 @@ def prove_retry_wait_control(state, kind):
         record = state / f"{control_key}.json"
         args = [
             str(RUI),
-            "stop-session" if kind == "stop" else "interrupt-model",
+            "session",
+            "stop" if kind == "stop" else "interrupt-model",
             "--store",
             str(store),
             "--record",
@@ -1682,7 +1683,7 @@ def prove_retry_wait_control(state, kind):
             active_capacity=1,
         )
         replayed = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1706,7 +1707,7 @@ def prove_retry_wait_control(state, kind):
         unreadable = subprocess.run(
             [
                 str(RUI),
-                "read-result",
+                "request", "read-result",
                 "--store",
                 str(store),
                 "--key",
@@ -1805,7 +1806,7 @@ def main():
         dropped_exact = subprocess.run(
             [
                 str(RUI),
-                "interrupt-model",
+                "session", "interrupt-model",
                 "--store",
                 str(store),
                 "--record",
@@ -1834,7 +1835,7 @@ def main():
         assert exact_message["result"]["status"] == "cancelled", exact_message
         started = time.monotonic()
         exact = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1876,7 +1877,7 @@ def main():
         dropped_stop = subprocess.run(
             [
                 str(RUI),
-                "stop-session",
+                "session", "stop",
                 "--store",
                 str(store),
                 "--record",
@@ -1894,7 +1895,7 @@ def main():
         )
         assert dropped_stop.returncode != 0, dropped_stop
         recovered_stop = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1971,7 +1972,7 @@ def main():
 
         process, _ = start_host(store)
         replay_stop = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",
@@ -1982,7 +1983,7 @@ def main():
         assert replay_stop["answer"]["status"] == "accepted", replay_stop
         assert replay_stop["answer"]["replayed"] is True, replay_stop
         replay_interrupt = command(
-            "retry",
+            "request", "recover",
             "--store",
             store,
             "--record",

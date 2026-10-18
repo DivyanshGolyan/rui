@@ -613,7 +613,7 @@ func deny(client measurement.Client, directory, session, action string, index in
 	started := time.Now()
 	var answer map[string]any
 	err := measurement.RunJSON(client.Deadline, &answer, client.Binary,
-		"deny-action", "--store", client.Store, "--record", filepath.Join(directory, fmt.Sprintf("deny-%d.json", index)),
+		"action", "deny", "--store", client.Store, "--record", filepath.Join(directory, fmt.Sprintf("deny-%d.json", index)),
 		"--key", fmt.Sprintf("deny-%d", index), "--session", session, "--action", action)
 	if err == nil {
 		status, _ := measurement.StringField(answer, "answer", "status")
@@ -1026,7 +1026,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err != nil {
 			return result, err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask"}, accepted); err != nil {
+		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask"}, accepted); err != nil {
 			return result, err
 		}
 	} else if err := client.Configure(value.Name, session, "--tools", "bash", "--permission-mode", "ask"); err != nil {
@@ -1039,7 +1039,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err := os.WriteFile(textPath, []byte("classify raw provider calls"), 0o600); err != nil {
 			return result, err
 		}
-		if err := measure("cli-message", "message", []string{"message", "--store", store, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--session", session, "--text", textPath}, accepted); err != nil {
+		if err := measure("cli-message", "message", []string{"session", "send", "--store", store, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--session", session, "--text", textPath}, accepted); err != nil {
 			return result, err
 		}
 		deadline = measurement.NewDeadline(2 * time.Minute)
@@ -1127,7 +1127,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		return result, fmt.Errorf("got %d unresolved actions, want %d", len(actions), value.Valid)
 	}
 	if runtime.GOOS == "darwin" && value.Name == "valid-256" {
-		if err := measure("cli-inspection", "inspection", []string{"inspect-session", "--store", store, "--session", session}, func(output []byte) error {
+		if err := measure("cli-inspection", "inspection", []string{"session", "inspect", "--store", store, "--session", session}, func(output []byte) error {
 			var report map[string]any
 			if err := json.Unmarshal(output, &report); err != nil {
 				return err
@@ -1142,7 +1142,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}
 	}
 	if runtime.GOOS == "darwin" && value.Name == "payload-100000" {
-		if err := measure("cli-action-read", "action_read", []string{"read-action-arguments", "--store", store, "--session", session, "--action", actions[0]}, func(output []byte) error {
+		if err := measure("cli-action-read", "action_read", []string{"action", "read-arguments", "--store", store, "--session", session, "--action", actions[0]}, func(output []byte) error {
 			if string(output) != calls[0].Arguments {
 				return fmt.Errorf("held Action read changed exact bytes: got=%d want=%d", len(output), len(calls[0].Arguments))
 			}
@@ -1156,7 +1156,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		started := time.Now()
 		var denialError error
 		if runtime.GOOS == "darwin" && value.Name == "mixed-restart" && index == 0 {
-			denialError = measure("cli-denial", "denial", []string{"deny-action", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, accepted)
+			denialError = measure("cli-denial", "denial", []string{"action", "deny", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, accepted)
 		} else {
 			_, denialError = deny(client, directory, "qualification/"+value.Name, action, index)
 		}
@@ -1250,7 +1250,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}
 		hostRunning = true
 		var replay map[string]any
-		if err := measurement.RunJSON(postMeasurementDeadline, &replay, binary, "retry", "--store", store,
+		if err := measurement.RunJSON(postMeasurementDeadline, &replay, binary, "request", "recover", "--store", store,
 			"--record", filepath.Join(directory, "deny-0.json"), "--kind", "permission-decision"); err != nil {
 			return result, err
 		}
@@ -1268,7 +1268,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			return result, fmt.Errorf("restart changed denied Action content: %w", contentError)
 		}
 		var recoveredFull map[string]any
-		if err := measurement.RunJSON(postMeasurementDeadline, &recoveredFull, binary, "inspect-session", "--store", store, "--session", "qualification/"+value.Name, "--profile", "full"); err != nil {
+		if err := measurement.RunJSON(postMeasurementDeadline, &recoveredFull, binary, "session", "inspect", "--store", store, "--session", "qualification/"+value.Name, "--profile", "full"); err != nil {
 			return result, err
 		}
 		historyEvidence, historyError := verifyFullCallHistory(recoveredFull, calls, value.Valid, actions)

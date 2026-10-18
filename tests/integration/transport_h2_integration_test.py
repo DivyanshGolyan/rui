@@ -220,10 +220,10 @@ class ManagedDescriptorTests(unittest.TestCase):
                     diagnostics = SimpleNamespace(records=[*transfers, *preparations], wait=lambda *args, **kwargs: transfers,
                         matching=matching)
 
-                    def command(kind, *args, **kwargs):
-                        if kind == "configure":
+                    def command(resource, operation, *args, **kwargs):
+                        if (resource, operation) == ("session", "configure"):
                             return {"answer": {"status": "accepted"}}
-                        if kind == "observe-command":
+                        if (resource, operation) == ("request", "inspect"):
                             # Observation has its own 15-second command cap;
                             # leave the cumulative crossing to read or release.
                             clock[0] += 14.9
@@ -620,8 +620,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 return f"answer-h1-0-{key.rsplit('-', 1)[1]}".encode()
                             return b"unaffected sibling" if name == "isolated_terminal_stream" else b"answer"
 
-                        def command(kind, *args, **kwargs):
-                            if kind == "inspect-session":
+                        def command(resource, operation, *args, **kwargs):
+                            if (resource, operation) == ("session", "inspect"):
                                 if "timeout" not in kwargs:
                                     return {"execution": {**clean, "custody_occupied": "1"}}
                                 if late == "release":
@@ -635,8 +635,10 @@ class ObservationDeadlineTests(unittest.TestCase):
                             if kind == "read_result":
                                 return read(store, fields["key"], deadline=fields["deadline"])
                             if kind == "inspect_session" and "timeout" not in fields:
-                                return command("inspect-session")
-                            return command(kind.replace("_", "-"), timeout=fields.get("timeout"))
+                                return command("session", "inspect")
+                            operation = {"configure": ("session", "configure"), "message": ("session", "send"),
+                                         "inspect_session": ("session", "inspect")}[kind]
+                            return command(*operation, timeout=fields.get("timeout"))
 
                         real_drain = transport.wait_for_drain
 
@@ -691,9 +693,10 @@ class ObservationDeadlineTests(unittest.TestCase):
                 clock = [0.0]
                 observation = {"result": {"status": status}}
 
-                def command(kind, *args, timeout, **kwargs):
-                    clock[0] += durations[0] if kind == "observe-command" else durations[2]
-                    return {"observation": observation} if kind == "observe-command" else {"execution": clean}
+                def command(resource, operation, *args, timeout, **kwargs):
+                    observing = (resource, operation) == ("request", "inspect")
+                    clock[0] += durations[0] if observing else durations[2]
+                    return {"observation": observation} if observing else {"execution": clean}
 
                 def read(*args, timeout, **kwargs):
                     self.assertEqual(status, "completed", "terminal failure must not request answer bytes")

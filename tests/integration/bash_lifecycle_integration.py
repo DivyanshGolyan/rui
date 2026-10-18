@@ -106,7 +106,7 @@ def admit(state, store, endpoint_url, name, fault=None, gated=False):
 def control_closed_while_host_alive(host, store, session):
     assert host.poll() is None, host.returncode
     try:
-        fixture.command("inspect-session", "--store", store, "--session", session)
+        fixture.command("session", "inspect", "--store", store, "--session", session)
     except AssertionError as error:
         return "FileNotFound" in str(error)
     return False
@@ -114,7 +114,7 @@ def control_closed_while_host_alive(host, store, session):
 
 def competing_host_is_rejected(store):
     completed = subprocess.run(
-        [str(fixture.RUI), "serve", "--store", str(store), "--active-capacity", "1"],
+        [str(fixture.RUI), "host", "serve", "--store", str(store), "--active-capacity", "1"],
         check=False,
         capture_output=True,
         text=True,
@@ -429,7 +429,7 @@ def main():
             host = None
 
             host = fixture.start_host(store, endpoint_url)
-            observation = fixture.command("observe-command", "--store", store,
+            observation = fixture.command("request", "inspect", "--store", store,
                                           "--key", "shutdown-drain")["observation"]
             assert observation["status"] == "absent", observation
             fixture.wait_for(

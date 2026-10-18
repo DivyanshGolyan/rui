@@ -165,11 +165,11 @@ def main():
             }
             assert endpoint.payload_hashes == expected_payload_hashes, "server response bytes differ"
             (out / "response-hashes.json").write_text(json.dumps(endpoint.payload_hashes, sort_keys=True, indent=2) + "\n")
-            execution = dispatch.command("inspect-session", "--store", store,
+            execution = dispatch.command("session", "inspect", "--store", store,
                                          "--session", "direct/compare-0")["execution"]
             assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
             time.sleep(.25)
-            execution = dispatch.command("inspect-session", "--store", store,
+            execution = dispatch.command("session", "inspect", "--store", store,
                                          "--session", "direct/compare-0")["execution"]
             assert execution["custody_occupied"] == "0", execution
             idle = sample(host.pid, out, "serviced-idle")

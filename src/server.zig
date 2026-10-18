@@ -124,6 +124,7 @@ const Host = struct {
     auth_worker: ?*AuthWorker = null,
     capture_writer: ?*provider.CaptureWriter = null,
     bash_path: []const u8 = default_bash_path,
+    bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
     custody: execution.CustodyPool = .{ .records = &.{} },
@@ -817,6 +818,7 @@ pub fn serve(
     authentication: ?model_adapter.Authentication,
     bash_path: []const u8,
     bash_timeout_ms: u64,
+    home: ?[]const u8,
 ) !void {
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
@@ -945,6 +947,8 @@ pub fn serve(
     const socket_z = try std.fmt.bufPrintSentinel(&socket_path, "{s}", .{lease.paths.socket.slice()}, 0);
     if (std.c.chmod(socket_z, 0o600) != 0) return error.SocketProtectionFailed;
 
+    var bash_environment = try bash.environment(io, allocator, home);
+    defer bash_environment.deinit();
     const custody_records = try allocator.alloc(execution.CustodyRecord, active_capacity);
     defer allocator.free(custody_records);
     const retention_capacity = @min(
@@ -965,6 +969,7 @@ pub fn serve(
         .provider_ca_file = provider_ca_file,
         .authentication = authentication,
         .bash_path = bash_path,
+        .bash_environment = &bash_environment,
         .bash_timeout_ms = bash_timeout_ms,
         .retention = undefined,
         .trace_run_ns = @intCast(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds),
@@ -2066,7 +2071,7 @@ fn launchPreparedBash(
         }
 
         fn launch(context: anytype) !void {
-            context.launched.* = try context.prepared.launch();
+            context.launched.* = try context.prepared.launch(context.host.bash_environment);
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -5739,7 +5744,7 @@ test "cleanup publication follows complete execution retirement" {
         .raw = .fromSeconds(5),
         .clock = .awake,
     });
-    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
+    slot = .{ .bash = .{ .token = token, .binding = binding, .execution = try prepared.launch(&bash.empty_environment), .delivery = .{ .closed = .{ .reclaim_at = deadline } } } };
     var window: [bash.copy_window_bytes]u8 = undefined;
     defer if (slot == .bash) {
         slot.bash.execution.requestInfrastructureShutdown(.now(std.testing.io, .awake));

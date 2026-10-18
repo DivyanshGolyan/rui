@@ -36,7 +36,7 @@ def dispose_owner_case(host, endpoint, thread):
 
 
 def execution_idle(store, session, retained_bytes=0):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == str(retained_bytes) else None
 
@@ -129,9 +129,9 @@ def prove_timeout_feedback(state):
             outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
             assert outputs == [result], replay
             instructions = replay["instructions"]
-            assert instructions == fixture.model_instructions(workspace), instructions
+            assert instructions == fixture.model_instructions(workspace, store=store, session=session), instructions
             assert instructions.count("\n\nSession instructions:\n") == 1, instructions
-            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\n\nSession instructions:\n", 1)[0]
+            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\nRui address", 1)[0]
             assert json.loads(quoted_path) == str(workspace), quoted_path
             if effective is None:
                 assert result.startswith("Bash succeeded."), result

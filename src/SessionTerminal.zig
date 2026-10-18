@@ -104,14 +104,14 @@ fn detachedWithOps(self: *Self, store: []const u8, session: []const u8, action: 
     // write after restoration. No Action means the original inline bytes.
     var buffer: [4 * (4 * (protocol.max_store_bytes + protocol.max_session_bytes) + 128)]u8 = undefined;
     var notice = std.Io.Writer.fixed(&buffer);
-    try notice.writeAll("\nDetached. Host work continues.\nResume: rui resume --store ");
+    try notice.writeAll("\nDetached. Host work continues.\nResume: rui session resume --store ");
     try Text.writeShellWord(&notice, store);
     try Text.writeShellSession(&notice, session, true);
     try notice.writeAll("\n");
     if (action) |id| {
         try notice.writeAll("Pending Action: inspect the complete proposal before deciding.\n");
-        for ([_][]const u8{ "inspect-action", "allow-action", "deny-action" }) |command| {
-            try notice.print("rui {s} --store ", .{command});
+        for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
+            try notice.print("rui action {s} --store ", .{command});
             try Text.writeShellWord(&notice, store);
             try Text.writeShellSession(&notice, session, false);
             try notice.print(" --action {d}\n", .{id});
@@ -195,7 +195,7 @@ test "detached notice restores flags and requires one complete nonblocking write
                 try std.testing.expectEqual(@as(usize, if (enable_failed) 0 else 1), output.writes);
                 try std.testing.expect(!output.blocking_write);
                 if (!enable_failed) try std.testing.expectEqualStrings(
-                    "\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/a\\'\\\\\\012' -- $'--s'\n",
+                    "\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\'\\\\\\012' -- $'--s'\n",
                     output.bytes[0..output.len],
                 );
                 if (!enable_failed and !restore_failed and delivery == .full) try result else try std.testing.expectError(error.TerminalCleanupFailed, result);
@@ -205,11 +205,11 @@ test "detached notice restores flags and requires one complete nonblocking write
     var output: Output = .{ .enable_failed = false, .restore_failed = false, .delivery = .full };
     var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .colour = false, .active = false };
     try terminal.detachedWithOps("/tmp/store", "A\x00Z", 913, &output);
-    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui resume --store $'/tmp/store' --session-hex 41005a\n" ++
+    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/store' --session-hex 41005a\n" ++
         "Pending Action: inspect the complete proposal before deciding.\n" ++
-        "rui inspect-action --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
-        "rui allow-action --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
-        "rui deny-action --store $'/tmp/store' --session-hex 41005a --action 913\n", output.bytes[0..output.len]);
+        "rui action inspect --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
+        "rui action allow --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
+        "rui action deny --store $'/tmp/store' --session-hex 41005a --action 913\n", output.bytes[0..output.len]);
 }
 
 pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {

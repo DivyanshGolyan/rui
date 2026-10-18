@@ -14,6 +14,34 @@ const command_write_window_bytes: usize = 4096;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
+/// Bash receives only this Host-owned environment: the running executable's
+/// directory first on PATH, so ordinary `rui` is this exact build, and the
+/// Host's absolute HOME. Nothing else from the Host environment, including
+/// provider settings or credentials, reaches the child.
+pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !std.process.Environ.Map {
+    var result = std.process.Environ.Map.init(allocator);
+    errdefer result.deinit();
+    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const executable = executable_buffer[0..try std.process.executablePath(io, &executable_buffer)];
+    var path_buffer: [std.fs.max_path_bytes + system_path.len + 1]u8 = undefined;
+    try result.put("PATH", try searchPath(&path_buffer, std.fs.path.dirname(executable)));
+    if (home) |value| if (std.fs.path.isAbsolute(value)) try result.put("HOME", value);
+    return result;
+}
+
+/// For owners that never launch Bash (tests); reading it allocates nothing.
+pub const empty_environment: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.heap.page_allocator };
+
+const system_path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// A directory containing ':' cannot be one PATH entry; the child then finds
+/// only system commands rather than a split directory.
+fn searchPath(buffer: []u8, directory: ?[]const u8) ![]const u8 {
+    const value = directory orelse return system_path;
+    if (std.mem.indexOfScalar(u8, value, ':') != null) return system_path;
+    return std.fmt.bufPrint(buffer, "{s}:" ++ system_path, .{value});
+}
+
 const BashObservation = extern struct {
     kind: c_int,
     value: c_int,
@@ -187,7 +215,7 @@ pub const Prepared = struct {
         return resources;
     }
 
-    pub fn launch(self: *Prepared) !Execution {
+    pub fn launch(self: *Prepared, child_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var script_path_buffer: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
         const script_path = try std.fmt.bufPrint(
@@ -195,13 +223,11 @@ pub const Prepared = struct {
             "{s}/{s}",
             .{ self.scratch_path, self.script.?.name.slice() },
         );
-        var empty_environment = std.process.Environ.Map.init(self.allocator);
-        defer empty_environment.deinit();
         const started = std.Io.Clock.Timestamp.now(self.io, .awake);
         var child = std.process.spawn(self.io, .{
             .argv = &.{ self.bash_path, script_path },
             .cwd = .{ .path = self.workspace.slice() },
-            .environ_map = &empty_environment,
+            .environ_map = child_environment,
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
@@ -1615,4 +1641,23 @@ test "Bash descriptor decoding preserves authorized command bytes" {
         var invalid_source = Source{ .bytes = invalid };
         try std.testing.expect(!try tools.validBashArguments(&invalid_source));
     }
+}
+
+test "Bash environment carries only this executable's PATH and an absolute HOME" {
+    var executable_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const executable = executable_buffer[0..try std.process.executablePath(std.testing.io, &executable_buffer)];
+    const directory = std.fs.path.dirname(executable).?;
+    var with_home = try environment(std.testing.io, std.testing.allocator, "/home/peer");
+    defer with_home.deinit();
+    try std.testing.expectEqual(@as(usize, 2), with_home.count());
+    const path = with_home.get("PATH").?;
+    try std.testing.expect(std.mem.startsWith(u8, path, directory));
+    try std.testing.expectEqualStrings(":" ++ system_path, path[directory.len..]);
+    try std.testing.expectEqualStrings("/home/peer", with_home.get("HOME").?);
+    var relative_home = try environment(std.testing.io, std.testing.allocator, "relative");
+    defer relative_home.deinit();
+    try std.testing.expectEqual(@as(usize, 1), relative_home.count());
+    var buffer: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(system_path, try searchPath(&buffer, "/opt/a:b/bin"));
+    try std.testing.expectEqualStrings("/opt/rui/bin:" ++ system_path, try searchPath(&buffer, "/opt/rui/bin"));
 }

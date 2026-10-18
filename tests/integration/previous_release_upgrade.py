@@ -2,6 +2,7 @@
 """Verify same-format upgrades and prompt, preserving breaking-format refusal."""
 import contextlib
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -15,7 +16,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process
+from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for_execution_release
 
 
 def install(checkout):
@@ -33,25 +34,94 @@ def supported_format(checkout):
     return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
 
 
+class Dialect:
+    """One installed build's command grammar; the previous build keeps its own."""
+
+    def __init__(self, checkout):
+        arguments = checkout / "src/cli_args.zig"
+        self.resource_first = arguments.exists() and ".request_inspect" in arguments.read_text()
+
+    def serve(self):
+        return ("host", "serve") if self.resource_first else ("serve",)
+
+    def host_arguments(self, store, endpoint):
+        return [str(fixture.RUI), *self.serve(), "--store", str(store), "--active-capacity", "1",
+                "--provider-endpoint", endpoint, "--test-retry-waits-ms", "50,100,150"]
+
+    def host_status(self, binary, store, timeout):
+        status = subprocess.run([binary, "host", "status", "--store", store],
+                                capture_output=True, text=True, check=True, timeout=timeout)
+        if self.resource_first:
+            return json.loads(status.stdout)["status"], status.stdout
+        for state in ("ready", "unavailable"):
+            if f"Host: {state}" in status.stdout:
+                return state, status.stdout
+        return None, status.stdout
+
+    def configure(self, state, store, key, session, model):
+        reply = fixture.command(*(("session", "configure") if self.resource_first else ("configure",)),
+            "--store", store, "--record", state / f"{key}.json", "--key", key, "--session", session,
+            "--workspace", fixture.ROOT, "--provider", "codex", "--model", model,
+            "--tools", "bash,edit", "--permission-mode", "ask")
+        assert reply["answer"]["status"] == "accepted", reply
+
+    def message(self, state, store, key, session, text):
+        text_path = state / f"{key}.txt"
+        text_path.write_text(text)
+        reply = fixture.command(*(("session", "send") if self.resource_first else ("message",)),
+            "--store", store, "--record", state / f"{key}.json", "--key", key, "--session", session,
+            "--text", text_path)
+        assert reply["answer"]["status"] == "accepted", reply
+
+    def observe(self, store, key, timeout=15):
+        return fixture.command(*(("request", "inspect") if self.resource_first else ("observe-command",)),
+                               "--store", store, "--key", key, timeout=timeout)["observation"]
+
+    def read_result(self, store, key, timeout=15):
+        command = ("request", "read-result") if self.resource_first else ("read-result",)
+        completed = subprocess.run([str(fixture.RUI), *command, "--store", str(store), "--key", key],
+                                   capture_output=True, timeout=timeout)
+        assert completed.returncode == 0, (key, completed)
+        return completed.stdout
+
+    def inspect_session(self, store, session, timeout=15):
+        return fixture.command(*(("session", "inspect") if self.resource_first else ("inspect-session",)),
+                               "--store", store, "--session", session, timeout=timeout)
+
+    def wait_for_result_release(self, store, key, session, deadline):
+        def remaining():
+            left = min(deadline, time.monotonic() + 15) - time.monotonic()
+            assert left > 0, f"{key} exhausted its original deadline"
+            return left
+        observation = fixture.wait_for(
+            lambda: (value if (value := self.observe(store, key, remaining())).get("result") else None),
+            f"{key} terminal result", deadline=deadline)
+        answer = (self.read_result(store, key, remaining())
+                  if observation["result"]["status"] == "completed" else None)
+        assert time.monotonic() < deadline, f"{key} result read exceeded its original deadline"
+        execution = wait_for_execution_release(
+            lambda left: self.inspect_session(store, session, left)["execution"], deadline)
+        return observation, answer, execution
+
+
 def database_hashes(store):
     return {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
             for path in store.glob("rui.sqlite3*")}
 
 
-def stop_detached(binary, store):
+def stop_detached(dialect, binary, store):
     deadline = time.monotonic() + 10
     stop_requested = False
     while True:
         remaining = deadline - time.monotonic()
         assert remaining > 0, "Store ownership release unconfirmed"
-        status = subprocess.run([binary, "host", "status", "--store", store],
-                                capture_output=True, text=True, check=True, timeout=min(5, remaining))
-        if "Host: unavailable" in status.stdout:
+        state, shown = dialect.host_status(binary, store, min(5, remaining))
+        if state == "unavailable":
             return
-        if "Host: ready" in status.stdout and not stop_requested:
+        if state == "ready" and not stop_requested:
             stop_requested = True
             remaining = deadline - time.monotonic()
-            assert remaining > 0, status.stdout
+            assert remaining > 0, shown
             subprocess.run([binary, "host", "stop", "--store", store],
                            check=True, timeout=min(5, remaining))
         time.sleep(.025)
@@ -60,6 +130,7 @@ def stop_detached(binary, store):
 def main():
     previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
     previous_format, candidate_format = supported_format(previous), supported_format(candidate)
+    previous_cli, candidate_cli = Dialect(previous), Dialect(candidate)
     # Do not use the runner's HOME, default Store or credentials. Keep the
     # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
@@ -76,6 +147,7 @@ def main():
         previous_artifact = binary.resolve()
         previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
         fixture.RUI = binary
+        dialect = previous_cli
         expected = "Saved before reinstall: café\nsecond line remains intact".encode()
         endpoint = fixture.SuccessEndpoint([
             fixture.sse_answer("upgrade-response", "upgrade-reasoning", "upgrade-message",
@@ -87,12 +159,12 @@ def main():
         attempted_restart = False
         try:
             seed, _ = start_ready_process(
-                fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 required_fields={"execution": "enabled"},
             )
-            fixture.configure(root, store, "upgrade-configure", "upgrade/session", "model-a")
-            fixture.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
-            observation, answer, _ = fixture.wait_for_result_release(
+            dialect.configure(root, store, "upgrade-configure", "upgrade/session", "model-a")
+            dialect.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
+            observation, answer, _ = dialect.wait_for_result_release(
                 store, "upgrade-message", "upgrade/session", time.monotonic() + 15)
             assert observation["result"]["status"] == "completed" and answer == expected, observation
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
@@ -100,13 +172,13 @@ def main():
                 "workspace": str(workspace), "provider": "codex", "model": "model-a",
                 "tools": ["bash", "edit"], "permission_mode": "ask",
             }
-            before = fixture.command("inspect-session", "--store", store, "--session", "upgrade/session")["session"]
+            before = dialect.inspect_session(store, "upgrade/session")["session"]
             for field, value in configuration.items():
                 assert before[field] == value, (field, value, before)
             subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=10)
             # Effect-aware shutdown is a nonzero serving exit, not a crash.
             assert seed.wait(timeout=10) != 0
-            stop_detached(binary, store)  # Confirm lease release, not just acknowledgement.
+            stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.
             stop_process(seed)
             seed = None
             with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro", uri=True)) as database:
@@ -119,7 +191,9 @@ def main():
             assert binary.resolve() != previous_artifact, "installation did not publish a new build"
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
-            commands = (("host", "start"),) if previous_format == candidate_format else (("host", "start"), ("serve",))
+            dialect = candidate_cli
+            commands = ((("host", "start"),) if previous_format == candidate_format
+                        else (("host", "start"), candidate_cli.serve()))
             for command in commands:
                 attempted_restart = True
                 started_at = time.monotonic()
@@ -134,10 +208,9 @@ def main():
                 print(restarted.stdout + restarted.stderr, flush=True)
                 if previous_format == candidate_format:
                     assert restarted.returncode == 0, "same-format upgrade must start without a fresh Store"
-                    status = subprocess.run([binary, "host", "status", "--store", store],
-                                            capture_output=True, text=True, check=True, timeout=5)
-                    assert "Host: ready" in status.stdout, status.stdout
-                    print(status.stdout, flush=True)
+                    state, shown = dialect.host_status(binary, store, 5)
+                    assert state == "ready", shown
+                    print(shown, flush=True)
                 else:
                     assert restarted.returncode != 0 and elapsed < 5, (elapsed, restarted)
                     for text in (str(store), f"found schema {previous_format}",
@@ -146,28 +219,29 @@ def main():
                         assert text in restarted.stderr, (text, restarted.stderr)
                     assert "HostReadinessUnconfirmed" not in restarted.stderr
                     assert database_hashes(store) == before_hashes, "refusal changed SQLite data or file membership"
-                    stop_detached(binary, store)
+                    stop_detached(dialect, binary, store)
                     attempted_restart = False
                     print(f"Breaking format {previous_format}→{candidate_format} {' '.join(command)} refused in {elapsed:.3f}s; SQLite hashes unchanged", flush=True)
             if previous_format != candidate_format:
                 # The previous installed artifact must still recover the exact
                 # work at its original Store path. This is not a migration.
                 fixture.RUI = previous_artifact
+                dialect = previous_cli
                 seed, _ = start_ready_process(
-                    fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+                    dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
                     required_fields={"execution": "enabled"},
                 )
-            recovered = fixture.observe(store, "upgrade-message")
+            recovered = dialect.observe(store, "upgrade-message")
             assert recovered["result"]["status"] == "completed", recovered
             assert recovered["processing"] == observation["processing"], "upgrade replayed completed work"
-            assert fixture.read_result(store, "upgrade-message") == expected, "saved answer changed"
-            after = fixture.command("inspect-session", "--store", store, "--session", "upgrade/session")["session"]
+            assert dialect.read_result(store, "upgrade-message") == expected, "saved answer changed"
+            after = dialect.inspect_session(store, "upgrade/session")["session"]
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
         finally:
             dispose_all(
-                lambda: stop_detached(binary, store) if attempted_restart else None,
+                lambda: stop_detached(dialect, binary, store) if attempted_restart else None,
                 lambda: stop_process(seed) if seed is not None else None,
                 endpoint.shutdown,
                 endpoint.server_close,

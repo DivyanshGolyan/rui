@@ -490,6 +490,10 @@ pub const HistoricalSettings = struct {
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    /// The originating Operation's own address: canonical Store selector and
+    /// exact Session reference, for the Rui-owned request context.
+    store: protocol.Bounded(protocol.max_store_bytes),
+    session: protocol.Bounded(protocol.max_session_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -5505,6 +5509,8 @@ pub const Store = struct {
             .model = model,
             .provider = try readProvider(statement, 4),
             .workspace = workspace,
+            .store = self.selector,
+            .session = session_ref,
             .session_affinity = digest[0..16].*,
             .baseline_instructions = .{ .view = view, .length = instructions.length, .digest = instructions.digest },
             .output_schema = output_schema,

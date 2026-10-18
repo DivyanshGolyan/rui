@@ -59,17 +59,19 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 }
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
+	// Digests come from tests/integration/model_fixture.py model_instructions.
 	for _, test := range []struct {
 		workspace string
+		store     string
 		bytes     int
 		digest    string
 	}{
-		{"/workspace", 470, "146313e158f7e1a41222b102146bf88cf1fd5c64d28f57be9fca261caafe64e0"},
-		{"/tmp/a \"project\"\\tree\n<&雪\u2028", 501, "cacbc49f297beae7db9419c4f0136f711cf46a9df1c36d23cffeb0e7eb9d09a7"},
+		{"/workspace", "/store", 1044, "efd7f22a3389a08d5b0bb025b78c526aea4bf28e6f2b1b039ebf8ce45c425afa"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 1125, "e75b8fd45de4c499a77efeb98d7a6d05cfdd327d8cd6363d1e8b768d06b0eddc"},
 	} {
-		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, test.workspace)
+		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"measure/capacity-1/1/0"}, test.workspace, test.store)
 		if bytes != test.bytes || digest != test.digest {
-			t.Fatalf("unexpected independent request oracle for %q: %d %s", test.workspace, bytes, digest)
+			t.Fatalf("unexpected independent request oracle for %q %q: %d %s", test.workspace, test.store, bytes, digest)
 		}
 	}
 }

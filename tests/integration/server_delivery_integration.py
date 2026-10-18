@@ -146,8 +146,11 @@ def main():
                                      capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0, stopped
             identity = json.loads(discovery_body)["instance"]
-            assert f"Host instance: {identity} (retry with --instance {identity})" in stopped.stdout, stopped
-            assert "Stop acknowledged; completion and lease release are not confirmed" in stopped.stdout, stopped
+            reported = json.loads(stopped.stdout)
+            assert {name: reported[name] for name in ("type", "status", "instance", "retirement")} == {
+                "type": "host_stop", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
+            }, stopped
+            assert stopped.stderr.endswith(f" --instance {identity}\n"), stopped
             for request in stop_requests:
                 peers.release(request, stop_deadline)
             control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
