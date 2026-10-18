@@ -13,6 +13,7 @@ const cores = .{
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
+    .{ "DiagnosticFiles.zig", @import("DiagnosticFiles.zig") },
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
