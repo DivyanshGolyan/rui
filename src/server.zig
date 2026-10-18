@@ -3138,6 +3138,16 @@ fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_use
     writeTestTrace(host, &trace, &publication);
 }
 
+/// Local execution facts for inspection, read from another thread than the
+/// execution owner's.
+fn executionFacts(host: *Host) store_module.SessionReportExecution {
+    return .{
+        .dispatch_fenced = host.dispatch_fenced.load(.acquire),
+        .custody_occupied = host.custody.held(),
+        .scratch_used_bytes = host.scratch_used.load(.acquire),
+    };
+}
+
 fn traceAttemptRollback(host: *Host) void {
     if (!host.faults.test_phase_trace) return;
     var publication = beginTestObservation(host, "attempt_admission_rolled_back", null);
@@ -3833,11 +3843,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .request_number = request_number,
                 .profile = request_value.profile,
                 .fail_unlink = host.faults.report_unlink,
-                .execution = .{
-                    .dispatch_fenced = host.dispatch_fenced.load(.acquire),
-                    .custody_occupied = host.custody.occupied(),
-                    .scratch_used_bytes = host.scratch_used.load(.acquire),
-                },
+                .execution = executionFacts(host),
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "session report scratch cleanup", err);
@@ -5245,6 +5251,34 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try std.testing.expect(!host.custody.claimTerminalDelivery(token));
         try host.custody.releaseUnused(reused);
     }
+}
+
+test "inspection counts held custody, not an in-flight admission reservation" {
+    // The execution owner reserves before each admission probe and releases
+    // when nothing is runnable. Inspection reads from another thread, so it
+    // must not report that probe as a second custody beside gated cleanup.
+    var records: [2]execution.CustodyRecord = undefined;
+    var host = Host{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .faults = .{},
+        .custody = execution.CustodyPool.initialize(&records),
+    };
+    const cleanup = host.custody.reserve().?;
+    var permit = store_module.DispatchPermit{ .binding = .{ .turn_id = 1, .operation_id = 1, .attempt_ordinal = 1 } };
+    _ = try host.custody.attach(cleanup, &permit);
+    try host.custody.detach(cleanup);
+    const probe = host.custody.reserve().?;
+    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
+    // The reservation still blocks reuse and stays visible to reconciliation.
+    try std.testing.expectEqual(@as(usize, 2), host.custody.occupied());
+    try std.testing.expect(host.custody.reserve() == null);
+    try host.custody.releaseUnused(probe);
+    try std.testing.expectEqual(@as(usize, 1), executionFacts(&host).custody_occupied);
+    try host.custody.cleanupComplete(cleanup);
+    try std.testing.expectEqual(@as(usize, 0), executionFacts(&host).custody_occupied);
 }
 
 test "cleanup delay follows elapsed time and preserves custody reuse" {

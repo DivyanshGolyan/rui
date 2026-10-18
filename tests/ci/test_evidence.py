@@ -16,6 +16,34 @@ import build_artifact
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_acceptance_requires_the_complete_target_closure_not_the_entire_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            self.addCleanup(os.chdir, previous)
+            os.chdir(directory)
+            manifest = Path('.zig-cache/o/ci-compiled/ci-targets.json')
+            manifest.parent.mkdir(parents=True)
+            rows = [dict(target='test-logic', executables=['test-logic_tests', 'rui-allocation-actor']),
+                    dict(target='test', executables=['test-tests', 'rui-allocation-actor'])]
+            manifest.write_text(json.dumps(rows))
+            self.assertEqual(evidence.target_executables(['test-logic']), [
+                '.zig-cache/o/ci-compiled/rui-allocation-actor',
+                '.zig-cache/o/ci-compiled/test-logic_tests'])
+            self.assertEqual(evidence.target_executables(['test', 'test-logic']), [
+                '.zig-cache/o/ci-compiled/rui-allocation-actor',
+                '.zig-cache/o/ci-compiled/test-logic_tests',
+                '.zig-cache/o/ci-compiled/test-tests'])
+            for invalid in ([], rows + [rows[0]],
+                            [dict(target='test-logic', executables=[])],
+                            [dict(target='test-logic', executables=['../test'])],
+                            [dict(target='test-logic', executables=['/tmp/test'])]):
+                manifest.write_text(json.dumps(invalid))
+                with self.assertRaises(ValueError):
+                    evidence.target_executables(['test-logic'])
+            manifest.unlink()
+            with self.assertRaises(FileNotFoundError):
+                evidence.target_executables(['test-logic'])
+
     def test_cpu_floor_is_bound_to_platform_and_acceptance_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             previous = Path.cwd()
@@ -23,6 +51,8 @@ class EvidenceTest(unittest.TestCase):
             os.chdir(directory)
             manifest = Path('.zig-cache/o/ci-compiled/ci-cpu.json')
             manifest.parent.mkdir(parents=True)
+            manifest.with_name('ci-targets.json').write_text(json.dumps([
+                dict(target='test', executables=['test-tests'])]))
             with patch.dict(os.environ, RUNNER_TEMP=directory, GITHUB_EVENT_NAME='push',
                             GITHUB_WORKFLOW_REF='owner/repo/.github/workflows/check.yml@feature',
                             GITHUB_REF='refs/heads/feature'), \
@@ -145,9 +175,13 @@ class EvidenceTest(unittest.TestCase):
             bootstrap.parent.mkdir(parents=True)
             bootstrap.write_bytes(b'worker-specific compiler bootstrap')
             bootstrap.chmod(0o755)
+            unrelated = executable.with_name('unrelated-native-test')
+            unrelated.write_bytes(b'OpenSSL build date and random scratch path')
+            unrelated.chmod(0o755)
             inputs = dict(tree='a' * 40, targets=['test'], part='all',
                           workflow='owner/repo/.github/workflows/check.yml',
-                          event='push', branch='feature', tools='native-tools')
+                          event='push', branch='feature', tools='native-tools',
+                          executables=[str(executable)])
             run = dict(id=123, run_attempt=1, conclusion='success', event='push', head_sha='b' * 40,
                        path='.github/workflows/check.yml', head_branch='feature',
                        head_repository=dict(full_name='owner/repo'))
@@ -158,11 +192,16 @@ class EvidenceTest(unittest.TestCase):
             receipt = json.loads(Path('rui-evidence/evidence.json').read_text())
             self.assertEqual(receipt['executables'],
                              {str(executable): hashlib.sha256(executable.read_bytes()).hexdigest()})
+            self.assertEqual(sorted(str(path) for path in Path('rui-evidence').rglob('*') if path.is_file()),
+                             ['rui-evidence/evidence.json', 'rui-evidence/executables/native-test'])
+            self.assertEqual(Path('rui-evidence/executables/native-test').read_bytes(), executable.read_bytes())
 
-            def archive_for(value):
+            def archive_for(value, payload=b'exact executable bytes'):
                 stream = io.BytesIO()
                 with zipfile.ZipFile(stream, 'w') as zipped:
                     zipped.writestr('evidence.json', json.dumps(value))
+                    if payload is not None:
+                        zipped.writestr('executables/native-test', payload)
                 archive = stream.getvalue()
                 artifact = dict(digest='sha256:' + hashlib.sha256(archive).hexdigest(),
                                 workflow_run=dict(id=123))
@@ -176,7 +215,7 @@ class EvidenceTest(unittest.TestCase):
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
                 data, metadata = archive_for(dict(receipt,
                     executables={str(bootstrap): evidence.digest(bootstrap)}))
-                with self.assertRaisesRegex(ValueError, 'Foreign executable path'):
+                with self.assertRaises(ValueError):
                     evidence.verify(data, metadata, run, inputs)
                 bootstrap.unlink()
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
@@ -200,14 +239,21 @@ class EvidenceTest(unittest.TestCase):
                         evidence.verify(archive, invalid, run, inputs)
                 for verdict in ('compiled-not-tested', 'failed'):
                     data, metadata = archive_for(dict(receipt, verdict=verdict))
-                    with self.assertRaisesRegex(ValueError, 'No passing executable evidence'):
+                    with self.assertRaisesRegex(ValueError, 'No passing evidence'):
                         evidence.verify(data, metadata, run, inputs)
+                # Rebuild nondeterminism cannot invalidate the exact retained
+                # artifact that passed. It does not accept the new binary.
                 executable.write_bytes(b'changed executable')
-                with self.assertRaisesRegex(ValueError, 'executable missing or changed'):
-                    evidence.verify(archive, artifact, run, inputs)
+                unrelated.write_bytes(b'different timestamp and scratch path')
+                self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
                 executable.unlink()
+                self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
+                data, metadata = archive_for(receipt, b'changed retained executable')
                 with self.assertRaisesRegex(ValueError, 'executable missing or changed'):
-                    evidence.verify(archive, artifact, run, inputs)
+                    evidence.verify(data, metadata, run, inputs)
+                data, metadata = archive_for(receipt, None)
+                with self.assertRaisesRegex(ValueError, 'Unexpected evidence archive'):
+                    evidence.verify(data, metadata, run, inputs)
                 for invalid in ({}, {'../secret': 'ignored'}, {'/tmp/secret': 'ignored'},
                                 {str(bootstrap): 'ignored'},
                                 {'.zig-cache/o/ci-compiled-extra/test': 'ignored'},
@@ -221,7 +267,8 @@ class EvidenceTest(unittest.TestCase):
     def test_source_tree_is_verified_independently_of_the_receipt(self):
         # A self-consistent artifact cannot supply its own source-tree oracle.
         inputs = dict(tree='expected', workflow='owner/repo/.github/workflows/check.yml',
-                      event='push', branch='refs/heads/feature')
+                      event='push', branch='refs/heads/feature',
+                      executables=['.zig-cache/o/ci-compiled/test'])
         with tempfile.TemporaryDirectory() as directory:
             previous = Path.cwd()
             self.addCleanup(os.chdir, previous)
@@ -234,6 +281,7 @@ class EvidenceTest(unittest.TestCase):
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, 'w') as zipped:
                 zipped.writestr('evidence.json', json.dumps(receipt))
+                zipped.writestr('executables/test', binary.read_bytes())
             archive = stream.getvalue()
             artifact = dict(digest='sha256:' + hashlib.sha256(archive).hexdigest(), workflow_run=dict(id=1))
             run = dict(id=1, run_attempt=1, conclusion='success', event='push', head_branch='feature',
@@ -275,7 +323,7 @@ class EvidenceTest(unittest.TestCase):
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b'tested binary')
             inputs = dict(tree=tree, workflow='owner/repo/.github/workflows/check.yml',
-                          event='pull_request', branch='feature')
+                          event='pull_request', branch='feature', executables=[str(binary)])
             run = dict(id=1, run_attempt=1, conclusion='success', event='pull_request',
                        head_sha=head, head_branch='feature', path='.github/workflows/check.yml',
                        head_repository=dict(full_name='owner/repo'),
@@ -285,6 +333,7 @@ class EvidenceTest(unittest.TestCase):
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, 'w') as zipped:
                 zipped.writestr('evidence.json', json.dumps(receipt))
+                zipped.writestr('executables/test', binary.read_bytes())
             data = stream.getvalue()
             artifact = dict(digest='sha256:' + hashlib.sha256(data).hexdigest(), workflow_run=dict(id=1))
             commit = dict(tree=dict(sha=tree), parents=[dict(sha=base), dict(sha=head)])
