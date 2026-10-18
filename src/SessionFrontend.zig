@@ -587,10 +587,19 @@ fn driveActive(self: *Self) !void {
 /// The choice keeps the Action's heading lines beside it once paging hides
 /// them; they leave again when the heading is back on screen.
 fn approvalContext(out: *std.Io.Writer, top_hidden: bool, workspace: []const u8, summary: View.ActionSummary) !void {
-    _ = out;
-    _ = top_hidden;
-    _ = workspace;
-    _ = summary;
+    if (!top_hidden) return;
+    try out.writeAll("Run Bash");
+    if (summary.description.slice().len != 0) {
+        try out.writeAll(" · ");
+        var label: TerminalText = .{ .mode = .line };
+        try label.feed(out, summary.description.slice());
+        try label.finish(out);
+    }
+    try out.writeAll("\nWorkspace: ");
+    var location: TerminalText = .{ .mode = .line };
+    try location.feed(out, workspace);
+    try location.finish(out);
+    if (summary.timeout_ms) |timeout| try out.print(" · Time limit: {d} ms", .{timeout}) else try out.writeAll(" · Time limit: Host default");
 }
 
 test "a paged Action keeps what runs, where and for how long beside the choice" {
