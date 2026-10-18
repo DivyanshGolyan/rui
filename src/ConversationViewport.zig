@@ -233,7 +233,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         fn marker(cluster: []const u8) bool {
-            for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*" }) |glyph| if (std.mem.eql(u8, cluster, glyph)) return true;
+            for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$" }) |glyph| if (std.mem.eql(u8, cluster, glyph)) return true;
             return false;
         }
 

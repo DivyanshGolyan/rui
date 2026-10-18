@@ -546,7 +546,7 @@ test "actual overflow yields wording before clipping required status" {
     try std.testing.expectEqualStrings("/", window.readCell(7, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 2).?.char.grapheme);
     try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, "Idle", "› ", &live));
-    try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 3, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, "a: Allow once / d: Deny (Enter)\n! Original retained", "> ", &.{}));
+    try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 3, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, Frame.approval_choice ++ "\n! Original retained", "> ", &.{}));
     var calls: View.Live = .{ .count = 3, .total = 4 };
     for ([_][]const u8{ "Wait for bypass café", "Inspect application settings and report configuration errors before applying changes to local assets", "Wait for bypass café" }, 0..) |label, index| {
         calls.entries[index] = .{ .operation = 7, .ordinal = index, .presentation = .{ .description = .{}, .code = if (index == 1) .failed else .unresolved, .publication_position = null } };
@@ -625,14 +625,93 @@ test "prepared Action preserves selected inspection until explicit return" {
         try std.testing.expectEqual(!oversized, screen.preview_complete);
         try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text(), "Run Bash: exact command\n"));
         if (!oversized) {
-            try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, "a: Allow once / d: Deny (Enter)", "> ", &.{});
+            try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, Frame.approval_choice, "> ", &.{});
             const window = screen.vx.window();
             try std.testing.expectEqualStrings("R", window.readCell(0, 0).?.char.grapheme);
-            try std.testing.expectEqualStrings("a", window.readCell(0, 2).?.char.grapheme);
+            try std.testing.expectEqualStrings("T", window.readCell(0, 2).?.char.grapheme);
             try std.testing.expectEqualStrings(">", window.readCell(0, 3).?.char.grapheme);
         }
         screen.releaseAction();
         try screen.prepareAction(io, action);
         try std.testing.expect(screen.actionVisible());
     }
+}
+
+fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
+    const window = screen.vx.window();
+    var length: usize = 0;
+    for (0..window.width) |column| {
+        const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
+        if (length + grapheme.len > storage.len) break;
+        @memcpy(storage[length..][0..grapheme.len], grapheme);
+        length += grapheme.len;
+    }
+    return std.mem.trimEnd(u8, storage[0..length], " ");
+}
+
+test "line scrolling marks only drawn Action rows and older pages keep the row in view" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const action = try tmp.dir.createFile(io, "action", .{ .read = true });
+    defer action.close(io);
+    var text: [40 * 8]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    for (0..40) |row| try writer.print("row {d:0>2}\n", .{row});
+    try action.writePositionalAll(io, writer.buffered(), 0);
+    var storage: [160]u8 = undefined;
+
+    try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+    try screen.prepareAction(io, action);
+    try screen.latest();
+    var seen: [40]bool = @splat(false);
+    var steps: usize = 0;
+    while (true) : (steps += 1) {
+        try std.testing.expect(steps < 100);
+        try screen.render(&out.writer, size, "", 0, "", "> ", &.{});
+        for (0..12) |row| {
+            const shown = rowText(screen, @intCast(row), &storage);
+            if (std.mem.startsWith(u8, shown, "row ")) seen[try std.fmt.parseInt(usize, shown[4..6], 10)] = true;
+        }
+        if (screen.approvalReady()) break;
+        // Undrawn scrolling cannot pass the first unseen row, so repeated
+        // moves between frames cannot credit rows that never reached the screen.
+        for (0..if (steps == 0) 100 else 1) |_| _ = screen.browse(true, steps % 2 == 0);
+    }
+    try std.testing.expect(steps > 3);
+    for (seen) |drawn| try std.testing.expect(drawn);
+
+    // A transcript keeps its first visible row while an older page arrives.
+    screen.releaseAction();
+    try screen.latest();
+    for (0..30) |line| {
+        var buffer: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&buffer, "live {d:0>2}\n", .{line}));
+    }
+    try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+    try screen.beginTranscript(0);
+    for (0..5) |_| _ = screen.browse(false, false);
+    try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+    const before = try std.testing.allocator.dupe(u8, rowText(screen, 1, &storage));
+    defer std.testing.allocator.free(before);
+    try std.testing.expect(std.mem.startsWith(u8, before, "live "));
+    try std.testing.expect(!screen.transcriptAtTop());
+    const older = try tmp.dir.createFile(io, "older", .{ .read = true });
+    defer older.close(io);
+    try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
+    try screen.prependFile(io, older);
+    try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+    try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
+    // Resize keeps the first browsed line in view.
+    try screen.render(&out.writer, .{ .row = 10, .col = 30, .xpixel = 0, .ypixel = 0 }, "", 0, "", "› ", &.{});
+    try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
 }

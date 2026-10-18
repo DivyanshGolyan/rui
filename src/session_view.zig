@@ -175,15 +175,19 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     var source: Source = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
+    // Where and how long first, then the exact command; the description is
+    // the model's label, never a substitute for the command.
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
-    try sink.feed("? Run Bash:");
+    try sink.feed("? Run Bash");
     try sink.feed(Style.normal.code(colour));
-    try sink.feed("\n  ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-    if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
-    try escaped.finish();
+    if (arguments.description.len != 0) {
+        try indented.feed(" · ");
+        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
+        try label.feed(arguments.description.slice());
+        try label.finish();
+    }
     try indented.feed("\nWorkspace: ");
     var location: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .line } };
     try location.feed(workspace);
@@ -191,6 +195,12 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     if (arguments.timeout_ms) |timeout| {
         try print(&indented, "\nTime limit: {d} ms", .{timeout});
     } else try indented.feed("\nTime limit: Host default");
+    try indented.feed("\n$ ");
+    var command: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented };
+    var escaped: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
+    if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
+    try escaped.finish();
+    try command.finish();
     try indented.feed("\n");
     try indented.finish();
 }

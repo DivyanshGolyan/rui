@@ -5,6 +5,7 @@ const Viewport = @import("ConversationViewport.zig");
 const Self = @This();
 pub const Composer = Viewport.Sized(65_536, false);
 pub const Call = Viewport.Sized(512, false);
+pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
 pub const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
@@ -81,7 +82,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
     try self.status.layout(input.width);
     const reserve: u16 = if (input.approval) 2 else 1;
     if (input.approval and self.status.displayRows() > input.height - reserve and
-        std.mem.eql(u8, input.status, "a: Allow once / d: Deny (Enter)"))
+        std.mem.eql(u8, input.status, approval_choice))
     {
         self.status.clear();
         try self.status.append("a Allow / d Deny\nEnter");
@@ -200,7 +201,7 @@ test "complete approval and overflow survive short layouts or fail before render
     input.height = 3;
     input.width = 12;
     input.approval = true;
-    input.status = "a: Allow once / d: Deny (Enter)\n! Original retained";
+    input.status = approval_choice ++ "\n! Original retained";
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, &composer, input));
 }
 
@@ -240,7 +241,7 @@ test "Action approval requires contiguous displayed rows and resets after resize
     var composer: Composer = .{};
     try composer.layout(78);
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "a: Allow once / d: Deny (Enter)", .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = approval_choice, .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
     document.top = 0;
     try frame.plan(&document, &composer, input);
     try std.testing.expect(!frame.approval_ready);
