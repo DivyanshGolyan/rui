@@ -103,7 +103,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     if (self.status_height > input.height - reserve) return error.TerminalTooSmall;
     const draft: Viewport.Layout = .{ .width = input.width - 2, .method = input.method };
     const caret = Viewport.caret(draft, input.draft[0..input.cursor]);
-    self.draft_height = @max(1, @min(@min(Viewport.draftRows(draft, input.draft), draft_rows), (input.height - self.status_height) -| 2));
+    // An exactly filled last row puts the caret on a row of its own.
+    const needed = @max(Viewport.draftRows(draft, input.draft), caret.row + 1);
+    self.draft_height = @max(1, @min(@min(needed, draft_rows), (input.height - self.status_height) -| 2));
     self.draft_first = caret.row -| (self.draft_height - 1);
     const available: u16 = input.height - self.draft_height - self.status_height;
     try document.prepare();
@@ -191,6 +193,18 @@ test "compact frame keeps exact-fit transcript and multiline caret without botto
     try frame.plan(&document, input);
     try std.testing.expectEqual(Position{ .offset = 4 }, frame.first);
     try std.testing.expectEqual(@as(u16, 23), frame.draft_top);
+}
+
+test "an exactly filled draft row puts the caret on the next row" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    // Eight columns leave six for the draft: "abcdef" fills its row.
+    for ([_][]const u8{ "abcde", "abcdef" }, [_]u16{ 1, 2 }, [_]u16{ 7, 2 }) |draft, height, column| {
+        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+        try std.testing.expectEqual(height, frame.draft_height);
+        try std.testing.expectEqual(frame.draft_top + height - 1, frame.caret_row);
+        try std.testing.expectEqual(column, frame.caret_column);
+    }
 }
 
 test "complete approval and overflow survive short layouts or fail before rendering" {
