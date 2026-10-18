@@ -121,6 +121,7 @@ test('cleanup follows every cache producer, including failed workflows with succ
   for (const file of readdirSync(directory).filter(file => file.endsWith('.yml') && file !== 'cache-maintenance.yml')) {
     const producer = readFileSync(`${directory}/${file}`, 'utf8');
     if (!/uses: (?:\.\/\.github\/actions\/setup|actions\/cache(?:\/save)?@)/.test(producer)) continue;
+    if (/^cache-mode: read$/m.test(producer) && producer.match(/^\s*cache-mode:/gm).length === 1) continue;
     const name = producer.match(/^name: (.+)$/m)[1];
     assert.ok(jobs.workflow_run.includes(name), `${file} needs post-publication cleanup`);
   }

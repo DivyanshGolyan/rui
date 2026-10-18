@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-launch reader oracle, run by its fixture; not native Host qualification."""
+"""Host-launch fixture oracles; not native Host qualification."""
 
 from contextlib import contextmanager
 import errno
@@ -8,9 +8,59 @@ import pty
 import select
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+
+def check_process_discovery(cleanup):
+    owner = sys.modules[cleanup.__module__]
+    Path = owner.pathlib.Path
+    with tempfile.TemporaryDirectory(prefix="rui-proc-discovery-") as directory:
+        store = Path(directory).resolve() / "store"
+        proc = Path("/proc")
+        vanished, selected, unrelated, other_store = (proc / str(pid) for pid in (41001, 41002, 41003, 41004))
+        command = [str(owner.RUI), "serve", "--store", str(store)]
+        arguments = {
+            selected: command,
+            unrelated: [sys.executable, "-c", "pass"],
+            other_store: [*command[:-1], str(store.with_name("other-store"))],
+        }
+        for failure in (FileNotFoundError(errno.ENOENT, "vanished"),
+                        ProcessLookupError(errno.ESRCH, "vanished"),
+                        OSError(errno.EIO, "discovery read failed")):
+            killed = set()
+
+            def read(path):
+                if path.parent == vanished:
+                    raise failure
+                if int(path.parent.name) in killed:
+                    raise FileNotFoundError(errno.ENOENT, "retired")
+                return b"\0".join(part.encode() for part in arguments[path.parent]) + b"\0"
+
+            def kill(pid, sig):
+                assert pid == int(selected.name) and sig == owner.signal.SIGKILL, (pid, sig)
+                killed.add(pid)
+
+            # Model an enumerated process exiting before its cmdline read.
+            # Keep a live match after it, plus unrelated process/Store controls.
+            with patch.object(Path, "is_dir", return_value=True), \
+                    patch.object(Path, "iterdir", return_value=[vanished, selected, unrelated, other_store]), \
+                    patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill):
+                if failure.errno == errno.EIO:
+                    try:
+                        cleanup(store)
+                    except OSError as error:
+                        assert error is failure, error
+                    else:
+                        raise AssertionError("real process-discovery read failure was suppressed")
+                    assert not killed, "cleanup acted on an incomplete process census"
+                else:
+                    cleanup(store)
+                    assert killed == {int(selected.name)}, killed
+                    assert owner.matching_processes(store) == [], "retired process still discovered"
+    print("Host process discovery: ENOENT/ESRCH retirement, exact Store selection and real read failures passed")
 
 
 @contextmanager

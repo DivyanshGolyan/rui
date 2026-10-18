@@ -135,7 +135,7 @@ def restore(artifact_id, targets):
             with zipped.open("compiled.tar.gz") as incoming, archive.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
         unpack(archive, receipt, identity(targets))
-    print(f"Verified compiled artifact {artifact_id}; gates still require execution", flush=True)
+    print(f"Verified compiled artifact {artifact_id}; compiled only, gate acceptance not yet established", flush=True)
 
 
 def main():

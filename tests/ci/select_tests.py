@@ -42,6 +42,8 @@ RULES = (
      ("check",), ("check",), "Shared protocol, native execution or resource ownership"),
     (("src/BashLifecycle.zig", "src/deadline.zig"), ("test-logic",), ("test-logic",),
      "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
+    (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
+     "Portable Codex credential decisions and token messages; native owner checks follow below"),
     (("src/bash*", "src/BashLifecycle.zig", "src/deadline.zig", "tests/integration/bash*"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
@@ -149,7 +151,8 @@ def select(paths, phase, available):
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             continue
-        if path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml":
+        if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
+                or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: selector and workflow checks")
             targets.add("test-logic")
             native_targets.add("test-logic")

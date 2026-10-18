@@ -67,11 +67,17 @@ jobs:
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           fallback=()
           if [ "$EVENT_NAME" = push ]; then
             fallback=(--fallback-base origin/main)
+            if [[ "$REF_NAME" = wip/* ]]; then
+              # A trunk candidate must cover its complete delta, including
+              # after an empty same-tree evidence proof push.
+              BASE=$(git merge-base HEAD origin/main)
+            fi
           fi
           python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" "${fallback[@]}" > selection.json
           cat selection.json
@@ -119,7 +125,7 @@ jobs:
         run: |
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
-            if [ "$workflow" = .github/workflows/qualify-macos.yml ]; then
+            if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ]; then
               # 1.7.7 predates GitHub's server-enforced cache policy key.
               actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
             else
@@ -215,7 +221,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
       - name: Publish input- and artifact-verified evidence
@@ -298,7 +304,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
-          echo "Tested SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
       - name: Publish input- and artifact-verified evidence
         if: ${{ steps.gates.outputs.evidence_path != '' }}
