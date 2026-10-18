@@ -16,6 +16,8 @@ RULES = (
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
+    (("src/turn_policy.zig",), ("test-logic",), ("test-logic",),
+     "Turn completion and compaction decisions over transaction facts"),
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
