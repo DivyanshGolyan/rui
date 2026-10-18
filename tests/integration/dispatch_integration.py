@@ -1785,9 +1785,21 @@ def main():
                 "return an object",
             )
             schema_deadline = time.monotonic() + 8
+
+            def schema_result():
+                value = observe(schema_store, f"schema-message-{index}", deadline=schema_deadline)
+                remaining = schema_deadline - time.monotonic()
+                assert remaining > 0, "schema result exceeded its original deadline"
+                execution = command(
+                    "session", "inspect", "--store", schema_store,
+                    "--session", "direct/unsupported-schema",
+                    timeout=remaining,
+                )["execution"]
+                assert not execution["dispatch_fenced"], ("schema rejection must precede metadata acquisition", execution)
+                return value if value.get("result", {}).get("code") else None
+
             schema_failure = wait_for(
-                lambda: (value := observe(schema_store, f"schema-message-{index}", deadline=schema_deadline)).get("result", {}).get("code")
-                and value,
+                schema_result,
                 "unsupported structured output rejection",
                 deadline=schema_deadline,
             )
