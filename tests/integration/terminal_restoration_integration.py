@@ -361,6 +361,17 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"))) {
         blocked = 1;
         record("output-blocked\n");
+        if (!strcmp(fault, "backpressure")) {
+            /* Darwin later accepts screen output without a reader. Hold the
+               actual EAGAIN: stop the PTY and fill its queue to the byte. */
+            if (tcflow(fd, TCOOFF)) _exit(95);
+            int held_flags = fcntl(fd, F_GETFL);
+            if (held_flags < 0 || fcntl(fd, F_SETFL, held_flags | O_NONBLOCK)) _exit(96);
+            static const char held_filler[256];
+            while (real_write(fd, held_filler, sizeof held_filler) > 0) {}
+            while (errno == EAGAIN && real_write(fd, held_filler, 1) > 0) {}
+            if (errno != EAGAIN || fcntl(fd, F_SETFL, held_flags)) _exit(97);
+        }
     }
     /* Whether the kernel later accepted screen output without a reader
        distinguishes a drained queue from work done while still blocked. */
@@ -1073,6 +1084,9 @@ def persistent_cases(state, library, home, store, host):
                     time.sleep(0.5)
                     with log.open("a") as marks:
                         marks.write(f"test-interrupt-sent records={len(set(records.glob('*.json')) - before)}\n")
+                    # A drained queue lets the deferred command run legitimately;
+                    # that is a lost fixture precondition, not a product result.
+                    assert "output-progressed\n" not in log.read_text(), ("terminal output drained before the interrupt", log.read_text())
                     assert caller.poll() is None, "blocked output turned a command into cancellation"
                 os.write(master, b"\x03")
             elif case.startswith("incomplete-"):
