@@ -11,7 +11,8 @@ import subprocess
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
-    (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
+    (("src/logic_tests.zig", "src/core_boundary.zig", "src/execution_turn.zig", "src/request_encoding.zig",
+      "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
@@ -47,6 +48,10 @@ RULES = (
      ("check",), ("check",), "Shared protocol, native execution or resource ownership"),
     (("src/BashLifecycle.zig", "src/deadline.zig"), ("test-logic",), ("test-logic",),
      "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
+    (("src/SessionInput.zig", "src/tools.zig"), ("test-logic", "check"), ("test-logic", "check"),
+     "Portable input and tool-parser tests; shared native owners stay in check"),
+    (("src/attempt.zig", "src/descriptor_capacity.zig"), ("test-logic",), ("test-logic",),
+     "Functional cores beside shared owners; their native checks follow"),
     (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
      "Portable Codex credential decisions and token messages; native owner checks follow below"),
     (("src/bash*", "src/BashLifecycle.zig", "src/deadline.zig", "tests/integration/bash*"),
