@@ -83,6 +83,11 @@ pub fn actionVisible(self: *const Self) bool {
     return self.view == .action;
 }
 
+/// Paging a long Action moves its "Run Bash" and Workspace rows off screen.
+pub fn actionTopHidden(self: *const Self) bool {
+    return self.actionVisible() and !self.browsing.atTop(self.textLayout(), self.height);
+}
+
 pub fn approvalReady(self: *const Self) bool {
     return self.actionVisible() and self.preview_complete and self.approval_ready;
 }

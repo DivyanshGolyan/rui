@@ -3427,6 +3427,12 @@ def renderer_cases():
                 assert tty.capture.draft("", 2, prompt="> "), "unread choice text survived readiness"
                 tty.send("\n", "Type a + Enter to allow once · d + Enter to deny")
                 assert "printf approved > renderer-effect" in shown, shown
+                # Paging hid the Action's heading, so the choice keeps where it
+                # runs beside it; the opening frame showed that heading instead.
+                assert "? Run Bash" not in shown and "Run Bash · Renderer consent\nWorkspace:" in shown, shown
+                kept = shown.split("Run Bash · Renderer consent\nWorkspace:", 1)[1].split("Type a + Enter", 1)[0]
+                assert "".join(kept.split()) == str(workspace) + "·Timelimit:Hostdefault", shown
+                assert "\nRun Bash · Renderer consent\nWorkspace:" not in opened, opened
                 # The header leads the Action: where and how long, then the command.
                 assert "? Run Bash · Renderer consent" in opened, opened
                 shown_workspace = opened.split("\n  Workspace:", 1)[1].split("\n  Time limit:", 1)[0]
