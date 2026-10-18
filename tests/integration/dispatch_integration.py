@@ -168,7 +168,7 @@ def compaction_cases(state, processes, endpoints, releases):
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
         assert current["compaction_trigger"] is None and current["compaction_trigger_override"] is None, current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
-        overflowed = command("inspect-session", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
+        overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
         message(state, store, f"{route}-followup-input", session, "followup input")
         wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
@@ -1167,7 +1167,7 @@ def main():
             reopened = start_host(permanent_store, None)
             processes.append(reopened)
             report = command(
-                "inspect-session", "--store", permanent_store,
+                "session", "inspect", "--store", permanent_store,
                 "--session", "direct/permanent", "--profile", "full",
             )
             operation = report["full"]["model_operations"][0]
