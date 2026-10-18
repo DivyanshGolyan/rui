@@ -3588,8 +3588,176 @@ def renderer_cases():
                     assert "› x" in history or {"Sending…", "Sent"} & set(history), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        completed = True
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
+
+        def feedback(frames, text):
+            for frame in frames:
+                rows = frame.rstrip("\n").split("\n")
+                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+                history = rows[:composer]
+                if rows[composer].strip() == "›":
+                    assert f"› {text}" in history or {"Sending…", "Sent"} & set(history), (text, frame)
+
+        def held_pages():
+            """Once holding is set, Activity page requests reach the Host only
+            after release, so the page then read holds everything until then."""
+            holding, release = threading.Event(), threading.Event()
+            def hold(_):
+                if holding.is_set():
+                    release.wait(10)
+                return True
+            return holding, release, hold
+
+        # Sent belongs to the accepted Message, not to whichever read joins
+        # next: a read that predates a second Message cannot clear it.
+        session = "renderer/sent-identity"
+        configure(session)
+        markers = (answer("sent first"), answer("sent second"))
+        gates = {text: threading.Event() for text in (b"AAA", b"BBB")}
+        holding = {text: threading.Event() for text in gates}
+        def hold_content(response):
+            for text, gate in gates.items():
+                if text in response and not holding[text].is_set():
+                    holding[text].set()
+                    gate.wait(10)
+            return response
+        proxy = canonical.ReplyProxy(host, "/v1/activity-content", hold_content)
+        with terminal(session) as tty:
+            os.write(tty.master, b"AAA\n")
+            assert holding[b"AAA"].wait(10), tty.capture.completed
+            frames = tty.every_frame()
+            sent = len(proxy.mutations)
+            def accepted():
+                rows = tty.capture.completed.rstrip("\n").split("\n")
+                return len(proxy.mutations) > sent and rows[-1].strip() == "›" and "Sending…" not in rows
+            tty.send("BBB\n", predicate=accepted)
+            gates[b"AAA"].set()
+            tty.wait(predicate=lambda: holding[b"BBB"].is_set() and "› AAA" in tty.capture.completed)
+            gates[b"BBB"].set()
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both Messages answered", timeout=20)
+            # BBB may join the first Turn; then its own answer is never asked for.
+            unused = [response for response in endpoint.responses if markers[1].encode() in response]
+            for response in unused:
+                endpoint.responses.remove(response)
+            tty.wait(markers[0] if unused else markers[1])
+            feedback(frames, "BBB")
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: Sent stays with each accepted Message until a delivered page holds it", flush=True)
+
+        # A catch-up page that ends before the accepted Message is not its
+        # delivery: Sent stays through every page until one holds it.
+        session = "renderer/sent-catch-up"
+        configure(session)
+        holding, release, hold_page = held_pages()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            holding.set()
+            for index in range(10):
+                answer(f"backlog {index}")
+                key = admit(home, "session", "send", "--store", store, "--session", session, f"backlog {index}")["request"]
+                fixture.wait_for(lambda: fixture.completed_observation(store, key), "backlog answer", timeout=20)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "backlog settled", timeout=20)
+            marker = answer("caught up")
+            frames = tty.every_frame()
+            tty.send("CCC\n", predicate=lambda: "Sent" in tty.capture.completed)
+            release.set()
+            tty.wait(marker, timeout=20)
+            feedback(frames, "CCC")
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: Sent stays through catch-up pages that end before the Message", flush=True)
+
+        # An open /status page reloads when anything it reports changes, not
+        # only the first Action: deciding a later one elsewhere updates it.
+        session = "renderer/status-attention"
+        configure(session, "ask")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-status-attention", [
+            ("bash", f"status-attention-{index}", json.dumps({"cmd": f"printf {index}", "description": f"Attention {index}", "timeout_ms": None}))
+            for index in range(3)]))
+        with terminal(session) as tty:
+            tty.send("propose three Actions\n", "Type a + Enter to allow once · d + Enter to deny")
+            actions = [row["action"] for row in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
+            assert len(actions) == 3, actions
+            shown = tty.send("/status\n", "Session: ")
+            for action in actions:
+                assert f"Action requiring attention: {action}" in shown, shown
+            run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
+            def updated():
+                screen = tty.capture.completed
+                return ("Session: " in screen and f"Action requiring attention: {actions[1]}" not in screen and
+                        f"Action requiring attention: {actions[0]}" in screen and f"Action requiring attention: {actions[2]}" in screen)
+            tty.wait(predicate=updated, timeout=10)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: an open /status page follows a later Action decided elsewhere", flush=True)
+
+        # A page that spans several output windows still commits as one
+        # capture: a running call never vanishes between footer and history.
+        session = "renderer/whole-page"
+        configure(session)
+        label = "Wait one second"
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-whole-page", [
+            ("bash", "whole-page-call", json.dumps({"cmd": "sleep 1", "description": label, "timeout_ms": None}))]))
+        after_call = answer("whole page call")
+        queued = answer("whole page queued")
+        holding, release, hold_page = held_pages()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            tty.send("wait one second\n", f"• {label}")
+            requests = len(endpoint.requests)
+            holding.set()
+            long_message = "\n".join(f"queued line {index:03} " + "m" * 80 for index in range(70))
+            admit(home, "session", "send", "--store", store, "--session", session, long_message)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests, "call finished", timeout=20)
+            frames = tty.every_frame()
+            release.set()
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "queued Message answered", timeout=20)
+            # The queued Message may join the call's Turn; then one answer covers both.
+            unused = [response for response in endpoint.responses if queued.encode() in response]
+            for response in unused:
+                endpoint.responses.remove(response)
+            final = after_call if unused else queued
+            tty.wait(final, timeout=20)
+            for frame in frames:
+                if final in frame:
+                    break
+                assert label in frame, frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: a page spanning several windows commits with its footer as one capture", flush=True)
+
+        # The composer status comes from the capture its history does: an
+        # ended Turn's answer never sits beside Working….
+        session = "renderer/status-capture"
+        configure(session)
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-status-capture", [
+            ("bash", "status-capture-call", json.dumps({"cmd": "sleep 1", "description": "Wait for the capture", "timeout_ms": None}))]))
+        marker = answer("status capture")
+        holding, release, hold_page = held_pages()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            tty.send("wait for the capture\n", "• Wait for the capture")
+            frames = tty.every_frame()
+            holding.set()
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "turn ended", timeout=20)
+            release.set()
+            tty.wait(marker, timeout=20)
+            tty.wait(predicate=lambda: "Working…" not in tty.capture.completed, timeout=5)
+            for frame in frames:
+                assert not (marker in frame and "Working…" in frame), frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: the composer status and history come from one capture", flush=True)
+        completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
