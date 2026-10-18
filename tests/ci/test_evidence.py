@@ -16,6 +16,29 @@ import build_artifact
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_nonempty_generator_manifests_bind_consumed_output_bytes(self):
+        import collect_inputs
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'src').mkdir()
+            (root / 'src/gen.sh').write_text('generator reads an unenumerated directory')
+            for prefix in (0, 2, 3):
+                cache = root / ('global' if prefix == 3 else '.zig-cache')
+                generated = cache / 'o/generated/gen.zig'
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                path = str(generated) if prefix == 0 else 'o/generated/gen.zig'
+                manifests = {'binary': [dict(prefix=prefix, path=path)],
+                             'generated': [dict(prefix=4, path='src/gen.sh')]}
+                first, second = {}, {}
+                with self.subTest(prefix=prefix), patch.dict(os.environ, ZIG_GLOBAL_CACHE_DIR=str(cache)):
+                    generated.write_text('first generated value')
+                    before = collect_inputs.closure(root, manifests, 'binary', external=first)
+                    generated.write_text('changed generated value from an undeclared input')
+                    after = collect_inputs.closure(root, manifests, 'binary', external=second)
+                    self.assertEqual(before, ['src/gen.sh'])
+                    self.assertEqual(after, before)
+                    self.assertNotEqual(first, second)
+
     def test_suite_inputs_follow_generated_imports_and_fail_closed(self):
         import collect_inputs
         with tempfile.TemporaryDirectory() as directory:
@@ -28,23 +51,23 @@ class EvidenceTest(unittest.TestCase):
                            dict(prefix=2, path='o/generated/options.zig')],
                 'generated': [dict(prefix=4, path='src/prepare.sh')],
             }
-            closure = collect_inputs.closure(root, manifests, 'binary')
+            generated = root / '.zig-cache/o/generated/options.zig'
+            generated.parent.mkdir(parents=True)
+            generated.write_text('first build option')
+            closure = collect_inputs.closure(root, manifests, 'binary', external={})
             self.assertEqual(closure, ['src/logic.zig', 'src/prepare.sh'])
             # An orphan generated file cannot be treated as independent source.
             del manifests['generated']
             with self.assertRaisesRegex(ValueError, 'generated'):
-                collect_inputs.closure(root, manifests, 'binary')
+                collect_inputs.closure(root, manifests, 'binary', external={})
             manifests['generated'] = [dict(prefix=2, path='o/binary/cycle')]
             with self.assertRaisesRegex(ValueError, 'cycle'):
-                collect_inputs.closure(root, manifests, 'binary')
+                collect_inputs.closure(root, manifests, 'binary', external={})
             manifests['generated'] = [dict(prefix=0, path='/unowned/native.h')]
             with self.assertRaisesRegex(ValueError, 'unowned'):
-                collect_inputs.closure(root, manifests, 'binary')
+                collect_inputs.closure(root, manifests, 'binary', external={})
             # WriteFile manifests have no file dependencies: their generated
             # contents, not an empty closure, carry configuration identity.
-            generated = root / '.zig-cache/o/generated/options.zig'
-            generated.parent.mkdir(parents=True)
-            generated.write_text('first build option')
             manifests['generated'] = []
             first, second = {}, {}
             collect_inputs.closure(root, manifests, 'binary', external=first)
