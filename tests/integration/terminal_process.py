@@ -13,6 +13,10 @@ from host_process import dispose_all, stop_process
 
 # Conversations run full screen; tall enough that a short exchange stays in view.
 COLUMNS, ROWS = 80, 50
+# Every PTY here emulates a cursor-addressing terminal, so its callers inherit
+# one rather than the runner's TERM (TERM=dumb is refused at entry). A case
+# about TERM itself sets it explicitly.
+os.environ["TERM"] = "xterm-256color"
 # Screen observers by master descriptor. A new PTY can reuse a closed
 # descriptor number, so opening one discards the previous terminal's screen.
 CAPTURES = {}

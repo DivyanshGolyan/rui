@@ -1409,7 +1409,7 @@ def persistent_opening_case():
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
         # A queued local traversal is not eligible until opening establishes its
         # cursor. Both command and inspection cancellation must retain it.
-        for handoff in (b"/status\n", b"/inspect-action\n"):
+        for handoff in (b"/requests\n", b"/inspect-action\n"):
             opening_release.clear()
             opening_held = threading.Event()
 
@@ -2296,6 +2296,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         prior_release.touch()
                         prefix = terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
                         assert len(selected) == 1, selected
+                        # A scan settled after the prior call and before the
+                        # Action rightly shows that success; only the held
+                        # stale page must change nothing.
+                        held = settle_screen(master, quiet=0.5)
+                        assert "? Run Bash" not in held, held
                         requests_before = len(endpoint.requests)
                         run(home, "action", "allow", "--store", store, "--session", reference, "--action", selected[0])
                         fixture.wait_for(lambda: len(endpoint.requests) == requests_before + 1, "successful external approval continuation")
@@ -2309,7 +2314,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                             before_notice = current_screen(master)
                             # A page read under the stale Current shows only with a
                             # settled one: neither its success nor an approval yet.
-                            assert f"✓ {prior_label}\n" not in before_notice and "? Run Bash" not in before_notice, before_notice
+                            assert (f"✓ {prior_label}\n" in before_notice) == (f"✓ {prior_label}\n" in held), (held, before_notice)
+                            assert "? Run Bash" not in before_notice, before_notice
                             prefix = b""
                         refreshed_release.set()
                         await_screen(master, f"✓ {label}", composer=True)
@@ -3692,7 +3698,14 @@ def renderer_cases():
             # to and was told stays, and nothing returns to the top.
             tty.resize(80, 12)
             tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or "Session: " not in tty.capture.completed)
-            tty.send("\x1b[6~", predicate=lambda: "Session: " not in tty.capture.completed and f"Action requiring attention: {actions[2]}" in tty.capture.completed)
+            # Line by line, so the last Action lands on the bottom row however
+            # many rows the Store path wraps to.
+            for _ in range(40):
+                if f"Action requiring attention: {actions[2]}" in tty.capture.completed:
+                    break
+                tty.send("\x1b[1;2B", predicate=lambda: True)
+            scrolled = tty.capture.completed
+            assert "Session: " not in scrolled and f"Action requiring attention: {actions[0]}" in scrolled, scrolled
             tty.send("/foo\n", "! Unknown command /foo · /help")
             frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
