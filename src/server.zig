@@ -3790,8 +3790,13 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 try renderModelCatalogRejection(&response, host.model_catalog.?, command.configuration.model.value.slice(), catalog_observation.?);
             } else {
                 try renderConfigureReply(&response, command, result);
-                if (result != .conflict and result != .infrastructure_failure)
-                    if (catalog_observation) |observation| try appendModelCatalog(&response, observation);
+                // Replay answers before any verdict, so it reports none.
+                const judged = switch (result) {
+                    .accepted => |accepted| !accepted.replayed,
+                    .rejected => |rejected| !rejected.replayed,
+                    else => false,
+                };
+                if (judged) if (catalog_observation) |observation| try appendModelCatalog(&response, observation);
             }
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,

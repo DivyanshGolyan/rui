@@ -159,12 +159,13 @@ def run():
         # Replay runs before the verdict.
         replay, _ = rui("request", "recover", "--store", store, "--record", state / "early.json", "--kind", "configure")
         assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"], replay
+        assert "model_catalog" not in replay, replay
 
         # Recovery of the unsaved rejection re-judges the original intent.
         refresh_to(store, endpoint, (200, catalog_body(("gpt-6-luna", "list"), ("gpt-5-codex", "list")), 0))
         recovered, _ = rui("request", "recover", "--store", store, "--record", state / "absent.json", "--kind", "configure")
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["created"], recovered
-        assert not recovered["answer"]["replayed"], recovered
+        assert not recovered["answer"]["replayed"] and recovered["model_catalog"]["verdict"] == "listed", recovered
 
         # Every unusable response fails open, keeps the reason, and never
         # rejects, even after a fresh catalog existed.
