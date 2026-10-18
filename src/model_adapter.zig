@@ -26,6 +26,174 @@ pub const observation_names: provider.ObservationNames = .{
     .model = "openai-model",
     .alternate_model = "x-openai-model",
 };
+
+/// Interpretation borrows sealed bytes and the caller's metadata workspace.
+/// It grants no settlement authority and neither closes nor transfers either
+/// resource. Rejections contain only local codes and structural coordinates.
+pub const OutputRejection = struct {
+    reason: anyerror,
+    code: []const u8,
+    location: Output.Rejection,
+    kind: enum { invalid_output, context_overflow } = .invalid_output,
+
+    pub fn format(self: OutputRejection, buffer: *[512]u8) []const u8 {
+        return self.location.format(self.reason, buffer);
+    }
+};
+
+pub const OutputInterpretation = union(enum) {
+    accepted: Output.Validated,
+    rejected: OutputRejection,
+};
+
+pub const ModelObservations = struct {
+    openai: []const u8 = "",
+    alternate: []const u8 = "",
+};
+
+/// Schema support is checked before acquiring validation metadata, preserving
+/// the original failure precedence when metadata acquisition would also fail.
+pub fn outputSchemaRejection(structured: bool, source_length: u64) ?OutputRejection {
+    if (!structured) return null;
+    return .{
+        .reason = error.UnsupportedOutputSchema,
+        .code = "unsupported_output_schema",
+        .location = .{ .stage = .response, .byte_offset = source_length },
+    };
+}
+
+pub fn interpretOutput(
+    io: std.Io,
+    source: std.Io.File,
+    source_length: u64,
+    metadata: *store.OutputMetadataWriter,
+    operation: store.ModelOperationKind,
+    models: ModelObservations,
+    faults: Output.Faults,
+) OutputInterpretation {
+    var rejection: Output.Rejection = .{};
+    const validated = Output.validate(io, source, source_length, metadata, operation, &rejection, faults) catch |err| return .{ .rejected = .{
+        .reason = err,
+        .code = Output.failureCode(err),
+        .location = rejection,
+        .kind = if (err == error.ContextOverflow) .context_overflow else .invalid_output,
+    } };
+    if (!modelObservationsAgree(validated.evidence.served_model.slice(), models)) return .{ .rejected = .{
+        .reason = error.ContradictoryProviderOutput,
+        .code = "contradictory_provider_output",
+        .location = .{ .stage = .response, .byte_offset = source_length },
+    } };
+    return .{ .accepted = validated };
+}
+
+fn modelObservationsAgree(body: []const u8, models: ModelObservations) bool {
+    const values = [_][]const u8{ body, models.openai, models.alternate };
+    var observed: ?[]const u8 = null;
+    for (values) |value| {
+        if (value.len == 0) continue;
+        if (observed) |prior| {
+            if (!std.mem.eql(u8, prior, value)) return false;
+        } else observed = value;
+    }
+    return true;
+}
+
+pub const ErrorResponse = union(enum) { ordinary, context_overflow, unreadable: anyerror };
+
+pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16) ErrorResponse {
+    const overflow = Output.contextOverflow(io, source, length, status) catch |err| return .{ .unreadable = err };
+    return if (overflow) .context_overflow else .ordinary;
+}
+
+test "provider interpretation preserves accepted bytes and rejects every model disagreement" {
+    const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
+    const prefix = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
+    const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool }{
+        .{ .body = "", .models = .{}, .accepted = true },
+        .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true },
+        .{ .body = "", .models = .{ .openai = "model-a", .alternate = "model-b" }, .accepted = false },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{}, .accepted = true },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-a", .alternate = "model-a" }, .accepted = true },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-b" }, .accepted = false },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .alternate = "model-a-extra" }, .accepted = false },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const root_length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var metadata = try store.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+        var metadata_owned = true;
+        defer if (metadata_owned) metadata.deinit();
+        const bytes = try std.testing.allocator.print("{s}data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[]{s}}}}}\n\n", .{ prefix, case.body });
+        defer std.testing.allocator.free(bytes);
+        const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, bytes);
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, .assistant_response, case.models, .{});
+        if (case.accepted) {
+            try std.testing.expect(interpreted == .accepted);
+            try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.answer_length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.answer_digest);
+            try std.testing.expectEqualStrings("r", interpreted.accepted.evidence.response_id.slice());
+        } else {
+            try std.testing.expect(interpreted == .rejected);
+            try std.testing.expectEqualStrings("contradictory_provider_output", interpreted.rejected.code);
+            try std.testing.expectEqual(bytes.len, interpreted.rejected.location.byte_offset);
+            try std.testing.expectEqual(.response, interpreted.rejected.location.stage);
+        }
+        // Interpretation neither closes its borrowed source nor releases the
+        // caller's metadata charge, even on cross-response rejection.
+        try std.testing.expect(used.load(.acquire) > 0);
+        var first: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(usize, 1), try file.readPositionalAll(std.testing.io, &first, 0));
+        metadata.deinit();
+        metadata_owned = false;
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "provider interpretation closes failure variants without granting settlement or disposal" {
+    try std.testing.expect(outputSchemaRejection(false, 19) == null);
+    const schema = outputSchemaRejection(true, 19).?;
+    try std.testing.expectEqualStrings("unsupported_output_schema", schema.code);
+    try std.testing.expectEqual(@as(u64, 19), schema.location.byte_offset);
+    const overflow = "{\"error\":{\"code\":\"context_length_exceeded\"}}";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, overflow);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 400) == .context_overflow);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len, 200) == .ordinary);
+    try std.testing.expect(interpretErrorResponse(std.testing.io, file, overflow.len + 1, 503) == .unreadable);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
+    const cases = [_]struct { bytes: []const u8, fault: bool = false, limit: u64 = 4096, code: []const u8, overflow: bool = false }{
+        .{ .bytes = overflow, .code = "malformed_provider_output" },
+        .{ .bytes = "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\"}\n\n", .code = "provider_context_overflow", .overflow = true },
+        .{ .bytes = "data: {\"type\":\"future.event\"}\n\n", .code = "unsupported_provider_output" },
+        .{ .bytes = item, .fault = true, .code = "response_metadata_failed" },
+        .{ .bytes = item, .limit = 0, .code = "response_metadata_exhausted" },
+    };
+    for (cases) |case| {
+        const source = try tmp.dir.createFile(std.testing.io, "output", .{ .read = true });
+        defer source.close(std.testing.io);
+        try source.writeStreamingAll(std.testing.io, case.bytes);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var metadata = try store.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
+        defer metadata.deinit();
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, .assistant_response, .{}, .{ .metadata = case.fault });
+        try std.testing.expect(interpreted == .rejected);
+        try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
+        try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
+    }
+}
+
 pub const Authentication = struct { path: []const u8, fixture: bool = false };
 pub const Credential = codex_credentials.Lease;
 
