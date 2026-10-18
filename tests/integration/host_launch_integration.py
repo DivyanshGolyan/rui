@@ -9,6 +9,8 @@ import hashlib
 import os
 import pathlib
 import pty
+from terminal_process import COLUMNS, ROWS, open_pty
+from terminal_screen import ScreenCapture
 import re
 import resource
 import select
@@ -823,27 +825,31 @@ def main():
         bare_credential = bare_credential_dir / "codex.json"
         codex_fixture.credentials(bare_credential)
         bare_env = {**os.environ, "HOME": str(bare_home)}
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         caller = None
         try:
             original_terminal = termios.tcgetattr(master)
             caller = subprocess.Popen([RUI], cwd=root, env=bare_env,
                 stdin=slave, stdout=slave, stderr=slave)
             output = bytearray()
+            screen = ScreenCapture(COLUMNS, ROWS)
             until = time.monotonic() + COMMAND_TIMEOUT
-            while "› ".encode("utf-8") not in output:
+            # The bypass notice is in-frame state above the composer; the
+            # committed screen, not a byte match, establishes the prompt.
+            while not ("Bash runs without approval." in screen.completed
+                    and screen.screen.display[screen.screen.cursor.y].startswith("›")):
                 remaining = until - time.monotonic()
-                assert remaining > 0 and select.select([master], [], [], remaining)[0], output
+                assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
                 chunk = os.read(master, 65536)
                 assert chunk, ("terminal closed before prompt", output)
                 assert len(output) + len(chunk) < PTY_OUTPUT_LIMIT, "unexpected unbounded terminal output"
                 output.extend(chunk)
+                screen.feed(chunk)
             # Automatic success is quiet; readiness is established separately
             # through protected status and the accepted Session below.
-            assert all(noise not in output for noise in (b"Provider:", b"Model:", b"Permission:", b"request:", b"Session:", b"Workspace:")), output
-            bash_bypass = "bash" in DEFAULTS.tools.split(",") and DEFAULTS.permission_mode == "bypass"
-            assert (b"Bash runs without approval" in output) == bash_bypass, output
-            assert b"Bash commands can run without asking you" not in output, output
+            assert all(noise not in screen.completed for noise in ("Provider:", "Model:", "Permission:", "request:", "Session:", "Workspace:")), screen.completed
+            assert not screen.plain, ("bypass notice left the frame", screen.plain)
+            assert "Bash commands can run without asking you" not in screen.completed, screen.completed
             captures = list((bare_home / ".config/rui/requests").glob("*.json"))
             assert len(captures) == 1, captures
             captured = json.loads(captures[0].read_text())

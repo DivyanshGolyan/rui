@@ -88,7 +88,7 @@ Type a request at `›`, such as `Investigate the failing test`. In approval mod
 
 You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `rui session send --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
 
-The experimental libvaxis renderer is off by default. Run `RUI_RENDERER=vaxis "$RUI"` to try it. It uses an alternate screen, so conversation output does not enter your terminal's scrollback. PgUp/PgDn browse the retained view, Ctrl-G returns to the latest view, and `/history` reads older saved content. Unset `RUI_RENDERER` to return to inline scrollback; `TERM=dumb` always uses inline output. Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup; use your terminal's reset command if needed.
+The conversation uses the full terminal screen and leaves your shell's screen as it was when you exit; conversation text does not stay in your terminal's scrollback. Scroll with PgUp/PgDn, the arrow keys or the mouse wheel; keep scrolling up to read older conversation. Esc returns to the latest messages. Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup; use your terminal's reset command if needed.
 
 ## Return to your work
 
