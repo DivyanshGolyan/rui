@@ -213,6 +213,21 @@ pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void 
     }
 }
 
+/// Replaces the shown inspection with a newer copy of the same page. The first
+/// visible line keeps its line number, clamped to the new page.
+pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
+    std.debug.assert(self.view == .inspection);
+    const document = &self.browsing;
+    const first = document.first(self.textLayout(), self.height).offset;
+    const line = std.mem.count(u8, document.bytes[0..@min(first, document.length)], "\n");
+    const length = (try file.stat(io)).size;
+    try self.load(document, io, file, true);
+    var offset: usize = 0;
+    for (0..line) |_| offset = 1 + (std.mem.indexOfScalarPos(u8, document.bytes[0..document.length], offset, '\n') orelse break);
+    document.top = .{ .offset = offset };
+    self.preview_complete = length <= Viewport.capacity and document.origin == 0;
+}
+
 pub fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
     self.action_seen = .{};
     self.approval_ready = false;
