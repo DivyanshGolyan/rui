@@ -366,16 +366,23 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches(Key.backspace, .{ .alt = true }) or value.matches(127, .{ .alt = true })) return self.backwardWord(false);
     if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
     if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
+    // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
+    // on a character or a named key such as Enter, is dropped whole and
+    // reported. Its bare key (ESC . as ".", ESC CR as Enter) was never typed,
+    // and the draft around it was: an Esc pressed just before a key arrives
+    // as one chord.
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
-    // those are not text, so they reject the input.
-    if (value.mods.ctrl or !validScalar(value.codepoint, false)) {
+    // those are not text, so they reject the input, with or without Alt.
+    const control = value.codepoint < 0x20 and value.codepoint != Key.enter and value.codepoint != Key.tab and value.codepoint != Key.escape;
+    if (value.mods.ctrl or control) {
         self.reject(.invalid);
         return .none;
     }
-    // Any other chord the bindings above do not consume is dropped whole and
-    // reported. Its bare character (ESC . as ".") was never typed, and the
-    // draft around it was: an Esc pressed just before a key arrives as one.
     if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .unbound;
+    if (!validScalar(value.codepoint, false)) {
+        self.reject(.invalid);
+        return .none;
+    }
     if (value.text) |text| return self.insertText(text, false);
     return .none;
 }
@@ -752,12 +759,13 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // modifyOtherKeys chords), Kitty with and without associated text, and
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u" }) |chord| {
+    // Alt-Enter, as ESC CR or Kitty, neither sends the draft nor adds a line.
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
             for ("o") |byte| _ = editor.feed(&stream, byte);
-            for (chord) |byte| _ = editor.feed(&stream, byte);
+            for (chord) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
             try std.testing.expectEqualStrings("o", storage[0..editor.length]);
             for ("k") |byte| _ = editor.feed(&stream, byte);
             try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
@@ -788,6 +796,9 @@ test "a dropped chord reports itself as it arrives" {
     _ = editor.feed(&stream, 'o');
     _ = editor.feed(&stream, 0x1b);
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '.'));
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\r'));
+    try std.testing.expectEqualStrings("o", storage[0..editor.length]);
 }
 
 test "meta-backspace deletes a word without swallowing the next character" {
