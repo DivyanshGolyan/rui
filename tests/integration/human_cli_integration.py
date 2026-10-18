@@ -90,7 +90,7 @@ def compaction_settings_case(home, store, workspace):
     with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
         "--", session], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
-        status = flat(terminal_step(master, "/status", "Work: ", composer=True))
+        status = flat(status_frame(master, session))
         assert "244800 tokens (model default)" in status, status
         assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
@@ -102,9 +102,9 @@ def compaction_settings_case(home, store, workspace):
             ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)"),
             ("--compaction-trigger default --output-reservation default", "244800 tokens (model default)", "0 tokens (model default)"),
         ):
-            configured = terminal_step(master, "/configure " + flags, "Configured.", composer=True)
+            configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
-            status = flat(terminal_step(master, "/status", "Work: ", composer=True))
+            status = flat(status_frame(master, session))
             assert trigger in status and "Extra compaction headroom: " + headroom in status, status
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
@@ -211,6 +211,47 @@ def current_screen(master):
 def shown(text, screen):
     from terminal_screen import shown as wrapped
     return wrapped(text, screen)
+
+
+def command_frame(master, command, accept, timeout=15):
+    """Send `command`; return the first committed frame after it that
+    `accept`s with the composer ready in that same frame. Page identity,
+    readiness and any absence check then describe one shown frame."""
+    capture = terminal_capture(master)
+    found = []
+
+    def observe(screen, x, y):
+        if not found and accept(screen) and composer_ready(screen, x, y):
+            found.append(screen)
+
+    capture.listener = observe
+    try:
+        os.write(master, (command + "\n").encode())
+        deadline = time.monotonic() + timeout
+        while not found:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
+                "command result frame", command, capture.completed)
+            chunk = os.read(master, 65536)
+            assert chunk, ("terminal closed before command result", command)
+            capture.feed(chunk)
+    finally:
+        capture.listener = None
+    return found[0]
+
+
+def status_frame(master, session, command="/status", timeout=15):
+    """The /status page for exactly `session` (escaped as /status shows it)."""
+    escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
+    line = "\nSession: " + escaped + "\n"
+    return command_frame(master, command, lambda frame: frame.startswith("Browsing · Esc returns\n")
+        and line in frame and "\nWork: " in frame, timeout)
+
+
+def configured_frame(master, command):
+    """The live frame whose status row reports this Configure's success."""
+    return command_frame(master, command, lambda frame: "Configured." in frame.split("\n")
+        and not frame.startswith("Browsing"))
 
 
 def composer_ready(screen, x, y):
@@ -516,6 +557,49 @@ def terminal_wait_oracles():
                     assert suffix == terminal_frame([marker, "›"], (2, 3)), (command, output)
                 assert peer.recv(4096) == (command + "\n").encode()
                 forget_terminal(reader.fileno())
+    # Command results: identity, readiness and absence describe one fresh
+    # committed frame, not readiness or a Session borrowed from earlier ones.
+    session = 's/é"\n'
+    page = ["Browsing · Esc returns", 'Session: s/é\\"\\n', "Permission: bypass", "Work: completed", "", "›"]
+    def frame_after(command, chunks, read):
+        reader, peer = socket.socketpair()
+        with reader, peer:
+            forget_terminal(reader.fileno())
+            peer.settimeout(1)
+            peer.sendall(b"".join(chunks))
+            peer.shutdown(socket.SHUT_WR)
+            try:
+                return read(reader.fileno())
+            except AssertionError as failure:
+                assert failure.args[0][0] == "terminal closed before command result", failure
+                return None
+            finally:
+                assert peer.recv(4096) == (command + "\n").encode()
+                forget_terminal(reader.fileno())
+    status = lambda fd: status_frame(fd, session)
+    configured = lambda fd: configured_frame(fd, "/configure --model m")
+    unavailable = terminal_frame(["Browsing · Esc returns", "rui: status: StatusUnavailable", "", "›"], (4, 3))
+    assert frame_after("/status", [terminal_frame(page[:2], (2, 1)), unavailable], status) is None
+    assert frame_after("/status", [terminal_frame([page[0], "Session: other"] + page[2:], (6, 3))], status) is None
+    assert frame_after("/status", [terminal_frame(page, (1, 1))], status) is None  # Not at the composer.
+    shown = frame_after("/status", [terminal_frame(["✓ Inspect café", "", "›"], (3, 3)), terminal_frame(page, (6, 3))], status)
+    assert shown is not None and "Inspect café" not in shown, shown  # A transient live outcome is legitimate.
+    live = ["answer", "Configured.", "›"]
+    assert frame_after("/configure --model m", [terminal_frame(live, (2, 1))], configured) is None
+    assert frame_after("/configure --model m", [terminal_frame(["Browsing · Esc returns"] + live, (4, 3))], configured) is None
+    assert frame_after("/configure --model m", [terminal_frame(live, (3, 3))], configured) is not None
+    reader, peer = socket.socketpair()
+    with reader, peer:  # A page committed before the command is not its result.
+        forget_terminal(reader.fileno())
+        peer.sendall(terminal_frame(page, (6, 3)))
+        read_terminal(reader.fileno(), "Work: ", composer=True)
+        try:
+            status_frame(reader.fileno(), session, "/status", timeout=0.3)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("an earlier page satisfied a later command")
+        forget_terminal(reader.fileno())
     # Many large frames keep the newest MiB and still find the marker.
     large = [terminal_frame([f"frame {n} " + "x" * 70] * 49) for n in range(400)] + [terminal_frame(["final marker", "›"], (2, 3))]
     output = collect(large, "final marker", composer=True)
@@ -1912,11 +1996,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "\n› next cafXaYé!" in submitted_draft, submitted_draft
         fixture.wait_for(lambda: proxy.exchanges, "retained draft queued Message")
         assert json.loads(proxy.exchanges[0][0])["text"]["value"] == "next cafXaYé!"
-        terminal_step(master, "/status", "Session: ", composer=True)
-        # The page, not the live frames drawn while it loaded: the transcript
-        # rightly keeps the outcome above the composer.
-        quiet_status = current_screen(master)
-        assert f"✓ {description}" not in quiet_status and "Bash succeeded." not in quiet_status, (
+        # The page itself, not live frames drawn while it loaded: the
+        # transcript rightly keeps the outcome above the composer. No outcome
+        # form (success, denial, failure, timeout) repeats on the page.
+        quiet_status = status_frame(master, reference)
+        assert description not in quiet_status and "Bash succeeded." not in quiet_status, (
             "already presented outcome repeated on refresh", quiet_status)
         if exit_code:
             # Wide enough that the raw export command is one row.
@@ -2032,8 +2116,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
                 assert "Process retirement confirmed" not in outcome, ("sibling retirement diagnostics leaked", outcome)
                 assert "› live cafXé!" in outcome, outcome
-                terminal_step(master, "\x01\x0b/status", "Session: ", composer=True)
-                assert f"✓ {bypass_description}" not in current_screen(master), ("status page repeated a presented result", current_screen(master))
+                page = status_frame(master, reference, "\x01\x0b/status")
+                assert bypass_description not in page, ("status page repeated a presented result", page)
                 return_to_live(master)
                 refreshed = settle_screen(master)
                 assert permanent_tool_count(refreshed, f"✓ {bypass_description}") == 2, ("presented bypass result repeated", refreshed)
@@ -3370,6 +3454,7 @@ def main(selected="all"):
         persistent_permission_case("allow-action", signal_failure=True)
         persistent_permission_case("allow-action", signal_failure=True, timed_out=True)
         persistent_permission_case("allow-action", lost_reply=True)
+        persistent_permission_case("deny-action", lost_reply=True)
         persistent_permission_case(fragmented_paste=True)
         persistent_permission_case(stale_target=True)
     if selected == "persistent-permission":
@@ -3824,12 +3909,10 @@ def main(selected="all"):
                 assert "Permission:" not in welcome, welcome
                 assert ("Bash runs without approval" in welcome) == warning, welcome
                 assert "Bash commands can run without asking you" not in welcome, welcome
-                status = terminal_step(master, "/status", "Session: ", composer=True)
+                status = status_frame(master, warning_ref)
                 assert f"Permission: {mode}\n" in status, status
                 assert fixture.command("inspect-session", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
-                # The page itself does not repeat the warning; the bypass
-                # notice is the Session's own status row below it.
-                assert "Bash runs without approval" not in current_screen(master).split("\nWork: ", 1)[0], status
+                assert "Bash runs without approval" not in status.split("\nWork: ", 1)[0], status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
         created = []
@@ -4088,9 +4171,7 @@ def main(selected="all"):
             terminal_step(master, "/configure --instructions -", "Use a file for", composer=True)
             terminal_step(master, "/configure --output-schema -", "Use a file for", composer=True)
             terminal_step(master, "/status", f"Session: {session}", composer=True)
-            terminal_step(master, '/configure --model "model-a"', "Configured.", composer=True)
-            # The result frame; frames before it may still show the /status page.
-            configured = current_screen(master)
+            configured = configured_frame(master, '/configure --model "model-a"')
             assert "Configured." in configured and "request:" not in configured, configured
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
