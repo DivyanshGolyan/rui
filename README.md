@@ -168,7 +168,7 @@ The **Host** runs work in the background. The **Store** is its private directory
 "$RUI" host status
 ```
 
-`host start` starts a Host with capacity for 100 active executions, or connects to an existing one without changing its settings. A running Host keeps the capacity it started with, even after you upgrade Rui; stop it and start a new one to use the current default. The Host raises its own open-file soft limit when the hard limit allows. If the hard limit is too low, startup fails and names the limit to raise. It prints the diagnostic-log location. Rui does not install an OS service or restart a crashed Host automatically. If startup times out, inspect status and diagnostics; a timeout does not prove the Host stopped.
+`host start` starts a Host with capacity for 100 active executions, or connects to an existing one without changing its settings. A running Host keeps the capacity it started with, even after you upgrade Rui; stop it and start a new one to use the current default. The Host raises its own open-file soft limit as far as the hard limit allows. If the limit still falls short, the Host accepts fewer simultaneous client requests; it never reduces the number of active executions. If the hard limit is too low even for that, startup fails and names the limit to raise. It prints the diagnostic-log location. Rui does not install an OS service or restart a crashed Host automatically. If startup times out, inspect status and diagnostics; a timeout does not prove the Host stopped.
 
 To shut down the Host and interrupt **all work in the selected Store**:
 
