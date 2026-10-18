@@ -56,7 +56,9 @@ pub fn feed(self: *Self, byte: u8) Decoded {
     const line_end = !self.paste and (byte == '\r' or byte == '\n');
     // Cancellation is observable even during an incomplete terminal response.
     // Inside marked paste it is data and the editor rejects the control byte.
-    if (!self.paste and (byte == 3 or byte == 4 or line_end) and self.used != 0) {
+    // A lone ESC before a line end is Alt-Enter: one chord for the editor to
+    // judge, never a pending prefix to discard before an ordinary Enter.
+    if (!self.paste and (byte == 3 or byte == 4 or line_end) and self.used != 0 and !(line_end and self.pending() == .escape)) {
         const escape = self.bytes[0] == 0x1b;
         self.used = 0;
         if (!escape and byte != 3 and byte != 4) return .{ .invalid = .{ .line_end = true } };

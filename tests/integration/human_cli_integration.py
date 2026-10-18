@@ -3827,20 +3827,37 @@ def renderer_cases():
         print("renderer: /status opens from the capture the composer status shows", flush=True)
 
         # A /status not yet shown yields to a later page request: the page
-        # asked for last is the one that stays on screen.
+        # asked for last is the one that stays on screen, even when the read
+        # that would show /status is already in flight.
         session = "renderer/status-yields"
         configure(session)
         marker = answer("status yields")
-        holding, release, hold_page = held_pages()
-        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        holding = threading.Event()
+        held = [threading.Event(), threading.Event()]
+        released = [threading.Event(), threading.Event()]
+        reads = []
+        def hold_two(_):
+            if holding.is_set() and len(reads) < 2:
+                index = len(reads)
+                reads.append(index)
+                held[index].set()
+                released[index].wait(10)
+            return True
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two)
         with terminal(session) as tty:
             tty.send("status yields\n", marker)
-            holding.set()
-            os.write(tty.master, b"/status\n/details\n")
-            time.sleep(0.5)
-            release.set()
-            tty.wait("Recent conversation — tool details", timeout=20)
             frames = tty.every_frame()
+            holding.set()
+            assert held[0].wait(10)
+            os.write(tty.master, b"/status\n")
+            time.sleep(0.3)
+            released[0].set()
+            # The next read carries the /status request.
+            assert held[1].wait(10)
+            os.write(tty.master, b"/details\n")
+            time.sleep(0.3)
+            released[1].set()
+            tty.wait("Recent conversation — tool details", timeout=20)
             time.sleep(1.5)
             assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
             for frame in frames:
@@ -3850,6 +3867,47 @@ def renderer_cases():
         proxy.close()
         proxy = None
         print("renderer: a later /details replaces a /status not yet shown", flush=True)
+
+        # A fresh Session's live page begins with an Admission row, which is
+        # no conversation cursor: its start is the start of the conversation.
+        session = "renderer/fresh-start"
+        configure(session)
+        marker = answer("fresh start")
+        with terminal(session) as tty:
+            tty.send("fresh start\n", marker)
+            frames = tty.every_frame()
+            tty.send("/history\n", "Start of conversation")
+            for _ in range(3):
+                os.write(tty.master, b"\x1b[5~")
+                time.sleep(0.3)
+            time.sleep(1)
+            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
+            for frame in frames:
+                assert "Earlier messages unavailable" not in frame, frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: a fresh Session scrolls to its start", flush=True)
+
+        # While approval is paused the composer is the draft: what is typed
+        # stays there, cannot decide, and returns after the decision.
+        session = "renderer/paused-draft"
+        configure(session, "ask")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-paused", [
+            ("bash", "paused-call", json.dumps({"cmd": "printf paused", "description": "Paused draft", "timeout_ms": None}))]))
+        marker = answer("paused done")
+        with terminal(session) as tty:
+            tty.send("propose paused\n", "Type a + Enter to allow once · d + Enter to deny")
+            tty.send("/details\n", "Approval paused · Esc returns to Action")
+            tty.send("next draft", predicate=lambda: tty.capture.draft("next draft", 12))
+            tty.send("\r", "! Action needs a decision; Esc returns to it. Draft retained.")
+            assert tty.capture.draft("next draft", 12), tty.capture.completed
+            assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
+            tty.send("\x1b", "Type a + Enter to allow once · d + Enter to deny")
+            tty.send("a\r", marker)
+            tty.wait(predicate=lambda: tty.capture.draft("next draft", 12), timeout=10)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: a draft typed while approval is paused stays and cannot decide", flush=True)
 
         # A Message accepted after its page and many later ones were shown is
         # already delivered: Sent never outlives it.

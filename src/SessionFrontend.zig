@@ -553,8 +553,8 @@ fn driveActive(self: *Self) !void {
         if (self.dirty) {
             const screen = self.terminal.screen;
             if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
-            const view: Input.View = if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const action_visible = self.actionVisible();
+            const view: Input.View = if (self.consent.active() and action_visible) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const approval_ready = self.approvalReady();
             const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) Frame.approval_choice else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Esc returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
                 .not_started => "Not sent · Ctrl-R retries original",
@@ -800,6 +800,12 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         try self.submission.requestRecovery(null);
         return .byte;
     }
+    if (self.consent.active() and !self.actionVisible() and pending == .none and byte == 18) {
+        // Recovery waits for the Action; the paused draft stays as it is.
+        self.consent.invalidate();
+        self.notice = "! Action needs a decision; Esc returns to it. Draft retained.";
+        return .byte;
+    }
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
     var decoded = stream.feed(byte);
@@ -808,16 +814,24 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
         },
-        else => if (self.consent.active()) try self.choiceEvent(decoded) else try self.draftEvent(decoded),
+        // The choice takes input only beside its Action. While approval is
+        // paused, typing goes to the draft shown in the composer; it never
+        // decides, and returning to the Action needs a fresh choice.
+        else => if (self.consent.active() and self.actionVisible()) try self.choiceEvent(decoded) else {
+            if (self.consent.active()) {
+                self.consent.invalidate();
+                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            }
+            try self.draftEvent(decoded);
+            if (self.detached) self.consent.interrupt();
+        },
     };
     return .byte;
 }
 
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
-    const visible = self.actionVisible();
-    if (!visible) self.consent.invalidate();
-    if (visible and !self.consent.acceptsInput()) {
+    if (!self.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
         const event = self.choice.apply(decoded);
         if (event == .interrupt or event == .eof) {
@@ -835,12 +849,6 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const event = self.choice.apply(decoded);
     try self.navigation(event);
     switch (event) {
-        .latest, .close_view => {
-            if (!visible) {
-                self.consent.invalidate();
-                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-            }
-        },
         .submit => {
             const text = self.choice.buffer[0..self.choice.length];
             const decision = if (self.approvalReady()) self.consent.submit(text) else null;
@@ -849,7 +857,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
             } else if (std.mem.startsWith(u8, text, "/")) {
                 self.choiceCommand(text);
-            } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
+            } else self.notice = if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.";
             self.consent.invalidate();
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         },
@@ -869,7 +877,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const submission = self.submission.view();
     // A Message waits for a pending command, which may change its configuration.
-    switch (self.input.applySelected(decoded, !self.opening and self.read_phase != .permission and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
+    switch (self.input.applySelected(decoded, !self.opening and self.read_phase != .permission and !self.consent.active() and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -881,7 +889,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 self.requestHistory(text);
             } else self.admitCommand();
         },
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.consent.active()) "! Action needs a decision; Esc returns to it. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
