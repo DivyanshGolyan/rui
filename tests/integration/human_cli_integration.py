@@ -3484,8 +3484,35 @@ def renderer_cases():
                 assert f"rui action {name} --store $'{store}' --session $'renderer/oversized' --action {action}" in detached, detached
             assert set((home / ".config/rui/requests").glob("*.json")) == records
             assert not (workspace / "renderer-oversized-effect").exists()
-        completed = True
         print("renderer: oversized Action cannot approve; exact shell commands survive alternate-screen exit", flush=True)
+
+        # Another client decides: the choice must leave on its own, with the
+        # outcome and answer shown, never an Action that still looks pending.
+        for decision in ("allow", "deny"):
+            session = f"renderer/elsewhere-{decision}"
+            configure(session, "ask")
+            effect = workspace / f"renderer-elsewhere-{decision}"
+            arguments = json.dumps({"cmd": f"printf decided > {effect.name}", "description": "Decided elsewhere", "timeout_ms": None})
+            endpoint.responses.append(fixture.sse_tool_calls(f"renderer-elsewhere-{decision}", [("bash", f"elsewhere-{decision}-call", arguments)]))
+            marker = answer(f"elsewhere {decision}")
+            with terminal(session) as tty:
+                tty.send("propose an Action decided elsewhere\n", "Type a + Enter to allow once · d + Enter to deny")
+                action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
+                generation = tty.capture.generation
+                run(home, "action", decision, "--store", store, "--session", session, "--action", action)
+                shown = tty.wait(marker, after=generation)
+                for pending in ("Type a + Enter", "PgDn reads", "? Run Bash"):
+                    assert pending not in shown, (decision, shown)
+                assert effect.exists() == (decision == "allow"), decision
+                # Paging and a /status round trip cannot bring the choice back.
+                tty.send("\x1b[6~", predicate=lambda: tty.capture.generation > generation)
+                tty.send("/status\n", "Session: ")
+                tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
+                assert "Type a + Enter" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        completed = True
+        print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key", flush=True)
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
             lambda: fixture.stop_host(host) if host is not None else None,
