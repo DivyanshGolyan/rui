@@ -296,3 +296,63 @@ diff --git a/src/widgets/View.zig b/src/widgets/View.zig
 @@ -12,1 +12,1 @@
 -const unicode = @import("../unicode.zig");
 +const unicode = @import("terminal_unicode");
+diff --git a/src/Window.zig b/src/Window.zig
+--- a/src/Window.zig
++++ b/src/Window.zig
+@@ -308,6 +308,12 @@
+                     }
+                     const w = self.gwidth(s);
+                     if (w == 0) continue;
++                    // A wide grapheme that would cross the edge starts the next row.
++                    if (col != 0 and col + w > self.width) {
++                        row += 1;
++                        col = 0;
++                        if (row >= self.height) break :blk true;
++                    }
+                     if (opts.commit) self.writeCell(col, row, .{
+                         .char = .{
+                             .grapheme = s,
+@@ -334,7 +340,7 @@
+             var col: u16 = opts.col_offset;
+             var overflow: bool = false;
+             var soft_wrapped: bool = false;
+-            outer: for (segments) |segment| {
++            outer: for (segments, 0..) |segment, segment_index| {
+                 var line_iter: LineIterator = .{ .buf = segment.text };
+                 while (line_iter.next()) |line| {
+                     defer {
+@@ -370,8 +376,17 @@
+                                 }
+                             },
+                             .word => |word| {
+-                                const width = self.gwidth(word);
+-                                if (width + col > self.width and width < self.width) {
++                                // A word continues into following segments
++                                // (style changes) until whitespace.
++                                var width = self.gwidth(word);
++                                if (word.ptr + word.len == segment.text.ptr + segment.text.len) {
++                                    for (segments[segment_index + 1 ..]) |next| {
++                                        const end = std.mem.indexOfAny(u8, next.text, " \t\r\n") orelse next.text.len;
++                                        width +|= self.gwidth(next.text[0..end]);
++                                        if (end != next.text.len) break;
++                                    }
++                                }
++                                if (width + col > self.width and width <= self.width) {
+                                     row += 1;
+                                     col = 0;
+                                 }
+@@ -385,6 +400,14 @@
+                                     }
+                                     const s = grapheme.bytes(word);
+                                     const w = self.gwidth(s);
++                                    if (col != 0 and col + w > self.width) {
++                                        row += 1;
++                                        col = 0;
++                                        if (row >= self.height) {
++                                            overflow = true;
++                                            break :outer;
++                                        }
++                                    }
+                                     if (opts.commit) self.writeCell(col, row, .{
+                                         .char = .{
+                                             .grapheme = s,

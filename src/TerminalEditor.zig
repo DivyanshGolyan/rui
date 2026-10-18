@@ -431,9 +431,6 @@ test "renderer declines standalone zero-width edits and rolls back an unrepresen
         for ("é🧑‍🌾") |byte| _ = editor.feed(byte);
         try std.testing.expectEqualStrings("é🧑‍🌾kept", storage[0..editor.length]);
         try std.testing.expectEqual(Event.submit, editor.feed('\r'));
-        var composer: @import("TerminalFrame.zig").Composer = .{};
-        try composer.append(storage[0..editor.length]);
-        try composer.layoutInput(78);
     }
 }
 

@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
+const Position = Viewport.Position;
 const Frame = @import("TerminalFrame.zig");
 const View = @import("session_view.zig");
 const Self = @This();
@@ -18,18 +19,22 @@ memory: Memory = .{},
 live: Document = .{},
 browsing: Document = .{},
 staging: Document = .{},
-composer: Frame.Composer = .{},
+// The draft as displayed: tabs show as one space so offsets stay exact.
+composer: [65_536]u8 = undefined,
 view: ViewKind = .live,
 // Newer transcript rows left the copy so older pages fit; returning to them
 // means returning to live.
 newer_trimmed: bool = false,
+// Rows asked for above the transcript's top while an older page loads; the
+// page applies them, so holding PgUp or the wheel keeps moving.
+overscroll: usize = 0,
 preview_complete: bool = true,
-action_seen: usize = 0,
+action_seen: Position = .{},
 approval_ready: bool = false,
 // Borrowed from the frontend: immutable and open until releaseAction or screen
 // disposal. This owner neither closes the file nor grants its consent authority.
 action_view: ?struct { io: std.Io, file: std.Io.File } = null,
-height: usize = 1,
+height: u16 = 1,
 colour: bool,
 
 pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
@@ -56,13 +61,17 @@ pub fn liveEnd(self: *const Self) u64 {
     return self.live.origin + self.live.length;
 }
 
+fn textLayout(self: *const Self) Viewport.Layout {
+    return .{ .width = @max(1, self.vx.screen.width), .method = self.vx.caps.unicode };
+}
+
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.vx.caps.unicode == method) return;
-    self.action_seen = 0;
+    self.action_seen = .{};
     self.approval_ready = false;
     self.vx.caps.unicode = method;
     self.vx.screen.width_method = method;
-    inline for (.{ &self.live, &self.browsing, &self.staging, &self.composer }) |document| {
+    inline for (.{ &self.live, &self.browsing, &self.staging }) |document| {
         document.width_method = method;
         document.dirty = true;
     }
@@ -83,9 +92,10 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     std.debug.assert(self.view == .live);
     self.browsing = self.live;
     self.browsing.discardFront(front);
-    try self.browsing.layout(@max(1, self.vx.screen.width));
-    self.browsing.top = self.browsing.displayRows() -| self.height;
+    try self.browsing.prepare();
+    self.browsing.top = self.browsing.bottom(self.textLayout(), self.height);
     self.newer_trimmed = false;
+    self.overscroll = 0;
     self.view = .transcript;
 }
 
@@ -95,17 +105,19 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = &self.browsing;
-    const end = document.atBottom(self.height);
+    const end = document.atBottom(self.textLayout(), self.height);
+    const moves: usize = if (page) self.height else 1;
+    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
     const unseen = if (self.actionVisible() and self.preview_complete and !self.approval_ready) self.action_seen else null;
-    document.browse(down, if (page) self.height else 1, self.height, unseen);
+    document.browse(self.textLayout(), down, moves, self.height, unseen);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.height));
+    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
 }
 
 /// The transcript shows its first retained row, so older text is wanted.
 pub fn transcriptAtTop(self: *const Self) bool {
-    return self.view == .transcript and self.browsing.atTop(self.height);
+    return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
 }
 
 /// Prepends one older canonical page, rendered to `file`, above the
@@ -113,7 +125,6 @@ pub fn transcriptAtTop(self: *const Self) bool {
 pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .transcript);
     try self.load(&self.staging, io, file, false);
-    const width = @max(1, self.vx.screen.width);
     if (self.staging.origin != 0) {
         // A page larger than the view cannot join its older neighbour without
         // a gap. Keep its newest whole lines and say so at the gap.
@@ -125,9 +136,12 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
         try marker.append(View.Style.quiet.code(self.colour));
         try marker.append(text);
         try marker.append(View.Style.normal.code(self.colour));
-        _ = try self.staging.prepend(&marker, width, 1);
+        _ = try self.staging.prepend(&marker, self.textLayout(), 1);
     }
-    if (try self.browsing.prepend(&self.staging, width, self.height)) self.newer_trimmed = true;
+    if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
+    const first = self.browsing.first(self.textLayout(), self.height);
+    self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
+    self.overscroll = 0;
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
@@ -147,7 +161,7 @@ fn boundary(self: *Self, text: []const u8) !void {
     try marker.append(View.Style.quiet.code(self.colour));
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
-    if (try self.browsing.prepend(&marker, @max(1, self.vx.screen.width), self.height)) self.newer_trimmed = true;
+    if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
 }
 
 pub fn latest(self: *Self) !void {
@@ -173,24 +187,24 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
         offset += wanted;
     }
     document.width_method = self.vx.caps.unicode;
-    try document.layout(@max(1, self.vx.screen.width));
+    try document.prepare();
 }
 
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
     self.view = if (action) .action else .inspection;
     try self.load(&self.browsing, io, file, true);
-    self.browsing.top = 0;
+    self.browsing.top = .{};
     self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
     self.approval_ready = false;
     if (action) {
-        self.action_seen = 0;
+        self.action_seen = .{};
         self.action_view = .{ .io = io, .file = file };
     }
 }
 
 pub fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
-    self.action_seen = 0;
+    self.action_seen = .{};
     self.approval_ready = false;
     self.action_view = .{ .io = io, .file = file };
     if (self.view == .live) try self.showFile(io, file, true);
@@ -201,12 +215,20 @@ pub fn releaseAction(self: *Self) void {
     self.view = .live;
 }
 
-pub fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) !void {
+/// The draft must have a cell for every cluster; the editor declines edits
+/// that would not.
+fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]const u8 {
     try Frame.validateGeometry(size.col, size.row);
-    self.composer.clear();
-    self.composer.width_method = self.vx.caps.unicode;
-    try self.composer.append(bytes);
-    try self.composer.layoutInput(size.col - 2);
+    var clusters = vaxis.unicode.graphemeIterator(bytes);
+    while (clusters.next()) |cluster| {
+        const text = cluster.bytes(bytes);
+        if (std.mem.eql(u8, text, "\n") or std.mem.eql(u8, text, "\t")) continue;
+        const cells = vaxis.gwidth.gwidth(text, self.vx.caps.unicode);
+        if (cells == 0 or cells > size.col - 2) return error.UnrepresentableTerminalGrapheme;
+    }
+    const draft = self.composer[0..bytes.len];
+    for (draft, bytes) |*shown, byte| shown.* = if (byte == '\t') ' ' else byte;
+    return draft;
 }
 
 pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live) !void {
@@ -214,20 +236,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // replacement grids during resize) share the same bounded allocator.
     // Snapshot before either resize or frame output can pump keyboard input.
     const width_method = self.vx.caps.unicode;
-    try self.prepareDraft(bytes, size);
+    const draft = try self.prepareDraft(bytes, size);
     var frame: std.Io.Writer.Allocating = .init(self.memory.allocator());
     defer frame.deinit();
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         // Reflow keeps the first browsed line in view and the draft bytes and
         // caret unchanged. An Action restarts its reading from the top.
-        const anchor: ?usize = if (self.view == .transcript or self.view == .inspection) self.browsing.offset(self.browsing.first(self.height)) else null;
-        self.browsing.top = 0;
-        self.action_seen = 0;
+        const anchor: Position = if (self.view == .transcript or self.view == .inspection) .{ .offset = self.browsing.first(self.textLayout(), self.height).offset } else .{};
+        self.browsing.top = anchor;
+        self.action_seen = .{};
         self.approval_ready = false;
-        defer if (anchor) |position| {
-            self.browsing.layout(size.col) catch {};
-            self.browsing.top = self.browsing.rowAt(position);
-        };
         // A render failure retires this invocation; no old grid is needed for
         // rollback. Retire it before allocating replacements, rather than
         // charging both geometries at once (notably on 16-KiB-page macOS).
@@ -252,9 +270,11 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     };
     const document = if (selected) &self.browsing else &self.live;
     var layout: Frame = undefined;
-    try layout.plan(document, &self.composer, .{
+    try layout.plan(document, .{
         .width = size.col,
         .height = size.row,
+        .method = self.vx.caps.unicode,
+        .draft = draft,
         .cursor = cursor,
         .status = status,
         .approval = approval,
@@ -267,23 +287,20 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .preview_complete = self.preview_complete,
     });
     self.height = layout.height;
-    for (0..layout.navigation_height) |row| try drawRow(window, &layout.heading, row, @intCast(row), 0, self.colour, self.style(.quiet));
-    for (layout.first..layout.first + layout.document_rows, layout.navigation_height..) |row, screen_row|
-        try drawRow(window, document, row, @intCast(screen_row), 0, self.colour, .{});
+    _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
+    _ = document.draw(window.child(.{ .y_off = layout.navigation_height, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     const status_style = self.style(if (approval) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected")) .failure else .quiet);
-    for (0..layout.status_height) |row| try drawRow(window, &layout.status, row, layout.status_row + @as(u16, @intCast(row)), 0, self.colour, status_style);
+    _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, status_style);
     var call_row = layout.status_row + layout.status_height;
     for (0..layout.used) |index| {
-        for (0..layout.calls[index].displayRows()) |row| try drawRow(window, &layout.calls[index], row, call_row + @as(u16, @intCast(row)), 0, self.colour, self.style(live.style(index)));
-        call_row += @intCast(layout.calls[index].displayRows());
+        _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)));
+        call_row += layout.call_heights[index];
     }
-    for (0..layout.overflow_height) |row| try drawRow(window, &layout.heading, row, call_row + @as(u16, @intCast(row)), 0, self.colour, self.style(.quiet));
-    for (layout.draft_first..@min(layout.draft_first + layout.draft_height, self.composer.row_count), 0..) |row, line| {
-        const screen_row = layout.draft_top + @as(u16, @intCast(line));
-        // Continuation rows align under the text; only the first row has a glyph.
-        _ = window.child(.{ .y_off = screen_row, .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "  ", .style = self.style(if (approval) .attention else .user) }, .{});
-        try drawRow(window, &self.composer, row, screen_row, 2, self.colour, .{});
-    }
+    _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
+    // Continuation rows align under the text; only the first row has a glyph.
+    for (0..layout.draft_height) |line| _ = window.child(.{ .y_off = layout.draft_top + @as(u16, @intCast(line)), .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "  ", .style = self.style(if (approval) .attention else .user) }, .{});
+    const draft_window = window.child(.{ .x_off = 2, .y_off = layout.draft_top, .height = layout.draft_height });
+    _ = draft_window.child(.{ .y_off = -@as(i17, layout.draft_first) }).print(&.{.{ .text = draft }}, .{ .wrap = .grapheme });
     window.showCursor(layout.caret_column, layout.caret_row);
     // Finish consuming every borrowed cell before output can pump input and
     // change the browsing document. The frame shares the cell memory budget.
@@ -299,30 +316,6 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (self.vx.caps.unicode == width_method) {
         self.action_seen = layout.action_seen;
         self.approval_ready = layout.approval_ready;
-    }
-}
-
-fn drawRow(window: vaxis.Window, document: anytype, document_row: usize, row: u16, start: u16, colour: bool, plain_style: vaxis.Style) !void {
-    const text = document.rowText(document_row);
-    const styles: []const u8 = if (document.styles.len == 0) &.{} else document.styles[document.offset(document_row)..];
-    var column = start + document.indent(document_row);
-    var clusters = vaxis.unicode.graphemeIterator(text);
-    while (clusters.next()) |cluster| {
-        const bytes = cluster.bytes(text);
-        const width = try document.advance(bytes, column - start);
-        // Layout ends a row at a space that reaches past the edge; it has no cell.
-        if (std.mem.eql(u8, bytes, " ") and @as(u32, column) + width > window.width) continue;
-        if (@as(u32, column) + width > window.width) return error.InvalidDisplayLayout;
-        if (std.mem.eql(u8, bytes, "\t")) {
-            column += width;
-            continue;
-        }
-        const cell_style: vaxis.Style = if (styles.len != 0) blk: {
-            const value = Viewport.cellStyle(styles[cluster.start], colour);
-            break :blk .{ .bold = value.bold, .italic = value.italic, .ul_style = if (value.underline) .single else .off, .fg = if (value.foreground) |index| .{ .index = index } else .default };
-        } else plain_style;
-        window.writeCell(column, row, .{ .char = .{ .grapheme = bytes, .width = @intCast(width) }, .style = cell_style });
-        column += width;
     }
 }
 
@@ -577,7 +570,7 @@ test "narrow browsing retains the complete return instruction" {
             const before = out.written().len;
             screen.vx.queueRefresh();
             try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, status, "› ", &.{});
-            try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "Ctrl-G") != null);
+            try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "Esc") != null);
         }
     }
 }
