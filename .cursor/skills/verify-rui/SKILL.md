@@ -105,7 +105,7 @@ Fixture policy, chosen by the latest user text:
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.
 
-The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key carrying the exact text → `/exit` restoration):
+The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key whose saved text is exactly the draft → `/exit` restoration):
 
 ```sh
 $V journey "$RUN" j1 --surface tmux-detached   # or pty / tmux-attached
@@ -128,7 +128,7 @@ Everything lives under `$RUN/evidence/`:
 Proof standards:
 - Drive the real `session resume` user path. Never use internal setters or test endpoints.
 - Capture the action and the resulting state, before and after, by generation.
-- Verify side effects: provider request count and text, capture keys and their `input.sha256`, saved results.
+- Verify side effects: provider request count and text, capture keys with their saved text (`HOME/.config/rui/requests/KEY.json`) and `request inspect` result, saved results.
 - The provider is the only mock. It sits at the production HTTP boundary.
 - A surface you did not exercise is not covered by one you did. PTY, tmux-detached, tmux-attached and physical terminal are different surfaces.
 - Name the input layer of every input claim:
