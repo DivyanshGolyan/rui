@@ -1359,7 +1359,10 @@ def persistent_opening_case():
         drawn, errors = terminal_exit(caller, master)
         assert caller.returncode != 0 and b"TruncatedResponse" in errors, errors
         assert b"Resume: rui session resume --store " in errors, errors
-        assert b"Saved heading" not in drawn and b"OPENING-COMPLETE" not in drawn, ("truncated opening exposed unverified content", drawn)
+        # No prefix at all: not the heading, not the answer's verified-so-far
+        # windows, not even the User row of the same opening.
+        for unverified in (b"Saved heading", b"x" * 80, b"OPENING-COMPLETE", b"literal"):
+            assert unverified not in drawn, ("truncated opening exposed unverified content", unverified, drawn)
         assert not drawn.count(b"\x1b[?1049h") or drawn.endswith(b"\x1b[?1049l") or b"\x1b[?1049l" in drawn, drawn
         actual = termios.tcgetattr(slave)
         if sys.platform == "darwin":
