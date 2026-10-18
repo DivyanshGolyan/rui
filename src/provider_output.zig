@@ -1391,6 +1391,73 @@ fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
     };
 }
 
+/// Derive the pressure anchor while validating provider bytes, not during
+/// Store replay. The raw usage range remains private immutable evidence.
+pub fn usagePressure(io: std.Io, file: std.Io.File, start: u64, length: u64) !?u64 {
+    var source = try FileSource.init(io, file, .{ .start = start, .length = length });
+    var depth: usize = 0;
+    var total: ?u64 = null;
+    var input: ?u64 = null;
+    var output: ?u64 = null;
+    var input_seen = false;
+    var output_seen = false;
+    var duplicate_split = false;
+    while (try source.peek() != null) {
+        switch (try source.take()) {
+            '{', '[' => depth += 1,
+            '}', ']' => depth -= 1,
+            '"' => {
+                var key: [32]u8 = undefined;
+                var length_decoded: usize = 0;
+                while (try source.peek() != '"') {
+                    var scalar: [4]u8 = undefined;
+                    const count = try output_format.decodeScalar(&source, &scalar);
+                    for (scalar[0..count]) |decoded| {
+                        if (length_decoded < key.len) key[length_decoded] = decoded;
+                        length_decoded += 1;
+                    }
+                }
+                _ = try source.take();
+                if (depth != 1 or length_decoded > key.len) continue;
+                try source.space();
+                if (try source.peek() != ':') continue;
+                _ = try source.take();
+                const is_input = std.mem.eql(u8, key[0..length_decoded], "input_tokens");
+                const is_output = std.mem.eql(u8, key[0..length_decoded], "output_tokens");
+                if (is_input) {
+                    duplicate_split = duplicate_split or input_seen;
+                    input_seen = true;
+                }
+                if (is_output) {
+                    duplicate_split = duplicate_split or output_seen;
+                    output_seen = true;
+                }
+                try source.space();
+                var token_count: u64 = 0;
+                var digits: usize = 0;
+                const first_digit = try source.peek();
+                while (try source.peek()) |next| {
+                    if (next < '0' or next > '9') break;
+                    _ = try source.take();
+                    token_count = token_count *| 10 +| (next - '0');
+                    digits += 1;
+                }
+                if (digits == 0 or (digits > 1 and first_digit == '0') or token_count > std.math.maxInt(i64)) continue;
+                try source.space();
+                const delimiter = try source.peek();
+                if (delimiter != ',' and delimiter != '}') continue;
+                if (std.mem.eql(u8, key[0..length_decoded], "total_tokens")) total = token_count;
+                if (is_input) input = token_count;
+                if (is_output) output = token_count;
+            },
+            else => {},
+        }
+    }
+    if (total) |value| return value;
+    if (duplicate_split) return null;
+    return (input orelse return null) +| (output orelse return null);
+}
+
 fn validateCompleted(
     io: std.Io,
     file: std.Io.File,
@@ -1436,6 +1503,7 @@ fn validateCompleted(
             .start = usage.start,
             .length = usage.length,
             .content_digest = try contentDigestRange(io, file, usage),
+            .usage_tokens = try usagePressure(io, file, usage.start, usage.length),
         });
     }
 }

@@ -12,7 +12,7 @@ const provider_output = @import("provider_output.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 24;
+pub const schema_version: u32 = 25;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -4585,7 +4585,7 @@ pub const Store = struct {
         // Covered provider/tool material is excluded separately by the base.
         var usage_position: u64 = 0;
         var result_admission = frontier;
-        const usage = try prepare(self.database, "SELECT o.usage_content_id,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
+        const usage = try prepare(self.database, "SELECT o.usage_tokens,coalesce((SELECT max(i.session_position) FROM model_output_item i WHERE i.operation_id=o.operation_id),o.admission_position),o.admission_position " ++
             "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
             "WHERE o.session_ref=?1 AND o.resolution_code IN ('completed','continued','tool_calls') " ++
             "AND o.admission_position>=?2 AND r.provider=?3 AND r.model=?4 ORDER BY o.admission_position DESC LIMIT 1");
@@ -4596,14 +4596,11 @@ pub const Store = struct {
         try bindText(usage, 4, current.model.slice());
         switch (c.sqlite3_step(usage)) {
             c.SQLITE_ROW => {
-                if (try readNullablePositiveI64(usage, 0)) |content_id| {
-                    usage_tokens = try self.usagePressure(content_id);
-                    if (usage_tokens != null) {
-                        usage_position = @intCast(try readNullablePositiveI64(usage, 1) orelse return error.CorruptStore);
-                        // Admission follows the preceding complete call/result
-                        // group. Include this producer: its results follow usage.
-                        result_admission = @intCast(try readNullablePositiveI64(usage, 2) orelse return error.CorruptStore);
-                    }
+                usage_tokens = try readNullableU64Blob(usage, 0);
+                if (usage_tokens != null) {
+                    usage_position = @intCast(try readNullablePositiveI64(usage, 1) orelse return error.CorruptStore);
+                    // Include this producer: its results follow usage.
+                    result_admission = @intCast(try readNullablePositiveI64(usage, 2) orelse return error.CorruptStore);
                 }
             },
             c.SQLITE_DONE => {},
@@ -4639,87 +4636,6 @@ pub const Store = struct {
         if (bytes < 0) return error.CorruptStore;
         const pressure = (usage_tokens orelse 0) +| (@as(u64, @intCast(bytes)) / 4) +| policy.output_reservation;
         return if (pressure >= trigger) .compaction else .assistant_response;
-    }
-
-    /// The retained usage is authoritative. Only the heuristic number is
-    /// derived here, with one fixed reader window and a bounded key buffer.
-    fn usagePressure(self: *Store, content_id: i64) !?u64 {
-        var source = try ContentSource.init(self, content_id, true);
-        defer source.reader.close();
-        var depth: usize = 0;
-        var total: ?u64 = null;
-        var input: ?u64 = null;
-        var output: ?u64 = null;
-        var input_seen = false;
-        var output_seen = false;
-        var duplicate_split = false;
-        while (try source.next()) |byte| {
-            switch (byte) {
-                '{', '[' => depth += 1,
-                '}', ']' => depth -= 1,
-                '"' => {
-                    var key: [32]u8 = undefined;
-                    var length: usize = 0;
-                    while (try source.peek() != '"') {
-                        var scalar: [4]u8 = undefined;
-                        const count = try decodeOutputScalar(&source, &scalar);
-                        for (scalar[0..count]) |decoded| {
-                            if (length < key.len) key[length] = decoded;
-                            length += 1;
-                        }
-                    }
-                    _ = try source.take();
-                    if (depth != 1 or length > key.len) continue;
-                    while (try source.peek()) |next| {
-                        if (!std.ascii.isWhitespace(next)) break;
-                        _ = try source.take();
-                    }
-                    if (try source.peek() != ':') continue;
-                    _ = try source.take();
-                    const is_input = std.mem.eql(u8, key[0..length], "input_tokens");
-                    const is_output = std.mem.eql(u8, key[0..length], "output_tokens");
-                    // Occurrence is independent of value validity. An invalid
-                    // duplicate cannot repair or preserve a usable split pair.
-                    if (is_input) {
-                        duplicate_split = duplicate_split or input_seen;
-                        input_seen = true;
-                    }
-                    if (is_output) {
-                        duplicate_split = duplicate_split or output_seen;
-                        output_seen = true;
-                    }
-                    while (try source.peek()) |next| {
-                        if (!std.ascii.isWhitespace(next)) break;
-                        _ = try source.take();
-                    }
-                    var number: u64 = 0;
-                    var digits: usize = 0;
-                    const first_digit = try source.peek();
-                    while (try source.peek()) |next| {
-                        if (next < '0' or next > '9') break;
-                        _ = try source.take();
-                        number = number *| 10 +| (next - '0');
-                        digits += 1;
-                    }
-                    if (digits == 0 or (digits > 1 and first_digit == '0') or number > std.math.maxInt(i64)) continue;
-                    // A JSON number with a fraction or exponent is not a token
-                    // integer. Never accept only its leading decimal digits.
-                    while (try source.peek()) |next| {
-                        if (!std.ascii.isWhitespace(next)) break;
-                        _ = try source.take();
-                    }
-                    const delimiter = try source.peek();
-                    if (delimiter != ',' and delimiter != '}') continue;
-                    if (std.mem.eql(u8, key[0..length], "total_tokens")) total = number;
-                    if (is_input) input = number;
-                    if (is_output) output = number;
-                },
-                else => {},
-            }
-        }
-        if (total) |value| return value;
-        if (duplicate_split) return null;
-        return (input orelse return null) +| (output orelse return null);
     }
 
     fn overflowCanCompact(self: *Store, binding: AttemptBinding) !bool {
@@ -5869,6 +5785,7 @@ pub const Store = struct {
         var metadata = try OutputMetadataReader.init(self.io, output.metadata, output.item_count);
         var imported_items: u64 = 0;
         var usage_id: ?i64 = null;
+        var usage_tokens: ?u64 = null;
         while (try metadata.next()) |record| {
             if (record.tag == .text) continue;
             if (record.tag == .usage) {
@@ -5882,6 +5799,7 @@ pub const Store = struct {
                     true,
                     faults,
                 );
+                usage_tokens = record.usage_tokens;
                 continue;
             }
             if (record.tag != .item) continue;
@@ -6060,7 +5978,7 @@ pub const Store = struct {
         {
             const update = try prepare(
                 self.database,
-                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9,output_item_count=?11 " ++
+                "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,body_model=?5,openai_model=?6,x_openai_model=?7,request_id=?8,usage_content_id=?9,output_item_count=?11,usage_tokens=?12 " ++
                     "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?10",
             );
             defer _ = c.sqlite3_finalize(update);
@@ -6075,6 +5993,11 @@ pub const Store = struct {
             try bindNullableI64(update, 9, usage_id);
             try bindU64(update, 10, binding.attempt_ordinal);
             try bindU64(update, 11, output.item_count);
+            var usage_bytes: [8]u8 = undefined;
+            if (usage_tokens) |tokens| {
+                std.mem.writeInt(u64, &usage_bytes, tokens, .little);
+                try bindBlob(update, 12, &usage_bytes);
+            } else if (c.sqlite3_bind_null(update, 12) != c.SQLITE_OK) return error.BindFailed;
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
@@ -7087,6 +7010,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ x_openai_model TEXT CHECK(x_openai_model IS NULL OR length(CAST(x_openai_model AS BLOB))<=256),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
+        \\ usage_tokens BLOB CHECK(usage_tokens IS NULL OR (length(usage_tokens)=8 AND usage_content_id IS NOT NULL)),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms=0) OR (uncertain=0 AND retry_due_at_ms>0))) OR
@@ -7536,6 +7460,13 @@ fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool
     return @intCast(value);
 }
 
+fn readNullableU64Blob(statement: *c.sqlite3_stmt, index: c_int) !?u64 {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    if (c.sqlite3_column_type(statement, index) != c.SQLITE_BLOB or c.sqlite3_column_bytes(statement, index) != 8) return error.CorruptStore;
+    const bytes: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, index) orelse return error.CorruptStore);
+    return std.mem.readInt(u64, bytes[0..8], .little);
+}
+
 fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -7861,16 +7792,25 @@ fn settleCallsForTestingWithFaults(
         });
     }
     if (usage_json) |bytes| {
-        try metadata.append(.{ .tag = .usage, .start = source_writer.end, .length = bytes.len, .content_digest = protocol.contentDigest(bytes) });
         try source_writer.writeAll(bytes);
     }
-    try metadata.sealForRead();
     const source_bytes = source_writer.buffered();
     var source_name: [64]u8 = undefined;
     const source = try tmp.dir.createFile(std.testing.io, try std.fmt.bufPrint(&source_name, "{s}-source", .{file_prefix}), .{ .read = true });
     defer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, source_bytes);
     try source.sync(std.testing.io);
+    if (usage_json) |bytes| {
+        const start = source_bytes.len - bytes.len;
+        try metadata.append(.{
+            .tag = .usage,
+            .start = start,
+            .length = bytes.len,
+            .content_digest = protocol.contentDigest(bytes),
+            .usage_tokens = try provider_output.usagePressure(std.testing.io, source, start, bytes.len),
+        });
+    }
+    try metadata.sealForRead();
     try storage.settleModelSuccess(binding, &.{
         .source = source,
         .source_length = source_bytes.len,
