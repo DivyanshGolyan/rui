@@ -627,7 +627,7 @@ pub const Execution = struct {
         }};
         // A tail that still owes bytes has them queued, so it reads directly.
         if (!(state == .tail and wanted != 0) and try std.posix.poll(&descriptor, 0) == 0) return .empty;
-        const reserved: usize = if (wanted == 0) 0 else @intCast(destination.budget.reserveUpTo(wanted));
+        const reserved: usize = if (wanted == 0) 0 else @intCast(destination.budget.allocateUpTo(wanted));
         if (reserved == 0) {
             var probe: [1]u8 = undefined;
             const count = std.posix.read(pipe.handle, &probe) catch |err| {
@@ -906,7 +906,7 @@ pub const Preparation = struct {
     fn flushCommand(self: *Preparation) !void {
         if (self.command_length == 0) return;
         const script = &self.cleanup.script.?;
-        if (!script.budget.reserve(self.command_length)) return error.ScratchCapacityExhausted;
+        if (!script.budget.allocate(self.command_length)) return error.ScratchCapacityExhausted;
         script.charged += self.command_length;
         try script.file.?.writeStreamingAll(self.io, self.command_buffer[0..self.command_length]);
         self.command_length = 0;

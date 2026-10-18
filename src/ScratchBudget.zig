@@ -12,14 +12,16 @@ pub fn narrowed(self: ScratchBudget, limit: u64) ScratchBudget {
     return result;
 }
 
-pub fn reserve(self: ScratchBudget, amount: u64) bool {
-    if (self.reserveWithoutReclaim(amount)) return true;
+/// Acquire a full charge, reclaiming eligible retained output if necessary.
+pub fn allocate(self: ScratchBudget, amount: u64) bool {
+    if (self.reserve(amount)) return true;
     const reclaim = self.reclaim_fn orelse return false;
     const context = self.reclaim_context orelse return false;
     return reclaim(context, amount, self.limit);
 }
 
-pub fn reserveWithoutReclaim(self: ScratchBudget, amount: u64) bool {
+/// Accounting only: failure changes no charge and never invokes reclamation.
+pub fn reserve(self: ScratchBudget, amount: u64) bool {
     if (amount > self.limit) return false;
     var current = self.used.load(.acquire);
     while (true) {
@@ -29,15 +31,17 @@ pub fn reserveWithoutReclaim(self: ScratchBudget, amount: u64) bool {
     }
 }
 
-pub fn reserveUpTo(self: ScratchBudget, maximum: u64) u64 {
-    const reserved = self.reserveUpToWithoutReclaim(maximum);
+/// Acquire available capacity; when full, reclaim for one byte of progress.
+pub fn allocateUpTo(self: ScratchBudget, maximum: u64) u64 {
+    const reserved = self.reserveUpTo(maximum);
     if (reserved != 0 or maximum == 0) return reserved;
     const reclaim = self.reclaim_fn orelse return 0;
     const context = self.reclaim_context orelse return 0;
     return if (reclaim(context, 1, self.limit)) 1 else 0;
 }
 
-pub fn reserveUpToWithoutReclaim(self: ScratchBudget, maximum: u64) u64 {
+/// Accounting-only partial reservation, with no cleanup or filesystem effects.
+pub fn reserveUpTo(self: ScratchBudget, maximum: u64) u64 {
     var current = self.used.load(.acquire);
     while (current < self.limit and maximum != 0) {
         const amount = @min(maximum, self.limit - current);
@@ -121,4 +125,39 @@ test "shared usage is baseline-relative and failed growth reserves nothing" {
     try std.testing.expectEqual(@as(u64, 53), used.load(.acquire));
     budget.release(12);
     try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+}
+
+test "only allocation may reclaim and partial allocation preserves charged progress" {
+    const Reclaimer = struct {
+        used: std.atomic.Value(u64) = .init(9),
+        calls: usize = 0,
+
+        fn reclaim(context: *anyopaque, amount: u64, limit: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            _ = self.used.fetchSub(4, .acq_rel);
+            return (ScratchBudget{ .used = &self.used, .limit = limit }).reserve(amount);
+        }
+    };
+    var owner: Reclaimer = .{};
+    const budget: ScratchBudget = .{
+        .used = &owner.used,
+        .limit = 10,
+        .reclaim_context = &owner,
+        .reclaim_fn = Reclaimer.reclaim,
+    };
+    try std.testing.expect(!budget.reserve(2));
+    try std.testing.expectEqual(@as(u64, 9), owner.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), owner.calls);
+    try std.testing.expect(budget.allocate(3));
+    try std.testing.expectEqual(@as(u64, 8), owner.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), owner.calls);
+    try std.testing.expectEqual(@as(u64, 2), budget.allocateUpTo(7));
+    try std.testing.expectEqual(@as(u64, 10), owner.used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), budget.reserveUpTo(7));
+    try std.testing.expectEqual(@as(u64, 0), budget.allocateUpTo(0));
+    try std.testing.expectEqual(@as(usize, 1), owner.calls);
+    try std.testing.expectEqual(@as(u64, 1), budget.allocateUpTo(7));
+    try std.testing.expectEqual(@as(u64, 7), owner.used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), owner.calls);
 }
