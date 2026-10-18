@@ -90,7 +90,8 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 }
 
 /// Pages or lines through the shown document. Returns true when a downward
-/// move at the transcript's end returned to live output.
+/// move passed the transcript's end: the caller returns to the latest view,
+/// which is the pending Action if there is one.
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = &self.browsing;
@@ -99,11 +100,7 @@ pub fn browse(self: *Self, down: bool, page: bool) bool {
     document.browse(down, if (page) self.height else 1, self.height, unseen);
     if (self.view != .transcript or !down) return false;
     // Untrimmed transcript ends where live output continues.
-    if ((end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.height))) {
-        self.view = .live;
-        return true;
-    }
-    return false;
+    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.height));
 }
 
 /// The transcript shows its first retained row, so older text is wanted.
@@ -135,7 +132,7 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
 
 /// Shows that the transcript reached the start of the saved conversation.
 pub fn markBeginning(self: *Self) !void {
-    try self.boundary("Beginning of conversation\n");
+    try self.boundary("Start of conversation\n");
 }
 
 /// Shows that live rows above this point left the view and older saved
@@ -283,7 +280,8 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     for (0..layout.overflow_height) |row| try drawRow(window, &layout.heading, row, call_row + @as(u16, @intCast(row)), 0, self.colour, self.style(.quiet));
     for (layout.draft_first..@min(layout.draft_first + layout.draft_height, self.composer.row_count), 0..) |row, line| {
         const screen_row = layout.draft_top + @as(u16, @intCast(line));
-        _ = window.child(.{ .y_off = screen_row, .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "> ", .style = self.style(if (approval) .attention else .user) }, .{});
+        // Continuation rows align under the text; only the first row has a glyph.
+        _ = window.child(.{ .y_off = screen_row, .height = 1, .width = 2 }).printSegment(.{ .text = if (line == 0) prompt else "  ", .style = self.style(if (approval) .attention else .user) }, .{});
         try drawRow(window, &self.composer, row, screen_row, 2, self.colour, .{});
     }
     window.showCursor(layout.caret_column, layout.caret_row);
@@ -307,7 +305,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
 fn drawRow(window: vaxis.Window, document: anytype, document_row: usize, row: u16, start: u16, colour: bool, plain_style: vaxis.Style) !void {
     const text = document.rowText(document_row);
     const styles: []const u8 = if (document.styles.len == 0) &.{} else document.styles[document.offset(document_row)..];
-    var column = start;
+    var column = start + document.indent(document_row);
     var clusters = vaxis.unicode.graphemeIterator(text);
     while (clusters.next()) |cluster| {
         const bytes = cluster.bytes(text);
@@ -445,7 +443,9 @@ test "compact conversation keeps the composer beside content without persistent 
     try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 3).?.char.grapheme);
-    try std.testing.expectEqualStrings(">", window.readCell(0, 4).?.char.grapheme);
+    // A draft continuation has no glyph; its text aligns under the first row.
+    try std.testing.expectEqualStrings(" ", window.readCell(0, 4).?.char.grapheme);
+    try std.testing.expectEqualStrings("l", window.readCell(2, 4).?.char.grapheme);
     try screen.render(&out.writer, size, "next", 4, "Working…", "› ", &.{});
     try std.testing.expectEqualStrings("W", window.readCell(0, 3).?.char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 3).?.style.fg);
@@ -488,6 +488,7 @@ test "optional spacing yields before exact-fit transcript rows" {
             try std.testing.expectEqualStrings("0", window.readCell(4, 1).?.char.grapheme);
             // Paging past the transcript's end returns to live output.
             try std.testing.expect(screen.browse(true, true));
+            try screen.latest();
             try std.testing.expectEqual(ViewKind.live, screen.view);
             try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
             for (first..rows, 0..) |row, y| {
@@ -520,8 +521,10 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try live.entries[0].presentation.description.?.set("12345中Z");
     try screen.render(&out.writer, size, "", 0, "Idle", "› ", &live);
-    try std.testing.expectEqualStrings("中", window.readCell(0, 2).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(2, 2).?.char.grapheme);
+    // The continuation aligns under the call's text, after its glyph.
+    try std.testing.expectEqualStrings("5", window.readCell(6, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(2, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(4, 2).?.char.grapheme);
     try screen.render(&out.writer, size, "", 0, "́Z", "› ", &live);
     try std.testing.expectEqualStrings("\\", window.readCell(0, 0).?.char.grapheme);
 }

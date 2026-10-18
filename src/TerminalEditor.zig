@@ -22,7 +22,7 @@ paste_start: struct { cursor: usize = 0, length: usize = 0, plain_ascii: bool = 
 /// Navigation events leave the draft unchanged. Up/Down beyond the draft's
 /// first/last line scroll the transcript; terminals in the alternate screen
 /// also deliver mouse wheel and trackpad scrolling as these arrow keys.
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view, width_report };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view, width_report, scroll_report };
 
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
@@ -57,8 +57,9 @@ pub fn setAttributes(action: std.posix.TCSA, attributes: Attributes) std.posix.T
     };
 }
 
-pub fn expire(self: *Editor) !void {
-    return self.input.expire();
+/// A lone Escape completes only when no sequence follows it in time.
+pub fn expire(self: *Editor) !Event {
+    return if (try self.input.expire()) .close_view else .none;
 }
 
 /// Literal command-line text is not keyboard input or a permission choice.
@@ -159,7 +160,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
             // Only bare ESC is ambiguous with a standalone key. A recognized
             // sequence, scalar or marked paste may arrive fragmented.
             if (try std.posix.poll(&fds, if (editor.pending() == .escape) 80 else 2000) == 0) {
-                editor.expire() catch |err| {
+                _ = editor.expire() catch |err| {
                     try output.writeStreamingAll(io, "\n");
                     return err;
                 };
@@ -197,7 +198,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         const old_length = editor.length;
         const event = editor.feed(byte[0]);
         switch (event) {
-            .none, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .width_report => {},
+            .none, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .width_report, .scroll_report => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
@@ -286,7 +287,10 @@ pub fn feed(self: *Editor, byte: u8) Event {
     const event = self.input.feed(byte) catch {
         self.reject(.invalid);
         return if (!was_paste and (byte == '\r' or byte == '\n')) .invalid else .none;
-    } orelse return .none;
+    } orelse return if (self.input.report) |report| switch (report) {
+        .width => .width_report,
+        .alternate_scroll_reset => .scroll_report,
+    } else .none;
     return switch (event) {
         .paste_start => blk: {
             if (was_paste or !self.allow_paste) self.reject(.invalid);
@@ -301,7 +305,6 @@ pub fn feed(self: *Editor, byte: u8) Event {
             }
             break :blk .none;
         },
-        .cap_unicode => if (self.input.reported_width != null) .width_report else .none,
         .key_press => |value| self.key(value, was_paste),
         else => .none,
     };
@@ -324,7 +327,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
     if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
-    if (value.matches(Key.escape, .{})) return .none;
+    if (value.matches(Key.escape, .{})) return .close_view;
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
     if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
     if (value.matches(Key.page_up, .{}) or value.matches(Key.page_up, .{ .shift = true })) return .page_up;
@@ -338,6 +341,8 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches(Key.up, .{})) return self.vertical(false) orelse .scroll_up;
     if (value.matches(Key.down, .{})) return self.vertical(true) orelse .scroll_down;
     if (value.matches(Key.home, .{}) or value.matches('a', .{ .ctrl = true })) return self.move(self.lineStart());
+    // With nothing to edit, End returns to the latest view like Ctrl-G.
+    if (value.matches(Key.end, .{}) and self.length == 0) return .close_view;
     if (value.matches(Key.end, .{}) or value.matches('e', .{ .ctrl = true })) return self.move(self.lineEnd());
     if (value.matches(Key.delete, .{})) return self.deleteNext();
     if (value.matches(Key.backspace, .{})) return self.deletePrevious();

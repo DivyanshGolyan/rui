@@ -27,6 +27,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         origin: u64 = 0,
         top: ?usize = null,
         rows: [row_capacity]u32 = undefined,
+        // Continuation rows of an indented line start at its text column.
+        indents: [row_capacity]u8 = undefined,
         row_count: usize = 0,
         columns: u16 = 0,
         width_method: gwidth.Method = .wcwidth,
@@ -111,7 +113,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// clusters in this display copy, never in saved content or input.
         pub fn layout(self: *Self, columns: u16) !void {
             if (self.dirty) try self.escapeZeroWidth();
-            try self.layoutInput(columns);
+            try self.wrap(columns, true);
         }
 
         fn escapeZeroWidth(self: *Self) !void {
@@ -149,32 +151,90 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         /// Composer offsets refer to original input bytes, not escaped output.
+        /// Draft rows break at cells so the caret maps to exactly one place.
         pub fn layoutInput(self: *Self, columns: u16) !void {
+            try self.wrap(columns, false);
+        }
+
+        /// Reading text breaks rows after spaces where a word would not fit,
+        /// hard-breaking only words wider than the row. Continuation rows keep
+        /// the line's leading indentation, up to half the width.
+        fn wrap(self: *Self, columns: u16, words: bool) !void {
             std.debug.assert(columns != 0);
             if (!self.dirty and self.columns == columns) return;
             self.columns = columns;
             self.row_count = 0;
-            self.addRow(0);
-            var column: u16 = 0;
+            self.addRow(0, 0);
             const bytes = self.text();
+            var column: u16 = 0;
+            var line_indent: u16 = 0; // Of the current logical line.
+            var leading = true;
+            var row_start: usize = 0;
+            var row_indent: u16 = 0;
+            var space_end: ?usize = null; // A break opportunity in this row.
             var iter = unicode.graphemeIterator(bytes);
             while (iter.next()) |grapheme| {
                 const cluster = grapheme.bytes(bytes);
                 if (std.mem.eql(u8, cluster, "\n")) {
-                    self.addRow(grapheme.start + grapheme.len);
+                    row_start = grapheme.start + grapheme.len;
+                    self.addRow(row_start, 0);
                     column = 0;
+                    line_indent = 0;
+                    row_indent = 0;
+                    leading = true;
+                    space_end = null;
                     continue;
                 }
+                const space = std.mem.eql(u8, cluster, " ");
+                if (leading and space and words) {
+                    line_indent += 1;
+                } else if (leading and words and marker(cluster) and std.mem.startsWith(u8, bytes[grapheme.start + grapheme.len ..], " ")) {
+                    // "› ", "• ", "- " and similar: continue under the text.
+                    line_indent += 2;
+                    leading = false;
+                } else leading = false;
                 var width = try self.advance(cluster, column);
-                if (column != 0 and @as(u32, column) + width > columns) {
-                    self.addRow(grapheme.start);
-                    column = 0;
+                if (column != row_indent and @as(u32, column) + width > columns) {
+                    row_indent = if (@as(u32, line_indent) * 2 <= columns) line_indent else 0;
+                    if (words and space) {
+                        // A space at the edge ends the row; it is not drawn.
+                        row_start = grapheme.start + grapheme.len;
+                        self.addRow(row_start, row_indent);
+                        column = row_indent;
+                        space_end = null;
+                        continue;
+                    }
+                    // Carry the unfinished word when it and this cluster fit
+                    // the next row; otherwise hard-break before this cluster.
+                    row_start = grapheme.start;
+                    column = row_indent;
+                    if (space_end) |word| {
+                        var carried_column = row_indent;
+                        var carried = unicode.graphemeIterator(bytes[word..grapheme.start]);
+                        while (carried.next()) |part| carried_column += try self.advance(part.bytes(bytes[word..grapheme.start]), carried_column);
+                        if (@as(u32, carried_column) + (try self.advance(cluster, carried_column)) <= columns) {
+                            row_start = word;
+                            column = carried_column;
+                        }
+                    }
+                    if (row_start == grapheme.start and @as(u32, column) + (try self.advance(cluster, column)) > columns) {
+                        row_indent = 0;
+                        column = 0;
+                    }
+                    self.addRow(row_start, row_indent);
+                    space_end = null;
                     width = try self.advance(cluster, column);
                 }
                 column += width;
+                if (words and space and !leading) space_end = grapheme.start + grapheme.len;
             }
-            if (column == columns) self.addRow(bytes.len);
+            if (column == columns) self.addRow(bytes.len, 0);
             self.dirty = false;
+        }
+
+        fn marker(cluster: []const u8) bool {
+            for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*" }) |glyph| if (std.mem.eql(u8, cluster, glyph)) return true;
+            return false;
         }
 
         // Layout, cells and caret use exactly the same measured advance.
@@ -188,16 +248,22 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn columnAt(self: *const Self, position: usize) !u16 {
-            const prefix = self.bytes[self.offset(self.rowAt(position))..position];
+            const row = self.rowAt(position);
+            const prefix = self.bytes[self.offset(row)..position];
             var clusters = unicode.graphemeIterator(prefix);
-            var column: u16 = 0;
+            var column: u16 = self.indents[row];
             while (clusters.next()) |cluster| column += try self.advance(cluster.bytes(prefix), column);
             return column;
         }
 
-        fn addRow(self: *Self, position: usize) void {
+        fn addRow(self: *Self, position: usize, row_indent: u16) void {
             self.rows[self.row_count] = @intCast(position);
+            self.indents[self.row_count] = @intCast(row_indent);
             self.row_count += 1;
+        }
+
+        pub fn indent(self: *const Self, row: usize) u16 {
+            return self.indents[row];
         }
 
         pub fn offset(self: *const Self, row: usize) usize {
@@ -427,4 +493,87 @@ test "a long joined cluster fails by display contract before width arithmetic ca
     view.width_method = .unicode;
     try view.layout(8);
     try std.testing.expectEqual(@as(u16, 2), try view.columnAt(view.length));
+}
+
+test "reading text wraps at words and keeps hanging indentation" {
+    var view: Sized(256, false) = .{};
+    try view.append("  The plain rui command isn't on PATH\n› a longword\n  supercalifragilistic x\n    deeper indented words here\n• one two three four");
+    try view.layout(16);
+    const expected = [_]struct { []const u8, u16 }{
+        .{ "  The plain rui ", 0 }, .{ "command isn't ", 2 }, .{ "on PATH", 2 },
+        .{ "› a longword", 0 },
+        .{ "  supercalifragi", 0 }, .{ "listic x", 2 },
+        .{ "    deeper ", 0 }, .{ "indented ", 4 }, .{ "words here", 4 },
+        .{ "• one two three ", 0 }, .{ "four", 2 },
+    };
+    try std.testing.expectEqual(expected.len, view.displayRows());
+    for (expected, 0..) |row, index| {
+        try std.testing.expectEqualStrings(row[0], view.rowText(index));
+        try std.testing.expectEqual(row[1], view.indent(index));
+    }
+    // Every row fits, counting its indentation.
+    for (0..view.displayRows()) |row| {
+        var column = view.indent(row);
+        var clusters = unicode.graphemeIterator(view.rowText(row));
+        while (clusters.next()) |cluster| column += try view.advance(cluster.bytes(view.rowText(row)), column);
+        try std.testing.expect(column <= 16);
+    }
+    // Draft rows still break at cells, so the caret maps to one place.
+    var draft: Sized(64, false) = .{};
+    try draft.append("abc defgh");
+    try draft.layoutInput(5);
+    try std.testing.expectEqualStrings("abc d", draft.rowText(0));
+    try std.testing.expectEqual(@as(u16, 1), try draft.columnAt(6));
+    // An indent too wide for half the row is dropped rather than squeezing.
+    var narrow: Sized(64, false) = .{};
+    try narrow.append("      wide indent text");
+    try narrow.layout(8);
+    try std.testing.expectEqual(@as(u16, 0), narrow.indent(1));
+}
+
+test "older text prepends above the rows in view and trims newer text at capacity" {
+    var view: Sized(64, true) = .{};
+    try view.append("live 1\nlive 2\nlive 3\n");
+    try view.layout(20);
+    view.top = 1; // "live 2" is the first row in view.
+    var older: Sized(64, true) = .{};
+    try older.append("\x1b[90mold A\x1b[39m\nold B\n");
+    try older.layout(20);
+    try std.testing.expect(!try view.prepend(&older, 20, 2));
+    try std.testing.expectEqualStrings("old Aold Blive 1live 2live 3", blk: {
+        var joined: [64]u8 = undefined;
+        var used: usize = 0;
+        for (0..view.displayRows()) |row| {
+            const text = view.rowText(row);
+            @memcpy(joined[used..][0..text.len], text);
+            used += text.len;
+        }
+        break :blk joined[0..used];
+    });
+    try std.testing.expectEqualStrings("live 2", view.rowText(view.first(2)));
+    try std.testing.expectEqual(@as(?u8, 8), cellStyle(view.styles[0], true).foreground);
+    try std.testing.expectEqual(@as(?u8, null), cellStyle(view.styles[view.offset(2)], true).foreground);
+    // Capacity: keep the older page whole and drop newest lines, line-aligned.
+    var full: Sized(64, true) = .{};
+    for (0..8) |index| {
+        var line: [8]u8 = undefined;
+        try full.append(try std.fmt.bufPrint(&line, "new {d}\n", .{index}));
+    }
+    try full.layout(20);
+    full.top = 0;
+    var page: Sized(64, true) = .{};
+    for (0..5) |index| {
+        var line: [8]u8 = undefined;
+        try page.append(try std.fmt.bufPrint(&line, "old {d}\n", .{index}));
+    }
+    try page.layout(20);
+    try std.testing.expect(try full.prepend(&page, 20, 2));
+    try std.testing.expect(full.length <= 64);
+    try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 0\n"));
+    try std.testing.expect(std.mem.endsWith(u8, full.text(), "\n"));
+    try std.testing.expectEqualStrings("new 0", full.rowText(full.first(2)));
+    // Discarding the front keeps later text and offsets absolute.
+    full.discardFront(full.origin + 6);
+    try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 1\n"));
+    try std.testing.expectEqual(@as(u64, 6), full.origin);
 }

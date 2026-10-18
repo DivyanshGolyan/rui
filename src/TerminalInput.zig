@@ -9,7 +9,14 @@ parser: vaxis.Parser = .{},
 bytes: [4096]u8 = undefined,
 used: usize = 0,
 paste: bool = false,
-reported_width: ?vaxis.gwidth.Method = null,
+/// A mode report consumed by the latest feed, valid until the next feed.
+report: ?Report = null,
+
+pub const Report = union(enum) {
+    width: vaxis.gwidth.Method,
+    /// The terminal reports alternate scroll (mode 1007) present but reset.
+    alternate_scroll_reset,
+};
 
 pub fn pending(self: *const Self) Pending {
     if (self.paste) return .incomplete;
@@ -17,16 +24,20 @@ pub fn pending(self: *const Self) Pending {
     return if (self.used == 1 and self.bytes[0] == 0x1b) .escape else .incomplete;
 }
 
-pub fn expire(self: *Self) !void {
+/// Returns true when the expired input was a lone Escape key.
+pub fn expire(self: *Self) !bool {
     switch (self.pending()) {
-        .none => {},
-        .escape => self.used = 0,
+        .none => return false,
+        .escape => {
+            self.used = 0;
+            return true;
+        },
         .incomplete => return error.IncompleteTerminalInput,
     }
 }
 
 pub fn feed(self: *Self, byte: u8) !?vaxis.Event {
-    self.reported_width = null;
+    self.report = null;
     // Cancellation is observable even during an incomplete terminal response.
     // Inside marked paste it is data and the editor rejects the control byte.
     if (!self.paste and (byte == 3 or byte == 4 or byte == '\r' or byte == '\n') and self.used != 0) {
@@ -59,12 +70,21 @@ pub fn feed(self: *Self, byte: u8) !?vaxis.Event {
         };
     }
     // Vaxis's cap_unicode event discards DECRPM's set/reset distinction. Keep
-    // that one observed fact here; never enable mode 2027 merely for support.
+    // the observed facts here; never enable mode 2027 merely for support, and
+    // enable mode 1007 only where the terminal reports it reset.
     const bytes = self.bytes[0..self.used];
-    if (!self.paste and bytes.len == 11 and std.mem.startsWith(u8, bytes, "\x1b[?2027;") and std.mem.endsWith(u8, bytes, "$y") and bytes[8] >= '0' and bytes[8] <= '4') {
-        self.reported_width = if (bytes[8] == '1' or bytes[8] == '3') .unicode else .wcwidth;
-        self.used = 0;
-        return .cap_unicode;
+    if (!self.paste and bytes.len == 11 and std.mem.endsWith(u8, bytes, "$y") and bytes[8] >= '0' and bytes[8] <= '4') {
+        const status = bytes[8];
+        if (std.mem.startsWith(u8, bytes, "\x1b[?2027;")) {
+            self.report = .{ .width = if (status == '1' or status == '3') .unicode else .wcwidth };
+            self.used = 0;
+            return null;
+        }
+        if (std.mem.startsWith(u8, bytes, "\x1b[?1007;")) {
+            if (status == '2') self.report = .alternate_scroll_reset;
+            self.used = 0;
+            return null;
+        }
     }
     const result = self.parser.parse(self.bytes[0..self.used], null) catch {
         self.used = 0;
@@ -97,7 +117,7 @@ test "terminal input owns fragmentation and paste provenance without an event qu
     try std.testing.expectEqual(Pending.none, input.pending());
     _ = try input.feed(0x1b);
     try std.testing.expectEqual(Pending.escape, input.pending());
-    try input.expire();
+    try std.testing.expect(try input.expire());
     try std.testing.expectEqual(Pending.none, input.pending());
 }
 
@@ -118,10 +138,22 @@ test "terminal width reports distinguish enabled mode from mere support" {
         const response = try std.fmt.bufPrint(&buffer, "\x1b[?2027;{d}$y", .{status});
         for (response[0 .. response.len - 1]) |byte| {
             _ = try input.feed(byte);
-            try std.testing.expect(input.reported_width == null);
+            try std.testing.expect(input.report == null);
         }
         _ = try input.feed(response[response.len - 1]);
-        try std.testing.expectEqual(@as(?vaxis.gwidth.Method, if (status == 1 or status == 3) .unicode else .wcwidth), input.reported_width);
+        try std.testing.expectEqual(@as(vaxis.gwidth.Method, if (status == 1 or status == 3) .unicode else .wcwidth), input.report.?.width);
+        _ = try input.feed('x');
+        try std.testing.expect(input.report == null);
+    }
+}
+
+test "alternate scroll is reported only when present and reset" {
+    for (0..5) |status| {
+        var input: Self = .{};
+        var buffer: [32]u8 = undefined;
+        for (try std.fmt.bufPrint(&buffer, "\x1b[?1007;{d}$y", .{status})) |byte| try std.testing.expect(try input.feed(byte) == null);
+        try std.testing.expectEqual(status == 2, input.report != null and input.report.? == .alternate_scroll_reset);
+        try std.testing.expectEqual(Pending.none, input.pending());
     }
 }
 

@@ -30,8 +30,8 @@ pub fn pending(self: *const Self) Editor.Pending {
     return self.editors[self.active].pending();
 }
 
-pub fn expire(self: *Self) !void {
-    try self.editors[self.active].expire();
+pub fn expire(self: *Self) !Editor.Event {
+    return self.editors[self.active].expire();
 }
 
 pub fn feed(self: *Self, byte: u8) Event {

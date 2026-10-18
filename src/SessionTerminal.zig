@@ -15,6 +15,8 @@ active: bool = true,
 result: anyerror!void = {},
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
 pending_at: i96 = 0,
+/// Set only after the terminal reported mode 1007 reset and Rui enabled it.
+alternate_scroll: bool = false,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 pub fn begin(screen: *Screen) !Self {
@@ -35,8 +37,9 @@ pub fn begin(screen: *Screen) !Self {
     if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try Editor.setAttributes(.FLUSH, mode);
     var self: Self = .{ .original = original, .flags = flags, .screen = screen };
-    // Query width mode without changing it. Unsupported queries are ignored.
-    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?2027$p";
+    // Query width and alternate-scroll modes without changing them. Opening
+    // never waits for a reply; unsupported queries are ignored.
+    const enter = "\x1b[?1049h\x1b[?2004h\x1b[?2027$p\x1b[?1007$p";
     if (std.c.write(1, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
         try self.finish();
         return error.TerminalCleanupFailed;
@@ -53,7 +56,8 @@ pub fn finish(self: *Self) !void {
     // Attempt controls independently; neither may hold restoration on output credit.
     const synchronized = std.c.write(1, "\x1b[?2026l", 8) == 8;
     const reset = std.c.write(1, "\x1b[0m", 4) == 4;
-    const disabled = std.c.write(1, "\x1b[?2004l", 8) == 8;
+    const disabled = std.c.write(1, "\x1b[?2004l", 8) == 8 and
+        (!self.alternate_scroll or std.c.write(1, "\x1b[?1007l", 8) == 8);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
         if (std.c.write(1, sequence.ptr, sequence.len) != @as(isize, @intCast(sequence.len))) screen_ok = false;
@@ -241,6 +245,14 @@ pub fn geometry() std.posix.winsize {
     if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) != 0 or size.row == 0 or size.col == 0)
         return .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     return size;
+}
+
+/// Wheel motion then arrives as arrow keys in the alternate screen. Finish
+/// restores the reported reset state.
+pub fn enableAlternateScroll(self: *Self) !void {
+    if (self.alternate_scroll) return;
+    self.alternate_scroll = true;
+    try self.write("\x1b[?1007h");
 }
 
 pub fn permanent(self: *Self, bytes: []const u8) !void {

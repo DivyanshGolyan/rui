@@ -52,6 +52,8 @@ next_compact_tools: bool = false,
 next_history_cursor: ?client.ConversationCursor = null,
 // Continues the transcript above its oldest shown row; null at the start.
 transcript_older: ?client.ConversationCursor = null,
+// A failed older load waits for the next scroll rather than retrying at once.
+older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
@@ -386,7 +388,7 @@ fn driveActive(self: *Self) !void {
                 self.read_phase = .history;
                 self.history_render_started = false;
                 self.reader_output_started = false;
-                self.notice = "Loading older conversation…";
+                self.notice = "Loading earlier messages…";
                 try self.reader.start(self.init.io, self, history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 self.read_phase = .activity;
@@ -510,14 +512,16 @@ fn approvalReady(self: *const Self) bool {
 fn navigation(self: *Self, event: Editor.Event, editor: *const Editor) !void {
     const screen = self.terminal.screen;
     switch (event) {
-        .width_report => screen.setWidth(editor.input.reported_width.?),
+        .width_report => screen.setWidth(editor.input.report.?.width),
+        .scroll_report => try self.terminal.enableAlternateScroll(),
         .page_up, .page_down, .scroll_up, .scroll_down => {
             const down = event == .page_down or event == .scroll_down;
             if (screen.view == .live) {
                 if (down) return; // Live output already shows the latest rows.
                 try self.beginTranscript();
             }
-            _ = screen.browse(down, event == .page_up or event == .page_down);
+            self.older_failed = false; // A new scroll may retry a failed load.
+            if (screen.browse(down, event == .page_up or event == .page_down)) try screen.latest();
         },
         .latest, .close_view => try screen.latest(),
         else => {},
@@ -542,7 +546,7 @@ fn beginTranscript(self: *Self) !void {
 }
 
 fn olderWanted(self: *const Self) bool {
-    return self.transcript_older != null and self.terminal.screen.transcriptAtTop() and !self.opening;
+    return self.transcript_older != null and !self.older_failed and self.terminal.screen.transcriptAtTop() and !self.opening;
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
@@ -551,7 +555,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const pending = if (self.consent.active()) self.choice.pending() else self.input.pending();
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            if (self.consent.active()) try self.choice.expire() else try self.input.expire();
+            const event = if (self.consent.active()) try self.choice.expire() else try self.input.expire();
+            if (event != .none) try self.navigation(event, if (self.consent.active()) &self.choice else &self.input.editors[self.input.active]);
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -637,7 +642,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         .busy => self.notice = if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
-            .width_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
+            .width_report, .scroll_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
             .interrupt, .eof => self.detached = true,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
@@ -720,7 +725,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     try out.writeAll(switch (pending.phase) {
         .details => "! Details unavailable; draft retained. ",
         .inspection => "! Inspection unavailable; draft retained. ",
-        else => "! History unavailable; older cursor and draft retained. ",
+        else => "! Earlier messages unavailable; scroll up to retry. Draft retained. ",
     });
     try self.writePendingDiagnostic(&out);
     try sink.permanent("\n");
@@ -785,7 +790,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.presentReadDiagnostic(&sink);
             try std.testing.expect(self.pending_diagnostic == null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "History unavailable") != null);
+            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
             // The status region repeats it while the transcript holds the record.
             try std.testing.expect(std.mem.indexOf(u8, self.notice.?, out.buffered()) != null);
         }
@@ -794,11 +799,12 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
 
 fn applyReader(self: *Self, end: ReadEnd) void {
     if (end.preparationFailure()) {
+        if (self.read_phase == .history) self.older_failed = true;
         if (self.pending_diagnostic == null)
             self.notice = switch (self.read_phase) {
                 .details => "! Details unavailable; draft retained.",
                 .inspection => "! Inspection unavailable; draft retained.",
-                else => "! History unavailable; older cursor and draft retained.",
+                else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
         self.dirty = true;
         return;
@@ -809,7 +815,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     if (self.read_phase == .history) {
         self.notice = null; // Clears "Loading older conversation…".
     } else if (self.read_phase == .details) {
-        self.notice = "  Details complete.";
+        self.notice = Frame.inspection_ready;
     } else if (self.read_phase == .inspection) {
         self.notice = Frame.inspection_ready;
     } else if (self.read_phase == .permission) {
