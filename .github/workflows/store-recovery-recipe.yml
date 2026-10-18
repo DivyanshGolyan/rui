@@ -1,0 +1,51 @@
+name: Disposable Store recovery recipe
+on:
+  push:
+    branches: ['qualification/store-recovery-recipe']
+permissions:
+  contents: read
+cache-mode: read
+jobs:
+  recipe:
+    if: ${{ !github.event.repository.private }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: b7a0c54cee0e1f952fcf73b18fa7caeaf732a8ae
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: .amp/recipe-harness
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+          path: .amp/previous-release
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Execute the exact candidate recipe in disposable HOME and Stores
+        env:
+          DOCS_CANDIDATE_SHA: b7a0c54cee0e1f952fcf73b18fa7caeaf732a8ae
+          RECIPE_EVIDENCE: ${{ runner.temp }}/recipe-evidence
+          RUI_UPGRADE_FAILURES: ${{ runner.temp }}/recipe-state
+        run: |
+          set -euo pipefail
+          uname -sm
+          python3 --version
+          mkdir -p "$RECIPE_EVIDENCE" "$RUI_UPGRADE_FAILURES"
+          python3 -B .amp/recipe-harness/.github/scripts/store_recovery_recipe.py .amp/previous-release . 2>&1 | tee "$RECIPE_EVIDENCE/recipe.log"
+      - name: Retain qualification receipts, never Store data
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: store-recovery-recipe-${{ matrix.os }}
+          path: ${{ runner.temp }}/recipe-evidence
+          retention-days: 3
+          if-no-files-found: error
