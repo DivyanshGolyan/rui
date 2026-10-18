@@ -269,7 +269,7 @@ fn record(self: *Self, json: []const u8) void {
                 _ = self.shared.state.fetchOr(1, .acq_rel);
                 return;
             }
-            bytes[length] = @intFromEnum(@field(FieldId, name));
+            bytes[length] = @backingInt(@field(FieldId, name));
             std.mem.writeInt(u16, bytes[length + 1 ..][0..2], @intCast(text.len), .little);
             @memcpy(bytes[length + 3 ..][0..text.len], text);
             length += 3 + text.len;
@@ -310,7 +310,7 @@ test "private owner observations remain bounded under full and closed credit" {
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[12..20], .little));
     try std.testing.expectEqual(@as(u8, 0), bytes[3]);
-    // Independent legacy bytes, despite Record declaring at_ns after subject.
+    // Independent schema bytes, despite Record declaring at_ns after subject.
     try std.testing.expectEqualSlices(u8, "\x00\x20\x00ordinary_classification_released" ++
         "\x01\x07\x001234567\x02\x05\x00route\x03\x07\x00message", bytes[header_bytes..@intCast(read)]);
     const unselected = "{"; // Native phase is unselected; malformed optional text cannot taint evidence.

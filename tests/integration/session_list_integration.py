@@ -13,10 +13,6 @@ import time
 from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
 
 
-RUI = pathlib.Path(sys.argv[1]).resolve()
-CLIENT = pathlib.Path(sys.argv[2]).resolve()
-
-
 def exchange(socket_path, route, request):
     body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode()
     with socket.socket(socket.AF_UNIX) as client:
@@ -125,6 +121,7 @@ def assert_resources(baseline, current):
 
 
 def main():
+    binary, client = (pathlib.Path(value).resolve() for value in sys.argv[1:3])
     with tempfile.TemporaryDirectory(prefix="rui-session-list-") as temporary:
         root = canonical_fixture_root(temporary)
         store = root / "store"
@@ -135,7 +132,7 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([RUI, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
+        process, fields = start_ready_process([binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]
@@ -149,7 +146,7 @@ def main():
                 began_ns = time.monotonic_ns()
                 deadline = time.monotonic() + 10
                 result = subprocess.run(
-                    [CLIENT, store, workspace if workspace is not None else "-", cursor["after"], cursor["ceiling"]],
+                    [client, store, workspace if workspace is not None else "-", cursor["after"], cursor["ceiling"]],
                     capture_output=True, timeout=10,
                 )
                 latest_invocation = (began_ns, time.monotonic_ns(), deadline)
@@ -187,7 +184,7 @@ def main():
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
             assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]
-            current = subprocess.run([RUI, "session", "list", "--store", store],
+            current = subprocess.run([binary, "session", "list", "--store", store],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert current.returncode == 0, current.stderr
             # Every page streams into exactly one JSON value.
@@ -195,7 +192,7 @@ def main():
             assert current_list["version"] == "1" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
             assert [row["reference"] for row in current_list["sessions"]] == [
                 names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later"]
-            all_workspaces = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
+            all_workspaces = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
             all_list = json.loads(all_workspaces.stdout)
@@ -211,7 +208,7 @@ def main():
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
             assert len(json.dumps(after_growth[1]).encode()) < 4096
-            safe = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
+            safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe
             assert long_reference in [row["reference"] for row in json.loads(safe.stdout)["sessions"]], safe
