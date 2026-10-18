@@ -153,7 +153,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute("SELECT purpose,resolution_code FROM model_operation ORDER BY operation_id").fetchall() == [
-                (0, "context_overflow"), (1, "continued"), (0, "completed")]
+                (0, "context_overflow"), (1, "compacted"), (0, "answer")]
             # Each overflow keeps the correlation its provider answer carried.
             assert database.execute("SELECT request_id FROM model_operation WHERE operation_id=1").fetchone()[0] == (
                 overflow_request_id if route == "http" else "request-1")
@@ -390,7 +390,7 @@ def main():
         # temporary no-work admission reservation before its owner releases it.
         assert recovered["work"]["status"] == "waiting_for_permission", recovered
         assert len(recovered["full"]["model_operations"]) == 1, recovered
-        assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_calls", recovered
+        assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_proposals", recovered
         second = recovered["actions"]["unresolved"][0]
         assert second["call_ordinal"] == "3", second
         assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
@@ -645,7 +645,7 @@ def main():
             assert database.execute(
                 "SELECT operation_id,attempt_ordinal,uncertain,resolution_code "
                 "FROM model_operation ORDER BY operation_id"
-            ).fetchall() == [(1, 1, 0, "tool_calls"), (2, 1, 1, None)]
+            ).fetchall() == [(1, 1, 0, "tool_proposals"), (2, 1, 1, None)]
 
         continuation_host = start_host(
             continuation_store,
@@ -1004,7 +1004,7 @@ def main():
                     "model-a-served",
                     None,
                     "request-1",
-                    "completed",
+                    "answer",
                     1,
                 ),
                 (
@@ -1013,7 +1013,7 @@ def main():
                     "model-a-served",
                     None,
                     "request-2",
-                    "completed",
+                    "answer",
                     1,
                 ),
             ]
@@ -1079,7 +1079,7 @@ def main():
             0,
             None,
             "provider_temporary_http_429",
-            "completed",
+            "answer",
         )
         database.close()
         stop_host(retry_host)
@@ -3480,7 +3480,7 @@ def main():
         database = sqlite3.connect(exhaustion_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation ORDER BY operation_id"
-        ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "completed")]
+        ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "answer")]
         database.close()
         assert len(exhaustion_endpoint.requests) == 5
         stop_host(exhaustion_host)

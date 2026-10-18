@@ -2446,7 +2446,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
         .abandon, .settle_authentication_failure => {
             request.deinit();
             if (decision == .settle_authentication_failure)
-                settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .terminal);
+                settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(host, slot, owner.token);
         },
         else => unreachable,
@@ -2473,7 +2473,7 @@ fn finishModelPreparationFailure(
             return;
         },
         .fence => fenceDispatch(host, "canonical request read", err),
-        .settle_preparation_failure => settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .terminal),
+        .settle_preparation_failure => settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.preparationFailureCode(err), .ordinary),
         .abandon => {},
         else => unreachable,
     }
@@ -2547,7 +2547,7 @@ fn launchPreparedRequest(
         }
         stderr.print("rui: provider preparation failed for operation {d}: {s}\n", .{ binding.operation_id, @errorName(err) });
         if (err == error.ResponseCaptureAcquisitionFailed) {
-            settleUnansweredFailure(host, token, binding, "response_capture_failed", .terminal);
+            settleUnansweredFailure(host, token, binding, "response_capture_failed", .ordinary);
         } else {
             fenceDispatch(host, "provider preparation", err);
         }
@@ -2634,7 +2634,7 @@ fn completeTransfer(
                 .write_failed => "response_write_failed",
                 .seal_failed => "response_seal_failed",
             };
-            settleUnansweredFailure(host, owner.token, owner.binding, code, .terminal);
+            settleUnansweredFailure(host, owner.token, owner.binding, code, .ordinary);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
@@ -2673,7 +2673,7 @@ fn completeTransfer(
         };
         const overflow = overflow_result catch |err| {
             stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-            attempt.fail("response_read_failed", .terminal);
+            attempt.fail("response_read_failed", .ordinary);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;
@@ -2697,7 +2697,7 @@ fn completeTransfer(
         .tls_verification_failure => "provider_tls_verification_failed",
         .invalid_headers => "invalid_provider_headers",
     };
-    const failure_disposition: store_module.ModelFailureDisposition =
+    const failure_disposition: store_module.ModelFailureClass =
         if (evidence.disposition == .temporary_http or
         evidence.disposition == .temporary_connection)
             .{ .retryable = .{
@@ -2706,7 +2706,7 @@ fn completeTransfer(
                 .retry_after_deadline_ms = evidence.retry_after_deadline_ms,
             } }
         else
-            .terminal;
+            .ordinary;
     if (answered) |attempt|
         attempt.fail(code, failure_disposition)
     else
@@ -2734,7 +2734,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     if (structured_output) {
         const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
         var detail: [512]u8 = undefined;
-        answered.reject("unsupported_output_schema", rejection.format(error.UnsupportedOutputSchema, &detail), .terminal);
+        answered.reject("unsupported_output_schema", rejection.format(error.UnsupportedOutputSchema, &detail), .ordinary);
         return .cleanup;
     }
 
@@ -2758,7 +2758,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             return .{ .named_scratch = retained };
         }
         stderr.print("rui: response metadata acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-        answered.fail("response_metadata_exhausted", .terminal);
+        answered.fail("response_metadata_exhausted", .ordinary);
         return .cleanup;
     };
     defer metadata.deinit();
@@ -2774,7 +2774,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         traceOperation(host, "validation_failed", owner.binding);
         stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
         var detail: [512]u8 = undefined;
-        answered.reject(model_adapter.Output.failureCode(err), rejection.format(err, &detail), if (err == error.ContextOverflow) .context_overflow else .terminal);
+        answered.reject(model_adapter.Output.failureCode(err), rejection.format(err, &detail), if (err == error.ContextOverflow) .context_overflow else .ordinary);
         return .cleanup;
     };
     traceOperation(host, "validation_completed", owner.binding);
@@ -2787,7 +2787,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         x_openai_model.slice(),
     )) {
         var detail: [512]u8 = undefined;
-        answered.reject("contradictory_provider_output", rejection.format(error.ContradictoryProviderOutput, &detail), .terminal);
+        answered.reject("contradictory_provider_output", rejection.format(error.ContradictoryProviderOutput, &detail), .ordinary);
         return .cleanup;
     }
     if (host.faults.before_result_delay_ms != 0 or host.faults.model_result_gate_path != null) {
@@ -2823,7 +2823,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
                 rejection.format(err, &detail),
-            ), .terminal, .{
+            ), .ordinary, .{
                 .before_commit = host.faults.result_before_commit,
             }) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
@@ -3026,14 +3026,14 @@ const AnsweredAttempt = struct {
         return .{ .host = host, .owner = owner, .request_id = request_id };
     }
 
-    fn fail(self: *const AnsweredAttempt, code: []const u8, disposition: store_module.ModelFailureDisposition) void {
+    fn fail(self: *const AnsweredAttempt, code: []const u8, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
         } }, disposition);
     }
 
-    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, disposition: store_module.ModelFailureDisposition) void {
+    fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, disposition: store_module.ModelFailureClass) void {
         settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic), disposition);
     }
 
@@ -3050,7 +3050,7 @@ fn settleUnansweredFailure(
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
     code: []const u8,
-    disposition: store_module.ModelFailureDisposition,
+    disposition: store_module.ModelFailureClass,
 ) void {
     settleFailure(host, token, binding, .{ .uncorrelated = code }, disposition);
 }
@@ -3060,7 +3060,7 @@ fn settleFailure(
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
     failure: store_module.ModelFailure,
-    disposition: store_module.ModelFailureDisposition,
+    disposition: store_module.ModelFailureClass,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
     host.store.settleModelAttemptFailure(binding, failure, disposition, .{
