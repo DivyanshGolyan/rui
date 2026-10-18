@@ -64,6 +64,8 @@ def permission_row(frame, mode):
     """The exact /status row, unwrapped from a narrow page."""
     value = BYPASS_STATUS if mode == "bypass" else f"Permission: {mode}"
     return f"{value} Automatic compaction:" in " ".join(frame.split())
+
+
 CAPTURE_NOTICE = re.compile(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n")
 
 
@@ -3976,7 +3978,7 @@ def main(selected="all"):
                 status = status_frame(master, warning_ref)
                 assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
-                assert "Bash runs without approval" not in status, status
+                assert mode == "bypass" or "without asking" not in status, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
         created = []
