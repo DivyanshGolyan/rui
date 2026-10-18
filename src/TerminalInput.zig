@@ -129,10 +129,16 @@ fn decode(self: *Self, line_end: bool) Decoded {
         const pasted = self.paste;
         const result = self.parser.parse(bytes, null) catch return self.invalid(line_end);
         if (result.n == 0) return .none;
-        // Byte-at-a-time ingress cannot leave a second event behind this one.
-        std.debug.assert(result.n == self.used);
-        self.used = 0;
-        const event = result.event orelse return .none;
+        const event = result.event orelse {
+            // A consumed reply or an interrupted sequence's prefix (an OSC cut
+            // by a new ESC). Keep the unconsumed suffix and decode it now.
+            std.mem.copyForwards(u8, self.bytes[0 .. self.used - result.n], self.bytes[result.n..self.used]);
+            self.used -= result.n;
+            continue;
+        };
+        // The event's text may borrow these bytes: retire them only on the
+        // next feed or next, after the caller consumed it.
+        if (result.n == self.used) self.used = 0 else self.consumed = result.n;
         switch (event) {
             .paste_start => self.paste = true,
             .paste_end => self.paste = false,
@@ -228,6 +234,28 @@ test "fragmented X10 mouse reports are consumed whole, never as typed text" {
     _ = bad.feed(1);
     try std.testing.expectEqual(Decoded{ .invalid = .{ .line_end = false } }, bad.feed('!'));
     try std.testing.expectEqual(Pending.none, bad.pending());
+}
+
+test "an interrupted OSC keeps the following sequence and key" {
+    // The parser consumes only the unterminated OSC prefix when a new ESC
+    // begins; the suffix is the next key, decoded in the same feed or by next.
+    for ([_]struct { bytes: []const u8, key: u21, alt: bool }{
+        .{ .bytes = "\x1b]0;title\x1b[A", .key = vaxis.Key.up, .alt = false },
+        .{ .bytes = "\x1b]0;title\x1bx", .key = 'x', .alt = true },
+    }) |case| {
+        var input: Self = .{};
+        var found: ?vaxis.Key = null;
+        for (case.bytes) |byte| {
+            var decoded = input.feed(byte);
+            while (decoded != .none) : (decoded = input.next()) {
+                try std.testing.expect(found == null);
+                found = decoded.event.event.key_press;
+            }
+        }
+        try std.testing.expect(found.?.matches(case.key, .{ .alt = case.alt }));
+        try std.testing.expectEqual(Pending.none, input.pending());
+        try std.testing.expectEqualStrings("q", testEvent(input.feed('q')).?.key_press.text.?);
+    }
 }
 
 test "fragmented APC and oversized associated text preserve the following key" {
