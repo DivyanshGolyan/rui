@@ -188,7 +188,7 @@ One bounded parse validates the entire keyed envelope, consumed duplicates, stri
 
 Within the mutation envelope, omittable consequential fields accept a typed value when present, never explicit JSON null: null is not absence and cannot bypass invocation/answer exclusivity or operation applicability. Session-stop `selection.turn` is the exception: it is required but nullable to represent no selected Turn; omission is malformed. Unknown extension values remain syntax-validated without becoming outcome authority.
 
-Global `requests` enumerates filename-valid generated handles even when their record is unreadable or unsupported. Session-local `/requests` filters readable supported identities by recorded Store and Session. Neither listing transmits requests or establishes Host work status.
+Global `request list` enumerates filename-valid generated handles even when their record is unreadable or unsupported. Session-local `/requests` filters readable supported identities by recorded Store and Session. Neither listing transmits requests or establishes Host work status.
 
 Runtime saves exact submission identity, captured inputs and one UUIDv4 in its existing intent transaction before core invocation, then records the answer independently; resubmit with that immutable token after lost replies. Core knows no Workflow membership/cancellation. This provides recoverable admission, not exactly-once effects. Controls use the same saved-key protocol; their owners retain command-specific validation, target selection and completion semantics. An original acceptance is immutable even while its completion progresses. A fresh key requests a fresh decision against current state; it does not override an already-settled target.
 

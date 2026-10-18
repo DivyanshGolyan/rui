@@ -103,6 +103,10 @@ fn run(init: std.process.Init) !void {
         // than guess. One-shot commands never start a Host implicitly.
         if (err == error.FileNotFound or err == error.ConnectionRefused)
             TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
+        if (err == error.MutationNotAccepted) {
+            TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
+            return err;
+        }
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
