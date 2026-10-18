@@ -1,7 +1,7 @@
 const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
-const store = @import("store.zig");
+const output_format = @import("output_format.zig");
 
 pub const max_evidence_bytes = 256;
 
@@ -71,7 +71,7 @@ const FileSource = struct {
         return self.buffer[@intCast(self.position - self.buffer_start)];
     }
 
-    fn take(self: *FileSource) !u8 {
+    pub fn take(self: *FileSource) !u8 {
         const byte = try self.peek() orelse return error.UnexpectedJsonEnd;
         self.position += 1;
         return byte;
@@ -200,15 +200,7 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
     }
 }
 
-fn readHexScalar(source: anytype) !u21 {
-    var value: u21 = 0;
-    for (0..4) |_| {
-        const byte = try source.take();
-        const digit = std.fmt.charToDigit(byte, 16) catch return error.InvalidJsonEscape;
-        value = value * 16 + digit;
-    }
-    return value;
-}
+const readHexScalar = output_format.readHexScalar;
 
 fn skipValue(source: anytype, depth: usize) !void {
     if (depth > protocol.max_json_depth) return error.JsonTooDeep;
@@ -613,7 +605,7 @@ fn validateAnnotations(io: std.Io, file: std.Io.File, annotations_range: ?Range)
 }
 
 const ItemValidation = struct {
-    kind: store.OutputItemKind,
+    kind: output_format.OutputItemKind,
     id_digest: [32]u8,
     text_records: u64 = 0,
 };
@@ -623,9 +615,9 @@ fn validateItem(
     file: std.Io.File,
     item: Range,
     ordinal: u64,
-    metadata: *store.OutputMetadataWriter,
+    metadata: *output_format.OutputMetadataWriter,
     answer_hash: *std.crypto.hash.sha2.Sha256,
-    operation: store.ModelOperationKind,
+    operation: output_format.ModelOperationKind,
 ) !ItemValidation {
     const fields = try readFields(io, file, item, item_field_names);
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
@@ -650,10 +642,10 @@ fn validateItem(
         try optionalCompleted(io, file, try fields.get("status"));
         try validateFunctionCallControls(io, file, fields);
         inline for (.{
-            .{ "id", store.OutputRecordTag.item_id, true },
-            .{ "name", store.OutputRecordTag.name, true },
-            .{ "call_id", store.OutputRecordTag.call_id, true },
-            .{ "arguments", store.OutputRecordTag.arguments, false },
+            .{ "id", output_format.OutputRecordTag.item_id, true },
+            .{ "name", output_format.OutputRecordTag.name, true },
+            .{ "call_id", output_format.OutputRecordTag.call_id, true },
+            .{ "arguments", output_format.OutputRecordTag.arguments, false },
         }) |descriptor| {
             var hash = protocol.contentHasher();
             var decoded = Decoded{ .hash = &hash };
@@ -734,7 +726,7 @@ pub const ReplayValidationCursor = struct {
 
     /// Bind every retained item to its admission-certified type and ID.
     /// Compatibility errors are deferred until these canonical facts agree.
-    pub fn authenticateIdentity(self: *const ReplayValidationCursor, kind: store.OutputItemKind, id_digest: [32]u8) !void {
+    pub fn authenticateIdentity(self: *const ReplayValidationCursor, kind: output_format.OutputItemKind, id_digest: [32]u8) !void {
         const actual = try self.frames[0].get("type");
         if (!actual.is(@tagName(kind)) or self.call_fields_seen & 1 == 0 or
             !std.mem.eql(u8, &self.call_fields[0].digest, &id_digest)) return error.CorruptStore;
@@ -1313,18 +1305,18 @@ test "incremental call authentication binds all four decoded fields with fixed s
 const Added = struct {
     active: bool = false,
     index: u64 = 0,
-    kind: store.OutputItemKind = .reasoning,
+    kind: output_format.OutputItemKind = .reasoning,
     id_digest: [32]u8 = @splat(0),
 };
 
 fn itemIdentity(io: std.Io, file: std.Io.File, item: Range) !struct {
-    kind: store.OutputItemKind,
+    kind: output_format.OutputItemKind,
     id_digest: [32]u8,
 } {
     const fields = try readFields(io, file, item, &.{ "type", "id" });
     var kind_name: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, try fields.required("type"), &kind_name);
-    const kind: store.OutputItemKind = if (kind_name.eql("reasoning"))
+    const kind: output_format.OutputItemKind = if (kind_name.eql("reasoning"))
         .reasoning
     else if (kind_name.eql("message"))
         .message
@@ -1344,7 +1336,7 @@ fn validateCompleted(
     io: std.Io,
     file: std.Io.File,
     response: Range,
-    metadata: *store.OutputMetadataWriter,
+    metadata: *output_format.OutputMetadataWriter,
     expected_items: u64,
     evidence: *Evidence,
 ) !void {
@@ -1362,7 +1354,7 @@ fn validateCompleted(
     }
     const output = try fields.required("output");
     var array = try Array.init(io, file, output);
-    var reader = try store.OutputMetadataReader.init(io, metadata.file, expected_items);
+    var reader = try output_format.OutputMetadataReader.init(io, metadata.file, expected_items);
     var index: u64 = 0;
     while (try array.next()) |terminal_item| {
         const identity = try itemIdentity(io, file, terminal_item);
@@ -1415,7 +1407,7 @@ fn processEvent(
     io: std.Io,
     file: std.Io.File,
     event: Range,
-    metadata: *store.OutputMetadataWriter,
+    metadata: *output_format.OutputMetadataWriter,
     added: *Added,
     completed: *bool,
     item_count: *u64,
@@ -1425,7 +1417,7 @@ fn processEvent(
     answer_length: *u64,
     answer_hash: *std.crypto.hash.sha2.Sha256,
     evidence: *Evidence,
-    operation: store.ModelOperationKind,
+    operation: output_format.ModelOperationKind,
     compaction_count: *u64,
     rejection: *Rejection,
 ) !void {
@@ -1531,8 +1523,8 @@ pub fn validate(
     io: std.Io,
     source_file: std.Io.File,
     source_length: u64,
-    metadata: *store.OutputMetadataWriter,
-    operation: store.ModelOperationKind,
+    metadata: *output_format.OutputMetadataWriter,
+    operation: output_format.ModelOperationKind,
     rejection: *Rejection,
     faults: Faults,
 ) !Validated {
@@ -1666,13 +1658,13 @@ fn testingObject(tmp: *std.testing.TmpDir, bytes: []const u8) !FileSource {
     return FileSource.init(std.testing.io, file, .{ .start = 0, .length = bytes.len });
 }
 
-const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: store.OutputMetadataRecord };
+const TestingValidation = struct { output: Validated, metadata_bytes: u64, first_item: output_format.OutputMetadataRecord };
 
 fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64) !TestingValidation {
     return validateTestingOperation(tmp, bytes, metadata_limit, .assistant_response);
 }
 
-fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: store.ModelOperationKind) !TestingValidation {
+fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1681,7 +1673,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
-    var metadata = try store.OutputMetadataWriter.init(
+    var metadata = try output_format.OutputMetadataWriter.init(
         std.testing.io,
         root[0..root_length],
         "provider-test-metadata",
@@ -1693,7 +1685,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     var rejection: Rejection = .{};
     const validated = try validate(std.testing.io, source, bytes.len, &metadata, operation, &rejection, .{});
     const metadata_bytes = used.load(.acquire);
-    var reader = try store.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
+    var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
     metadata.deinit();
     source.close(std.testing.io);
@@ -1709,7 +1701,7 @@ test "explicit compaction requires one private anchor and rejects Actions" {
     const result = try validateTestingOperation(&tmp, sse, 4096, .compaction);
     try std.testing.expectEqual(@as(u64, 1), result.output.item_count);
     try std.testing.expectEqual(@as(u64, 0), result.output.call_count);
-    try std.testing.expectEqual(store.OutputItemKind.compaction, result.first_item.kind);
+    try std.testing.expectEqual(output_format.OutputItemKind.compaction, result.first_item.kind);
     try std.testing.expectEqual(protocol.contentDigest(anchor), result.first_item.content_digest);
     const notification = "data: {\"type\":\"response.metadata\",\"metadata\":{}}\n\n";
     const with_metadata = try validateTestingOperation(&tmp, notification ++ sse, 4096, .compaction);
@@ -1854,7 +1846,7 @@ test "provider reasoning strings preserve raw items across evidence and file win
         try std.testing.expectEqual(@as(u64, 2), accepted.output.answer_length);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &accepted.output.answer_digest);
         const item = accepted.first_item;
-        try std.testing.expectEqual(store.OutputItemKind.reasoning, item.kind);
+        try std.testing.expectEqual(output_format.OutputItemKind.reasoning, item.kind);
         try std.testing.expectEqual(@as(u64, 0), item.ordinal);
         try std.testing.expectEqual(reasoning.len, item.length);
         try std.testing.expectEqualStrings(reasoning, sse[@intCast(item.start)..][0..@intCast(item.length)]);
@@ -2201,7 +2193,7 @@ test "provider authority metadata rejects every supported item on acceptance and
             defer std.testing.allocator.free(sse);
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
-            const purpose: store.ModelOperationKind = if (index == 3) .compaction else .assistant_response;
+            const purpose: output_format.ModelOperationKind = if (index == 3) .compaction else .assistant_response;
             var source = try testingObject(&tmp, item);
             defer source.file.close(std.testing.io);
             if (comptime std.mem.eql(u8, key, "future")) {

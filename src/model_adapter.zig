@@ -2,6 +2,7 @@ const std = @import("std");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const named_scratch = @import("named_scratch.zig");
+const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const provider = @import("provider.zig");
@@ -66,8 +67,8 @@ pub fn interpretOutput(
     io: std.Io,
     source: std.Io.File,
     source_length: u64,
-    metadata: *store.OutputMetadataWriter,
-    operation: store.ModelOperationKind,
+    metadata: *output_format.OutputMetadataWriter,
+    operation: output_format.ModelOperationKind,
     models: ModelObservations,
     faults: Output.Faults,
 ) OutputInterpretation {
@@ -124,7 +125,7 @@ test "provider interpretation preserves accepted bytes and rejects every model d
         const root_length = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        var metadata = try store.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+        var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         var metadata_owned = true;
         defer if (metadata_owned) metadata.deinit();
         const bytes = try std.testing.allocator.print("{s}data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[]{s}}}}}\n\n", .{ prefix, case.body });
@@ -185,7 +186,7 @@ test "provider interpretation closes failure variants without granting settlemen
         try source.writeStreamingAll(std.testing.io, case.bytes);
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;
-        var metadata = try store.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
+        var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
         defer metadata.deinit();
         const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, .assistant_response, .{}, .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
@@ -1318,7 +1319,7 @@ fn settleComposedForTesting(
     setup: *PreparationTestSetup,
     binding: store.AttemptBinding,
     file_prefix: []const u8,
-    item_kind: store.OutputItemKind,
+    item_kind: output_format.OutputItemKind,
     item_json: []const u8,
     item_id: []const u8,
     calls: []const ComposedCall,
@@ -1330,7 +1331,7 @@ fn settleComposedForTesting(
     try source_writer.writeAll(item_json);
     var metadata_used: std.atomic.Value(u64) = .init(0);
     var retained_metadata: ?named_scratch.Owner = null;
-    var metadata = try store.OutputMetadataWriter.init(
+    var metadata = try output_format.OutputMetadataWriter.init(
         std.testing.io,
         setup.root,
         file_prefix,
@@ -2105,7 +2106,7 @@ test "a bound trip releases ownership whether or not the sealing advance fired" 
 }
 
 test "request preparation rejects unsupported saved meaning and fences malformed canonical items" {
-    for ([_]struct { item: []const u8, kind: store.OutputItemKind = .reasoning, failure: anyerror }{
+    for ([_]struct { item: []const u8, kind: output_format.OutputItemKind = .reasoning, failure: anyerror }{
         .{ .item = "null", .failure = error.CorruptStore },
         .{ .item = "true", .failure = error.CorruptStore },
         .{ .item = "false", .failure = error.CorruptStore },
@@ -2368,7 +2369,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
     try source.sync(std.testing.io);
     var metadata_used: std.atomic.Value(u64) = .init(0);
     var retained_metadata: ?named_scratch.Owner = null;
-    var metadata = try store.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
     var rejection: Output.Rejection = .{};
     const result = try Output.validate(std.testing.io, source, sse.len, &metadata, .compaction, &rejection, .{});
