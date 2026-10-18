@@ -154,7 +154,13 @@ test "hanging indentation survives split windows and trusted styles" {
     }
 }
 
-pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, colour: bool) !void {
+/// What the Action heading says, for keeping it beside the choice.
+pub const ActionSummary = struct {
+    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
+    timeout_ms: ?u64 = null,
+};
+
+pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, workspace: []const u8, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -213,6 +219,7 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try command.finish();
     try indented.feed("\n");
     try indented.finish();
+    return .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };
 }
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !client.Current {

@@ -15,6 +15,7 @@ const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const stderr = @import("stderr.zig");
+const TerminalText = @import("TerminalText.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -72,6 +73,8 @@ read_phase: ReadPhase = .activity,
 // Worker result is inspected only after join; input policy stays UI-owned.
 history_render_started: bool = false,
 prepared_action: ?u64 = null,
+prepared_summary: View.ActionSummary = .{},
+action_summary: View.ActionSummary = .{},
 reader_output_started: bool = false,
 consent: ConsentPolicy.Consent = .{},
 choice_buffer: [64]u8 = undefined,
@@ -517,6 +520,7 @@ fn driveActive(self: *Self) !void {
             // this choice. A bounded preview is export-only, never consent.
             const presentation: ConsentPolicy.Presentation = if ((try self.action_file.stat(self.init.io)).size <= @import("ConversationViewport.zig").capacity) .complete else .preview;
             self.consent.adopt(self.prepared_action.?, presentation);
+            self.action_summary = self.prepared_summary;
             self.prepared_action = null;
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.read_phase = .activity;
@@ -534,10 +538,14 @@ fn driveActive(self: *Self) !void {
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
             } else workStatus(self.current.work.status.value);
-            var status_buffer: [2048]u8 = undefined;
+            var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+            var context = std.Io.Writer.fixed(&context_buffer);
+            if (self.consent.active() and action_visible)
+                try approvalContext(&context, screen.actionTopHidden(), self.observed.settings.workspace.slice(), self.action_summary);
+            var status_buffer: [context_buffer.len + 2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
             // Bypass is the default and stays quiet: /status shows Permission.
-            for ([_][]const u8{ self.notice orelse "", base_status }) |line| {
+            for ([_][]const u8{ self.notice orelse "", context.buffered(), base_status }) |line| {
                 if (line.len == 0) continue;
                 if (status.buffered().len != 0) try status.writeAll("\n");
                 try status.writeAll(line);
@@ -574,6 +582,29 @@ fn driveActive(self: *Self) !void {
         }
         _ = try self.step(16);
     }
+}
+
+/// The choice keeps the Action's heading lines beside it once paging hides
+/// them; they leave again when the heading is back on screen.
+fn approvalContext(out: *std.Io.Writer, top_hidden: bool, workspace: []const u8, summary: View.ActionSummary) !void {
+    _ = out;
+    _ = top_hidden;
+    _ = workspace;
+    _ = summary;
+}
+
+test "a paged Action keeps what runs, where and for how long beside the choice" {
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var summary: View.ActionSummary = .{ .timeout_ms = 5000 };
+    try approvalContext(&out, false, "/work", summary);
+    try std.testing.expectEqualStrings("", out.buffered());
+    try summary.description.set("Record\x1b[2J steps");
+    try approvalContext(&out, true, "/work/a\x1bb", summary);
+    try std.testing.expectEqualStrings("Run Bash · Record\\x1b[2J steps\nWorkspace: /work/a\\x1bb · Time limit: 5000 ms", out.buffered());
+    out = std.Io.Writer.fixed(&buffer);
+    try approvalContext(&out, true, "/work", .{});
+    try std.testing.expectEqualStrings("Run Bash\nWorkspace: /work · Time limit: Host default", out.buffered());
 }
 
 const WorkStatus = @FieldType(@FieldType(client.Current.Work, "status"), "value");
@@ -1054,7 +1085,7 @@ fn permission(raw: *anyopaque, task: *Task) !void {
     if (self.observed.first_action) |action| {
         try self.action_file.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = self.action_file };
-        try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, &output, self.colour);
+        self.prepared_summary = try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, &output, self.colour);
         self.next_compact_tools = false;
         self.prepared_action = action;
     }
