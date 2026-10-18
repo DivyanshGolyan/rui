@@ -36,6 +36,10 @@ inspection_file: std.Io.File = undefined,
 command: Command,
 inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
+// The shown inspection page is /status; it reloads when the work it
+// describes changes, so it never reports finished work as running.
+status_page: bool = false,
+status_stale: bool = false,
 // An inspection or Host command started and its result has not been
 // presented. A command may change configuration, so Messages and consent wait
 // for every inspection; exit prints an unshown command's output, which can
@@ -145,6 +149,8 @@ const Job = struct {
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
     inspection_action: ?u64 = null,
+    // A /status reload shows only while its page is still the one on screen.
+    refresh: bool = false,
     /// What the first window's output belongs to. The UI applies it with that
     /// window (the window handoff orders it), so streamed history and the live
     /// footer always come from one canonical capture.
@@ -501,6 +507,16 @@ fn driveActive(self: *Self) !void {
         if (self.reader.thread != null and self.reader.completed()) try self.settleReader();
         if (self.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
+        }
+        if (self.status_stale and self.reader.thread == null and self.input.command_length == null) {
+            self.status_stale = false;
+            if (self.terminal.screen.view == .inspection and self.status_page) {
+                self.inspection_kind = .status;
+                var job = self.freeze(.inspection);
+                job.inspection_submission = self.submission.view();
+                job.refresh = true;
+                try self.launch(job, inspectPage);
+            }
         }
         if (self.reader.thread == null and self.input.command_length != null) {
             const text = self.input.command_buffer[0..self.input.command_length.?];
@@ -911,6 +927,8 @@ fn settleReader(self: *Self) !void {
             self.transcript_older = self.job.result.history_cursor;
             if (self.transcript_older == null) try screen.markBeginning();
         }
+    } else if (end == .complete and self.job.refresh) {
+        if (self.terminal.screen.view == .inspection and self.status_page) try self.showInspection();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
         try self.showInspection();
         self.command_running = false; // Shown; exit no longer prints it.
@@ -1035,6 +1053,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     } else if (self.read_phase == .details or self.read_phase == .inspection) {
         // showInspection selected the notice.
     } else if (self.read_phase == .permission) {
+        self.status_stale = self.status_stale or (self.status_page and !sameWork(self.current, self.job.result.current));
         self.current = self.job.result.current;
         self.live = self.job.result.live;
         self.cursor = self.job.result.cursor;
@@ -1042,6 +1061,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.prepared_summary = self.job.result.summary;
         if (self.prepared_action == null) self.read_phase = .activity;
     } else {
+        self.status_stale = self.status_stale or (self.status_page and !self.opening and !sameWork(self.current, self.job.result.current));
         self.current = self.job.result.current;
         self.live = self.job.result.live;
         self.cursor = self.job.result.cursor;
@@ -1085,9 +1105,17 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
+/// What /status reports about the work and its settings.
+fn sameWork(shown: client.Current, observed: client.Current) bool {
+    return shown.work.status.value == observed.work.status.value and std.meta.eql(shown.work.turn, observed.work.turn) and
+        std.meta.eql(shown.work.operation, observed.work.operation) and shown.first_action == observed.first_action and
+        std.meta.eql(shown.settings.revision, observed.settings.revision);
+}
+
 fn showInspection(self: *Self) !void {
     // Any completed inspection or command requires a fresh choice afterwards.
     self.consent.invalidate();
+    self.status_page = false;
     if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
     const size = (try self.inspection_file.stat(self.init.io)).size;
     if (size == 0) {
@@ -1112,6 +1140,7 @@ fn showInspection(self: *Self) !void {
         }
     }
     try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
+    self.status_page = self.read_phase == .inspection and self.inspection_kind == .status;
     // The page heading already says how to return.
     self.notice = null;
 }
