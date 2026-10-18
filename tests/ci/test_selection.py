@@ -141,17 +141,25 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
-        for path in ("src/store.zig", "src/future_owner.zig", "tests/integration/future_case.py"):
+        for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["check"])
             self.assertTrue(result["native_required"])
 
     def test_store_sql_keeps_native_owner_without_unrelated_mac_suite(self):
+        # Both systems also run the bounded Debug failure-provenance subset;
+        # neither composed gate executes the Debug artifact through it.
         result = select(["src/store.zig"], "review", AVAILABLE)
-        self.assertEqual(result["native_targets"], ["test"])
+        self.assertEqual(result["targets"], ["check", "dispatch-debug-integration"])
+        self.assertEqual(result["native_targets"], ["dispatch-debug-integration", "test"])
+        self.assertTrue(result["native_required"])
         combined = select(["src/store.zig", "src/server.zig"], "review", AVAILABLE)
         self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check",
-                                                     "codex-h2-integration", "transport-h2-integration"])
+                                                     "codex-h2-integration", "dispatch-debug-integration",
+                                                     "transport-h2-integration"])
+        full = select(["src/store.zig", "build.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertIn("dispatch-debug-integration", full[family])
 
     def test_bash_keeps_real_custody_and_recovery_checks(self):
         result = select(["src/bash_platform.c"], "review", AVAILABLE)
@@ -176,8 +184,10 @@ class SelectionTest(unittest.TestCase):
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
         result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["check", "codex-credential-integration", "codex-h2-integration"])
-        self.assertEqual(result["native_targets"], ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test"])
+        self.assertEqual(result["targets"], ["check", "codex-credential-integration", "codex-h2-integration",
+                                             "dispatch-debug-integration"])
+        self.assertEqual(result["native_targets"], ["codex-credential-integration", "codex-h2-integration", "codex-integration",
+                                                    "dispatch-debug-integration", "test"])
 
     def test_build_changes_keep_long_and_debug_checks(self):
         result = select(["build.zig"], "review", AVAILABLE)
@@ -252,7 +262,7 @@ class SelectionTest(unittest.TestCase):
     def test_model_scenarios_do_not_select_shared_fixture_consumers(self):
         result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertEqual(result[family], ["dispatch-integration"])
+            self.assertEqual(result[family], ["dispatch-debug-integration", "dispatch-integration"])
 
     def test_standalone_helper_routes_add_without_losing_existing_consumers(self):
         for path, owner in (("host_process.py", "check"),

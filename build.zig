@@ -457,6 +457,16 @@ pub fn build(b: *std.Build) void {
         "Run the documented Debug artifact through configuration/message recovery",
     );
     debug_integration_step.dependOn(&debug_integration.step);
+    // A bounded Debug subset of the dispatch scenarios: failure provenance
+    // through SQLite. The full dispatch journey stays on ReleaseSafe.
+    const dispatch_debug_integration = b.addSystemCommand(&.{"python3"});
+    dispatch_debug_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
+    dispatch_debug_integration.addFileArg(ci.path(debug));
+    dispatch_debug_integration.addArg("failure-correlation");
+    b.step(
+        "dispatch-debug-integration",
+        "Run bounded model failure correlation through SQLite on the Debug artifact",
+    ).dependOn(&dispatch_debug_integration.step);
 
     const check_step = b.step(
         "check",
