@@ -2082,7 +2082,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, marker, composer=True)
                     narrow = current_screen(master)
                     shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                    assert any(label in shown for label in ("+4 more calls · /status", "+4 · /status")), narrow
+                    # Every one of the five calls is either shown or counted.
+                    label = re.search(r"\+(\d+)(?: more calls)? · /status", shown)
+                    calls = sum(row.lstrip().startswith(("✓ ", "• ", "! ")) for row in narrow.splitlines())
+                    assert label and int(label[1]) + calls == 5, narrow
                     if (rows, columns) == (6, 20):
                         assert "Working…" in shown, ("optional spacing or wording hid status", narrow)
                     assert caller.poll() is None, ("wrapped overflow displaced the composer", narrow)
@@ -2849,7 +2852,7 @@ def long_input_case(home, store, workspace, endpoint, host):
             stdin=slave, stdout=slave, stderr=slave)
         greeting = read_terminal(master, "› ")
         assert "Permission:" not in greeting, greeting
-        assert "Bash runs without approval" in greeting, greeting
+        assert "Bash runs without approval" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
         assert "Permission: bypass\n" in binding and "Provider: codex" in binding and "Model: model-a" in binding, binding
@@ -3907,12 +3910,12 @@ def main(selected="all"):
             ) as (caller, master):
                 welcome = read_terminal(master, "› ")
                 assert "Permission:" not in welcome, welcome
-                assert ("Bash runs without approval" in welcome) == warning, welcome
+                assert "Bash runs without approval" not in welcome, ("bypass is quiet", welcome)
                 assert "Bash commands can run without asking you" not in welcome, welcome
                 status = status_frame(master, warning_ref)
                 assert f"Permission: {mode}\n" in status, status
                 assert fixture.command("inspect-session", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
-                assert "Bash runs without approval" not in status.split("\nWork: ", 1)[0], status
+                assert "Bash runs without approval" not in status, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
         created = []
@@ -3938,7 +3941,7 @@ def main(selected="all"):
                 assert all(noise not in welcome for noise in ("request:", "New Session intent:", reference, "Workspace:", "Provider:", "Permission:")), welcome
                 status = terminal_step(master, "/status", "Session: ", composer=True)
                 assert f"Session: {reference}" in status and "Permission: bypass" in status, status
-                assert "Bash runs without approval" in welcome, welcome
+                assert "Bash runs without approval" not in welcome, ("bypass is quiet", welcome)
                 assert "Bash commands can run without asking you" not in welcome, welcome
                 current = fixture.command("inspect-session", "--store", store, "--session", reference)
                 assert current["session"]["permission_mode"] == mode, current
