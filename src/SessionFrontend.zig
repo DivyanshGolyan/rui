@@ -40,6 +40,9 @@ inspection_kind: Inspection = .status,
 // describes changes, so it never reports finished work as running.
 status_page: bool = false,
 status_stale: bool = false,
+// An accepted Message is not yet in delivered output; a read launched after
+// acceptance includes it.
+echo_pending: bool = false,
 // An inspection or Host command started and its result has not been
 // presented. A command may change configuration, so Messages and consent wait
 // for every inspection; exit prints an unshown command's output, which can
@@ -151,6 +154,7 @@ const Job = struct {
     inspection_action: ?u64 = null,
     // A /status reload shows only while its page is still the one on screen.
     refresh: bool = false,
+    echo: bool = false,
     /// What the first window's output belongs to. The UI applies it with that
     /// window (the window handoff orders it), so streamed history and the live
     /// footer always come from one canonical capture.
@@ -171,7 +175,7 @@ const Job = struct {
 };
 
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .colour = self.colour, .command = self.command, .inspect = self.inspect, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .colour = self.colour, .command = self.command, .inspect = self.inspect, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .echo = self.echo_pending };
     job.result.compact_tools = self.compact_tools;
     return job;
 }
@@ -600,7 +604,7 @@ fn driveActive(self: *Self) !void {
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
                 .rejected => "Rejected · /discard",
-            } else workStatus(self.current.work.status.value);
+            } else if (self.echo_pending) "Sent" else workStatus(self.current.work.status.value);
             var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
             var context = std.Io.Writer.fixed(&context_buffer);
             if (self.consent.active() and action_visible)
@@ -893,6 +897,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
     switch (end) {
         .accepted => |accepted| {
             self.poll_at = 0;
+            if (accepted.kind == .message) self.echo_pending = true;
             if (accepted.confirmed) self.notice = if (accepted.kind == .decision) "  • Decision confirmed." else "  • Original confirmed.";
         },
         .rejected => |rejected| {
@@ -1053,6 +1058,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     } else if (self.read_phase == .details or self.read_phase == .inspection) {
         // showInspection selected the notice.
     } else if (self.read_phase == .permission) {
+        if (self.job.echo) self.echo_pending = false;
         self.status_stale = self.status_stale or (self.status_page and !sameWork(self.current, self.job.result.current));
         self.current = self.job.result.current;
         self.live = self.job.result.live;
@@ -1061,6 +1067,7 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.prepared_summary = self.job.result.summary;
         if (self.prepared_action == null) self.read_phase = .activity;
     } else {
+        if (self.job.echo) self.echo_pending = false;
         self.status_stale = self.status_stale or (self.status_page and !self.opening and !sameWork(self.current, self.job.result.current));
         self.current = self.job.result.current;
         self.live = self.job.result.live;
@@ -1188,6 +1195,7 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return requests.failRead(failure),
     };
     job.lead.live = View.Live.init(page.facts.call_activity);
+    var rows: Rows = .{ .task = task };
     if (job.opening) {
         var mark: ?client.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
@@ -1198,13 +1206,14 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         };
         job.lead.mark = .{ .cursor = mark };
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(requests, job.store, job.session, task);
+        try pending.render(requests, job.store, job.session, &rows);
     } else if (page.facts.count != 0) {
         // Everything before this page's first item precedes its live output.
         const first = page.facts.items[0];
         job.lead.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal } };
     }
-    try View.render(requests, job.store, job.session, &page, task, job.colour, &job.result.compact_tools);
+    try View.render(requests, job.store, job.session, &page, &rows, job.colour, &job.result.compact_tools);
+    try rows.flush();
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
     } else {
@@ -1226,6 +1235,77 @@ fn history(raw: *anyopaque, task: *Task) !void {
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
     if (!latest) job.result.history_cursor = prepared.page.continuation();
+}
+
+/// Live output reaches the UI as whole rows: a window ends at its last
+/// newline unless one row fills it, and the rest follows when rendering ends.
+/// A frame never shows a row the worker is still writing.
+const Rows = struct {
+    task: *Task,
+    buffer: @FieldType(Task, "window") = undefined,
+    length: usize = 0,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        var rest = bytes;
+        while (rest.len != 0) {
+            if (self.length == self.buffer.len) {
+                const end = if (std.mem.lastIndexOfScalar(u8, &self.buffer, '\n')) |index| index + 1 else self.buffer.len;
+                try self.task.feed(self.buffer[0..end]);
+                std.mem.copyForwards(u8, &self.buffer, self.buffer[end..]);
+                self.length -= end;
+            }
+            const count = @min(rest.len, self.buffer.len - self.length);
+            @memcpy(self.buffer[self.length..][0..count], rest[0..count]);
+            self.length += count;
+            rest = rest[count..];
+        }
+    }
+
+    pub fn flush(self: *@This()) !void {
+        if (self.length == 0) return;
+        try self.task.feed(self.buffer[0..self.length]);
+        self.length = 0;
+    }
+};
+
+test "live output windows end at row boundaries" {
+    const Worker = struct {
+        fn run(_: *anyopaque, task: *Task) !void {
+            var rows: Rows = .{ .task = task };
+            try rows.feed("\n› ");
+            try rows.feed("x\n");
+            var long: [5000]u8 = undefined;
+            @memset(&long, 'y');
+            long[10] = '\n';
+            try rows.feed(&long);
+            try rows.flush();
+        }
+    };
+    var task: Task = .{};
+    var context: u8 = 0;
+    try task.start(std.testing.io, &context, Worker.run);
+    var windows: [4][]const u8 = undefined;
+    var storage: [4][4096]u8 = undefined;
+    var count: usize = 0;
+    while (true) {
+        const bytes = task.take() orelse {
+            if (task.completed() and task.take() == null) break;
+            std.Thread.yield() catch {};
+            continue;
+        };
+        @memcpy(storage[count][0..bytes.len], bytes);
+        windows[count] = storage[count][0..bytes.len];
+        count += 1;
+        task.acknowledge();
+    }
+    try task.join();
+    try std.testing.expectEqual(@as(usize, 3), count);
+    // The first window ends after the long text's first row, not mid-row;
+    // only a row longer than a window splits.
+    try std.testing.expectEqualStrings("\n› x\nyyyyyyyyyy\n", windows[0]);
+    try std.testing.expectEqual(@as(usize, 4096), windows[1].len);
+    try std.testing.expectEqual(@as(usize, 5000 - 11 - 4096), windows[2].len);
 }
 
 const DisplayCapture = struct {
