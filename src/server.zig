@@ -355,7 +355,10 @@ const Intake = struct {
                 else => "invocation_error",
             };
             respondStatic(self.host.io, reply, status, kind, code);
-            self.state = .reply;
+            // Detect a disconnected predecessor before classifying another
+            // peer in this socket pass. Half-closed clients still receive
+            // their bounded error through the ordinary reply state.
+            self.state = if (reply.advance(self.fd) catch true) .retired else .reply;
         }
 
         fn read(self: *Exchange) !void {
@@ -643,8 +646,8 @@ const Intake = struct {
                         if (now >= exchange.deadline) exchange.fail(error.TransferInactive) else fd = exchange.fd;
                     },
                     .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
-                        exchange.prepare() catch |err| exchange.fail(err);
                         exchange.state = .reply;
+                        exchange.prepare() catch |err| exchange.fail(err);
                     },
                     .reply => {
                         if (exchange.reply) |reply| {
@@ -6750,6 +6753,79 @@ test "retired reserved exchanges cannot block their successors while workers are
             for (intake.exchanges.items[0..places]) |peer| {
                 try std.testing.expectEqual(.closed, peer.state);
                 try std.testing.expectEqual(@as(c_int, -1), peer.fd);
+            }
+        }
+    }
+}
+
+test "disconnected reserved peers release classification while half-closed peers receive errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    for ([_][]const u8{ "host-info", "control/session-stop" }) |path| {
+        for ([_]bool{ false, true }) |half_closed| {
+            for ([_]bool{ true, false }) |body| {
+                var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+                var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+                host.retention = &retention;
+                var intake: Intake = .{ .host = &host };
+                host.intake = &intake;
+                defer intake.exchanges.deinit(host.allocator);
+                defer for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
+                const places: usize = if (std.mem.eql(u8, path, "host-info")) 1 else 2;
+                var clients: [2]c_int = .{ -1, -1 };
+                defer for (clients) |fd| {
+                    if (fd >= 0) _ = std.c.close(fd);
+                };
+                var header: [128]u8 = undefined;
+                const line = try std.fmt.bufPrint(&header, "POST /v1/{s} HTTP/1.1\r\n", .{path});
+                for (0..places) |index| {
+                    var sockets: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                    clients[index] = sockets[1];
+                    try setNonblocking(sockets[0]);
+                    try intake.accept(sockets[0]);
+                    const peer = intake.exchanges.items[index];
+                    try writeAll(host.io, sockets[1], line);
+                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n{");
+                    try peer.read();
+                    if (half_closed) {
+                        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[1], std.c.SHUT.WR));
+                    } else {
+                        _ = std.c.close(sockets[1]);
+                        clients[index] = -1;
+                    }
+                    // The listener can already have accepted the successor when
+                    // this socket pass observes EOF on its predecessor.
+                    peer.read() catch |err| peer.fail(err);
+                }
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try intake.accept(sockets[0]);
+                const successor = intake.exchanges.items[places];
+                try writeAll(host.io, sockets[1], line);
+                if (half_closed) {
+                    try std.testing.expectError(if (places == 1) error.DiscoveryCapacity else error.ControlCapacity, successor.read());
+                    for (intake.exchanges.items[0..places], clients[0..places]) |peer, client| {
+                        while (!try peer.reply.?.advance(peer.fd)) {}
+                        peer.state = .retired;
+                        var response: [1024]u8 = undefined;
+                        const length = try std.posix.read(client, &response);
+                        try std.testing.expect(std.mem.startsWith(u8, response[0..length], "HTTP/1.1 400 "));
+                        try std.testing.expect(std.mem.indexOf(u8, response[0..length], "UnexpectedEndOfBody") != null);
+                    }
+                    successor.route = null;
+                    successor.header_bytes.clearRetainingCapacity();
+                    try writeAll(host.io, sockets[1], line);
+                }
+                const failure: ?anyerror = if (successor.read()) |_| null else |err| err;
+                try std.testing.expectEqual(@as(?anyerror, null), failure);
+                try std.testing.expectEqual(.header, successor.state);
             }
         }
     }
