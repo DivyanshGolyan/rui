@@ -3,7 +3,8 @@
 
 This is a source architecture check, not Zig's lazy declaration analysis. Both
 platform branches count; test declarations, comments and string contents do not.
-The roots mirror addRui/addEvaluator in build.zig. Package imports are external.
+addRui in build.zig owns the Zig executable root. addEvaluator is C-only; its
+private Zig host adapter is currently fixture-only. Package imports are external.
 """
 import argparse
 import json
@@ -12,7 +13,7 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ROOTS = ("src/cli.zig", "src/evaluator.zig")
+ROOTS = ("src/cli.zig",)
 BASELINE = Path(__file__).with_name("import_cycles.json")
 # Preserve strings as tokens so braces/import spellings inside them are inert.
 TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@[A-Za-z_][A-Za-z_0-9]*|[A-Za-z_][A-Za-z_0-9]*|[^\s]')
