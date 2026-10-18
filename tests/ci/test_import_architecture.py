@@ -35,17 +35,26 @@ class ImportArchitectureTest(unittest.TestCase):
                 check(root, baseline, ("a.zig",))
 
     def test_root_alias_and_explicit_root_return_paths_are_both_cycles(self):
-        for imported in ("root", "a.zig"):
-            with self.subTest(imported=imported), tempfile.TemporaryDirectory() as directory, patch(
+        for declaration, imported in ((declaration, imported)
+                                      for declaration in ('test', 'test "nested"')
+                                      for imported in ("root", "a.zig")):
+            with self.subTest(declaration=declaration, imported=imported), tempfile.TemporaryDirectory() as directory, patch(
                 "import_architecture.trusted_allowance", create=True, return_value=[],
             ):
                 root = Path(directory)
                 baseline = root / "baseline.json"
                 baseline.write_text('{"cyclic_edges": []}')
                 (root / "a.zig").write_text('const b = @import("b.zig");')
-                (root / "b.zig").write_text(f'test {{ _ = @import("{imported}"); }}')
-                check(root, baseline, ("a.zig",))
-                (root / "b.zig").write_text(f'const a = @import("{imported}");')
+                (root / "c.zig").write_text('const value = 1;')
+                source = f'''{declaration} {{
+    const S = struct {{ {declaration} {{ _ = @import("std"); }} }};
+    _ = S;
+    _ = @import("{imported}");
+}}
+const c = @import("c.zig");'''
+                (root / "b.zig").write_text(source)
+                self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
+                (root / "b.zig").write_text(source + f'\nconst a = @import("{imported}");')
                 with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
                     check(root, baseline, ("a.zig",))
 

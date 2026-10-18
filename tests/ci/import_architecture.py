@@ -28,8 +28,8 @@ def production_imports(source):
     test_depth = None
     imports = set()
     for i, token in enumerate(tokens):
-        if token == "test" and (i == 0 or tokens[i - 1] != "@"):
-            # Zig test declarations are `test ["name"] { ... }`.
+        if token == "test" and test_depth is None and (i == 0 or tokens[i - 1] != "@"):
+            # Preserve the outermost test scope, including nested container tests.
             following = i + 1
             if following < len(tokens) and tokens[following].startswith('"'):
                 following += 1
