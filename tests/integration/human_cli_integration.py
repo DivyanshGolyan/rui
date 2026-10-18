@@ -4181,6 +4181,8 @@ def main(selected="all"):
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+            # This Session asks: help must not describe the bypass default as its mode.
+            assert "without approval" not in help_text and "/status shows whether Bash asks first" in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
