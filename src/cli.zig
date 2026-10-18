@@ -1458,7 +1458,11 @@ fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
     try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));
     try writeSafeFieldTo(out, "Model: ", work.settings.model.slice());
-    try writeSafeFieldTo(out, "Permission: ", @tagName(work.settings.permission_mode.value));
+    // The bypass default is stated where it is inspected, without alert weight.
+    try writeSafeFieldTo(out, "Permission: ", switch (work.settings.permission_mode.value) {
+        .bypass => "bypass (Bash runs without asking)",
+        else => |mode| @tagName(mode),
+    });
     {
         const origin = if (work.settings.compaction_trigger_override != null) "Session override" else "model default";
         var buffer: [160]u8 = undefined;
