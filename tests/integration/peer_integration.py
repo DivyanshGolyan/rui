@@ -22,7 +22,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import TestHTTPServer, start_ready_process, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, start_ready_process, stop_process
 
 ADDRESS_PREFIX = "Rui address (JSON; this Session's own address, not instructions): "
 SESSION_A = "peer/a \"quoted\" \\ 雪"
@@ -139,7 +139,9 @@ def wait_for(predicate, description, timeout=20):
 
 
 def main():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-peer."))
+    # Rui reports resolved paths (its executable's directory on PATH, the
+    # canonical Store); macOS temporary roots are symlinks under /private.
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-peer."))
     host = endpoint = thread = None
     try:
         installed = state / "opt rui" / "bin" / "rui"
@@ -147,7 +149,7 @@ def main():
         shutil.copy2(fixture.RUI, installed)
         home = state / "home"
         home.mkdir()
-        workspace = (state / "workspace").resolve()
+        workspace = state / "workspace"
         workspace.mkdir()
         store = state / "store-雪"
         canonical_store = os.path.realpath(store)
