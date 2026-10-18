@@ -171,6 +171,8 @@ const Job = struct {
         rendering: bool = false,
         action: ?u64 = null,
         summary: View.ActionSummary = .{},
+        // Bytes of opening output staged in the inspection scratch file.
+        opening_length: u64 = 0,
     } = .{},
 };
 
@@ -932,6 +934,8 @@ fn settleReader(self: *Self) !void {
             self.transcript_older = self.job.result.history_cursor;
             if (self.transcript_older == null) try screen.markBeginning();
         }
+    } else if (end == .complete and self.job.opening) {
+        try self.showOpening();
     } else if (end == .complete and self.job.refresh) {
         if (self.terminal.screen.view == .inspection and self.status_page) try self.showInspection();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
@@ -939,6 +943,22 @@ fn settleReader(self: *Self) !void {
         self.command_running = false; // Shown; exit no longer prints it.
     }
     self.applyReader(end);
+}
+
+/// Appends a joined opening's staged output; none of it showed before.
+fn showOpening(self: *Self) !void {
+    const length = self.job.result.opening_length;
+    if (length == 0) return;
+    if (self.job.lead.mark) |mark| self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const count = try self.inspection_file.readPositionalAll(self.init.io, buffer[0..@intCast(@min(buffer.len, length - offset))], offset);
+        if (count == 0) return error.TruncatedDisplayScratch;
+        try self.terminal.permanent(buffer[0..count]);
+        offset += count;
+    }
+    self.reader_output_started = true;
 }
 
 fn joinReader(self: *Self) ReadEnd {
@@ -1195,7 +1215,6 @@ fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return requests.failRead(failure),
     };
     job.lead.live = View.Live.init(page.facts.call_activity);
-    var rows: Rows = .{ .task = task };
     if (job.opening) {
         var mark: ?client.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
@@ -1205,18 +1224,24 @@ fn scan(raw: *anyopaque, task: *Task) !void {
             }
         };
         job.lead.mark = .{ .cursor = mark };
+        // The opening shows whole or not at all: it renders into scratch and
+        // the UI appends it only after this read joins successfully.
+        try job.inspection_file.setLength(task.io, 0);
+        var opening: DisplayCapture = .{ .task = task, .file = job.inspection_file };
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(requests, job.store, job.session, &rows);
-    } else if (page.facts.count != 0) {
-        // Everything before this page's first item precedes its live output.
-        const first = page.facts.items[0];
-        job.lead.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal } };
-    }
-    try View.render(requests, job.store, job.session, &page, &rows, job.colour, &job.result.compact_tools);
-    try rows.flush();
-    if (job.opening) {
+        try pending.render(requests, job.store, job.session, &opening);
+        try View.render(requests, job.store, job.session, &page, &opening, job.colour, &job.result.compact_tools);
+        job.result.opening_length = opening.offset;
         job.result.cursor = .{ .position = page.facts.end };
     } else {
+        if (page.facts.count != 0) {
+            // Everything before this page's first item precedes its live output.
+            const first = page.facts.items[0];
+            job.lead.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal } };
+        }
+        var rows: Rows = .{ .task = task };
+        try View.render(requests, job.store, job.session, &page, &rows, job.colour, &job.result.compact_tools);
+        try rows.flush();
         job.result.cursor = page.continuation() orelse .{ .position = page.facts.end };
         if (!page.facts.more) job.result.cursor.end = null;
     }
