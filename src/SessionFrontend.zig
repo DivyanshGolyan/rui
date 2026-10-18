@@ -924,12 +924,31 @@ test "frontend commits spacing only for completed visible reads" {
 }
 
 fn showInspection(self: *Self) !void {
-    if ((try self.inspection_file.stat(self.init.io)).size == 0) {
+    const size = (try self.inspection_file.stat(self.init.io)).size;
+    if (size == 0) {
         self.notice = "Command finished with no output.";
         return;
     }
+    // A short command result is a notice, not a page. Inside the Session the
+    // speaker is known: CLI "Rui: " text loses its prefix and "rui: "
+    // diagnostics become failure notices.
+    if (self.read_phase == .inspection and self.inspection_kind == .command and size <= 256) {
+        var bytes: [256]u8 = undefined;
+        const text = std.mem.trimEnd(u8, bytes[0..try self.inspection_file.readPositionalAll(self.init.io, bytes[0..@intCast(size)], 0)], "\n");
+        if (std.mem.count(u8, text, "\n") < 2) {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            while (lines.next()) |line| {
+                if (writer.buffered().len != 0) try writer.writeAll("\n");
+                if (std.mem.startsWith(u8, line, "Rui: ")) try writer.writeAll(line[5..]) else if (std.mem.startsWith(u8, line, "rui: ")) try writer.print("! {s}", .{line[5..]}) else try writer.writeAll(line);
+            }
+            self.notice = writer.buffered();
+            return;
+        }
+    }
     try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
-    self.notice = Frame.inspection_ready;
+    // The page heading already says how to return.
+    self.notice = null;
     self.consent.invalidate();
     if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
 }

@@ -7,7 +7,6 @@ const Position = Viewport.Position;
 const Self = @This();
 pub const Call = Viewport.Sized(512, false);
 pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
-pub const inspection_ready = "Inspection ready · Esc returns";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
 pub const max_cells = 24 * 2048;
