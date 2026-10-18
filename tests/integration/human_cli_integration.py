@@ -3075,6 +3075,14 @@ def renderer_cases():
     import canonical_failure_integration as canonical
     import resource
 
+    # Every-frame oracles see each synchronized commit, not just the newest one after a read.
+    control, seen = ScreenCapture(), []
+    control.listener = lambda screen, x, y: seen.append(screen)
+    control.feed(b"\x1b[?2026h\x1b[HBROKEN INTERMEDIATE\x1b[?2026l"
+                 b"\x1b[?2026h\x1b[H\x1b[2JCORRECT FINAL\x1b[?2026l")
+    assert len(seen) == 2 and "BROKEN INTERMEDIATE" in seen[0], seen
+    assert "BROKEN" not in control.completed and "CORRECT FINAL" in control.completed, control.completed
+
     original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, original_limit[0]), original_limit[1]))
 
@@ -3117,6 +3125,13 @@ def renderer_cases():
                 self.feed(chunk)
                 deadline += time.monotonic() - before
             return self.capture.completed
+
+        def every_frame(self):
+            """Every committed frame from now on. One read can commit several
+            frames; the newest after a read hides the ones before it."""
+            frames = []
+            self.capture.listener = lambda screen, x, y: frames.append(screen)
+            return frames
 
         def send(self, text, marker=None, *, predicate=None):
             generation = self.capture.generation
@@ -3526,12 +3541,8 @@ def renderer_cases():
             for index, (command, label) in enumerate(zip(commands, labels))]))
         marker = answer("one capture")
         with terminal(session) as tty:
-            frames = []
-            def record():
-                if not frames or frames[-1] != tty.capture.completed:
-                    frames.append(tty.capture.completed)
-                return tty.capture.reached(marker)
-            tty.send("run the tool demonstration\n", predicate=record)
+            frames = tty.every_frame()
+            tty.send("run the tool demonstration\n", marker)
             assert any("Working" in frame for frame in frames), frames
             for frame in frames:
                 for label in labels:
@@ -3565,13 +3576,9 @@ def renderer_cases():
         configure(session)
         marker = answer("submitted feedback")
         with terminal(session) as tty:
-            frames = []
-            def record():
-                if not frames or frames[-1] != tty.capture.completed:
-                    frames.append(tty.capture.completed)
-                return tty.capture.reached(marker)
             tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
-            tty.send("\n", predicate=record)
+            frames = tty.every_frame()
+            tty.send("\n", marker)
             for frame in frames:
                 rows = frame.rstrip("\n").split("\n")
                 composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
