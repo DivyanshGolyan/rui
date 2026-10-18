@@ -3093,6 +3093,9 @@ fn settleFailure(
 /// One optional Host stderr line locating a settled model failure. Settlement
 /// is canonical; a dropped line changes no Host work.
 fn reportModelFailure(binding: store_module.AttemptBinding, failure: store_module.ModelFailure, disposition: store_module.ModelFailureDisposition) void {
+    // Only an answered failure's classification is otherwise unreported;
+    // local failures already write their own single contextual warning.
+    if (failure.diagnostic() == null) return;
     // Code, shown ID and printable-ASCII classification at worst doubling.
     var bytes: [2048]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
