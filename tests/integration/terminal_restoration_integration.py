@@ -329,6 +329,13 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         /* Stop the real PTY before a bounded repaint, independently of input
            queue pressure. The syscall must encounter actual kernel EAGAIN. */
         if (tcflow(fd, TCOOFF)) _exit(92);
+        /* A stopped Darwin tty still queues a small frame. Fill the queue
+           with ignored NULs until the kernel itself reports EAGAIN. */
+        int pressure_flags = fcntl(fd, F_GETFL);
+        if (pressure_flags < 0 || fcntl(fd, F_SETFL, pressure_flags | O_NONBLOCK)) _exit(93);
+        static const char filler[256];
+        while (real_write(fd, filler, sizeof filler) > 0) {}
+        if (errno != EAGAIN || fcntl(fd, F_SETFL, pressure_flags)) _exit(94);
         pressure_stopped = 1;
         record("output-stopped\n");
     }
