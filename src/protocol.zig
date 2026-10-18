@@ -1862,17 +1862,39 @@ pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"sta
 /// Catalog slugs are printable ASCII, so JSON escaping at most doubles them.
 pub const max_catalog_slug_json_bytes = 2 + 2 * max_model_bytes;
 pub const max_catalog_rejection_slugs = 16;
-pub const max_model_catalog_rejection_bytes =
+pub const model_catalog_rejection_tail_bytes = "],\"available_count\":\"\"}".len + 20;
+/// A rejection without slugs. Slugs fill the rest of `max_response_bytes`,
+/// the bound older clients already enforce.
+pub const min_model_catalog_rejection_bytes =
     "{\"version\":\"1\",\"type\":\"model_catalog_rejection\",\"code\":\"model_unavailable\",\"model\":".len +
     max_catalog_slug_json_bytes + ",\"age_seconds\":\"\"".len + 20 +
-    ",\"available_models\":[".len + max_catalog_rejection_slugs * (max_catalog_slug_json_bytes + 1) +
-    "],\"available_count\":\"\"}".len + 20;
+    ",\"available_models\":[".len + model_catalog_rejection_tail_bytes;
+/// An accepted configuration reply with a maximal Session and a verdict.
+pub const max_configuration_reply_bytes =
+    "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":".len +
+    maximumJsonStringBytes(max_session_bytes) + ",\"revision\":\"\",\"created\":false".len + 20 +
+    "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}".len +
+    ",\"model_catalog\":".len + max_model_catalog_observation_bytes + "}".len;
+/// Mirrors `codex_model_catalog.max_observation_json_bytes`.
+pub const max_model_catalog_observation_bytes = "{\"verdict\":\"unchecked\",\"reason\":\"credential_unavailable\",\"age_seconds\":\"\"}".len + 20;
+
+pub fn jsonStringBytes(value: []const u8) usize {
+    var discarding: std.Io.Writer.Discarding = .init(&.{});
+    std.json.Stringify.encodeJsonString(value, .{}, &discarding.writer) catch unreachable;
+    return @intCast(discarding.fullCount());
+}
 pub const max_model_catalog_response_bytes =
     "{\"version\":\"1\",\"type\":\"model_catalog\",\"applicable\":false,\"available\":false,\"age_seconds\":\"\"".len + 20 +
     ",\"last_failure\":\"credential_unavailable\",\"fetching\":false,\"completed\":\"\"".len + 20 +
     ",\"refresh_target\":\"\",\"models\":[".len + 20 +
     256 * ("{\"slug\":".len + max_catalog_slug_json_bytes + ",\"visibility\":\"hidden\"},".len) + "]}".len;
-pub const max_response_bytes = @max(@max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len), max_model_catalog_rejection_bytes);
+pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+
+comptime {
+    // Catalog additions fit the bound older clients enforce.
+    std.debug.assert(min_model_catalog_rejection_bytes <= max_response_bytes);
+    std.debug.assert(max_configuration_reply_bytes <= max_response_bytes);
+}
 pub const max_conversation_page_response_bytes =
     "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
     "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +

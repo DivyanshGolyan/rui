@@ -123,6 +123,8 @@ fn run(init: std.process.Init) !void {
         // Defaults and auth never contact a Host.
         if ((err == error.FileNotFound or err == error.ConnectionRefused) and resource != .defaults and resource != .auth)
             TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
+        // The catalog rejection already explained itself and saved nothing.
+        if (err == error.ModelUnavailable) return err;
         if (err == error.MutationNotAccepted) {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
@@ -207,7 +209,11 @@ fn modelList(init: std.process.Init, args: []const []const u8) !void {
             };
         }
         refreshed = listing.completed >= target;
+        if (refreshed == false)
+            TerminalText.diagnostic("rui: model catalog refresh is still running after 12 s; showing the previous catalog. Run rui model list again shortly.\n", .{});
     }
+    if (!listing.applicable)
+        TerminalText.diagnostic("rui: this Host has no Codex endpoint, so it has no model catalog.\n", .{});
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
     try writer.writeAll("{\"version\":\"1\",\"type\":\"model_catalog\",\"store\":");
@@ -2290,7 +2296,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
         try writer.writeAll("Rui: Configured.\n");
         return writer.flush();
     }
-    if (reply.catalog_rejection) |*rejection| reportModelUnavailable(rejection);
+    if (reply.catalog_rejection) |*rejection| reportModelUnavailable(rejection, reply.context.store.slice());
     if (presentation == .json) {
         try writeMutationJson(writer, reply);
         try writer.writeByte('\n');
@@ -2311,7 +2317,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
     }
     const answer = reply.answer catch |err| {
         if (reply.catalog_rejection != null) {
-            try writer.print("invocation: {s} (HTTP {d}); nothing saved\n", .{ @errorName(err), reply.status });
+            try writer.writeAll("Session not created: model unavailable; nothing saved\n");
             try writer.flush();
             return err;
         }
@@ -2425,23 +2431,53 @@ fn warnModelCatalog(observation: ?codex_model_catalog.Observation, model: []cons
     switch (value.verdict) {
         .listed => {},
         .unchecked => |reason| if (reason != .not_applicable)
-            TerminalText.diagnostic("rui: warning: could not check model {s} against this account's model catalog ({s}); the provider decides when work starts.\n", .{ model, @tagName(reason) }),
-        .hidden => TerminalText.diagnostic("rui: warning: model {s} is hidden in this account's model catalog; the provider decides when work starts.\n", .{model}),
-        .absent => TerminalText.diagnostic("rui: warning: model {s} is not in this account's model catalog; the provider decides when work starts.\n", .{model}),
+            TerminalText.diagnostic("rui: warning: could not check model {s} against this account's model catalog ({s}). If the provider rejects it, the first message fails; rui model list --refresh shows available models.\n", .{ model, catalogReasonText(reason) }),
+        .hidden => TerminalText.diagnostic("rui: warning: model {s} is not offered in this account's model picker; the provider may still reject it when a message runs. rui model list shows available models.\n", .{model}),
+        .absent => TerminalText.diagnostic("rui: warning: this Session keeps model {s}, which this account's model catalog does not list; its next message may fail. rui model list shows available models.\n", .{model}),
     }
 }
 
-fn reportModelUnavailable(rejection: *const client.CatalogRejection) void {
-    var list: [protocol.max_catalog_rejection_slugs * (protocol.max_model_bytes + 2) + 32]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&list);
-    for (rejection.availableModels(), 0..) |*slug, index| {
-        writer.writeAll(if (index == 0) "" else ", ") catch unreachable;
-        writer.writeAll(slug.slice()) catch unreachable;
+fn catalogReasonText(reason: codex_model_catalog.Reason) []const u8 {
+    return switch (reason) {
+        .not_applicable => "no catalog for this provider",
+        .not_fetched => "catalog not fetched yet",
+        .stale => "catalog is over an hour old",
+        .other_account => "catalog belongs to another signed-in account",
+        .credential_unavailable => "Codex credentials unavailable",
+        .transport_failure => "could not reach the catalog",
+        .timeout => "catalog request timed out",
+        .http_status => "catalog request returned an HTTP error",
+        .too_large => "catalog response too large",
+        .unparseable => "catalog response unreadable",
+    };
+}
+
+/// Two lines, each within the 1024-byte stderr line bound: slugs fill only
+/// the room the Store path leaves, and the rest are counted.
+fn reportModelUnavailable(rejection: *const client.CatalogRejection, store: []const u8) void {
+    if (rejection.available_count == 0) {
+        TerminalText.diagnostic("rui: Model {s} is not available for this Codex account, and its model catalog lists no models; nothing was saved.\n", .{rejection.model.slice()});
+        TerminalText.diagnostic("rui: Run rui model list --store {s} --refresh, then try again.\n", .{store});
+        return;
     }
-    if (rejection.available_count > rejection.available_len)
-        writer.print(" and {d} more", .{rejection.available_count - rejection.available_len}) catch unreachable;
-    if (rejection.available_count == 0) writer.writeAll("none") catch unreachable;
-    TerminalText.diagnostic("rui: Model {s} is not available for this Codex account. Available models: {s}. Nothing was saved; configure an available model, or run rui model list --refresh if the account changed.\n", .{ rejection.model.slice(), writer.buffered() });
+    TerminalText.diagnostic("rui: Model {s} is not available for this Codex account; nothing was saved.\n", .{rejection.model.slice()});
+    const fixed = "\nrui: Available models: . Choose one of these with --model, or run rui model list --store  --refresh to update the list.\n".len + " and 18446744073709551615 more".len;
+    var list: [1024]u8 = undefined;
+    const budget = 1024 - fixed - @min(store.len, 1024 - fixed);
+    var shown: usize = 0;
+    var used: usize = 0;
+    for (rejection.availableModels()) |*slug| {
+        const separator: usize = if (shown == 0) 0 else 2;
+        if (used + separator + slug.len > budget) break;
+        if (separator != 0) @memcpy(list[used..][0..2], ", ");
+        @memcpy(list[used + separator ..][0..slug.len], slug.slice());
+        used += separator + slug.len;
+        shown += 1;
+    }
+    var more: [" and 18446744073709551615 more".len]u8 = undefined;
+    const hidden = rejection.available_count - shown;
+    const suffix = if (hidden == 0) "" else std.fmt.bufPrint(&more, "{s}{d} more", .{ if (shown == 0) "" else " and ", hidden }) catch unreachable;
+    TerminalText.diagnostic("rui: Available models: {s}{s}. Choose one of these with --model, or run rui model list --store {s} --refresh to update the list.\n", .{ list[0..used], suffix, store });
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -2868,7 +2904,7 @@ const usage_text =
     \\    resource or former command name.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
-    \\    Resources: session, request, action, host, defaults, auth.
+    \\    Resources: session, request, action, host, defaults, model, auth.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\

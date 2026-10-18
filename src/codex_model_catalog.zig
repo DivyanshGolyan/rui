@@ -72,9 +72,9 @@ pub const Verdict = union(enum) {
     }
 };
 
+/// Every verdict requires the shell to have reread the credential snapshot,
+/// so no observation can assume the fetching account is still current.
 pub const Account = enum {
-    /// The catalog's account matches the latest credential the shell saw.
-    assumed_current,
     /// The shell reread the credential snapshot and it names this account.
     confirmed,
     /// The snapshot names another account, or cannot be read.
@@ -87,23 +87,16 @@ pub const State = struct {
     catalog: ?*const Catalog = null,
     fetched_at_ms: i64 = 0,
     now_ms: i64,
-    account: Account = .assumed_current,
     last_failure: ?Reason = null,
 };
 
-pub fn classify(state: State, model: []const u8) Verdict {
+pub fn classify(state: State, account: Account, model: []const u8) Verdict {
     if (!state.applicable) return .{ .unchecked = .not_applicable };
     const catalog = state.catalog orelse return .{ .unchecked = state.last_failure orelse .not_fetched };
-    if (state.account == .unconfirmed) return .{ .unchecked = .other_account };
+    if (account == .unconfirmed) return .{ .unchecked = .other_account };
     if (state.now_ms - state.fetched_at_ms >= fresh_for_ms) return .{ .unchecked = .stale };
     const row = catalog.find(model) orelse return .absent;
     return if (row.visibility == .list) .listed else .hidden;
-}
-
-/// Only `absent` rejects, and only a configuration that would establish a
-/// new Session after the shell confirmed the catalog's account.
-pub fn rejectsNewSession(verdict: Verdict, account: Account) bool {
-    return verdict == .absent and account == .confirmed;
 }
 
 pub fn needsRefresh(state: State) bool {
@@ -339,35 +332,33 @@ test "parse rejects more rows than the catalog retains" {
 test "classify distinguishes definitive rows from every unchecked state" {
     const catalog = try testParse("{\"models\":[{\"slug\":\"gpt-6-luna\",\"visibility\":\"list\"},{\"slug\":\"codex-auto-review\",\"visibility\":\"hide\"}]}");
     const fresh: State = .{ .catalog = &catalog, .fetched_at_ms = 1_000, .now_ms = 1_000 + fresh_for_ms - 1 };
-    try std.testing.expectEqual(Verdict.listed, classify(fresh, "gpt-6-luna"));
-    try std.testing.expectEqual(Verdict.hidden, classify(fresh, "codex-auto-review"));
-    try std.testing.expectEqual(Verdict.absent, classify(fresh, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict.listed, classify(fresh, .confirmed, "gpt-6-luna"));
+    try std.testing.expectEqual(Verdict.hidden, classify(fresh, .confirmed, "codex-auto-review"));
+    try std.testing.expectEqual(Verdict.absent, classify(fresh, .confirmed, "gpt-5-codex"));
     // Exact bytes: no case or alias folding.
-    try std.testing.expectEqual(Verdict.absent, classify(fresh, "GPT-6-LUNA"));
-    try std.testing.expectEqual(Verdict.absent, classify(fresh, "gpt-6-luna-2026-10-01"));
+    try std.testing.expectEqual(Verdict.absent, classify(fresh, .confirmed, "GPT-6-LUNA"));
+    try std.testing.expectEqual(Verdict.absent, classify(fresh, .confirmed, "gpt-6-luna-2026-10-01"));
 
     var stale = fresh;
     stale.now_ms = 1_000 + fresh_for_ms;
-    try std.testing.expectEqual(Verdict{ .unchecked = .stale }, classify(stale, "gpt-5-codex"));
-    var other = fresh;
-    other.account = .unconfirmed;
-    try std.testing.expectEqual(Verdict{ .unchecked = .other_account }, classify(other, "gpt-5-codex"));
-    try std.testing.expectEqual(Verdict{ .unchecked = .not_fetched }, classify(.{ .now_ms = 0 }, "gpt-5-codex"));
-    try std.testing.expectEqual(Verdict{ .unchecked = .timeout }, classify(.{ .now_ms = 0, .last_failure = .timeout }, "gpt-5-codex"));
-    try std.testing.expectEqual(Verdict{ .unchecked = .not_applicable }, classify(.{ .applicable = false, .catalog = &catalog, .now_ms = 1_000 }, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .stale }, classify(stale, .confirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .other_account }, classify(fresh, .unconfirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .not_fetched }, classify(.{ .now_ms = 0 }, .confirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .timeout }, classify(.{ .now_ms = 0, .last_failure = .timeout }, .confirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .not_applicable }, classify(.{ .applicable = false, .catalog = &catalog, .now_ms = 1_000 }, .confirmed, "gpt-5-codex"));
     // A later failure keeps a fresh earlier catalog authoritative.
     var failed_after = fresh;
     failed_after.last_failure = .http_status;
-    try std.testing.expectEqual(Verdict.absent, classify(failed_after, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict.absent, classify(failed_after, .confirmed, "gpt-5-codex"));
 }
 
-test "only an absent model with a confirmed account rejects a new Session" {
-    try std.testing.expect(rejectsNewSession(.absent, .confirmed));
-    try std.testing.expect(!rejectsNewSession(.absent, .assumed_current));
-    try std.testing.expect(!rejectsNewSession(.absent, .unconfirmed));
-    try std.testing.expect(!rejectsNewSession(.hidden, .confirmed));
-    try std.testing.expect(!rejectsNewSession(.listed, .confirmed));
-    try std.testing.expect(!rejectsNewSession(.{ .unchecked = .stale }, .confirmed));
+test "an unconfirmed account never yields a rejecting verdict" {
+    var catalog: Catalog = .{};
+    try parse("{\"models\":[{\"slug\":\"gpt-6-luna\",\"visibility\":\"list\"}]}", &catalog);
+    const state: State = .{ .catalog = &catalog, .fetched_at_ms = 0, .now_ms = 1 };
+    try std.testing.expectEqual(Verdict.absent, classify(state, .confirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .other_account }, classify(state, .unconfirmed, "gpt-5-codex"));
+    try std.testing.expectEqual(Verdict{ .unchecked = .other_account }, classify(state, .unconfirmed, "gpt-6-luna"));
 }
 
 test "refresh starts at five minutes and never for a Host without a catalog" {

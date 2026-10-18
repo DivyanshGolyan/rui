@@ -14,11 +14,10 @@ const protocol = @import("protocol.zig");
 
 comptime {
     std.debug.assert(catalog.max_slug_bytes == protocol.max_model_bytes);
+    std.debug.assert(catalog.max_observation_json_bytes == protocol.max_model_catalog_observation_bytes);
 }
 
 pub const fetch_timeout_ms = 5_000;
-/// The rejection reply lists at most this many available slugs.
-pub const max_listed_in_reply = 16;
 
 pub const Observation = catalog.Observation;
 
@@ -70,8 +69,10 @@ pub fn stop(self: *CodexCatalog) void {
     self.thread = null;
 }
 
+/// Catalog age includes system suspend, so a catalog fetched before a long
+/// sleep is stale after it.
 fn nowMs(self: *const CodexCatalog) i64 {
-    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(self.io, .awake).raw.nanoseconds, std.time.ns_per_ms));
+    return @intCast(@divTrunc(std.Io.Clock.Timestamp.now(self.io, .boot).raw.nanoseconds, std.time.ns_per_ms));
 }
 
 /// Starts a fetch unless one is already requested or running.
@@ -87,96 +88,120 @@ fn requestLocked(self: *CodexCatalog) void {
     self.condition.broadcast(self.io);
 }
 
-fn stateLocked(self: *const CodexCatalog, now_ms: i64, account: catalog.Account) catalog.State {
+fn stateLocked(self: *const CodexCatalog, now_ms: i64) catalog.State {
     return .{
         .catalog = if (self.has_catalog) &self.published else null,
         .fetched_at_ms = self.fetched_at_ms,
         .now_ms = now_ms,
-        .account = account,
         .last_failure = self.last_failure,
     };
 }
 
-/// The current verdict without file or network I/O. Starts a background
-/// refresh when the catalog is missing or old; never waits for it.
-pub fn observe(self: *CodexCatalog, model: []const u8) Observation {
-    const now_ms = self.nowMs();
-    self.mutex.lockUncancelable(self.io);
-    defer self.mutex.unlock(self.io);
-    const state = self.stateLocked(now_ms, .assumed_current);
-    if (catalog.needsRefresh(state)) self.requestLocked();
-    return self.observationLocked(state, model);
-}
+/// The credential snapshot's account, read without Host or Store locks.
+pub const Identity = struct {
+    readable: bool = false,
+    fedramp: bool = false,
+    account: protocol.Bounded(codex_credentials.max_account_id_bytes) = .{},
+};
 
-fn observationLocked(self: *const CodexCatalog, state: catalog.State, model: []const u8) Observation {
-    return .{
-        .verdict = catalog.classify(state, model),
-        .age_ms = if (self.has_catalog) state.now_ms - self.fetched_at_ms else null,
-    };
-}
-
-/// Rereads the local credential snapshot, outside every Host and Store lock,
-/// before a verdict may reject. A different or unreadable account makes the
-/// verdict `unchecked`.
-pub fn confirm(self: *CodexCatalog, model: []const u8) Observation {
+/// Rereads the local credential snapshot. Every observation needs one, so no
+/// verdict can assume the fetching account is still current. Call it outside
+/// every Host and Store lock.
+pub fn readIdentity(self: *const CodexCatalog) Identity {
     var record: codex_credentials.Record = undefined;
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    var identity: Identity = .{};
     const readable = codex_credentials.readSnapshotInto(self.authentication.path, &record) catch false;
+    if (!readable) return identity;
+    identity.account.set(record.account_id.slice()) catch return identity;
+    identity.fedramp = record.fedramp;
+    identity.readable = true;
+    return identity;
+}
+
+/// Listed slugs copied with an `absent` verdict, from the same catalog.
+pub const Listed = struct {
+    rows: [protocol.max_catalog_rejection_slugs]catalog.Row = undefined,
+    len: usize = 0,
+    /// All listed rows, including those beyond `rows`.
+    count: usize = 0,
+
+    pub fn items(self: *const Listed) []const catalog.Row {
+        return self.rows[0..self.len];
+    }
+};
+
+/// The current verdict from memory and an identity read beforehand. Starts a
+/// background refresh when the catalog is missing or old; never waits for it.
+/// For an `absent` verdict, `listed` receives the same catalog's listed rows.
+pub fn observe(self: *CodexCatalog, model: []const u8, identity: *const Identity, listed: ?*Listed) Observation {
     const now_ms = self.nowMs();
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    const same = readable and self.has_catalog and record.fedramp == self.fedramp and
-        std.mem.eql(u8, record.account_id.slice(), self.account.slice());
-    return self.observationLocked(self.stateLocked(now_ms, if (same) .confirmed else .unconfirmed), model);
+    const state = self.stateLocked(now_ms);
+    if (catalog.needsRefresh(state)) self.requestLocked();
+    const same = identity.readable and self.has_catalog and identity.fedramp == self.fedramp and
+        std.mem.eql(u8, identity.account.slice(), self.account.slice());
+    const observation: Observation = .{
+        .verdict = catalog.classify(state, if (same) .confirmed else .unconfirmed, model),
+        .age_ms = if (self.has_catalog) now_ms - self.fetched_at_ms else null,
+    };
+    if (listed) |out| if (observation.verdict == .absent) {
+        out.* = .{};
+        for (self.published.items()) |*row| {
+            if (row.visibility != .list) continue;
+            if (out.len < out.rows.len) {
+                out.rows[out.len] = row.*;
+                out.len += 1;
+            }
+            out.count += 1;
+        }
+    };
+    return observation;
 }
 
 /// Requests a fetch that starts after this call and returns the completed
 /// count that will include it. Never waits: Host intake workers are few, so
-/// callers observe `summary().completed` instead of blocking a worker.
+/// callers observe `listing().completed` instead of blocking a worker.
 pub fn refresh(self: *CodexCatalog) u64 {
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
-    // A running fetch may have read older credentials or rows; the target
-    // is the fetch after it.
-    const target = self.completed + @as(u64, if (self.fetching) 2 else 1);
+    // A running fetch is joined: its completion satisfies every refresh
+    // requested while it runs, so concurrent callers share one GET.
+    const target = self.completed + 1;
     self.refresh_target = @max(self.refresh_target, target);
     self.requestLocked();
     return target;
 }
 
-/// Copies the listing under the lock. `listed_only` limits rows to picker
-/// models. Returns the total matching count; copies up to `out.len`.
-pub fn copyRows(self: *CodexCatalog, out: []catalog.Row, listed_only: bool) usize {
-    self.mutex.lockUncancelable(self.io);
-    defer self.mutex.unlock(self.io);
-    if (!self.has_catalog) return 0;
-    var count: usize = 0;
-    for (self.published.items()) |*row| {
-        if (listed_only and row.visibility != .list) continue;
-        if (count < out.len) out[count] = row.*;
-        count += 1;
-    }
-    return count;
-}
-
-pub const Summary = struct {
+pub const Listing = struct {
     has_catalog: bool,
     age_ms: ?i64,
     last_failure: ?catalog.Reason,
     fetching: bool,
     completed: u64,
+    /// Total rows; `out` receives up to its length.
+    count: usize,
 };
 
-pub fn summary(self: *CodexCatalog) Summary {
+/// Rows and status from one lock section, so availability, rows and the
+/// completed count always describe the same catalog.
+pub fn listing(self: *CodexCatalog, out: []catalog.Row) Listing {
     const now_ms = self.nowMs();
     self.mutex.lockUncancelable(self.io);
     defer self.mutex.unlock(self.io);
+    var count: usize = 0;
+    if (self.has_catalog) for (self.published.items()) |*row| {
+        if (count < out.len) out[count] = row.*;
+        count += 1;
+    };
     return .{
         .has_catalog = self.has_catalog,
         .age_ms = if (self.has_catalog) now_ms - self.fetched_at_ms else null,
         .last_failure = self.last_failure,
         .fetching = self.fetching or self.requested,
         .completed = self.completed,
+        .count = count,
     };
 }
 
@@ -199,11 +224,9 @@ fn run(self: *CodexCatalog) void {
         // Publication requires the snapshot to name the fetching account.
         var current_account = false;
         if (outcome == null) {
-            var record: codex_credentials.Record = undefined;
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-            const readable = codex_credentials.readSnapshotInto(self.authentication.path, &record) catch false;
-            current_account = readable and record.fedramp == fetched_fedramp and
-                std.mem.eql(u8, record.account_id.slice(), fetched_account.slice());
+            const identity = self.readIdentity();
+            current_account = identity.readable and identity.fedramp == fetched_fedramp and
+                std.mem.eql(u8, identity.account.slice(), fetched_account.slice());
         }
         const now_ms = self.nowMs();
         self.mutex.lockUncancelable(self.io);

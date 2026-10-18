@@ -4,6 +4,7 @@
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -167,6 +168,16 @@ def run():
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["created"], recovered
         assert not recovered["answer"]["replayed"] and recovered["model_catalog"]["verdict"] == "listed", recovered
 
+        # Long slugs stop before the reply exceeds the bound older clients
+        # enforce; the count still covers every listed row.
+        long_rows = [("m" * 250 + f"-{index:02d}", "list") for index in range(20)]
+        refresh_to(store, endpoint, (200, catalog_body(*long_rows), 0))
+        long_rejection, long_stderr = configure(store, state, "long", "catalog/long", "x" * 256, expect=1)
+        shown = long_rejection["error"]["available_models"]
+        assert long_rejection["error"]["available_count"] == "20" and 1 <= len(shown) < 16, long_rejection
+        assert shown == [slug for slug, _ in long_rows[:len(shown)]], shown
+        assert re.search(r"Available models: m{250}-00, .* and \d+ more\. ", long_stderr), long_stderr
+
         # Every unusable response fails open, keeps the reason, and never
         # rejects, even after a fresh catalog existed.
         for name, catalog, reason in (
@@ -204,12 +215,9 @@ def run():
         outcomes = [fixture.finish_command(process) for process in refreshes]
         # The five-second deadline ends the seven-second response.
         fixture.wait_for(lambda: model_list(store)["last_failure"] == "timeout", "timed-out fetch", timeout=20)
-        # One fetch at a time: the fixture keeps sleeping after Rui's
-        # deadline, so compare Rui's request starts, not fixture overlap.
-        starts = [request[-1] for request in endpoint.catalog_requests]
-        assert 1 <= len(starts) <= 2, endpoint.catalog_requests
-        assert all(later - earlier >= 4.5 for earlier, later in zip(starts, starts[1:])), starts
-        assert all(outcome["refresh"] in ("completed", "pending") for outcome in outcomes), outcomes
+        # Concurrent refreshes join the running fetch: one GET serves all.
+        assert len(endpoint.catalog_requests) == 1, endpoint.catalog_requests
+        assert all(outcome["refresh"] == "completed" for outcome in outcomes), outcomes
         # A timed-out refresh keeps the previous fresh catalog authoritative.
         still, _ = configure(store, state, "after-timeout", "catalog/after-timeout", "gpt-5-codex", expect=1)
         assert still["error"]["code"] == "model_unavailable", still
@@ -239,6 +247,11 @@ def run():
         credential_file.write_text(record)
         other, _ = configure(store, state, "other-account", "catalog/other-account", "gpt-5-codex")
         assert other["model_catalog"]["verdict"] == "unchecked" and other["model_catalog"]["reason"] == "other_account", other
+        # Every observation checks the account, not only possible rejections.
+        other_listed, _ = configure(store, state, "other-listed", "catalog/other-listed", "gpt-6-luna")
+        assert other_listed["model_catalog"]["reason"] == "other_account", other_listed
+        other_current, _ = rui("session", "inspect", "--store", store, "--session", "catalog/during-fetch")
+        assert other_current["session"]["model_catalog"]["reason"] == "other_account", other_current
         codex.credentials(credential_file)
         complete = True
     finally:

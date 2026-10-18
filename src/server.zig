@@ -3763,14 +3763,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
         },
         .configure => |*command| {
-            // Catalog verdicts read only Host memory; a possible rejection
-            // first rereads the credential snapshot, outside the Store lock.
+            // The verdict and its listed rows come from one catalog read,
+            // after a credential snapshot read outside the Store lock.
             var catalog_observation: ?codex_model_catalog.Observation = null;
+            var listed: CodexCatalog.Listed = .{};
             if (command.configuration.model.state == .value) {
                 const model = command.configuration.model.value.slice();
                 catalog_observation = if (host.model_catalog) |model_catalog| observed: {
-                    const first = model_catalog.observe(model);
-                    break :observed if (first.verdict == .absent) model_catalog.confirm(model) else first;
+                    const identity = model_catalog.readIdentity();
+                    break :observed model_catalog.observe(model, &identity, &listed);
                 } else .{ .verdict = .{ .unchecked = .not_applicable } };
             }
             const absent = if (catalog_observation) |value| value.verdict == .absent else false;
@@ -3787,7 +3788,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
             if (result == .model_unavailable) {
-                try renderModelCatalogRejection(&response, host.model_catalog.?, command.configuration.model.value.slice(), catalog_observation.?);
+                try renderModelCatalogRejection(&response, &listed, command.configuration.model.value.slice(), catalog_observation.?);
             } else {
                 try renderConfigureReply(&response, command, result);
                 // Replay answers before any verdict, so it reports none.
@@ -3922,6 +3923,11 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
+            // The credential snapshot is read before the Store lock.
+            var catalog_observer: ModelCatalogObserver = if (host.model_catalog) |model_catalog|
+                .{ .catalog = model_catalog, .identity = model_catalog.readIdentity() }
+            else
+                undefined;
             const report = host.store.captureSessionReport(request_value.session.slice(), .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),
@@ -3929,7 +3935,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .profile = request_value.profile,
                 .fail_unlink = host.faults.report_unlink,
                 .execution = executionFacts(host),
-                .model_catalog = if (host.model_catalog) |model_catalog| .{ .context = model_catalog, .observe = observeModelCatalog } else null,
+                .model_catalog = if (host.model_catalog != null) .{ .context = &catalog_observer, .observe = ModelCatalogObserver.observe } else null,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "session report scratch cleanup", err);
@@ -4230,10 +4236,15 @@ const HeaderReader = struct {
     }
 };
 
-fn observeModelCatalog(context: *anyopaque, model: []const u8) codex_model_catalog.Observation {
-    const model_catalog: *CodexCatalog = @ptrCast(@alignCast(context));
-    return model_catalog.observe(model);
-}
+const ModelCatalogObserver = struct {
+    catalog: *CodexCatalog,
+    identity: CodexCatalog.Identity,
+
+    fn observe(context: *anyopaque, model: []const u8) codex_model_catalog.Observation {
+        const self: *ModelCatalogObserver = @ptrCast(@alignCast(context));
+        return self.catalog.observe(model, &self.identity, null);
+    }
+};
 
 /// The complete bounded catalog (at most 256 rows) for `rui model list`.
 /// Refresh only requests a fetch; callers poll `completed` instead of
@@ -4246,8 +4257,8 @@ fn renderModelCatalog(host: *Host, refresh: bool, out: *std.Io.Writer) !void {
     };
     const target: ?u64 = if (refresh) model_catalog.refresh() else null;
     var rows: [codex_model_catalog.max_rows]codex_model_catalog.Row = undefined;
-    const count = model_catalog.copyRows(&rows, false);
-    const current = model_catalog.summary();
+    const current = model_catalog.listing(&rows);
+    const count = current.count;
     try out.print(",\"applicable\":true,\"available\":{},\"age_seconds\":", .{current.has_catalog});
     if (current.age_ms) |age| try out.print("\"{d}\"", .{@divTrunc(@max(age, 0), 1000)}) else try out.writeAll("null");
     try out.writeAll(",\"last_failure\":");
@@ -4266,26 +4277,29 @@ fn renderModelCatalog(host: *Host, refresh: bool, out: *std.Io.Writer) !void {
 
 /// An unsaved rejection in the existing invocation-error envelope: no new
 /// durable code exists, and older clients see a Host invocation failure.
+/// Slugs stop before the reply would exceed the existing reply bound, which
+/// older clients enforce; `available_count` still counts every listed row.
 fn renderModelCatalogRejection(
     response: *protocol.ResponseBuffer,
-    model_catalog: *CodexCatalog,
+    listed: *const CodexCatalog.Listed,
     model: []const u8,
     observation: codex_model_catalog.Observation,
 ) !void {
-    var rows: [protocol.max_catalog_rejection_slugs]codex_model_catalog.Row = undefined;
-    const count = model_catalog.copyRows(&rows, true);
     try response.append("{\"version\":\"1\",\"type\":\"model_catalog_rejection\",\"code\":\"model_unavailable\",\"model\":");
     try response.appendJsonString(model);
     try response.appendFmt(",\"age_seconds\":\"{d}\",\"available_models\":[", .{@divTrunc(@max(observation.age_ms.?, 0), 1000)});
-    for (rows[0..@min(count, rows.len)], 0..) |*row, index| {
+    for (listed.items(), 0..) |*row, index| {
+        const slug_bytes = protocol.jsonStringBytes(row.slice());
+        if (response.len + 1 + slug_bytes + protocol.model_catalog_rejection_tail_bytes > protocol.max_response_bytes) break;
         if (index != 0) try response.append(",");
         try response.appendJsonString(row.slice());
     }
-    try response.appendFmt("],\"available_count\":\"{d}\"}}", .{count});
+    try response.appendFmt("],\"available_count\":\"{d}\"}}", .{listed.count});
+    std.debug.assert(response.len <= protocol.max_response_bytes);
 }
 
-/// Adds the Host's current verdict for an explicit model to a configuration
-/// reply. Observed at reply time: a replay reports today's verdict.
+/// Adds the verdict a configuration applied to its reply. Replays and sparse
+/// updates apply none and omit it.
 fn appendModelCatalog(response: *protocol.ResponseBuffer, observation: codex_model_catalog.Observation) !void {
     std.debug.assert(response.len > 0 and response.bytes[response.len - 1] == '}');
     response.len -= 1;

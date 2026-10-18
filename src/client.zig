@@ -2475,8 +2475,8 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             rejection.age_seconds = try mutationId(wire.age_seconds.value orelse return error.InvalidResponse, true);
             const available = wire.available_models.value orelse return error.InvalidResponse;
             rejection.available_count = try mutationId(wire.available_count.value orelse return error.InvalidResponse, true);
-            if (available.len > rejection.available.len or available.len > rejection.available_count or
-                (available.len < rejection.available.len and available.len != rejection.available_count)) return error.InvalidResponse;
+            // The Host lists a prefix bounded by count and reply bytes.
+            if (available.len > rejection.available.len or available.len > rejection.available_count) return error.InvalidResponse;
             for (available, 0..) |slug, index| {
                 rejection.available[index] = .{};
                 rejection.available[index].set(slug.slice()) catch return error.InvalidResponse;
