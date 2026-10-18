@@ -47,6 +47,11 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
+    return toolHeadingWith(presentation, sink, colour, separate, "");
+}
+
+/// `exit` is a digits-only exit status, shown after the failure suffix.
+fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
     try sink.feed(state.style.code(colour));
@@ -58,6 +63,11 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
+    if (exit.len != 0) {
+        try indented.feed(" (exit ");
+        try indented.feed(exit);
+        try indented.feed(")");
+    }
     try indented.finish();
     try sink.feed("\n");
 }
@@ -384,8 +394,9 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
 /// Failures keep their last output lines in view; /details stays exact.
 pub fn toolResult(presentation: protocol.ToolPresentation, source: anytype, sink: anytype, colour: bool, compact: *bool) !void {
     const succeeded = presentation.code == .succeeded;
-    try toolHeading(presentation, sink, colour, !compact.* or !succeeded);
     var summary: Summary(@TypeOf(sink)) = .{
+        .presentation = presentation,
+        .separate = !compact.* or !succeeded,
         .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
         .code = presentation.code,
         .colour = colour,
@@ -434,6 +445,9 @@ fn Summary(comptime Sink: type) type {
             }
         };
         escaped: Escaped(Sink),
+        // The heading waits for the first detail: a failed exit status joins it.
+        presentation: ?protocol.ToolPresentation = null,
+        separate: bool = true,
         code: protocol.ToolPresentation.Code,
         colour: bool,
         section: enum { summary, stdout, stderr, ended } = .summary,
@@ -489,14 +503,30 @@ fn Summary(comptime Sink: type) type {
                 var prefix_buffer: [64]u8 = undefined;
                 const prefix = if (failing(self.code)) try std.fmt.bufPrint(&prefix_buffer, "Bash {s}. ", .{@tagName(self.code)}) else "";
                 const detail = if (!self.omitted and prefix.len != 0 and std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else line;
+                if (self.presentation != null and !self.emitted and prefix.len != 0 and !self.omitted) {
+                    const status = if (std.mem.startsWith(u8, detail, "Exit code: ") and std.mem.endsWith(u8, detail, ".")) detail["Exit code: ".len .. detail.len - 1] else "";
+                    var digits = status.len != 0 and status.len <= 3;
+                    for (status) |byte| digits = digits and std.ascii.isDigit(byte);
+                    if (digits) {
+                        try self.writeHeading(status);
+                        return;
+                    }
+                }
+                try self.writeHeading("");
                 try self.escaped.feed(if (self.emitted) "\n  " else "  ");
                 try self.escaped.feed(detail);
                 if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
                 self.emitted = true;
             }
         }
+        fn writeHeading(self: *@This(), exit: []const u8) !void {
+            const presentation = self.presentation orelse return;
+            self.presentation = null;
+            try toolHeadingWith(presentation, self.escaped.sink, self.colour, self.separate, exit);
+        }
         fn finish(self: *@This()) !void {
             if (self.length != 0) try self.emit();
+            try self.writeHeading("");
             if (failing(self.code) and self.section != .ended) {
                 // Strip the canonical trailer that follows stderr bytes.
                 while (self.stderr.count != 0) {
@@ -518,11 +548,7 @@ fn Summary(comptime Sink: type) type {
                     const back = shown - 1 - index;
                     shortened = shortened or tail.shortened[(tail.total - 1 - back) % tail.lines.len];
                     try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                    try self.escaped.finish();
-                    try self.escaped.sink.feed(Style.quiet.code(self.colour));
                     try self.escaped.feed(tail.last(back));
-                    try self.escaped.finish();
-                    try self.escaped.sink.feed(Style.normal.code(self.colour));
                     self.emitted = true;
                 }
                 if (shortened) {
@@ -550,36 +576,41 @@ test "tool summary hides only complete routine metadata and retains warnings" {
     const incomplete = "Capture may be incomplete because writers outlived process-group termination.";
     const capture_failure = "Capture failure: read; output may be incomplete.";
     const cases = .{
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "" },
-        .{ .succeeded, retirement, "" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning },
-        .{ .failed, "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  Exit code: 7.\n  " ++ capture_failure },
-        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Signal: 15.\n  " ++ warning },
-        .{ .cancelled, "Bash cancelled. Signal: 15.\n" ++ retirement, "  Signal: 15." },
-        .{ .indeterminate, "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Unknown process status: 0.\n  " ++ warning },
-        .{ .failed, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
-        .{ .succeeded, "Bash failed. Exit code: 7.", "  Bash failed. Exit code: 7." },
-        .{ .succeeded, retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning." },
-        .{ .succeeded, "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning },
-        .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning." },
-        .{ .succeeded, retirement ++ @as([256]u8, @splat('x')) ++ "\n" ++ warning, "  " ++ (retirement ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ warning },
-        .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "", "" },
+        .{ .succeeded, retirement, "", "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning, "" },
+        .{ .failed, "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  " ++ capture_failure, "7" },
+        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Signal: 15.\n  " ++ warning, "" },
+        .{ .cancelled, "Bash cancelled. Signal: 15.\n" ++ retirement, "  Signal: 15.", "" },
+        .{ .indeterminate, "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Unknown process status: 0.\n  " ++ warning, "" },
+        .{ .failed, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
+        .{ .succeeded, "Bash failed. Exit code: 7.", "  Bash failed. Exit code: 7.", "" },
+        .{ .succeeded, retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning.", "" },
+        .{ .succeeded, "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning, "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
+        .{ .succeeded, retirement ++ @as([256]u8, @splat('x')) ++ "\n" ++ warning, "  " ++ (retirement ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ warning, "" },
+        .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning, "" },
         // Failures show the last stderr lines, else stdout, without the trailer.
-        .{ .failed, "Bash failed. Exit code: 127.\nstdout tail:\n\nstderr tail:\nbash: line 1: rui: command not found\n\nFull stdout: /s/o\nFull stderr: /s/e\n", "  Exit code: 127.\n  bash: line 1: rui: command not found" },
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\nstderr tail:\n\nFull output was not retained.\n", "  Exit code: 1.\n  usage: x\n  help" },
-        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\n\nstderr tail:\none\ntwo\nthree\nfour\n\n[earlier output omitted]\n\nFull output was not retained.\n", "  Exit code: 2.\n  two\n  three\n  four\n  /details for full output." },
-        .{ .failed, "Bash failed. Exit code: 3.\nstdout tail:\n\nstderr tail:\nonly\n\n[earlier output omitted]\n", "  Exit code: 3.\n  only\n  /details for full output." },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\n\nstderr tail:\nalso hidden\n", "" },
-        .{ .failed, "Bash failed. Exit code: 4.\nstdout tail:\n\nstderr tail:\n\x1b[2Jcontrol\n", "  Exit code: 4.\n  \\x1b[2Jcontrol" },
+        .{ .failed, "Bash failed. Exit code: 127.\nstdout tail:\n\nstderr tail:\nbash: line 1: rui: command not found\n\nFull stdout: /s/o\nFull stderr: /s/e\n", "  bash: line 1: rui: command not found", "127" },
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\nstderr tail:\n\nFull output was not retained.\n", "  usage: x\n  help", "1" },
+        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\n\nstderr tail:\none\ntwo\nthree\nfour\n\n[earlier output omitted]\n\nFull output was not retained.\n", "  two\n  three\n  four\n  /details for full output.", "2" },
+        .{ .failed, "Bash failed. Exit code: 3.\nstdout tail:\n\nstderr tail:\nonly\n\n[earlier output omitted]\n", "  only\n  /details for full output.", "3" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\n\nstderr tail:\nalso hidden\n", "", "" },
+        .{ .failed, "Bash failed. Exit code: 4.\nstdout tail:\n\nstderr tail:\n\x1b[2Jcontrol\n", "  \\x1b[2Jcontrol", "4" },
     };
     inline for (cases) |case| {
         for (0..case[1].len + 1) |split| {
             var sink: Sink = .{};
-            var summary: Summary(*Sink) = .{ .code = case[0], .colour = false, .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
+            const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
+            var summary: Summary(*Sink) = .{ .presentation = presentation, .code = case[0], .colour = false, .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
             try summary.feed(case[1][0..split]);
             try summary.feed(case[1][split..]);
             try summary.finish();
-            try std.testing.expectEqualStrings(case[2], sink.bytes[0..sink.length]);
+            // A failed exit status joins the heading instead of a detail row.
+            var heading: Sink = .{};
+            try toolHeadingWith(presentation, &heading, false, true, case[3]);
+            try std.testing.expectEqualStrings(heading.bytes[0..heading.length], sink.bytes[0..heading.length]);
+            try std.testing.expectEqualStrings(case[2], sink.bytes[heading.length..sink.length]);
         }
     }
 }
