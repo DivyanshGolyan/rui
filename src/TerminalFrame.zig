@@ -25,6 +25,9 @@ call_heights: [3]u16,
 heading: Viewport.Sized(128, false),
 used: usize,
 height: u16,
+/// Document rows a transcript would have with this frame's status and draft:
+/// no calls, and a heading row when one fits.
+browsing_height: u16,
 first: Position,
 document_rows: usize,
 navigation_height: u16,
@@ -74,6 +77,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         .heading = .{ .width_method = input.method },
         .used = if (input.selected) 0 else input.calls.len,
         .height = 0,
+        .browsing_height = 0,
         .first = .{},
         .document_rows = 0,
         .navigation_height = 0,
@@ -141,6 +145,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         }
     }
     self.height = available - heading_height - call_rows;
+    self.browsing_height = available - @intFromBool(available > 1);
     self.first = document.first(layout, self.height);
     const shown = document.measure(layout, self.first, self.height);
     self.document_rows = shown.rows;

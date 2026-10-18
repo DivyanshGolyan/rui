@@ -28,6 +28,7 @@ newer_trimmed: bool = false,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
+browsing_height: u16 = 0,
 preview_complete: bool = true,
 action_seen: Position = .{},
 approval_ready: bool = false,
@@ -93,7 +94,11 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing = self.live;
     self.browsing.discardFront(front);
     try self.browsing.prepare();
-    self.browsing.top = self.browsing.bottom(self.textLayout(), self.height);
+    // Moves apply to the transcript's own height, which its heading and the
+    // absent calls make differ from the live view's: start at its end so the
+    // same rows down as up return to live output.
+    self.height = self.browsing_height;
+    self.browsing.top = null;
     self.newer_trimmed = false;
     self.overscroll = 0;
     self.view = .transcript;
@@ -287,6 +292,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .preview_complete = self.preview_complete,
     });
     self.height = layout.height;
+    self.browsing_height = layout.browsing_height;
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
     _ = document.draw(window.child(.{ .y_off = layout.navigation_height, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     const status_style = self.style(if (approval) .attention else if (std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected")) .failure else .quiet);
@@ -731,4 +737,35 @@ test "an unchanged frame writes nothing" {
     try std.testing.expectEqual(before, out.written().len);
     try screen.render(&out.writer, size, "a", 1, "Working…", "› ", &.{});
     try std.testing.expect(out.written().len > before);
+}
+
+test "browsing up then down by the same rows returns to the latest view" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..120) |index| {
+        var line: [32]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&line, "conversation row {d}\n", .{index}));
+    }
+    for ([_]u16{ 30, 16 }) |rows| {
+        for ([_]usize{ 1, 8, 40 }) |moves| {
+            const size: std.posix.winsize = .{ .row = rows, .col = 60, .xpixel = 0, .ypixel = 0 };
+            try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            try screen.beginTranscript(0);
+            for (0..moves) |_| {
+                try std.testing.expect(!screen.browse(false, false));
+                try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            }
+            for (0..moves) |step| {
+                try std.testing.expectEqual(step + 1 == moves, screen.browse(true, false));
+                try screen.render(&out.writer, size, "", 0, "", "› ", &.{});
+            }
+            try screen.latest();
+        }
+    }
 }
