@@ -157,6 +157,8 @@ test "hanging indentation survives split windows and trusted styles" {
 /// What the Action heading says, for keeping it beside the choice.
 pub const ActionSummary = struct {
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
+    // The Workspace the Action document names, not whatever is current later.
+    workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     timeout_ms: ?u64 = null,
 };
 
@@ -219,7 +221,9 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     try command.finish();
     try indented.feed("\n");
     try indented.finish();
-    return .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };
+    var summary: ActionSummary = .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };
+    try summary.workspace.set(workspace);
+    return summary;
 }
 
 pub fn current(requests: client.Requests, store: []const u8, session: []const u8, scratch: std.Io.File) !client.Current {
