@@ -2,6 +2,7 @@
 """Public-CLI evidence for detached Host launch and convergence."""
 
 import errno
+from contextlib import contextmanager
 import json
 import fcntl
 import hashlib
@@ -12,6 +13,7 @@ import re
 import resource
 import select
 import shlex
+import shutil
 import signal
 import socket
 import sqlite3
@@ -21,7 +23,8 @@ import tempfile
 import termios
 import time
 
-from host_process import canonical_fixture_root, start_ready_process, stop_process
+from host_process import (canonical_fixture_root, start_ready_process, stop_process,
+                          dispose_all, preserve_failure_metadata, _failure_destination)
 import codex_integration as codex_fixture
 
 
@@ -169,6 +172,12 @@ def status(store, env):
         text=True,
         timeout=5,
     )
+    # Save the actual observation before the caller tests readiness. A later
+    # probe cannot reconstruct the status that failed under intake pressure.
+    observation = json.dumps(dict(store=str(store), returncode=result.returncode,
+                                  stdout=result.stdout, stderr=result.stderr)) + "\n"
+    assert len(observation.encode()) <= 1024 * 1024, "status observation exceeds artifact bound"
+    (store.parent / "probe.log").write_text(observation)
     assert result.returncode == 0, result.stderr
     return result.stdout
 
@@ -398,8 +407,10 @@ def startup_limits(root, env):
             assert records and any(f"ordinary_intake={capacity}" in path.read_text() for path in records)
             print(f"detached startup {name}: {reported}", flush=True)
         finally:
-            subprocess.run([RUI, "host", "stop", "--store", store], env=env, capture_output=True, timeout=5)
-            wait_for_processes(store, 0)
+            dispose_all(
+                lambda: subprocess.run([RUI, "host", "stop", "--store", store], env=env, capture_output=True, timeout=5),
+                lambda: wait_for_processes(store, 0),
+            )
 
     store = root / "below-minimum"
     before = time.monotonic()
@@ -498,12 +509,57 @@ def wait_for_terminal_exit(caller, master, output, deadline):
         output.extend(chunk)
 
 
+@contextmanager
+def launch_fixture_root():
+    root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-host-launch-")))
+    try:
+        yield root
+    except BaseException as failure:
+        def cleanup():
+            dispose_all(*(lambda store=store: forced_crash_cleanup(store)
+                          for store in root.iterdir() if store.is_dir() and not store.is_symlink()
+                          and store.name not in ("home", "credentials")))
+
+        def retain():
+            def metadata():
+                diagnostics = {}
+                remaining = 128 * 1024
+                for path in sorted(root.glob("*/diagnostics/host-*.jsonl")):
+                    if path.is_symlink():
+                        continue
+                    with path.open("rb") as stream:
+                        data = stream.read(remaining + 1)
+                    if len(data) > remaining:
+                        diagnostics[str(path.relative_to(root))] = {"unavailable": "exceeds remaining diagnostic bound"}
+                        break
+                    diagnostics[str(path.relative_to(root))] = data.decode(errors="replace")
+                    remaining -= len(data)
+                return dict(failure=type(failure).__name__, host_diagnostics=diagnostics)
+            preserve_failure_metadata(root / f"observation-failure-{os.getpid()}.json", metadata)
+            destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
+            ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
+            sys.path.insert(0, ci)
+            try:
+                from run_selected import retain_failure_logs
+                retain_failure_logs([root], destination)
+            finally:
+                sys.path.remove(ci)
+            print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
+
+        dispose_all(cleanup, retain,
+                    lambda: print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True))
+        raise
+    else:
+        shutil.rmtree(root)
+
+
 def main():
     assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits]"
-    from host_launch_exit_test import check_exit_reader, check_process_discovery
+    from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention
     check_process_discovery(forced_crash_cleanup)
     check_exit_reader(wait_for_terminal_exit)
-    with tempfile.TemporaryDirectory(prefix="rui-host-launch-") as root_text:
+    check_failure_retention(launch_fixture_root, status)
+    with launch_fixture_root() as root_text:
         root = canonical_fixture_root(pathlib.Path(root_text))
         home = root / "home"
         home.mkdir(mode=0o700)

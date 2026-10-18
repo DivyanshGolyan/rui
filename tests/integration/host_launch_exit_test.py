@@ -1,17 +1,89 @@
 #!/usr/bin/env python3
 """Host-launch fixture oracles; not native Host qualification."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 import errno
+import io
+import json
 import os
 import pty
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+
+def check_failure_retention(root_owner, read_status):
+    owner = sys.modules[read_status.__module__]
+    Path = owner.pathlib.Path
+    with tempfile.TemporaryDirectory(prefix="rui-launch-retention-test-") as directory:
+        base = Path(directory)
+        command = base / "rui"
+        for status_code, cleanup_fails in ((0, False), (7, False), (0, True)):
+            command.write_text(f"#!{sys.executable}\nimport sys\nprint('Host: owned but unavailable')\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
+            command.chmod(0o700)
+            destination = base / f"{status_code}-{cleanup_fails}"
+            child = None
+            root = None
+            failure = AssertionError("ready observation failed")
+            output = io.StringIO()
+            def cleanup(_):
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+                if cleanup_fails:
+                    raise OSError(errno.EIO, "cleanup diagnostic")
+            try:
+                with patch.object(owner, "RUI", command), \
+                        patch.object(owner, "forced_crash_cleanup", side_effect=cleanup), \
+                        patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(destination)), redirect_stderr(output):
+                    try:
+                        with root_owner() as value:
+                            root = Path(value)
+                            store = root / "store"
+                            (store / "diagnostics").mkdir(parents=True)
+                            (store / "rui.sqlite3").write_bytes(b"private saved work")
+                            (store / "diagnostics/host-1.jsonl").write_text('{"phase":"ready","detail":"serving"}\n')
+                            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+                            if status_code:
+                                try:
+                                    read_status(store, os.environ)
+                                except AssertionError as error:
+                                    failure = error
+                                    raise
+                                raise AssertionError("status command failure was suppressed")
+                            assert read_status(store, os.environ) == "Host: owned but unavailable\n"
+                            raise failure
+                    except AssertionError as error:
+                        assert error is failure, "retention or cleanup replaced the original failure"
+                assert root.is_dir(), "failed Host-launch root was deleted"
+                assert child.poll() is not None, "failure retention leaked a live process"
+                assert (store / "rui.sqlite3").read_bytes() == b"private saved work"
+                assert f"retained native observation failure state: {root}" in output.getvalue()
+                captured = json.loads((root / "probe.log").read_text())
+                assert captured["stdout"] == "Host: owned but unavailable\n"
+                assert captured["stderr"] == "status diagnostic\n" and captured["returncode"] == status_code
+                metadata = json.loads(next(root.glob("observation-failure-*.json")).read_text())
+                assert metadata["host_diagnostics"]["store/diagnostics/host-1.jsonl"] == '{"phase":"ready","detail":"serving"}\n'
+                assert list(destination.rglob("probe.log")), "status missing from bounded CI artifacts"
+                assert list(destination.rglob("observation-failure-*.json")), "diagnostics missing from bounded CI artifacts"
+                assert not list(destination.rglob("rui.sqlite3")), "private Store was uploaded"
+                if cleanup_fails:
+                    assert any("cleanup diagnostic" in note for note in failure.__notes__)
+            finally:
+                if child is not None and child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=5)
+                if root is not None and root.exists():
+                    shutil.rmtree(root)
+        with root_owner() as value:
+            successful = Path(value)
+        assert not successful.exists(), "successful Host-launch root was retained"
+    print("Host-launch failure retention: actual status, diagnostics, private Store, process disposal and primary failure passed")
 
 
 def check_process_discovery(cleanup):
