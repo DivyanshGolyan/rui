@@ -1319,7 +1319,7 @@ Derive SQL/row/parameter bounds from actual statements and pinned representation
 
 Before Store ownership or readiness, the Host observes inherited descriptors and `RLIMIT_NOFILE`, then computes its simultaneous requirement with checked arithmetic. Linux enumerates `/proc/self/fd`, or checks the bounded range with `F_GETFD` when procfs is unavailable and the limit is finite. An unlimited Linux limit requires procfs; macOS enumerates `/dev/fd`.
 
-For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 403 + 2 + E(C) + A(C)\):
+For configured Active Capacity \(C\), the supported-burst requirement is \(I + F + T + 403 + 2 + E(C) + A(C) + M(C)\):
 
 | Term | Descriptor requirement |
 | --- | --- |
@@ -1330,6 +1330,7 @@ For configured Active Capacity \(C\), the supported-burst requirement is \(I + F
 | 2 | Intake wake socket pair. |
 | \(E(C)\) | 0 when \(C=0\); otherwise \(5C+5\). |
 | \(A(C)\) | 0 without managed authentication or execution places; otherwise 8 on Linux or 10 on macOS for the independent authentication worker. |
+| \(M(C)\) | Equal to \(A(C)\), for the independent [model catalog](#codex-model-catalog) worker: its own credential acquisition, then its own fetch. |
 
 An ordinary exchange peaks at a socket, one sealed content file, and overlapping writer/read-only handles for the second value. Absolute POSIX opens use `AT_FDCWD` without a directory descriptor.
 

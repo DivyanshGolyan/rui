@@ -811,7 +811,7 @@ def main():
         required = fixed + fields["inherited"]
         expected = dict(active_capacity=2, required=required, soft_limit=minimum_required - 1,
             inherited=fields["inherited"], fixed_host=fixed_host, clients=clients, execution=execution,
-            authentication=0, self_wake=2)
+            authentication=0, model_catalog=0, self_wake=2)
         assert fields == expected, (fields, expected)
         assert not rejected_store.exists(), "descriptor rejection followed startup side effects"
         if fields["inherited"] != 3:
