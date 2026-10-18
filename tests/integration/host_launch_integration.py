@@ -514,7 +514,8 @@ def launch_fixture_root():
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-host-launch-")))
     try:
         yield root
-    except BaseException as failure:
+    except BaseException:
+        failure_name = type(sys.exception()).__name__
         def cleanup():
             dispose_all(*(lambda store=store: forced_crash_cleanup(store)
                           for store in root.iterdir() if store.is_dir() and not store.is_symlink()
@@ -534,7 +535,7 @@ def launch_fixture_root():
                         break
                     diagnostics[str(path.relative_to(root))] = data.decode(errors="replace")
                     remaining -= len(data)
-                return dict(failure=type(failure).__name__, host_diagnostics=diagnostics)
+                return dict(failure=failure_name, host_diagnostics=diagnostics)
             preserve_failure_metadata(root / f"observation-failure-{os.getpid()}.json", metadata)
             destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
             ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")

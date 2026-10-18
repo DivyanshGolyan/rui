@@ -68,6 +68,7 @@ def check_failure_retention(root_owner, read_status):
                 assert captured["stdout"] == "Host: owned but unavailable\n"
                 assert captured["stderr"] == "status diagnostic\n" and captured["returncode"] == status_code
                 metadata = json.loads(next(root.glob("observation-failure-*.json")).read_text())
+                assert metadata["failure"] == "AssertionError"
                 assert metadata["host_diagnostics"]["store/diagnostics/host-1.jsonl"] == '{"phase":"ready","detail":"serving"}\n'
                 assert list(destination.rglob("probe.log")), "status missing from bounded CI artifacts"
                 assert list(destination.rglob("observation-failure-*.json")), "diagnostics missing from bounded CI artifacts"
