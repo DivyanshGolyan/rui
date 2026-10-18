@@ -105,6 +105,13 @@ fn decode(self: *Self, line_end: bool) Decoded {
             if (bytes.len < needed) return .none;
             _ = std.unicode.utf8Decode(bytes[0..needed]) catch return self.invalid(line_end);
         }
+        // An X10 mouse report is ESC [ M plus three payload bytes. The parser
+        // needs all six at once; given only the prefix it would consume the
+        // prefix and leave the payload as typed text. Payload bytes are 32+.
+        if (!self.paste and std.mem.startsWith(u8, bytes, "\x1b[M")) {
+            if (bytes.len < 6) return .none;
+            for (bytes[3..6]) |payload| if (payload < 32) return self.invalid(line_end);
+        }
         // Vaxis's cap_unicode event discards DECRPM's set/reset distinction. Keep
         // the observed facts here; never enable mode 2027 merely for support, and
         // enable mode 1007 only where the terminal reports it reset.
@@ -196,6 +203,31 @@ test "alternate scroll is reported only when present and reset" {
         try std.testing.expectEqual(status != 2, decoded == .none);
         try std.testing.expectEqual(Pending.none, input.pending());
     }
+}
+
+test "fragmented X10 mouse reports are consumed whole, never as typed text" {
+    // ESC [ M plus three payload bytes: the payload " is" must not become text.
+    var stream: Self = .{};
+    var mice: usize = 0;
+    var text: [8]u8 = undefined;
+    var length: usize = 0;
+    for ("\x1b[M is/exit") |byte| if (testEvent(stream.feed(byte))) |event| switch (event) {
+        .mouse => mice += 1,
+        .key_press => |key| {
+            @memcpy(text[length..][0..key.text.?.len], key.text.?);
+            length += key.text.?.len;
+        },
+        else => unreachable,
+    };
+    try std.testing.expectEqual(@as(usize, 1), mice);
+    try std.testing.expectEqualStrings("/exit", text[0..length]);
+    // A malformed payload is invalid input, not an underflowing coordinate.
+    var bad: Self = .{};
+    for ("\x1b[M") |byte| try std.testing.expect(bad.feed(byte) == .none);
+    _ = bad.feed(' ');
+    _ = bad.feed(1);
+    try std.testing.expectEqual(Decoded{ .invalid = .{ .line_end = false } }, bad.feed('!'));
+    try std.testing.expectEqual(Pending.none, bad.pending());
 }
 
 test "fragmented APC and oversized associated text preserve the following key" {
