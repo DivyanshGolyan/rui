@@ -18,7 +18,7 @@ const Self = @This();
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Inspect = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File };
-const Inspection = enum { status, requests, help };
+const Inspection = enum { status, requests, help, command };
 const ReadPhase = departure.ReadPhase;
 const ReadEnd = departure.ReadEnd;
 const AdmissionEnd = Submission.End;
@@ -33,6 +33,8 @@ inspection_file: std.Io.File = undefined,
 command: Command,
 inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
+command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
+command_text_length: usize = 0,
 inspection_submission: ?Submission.View = null,
 inspection_action: ?u64 = null,
 terminal: Terminal,
@@ -238,25 +240,79 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 fn drive(self: *Self, initial_text: ?[]const u8) !void {
     if (initial_text) |text| try self.beginMessage(self.input.submitText(text));
-    while (!self.detached) {
-        self.driveActive() catch |err| {
-            const failure = departure.activeFailure(err, interrupted.stopped.load(.acquire));
-            if (failure != error.CommandHandoff) return failure;
-            try self.handoff();
-        };
-    }
-}
-
-fn pendingHandoff(self: *Self) bool {
-    if (self.input.command_length) |length| return inspection(self.input.command_buffer[0..length]) == null;
-    return false;
+    try self.driveActive();
 }
 
 fn inspection(text: []const u8) ?Inspection {
     if (std.mem.eql(u8, text, "/status")) return .status;
     if (std.mem.eql(u8, text, "/requests")) return .requests;
     if (std.mem.eql(u8, text, "/help")) return .help;
+    for ([_][]const u8{ "/inspect-action", "/setup", "/configure" }) |name| {
+        if (std.mem.eql(u8, text, name)) return .command;
+    }
+    for ([_][]const u8{ "/setup ", "/configure ", "/result " }) |prefix| {
+        if (std.mem.startsWith(u8, text, prefix)) return .command;
+    }
     return null;
+}
+
+/// Answers local commands at once. Inspections, including Host commands,
+/// wait for the reader and then show their page.
+fn admitCommand(self: *Self) void {
+    const text = self.input.command_buffer[0..self.input.command_length.?];
+    if (inspection(text) != null) return;
+    self.input.command_length = null;
+    if (std.mem.eql(u8, text, "/discard")) {
+        self.submission.discardRejected() catch {
+            self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
+        };
+        if (self.submission.view() == null) self.poll_at = 0;
+    } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission.view() != null) {
+        self.submission.requestRecovery(text[9..]) catch {
+            self.notice = "! Recovery key does not match this original submission; nothing sent.";
+        };
+    } else if (std.mem.eql(u8, text, "/wait")) {
+        self.notice = "Work continues while you compose.";
+    } else if (std.mem.eql(u8, text, "/login")) {
+        self.notice = "Login uses rui login codex in your shell.";
+    } else {
+        // Name the command only when it is short printable ASCII.
+        const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+        var shown = name.len <= 32;
+        for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
+        var writer = std.Io.Writer.fixed(&self.notice_buffer);
+        writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+        self.notice = writer.buffered();
+    }
+}
+
+test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.input.init();
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+    const cases = .{
+        .{ "/foo bar", "! Unknown command /foo · /help" },
+        .{ "/\x1b[2J", "! Unknown command · /help" },
+        .{ "/result", "! Unknown command /result · /help" },
+        .{ "/wait", "Work continues while you compose." },
+        .{ "/configure --permission-mode ask", "" },
+        .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
+        .{ "/inspect-action", "" },
+        .{ "/status", "" },
+    };
+    inline for (cases) |case| {
+        self.notice = null;
+        @memcpy(self.input.command_buffer[0..case[0].len], case[0]);
+        self.input.command_length = case[0].len;
+        self.admitCommand();
+        if (case[1].len != 0) {
+            try std.testing.expectEqualStrings(case[1], self.notice.?);
+            try std.testing.expect(self.input.command_length == null);
+        } else {
+            try std.testing.expect(self.notice == null);
+            try std.testing.expectEqual(@as(?usize, case[0].len), self.input.command_length);
+        }
+    }
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -282,7 +338,6 @@ test "frontend consumed canonical reader and admission failures survive external
             return error.TestUnexpectedResult;
         };
         try std.testing.expectEqual(error.CanonicalStoreFailure, failure);
-        try std.testing.expectEqual(error.CanonicalStoreFailure, departure.activeFailure(failure, true));
     }
 }
 
@@ -305,7 +360,7 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
         while (self.reader.take() == null) std.Thread.yield() catch {};
         self.reader_output_started = true;
         const settled = self.quiesce();
-        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.handoff, error.InteractiveInterrupted).?);
+        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.inspection, error.InteractiveInterrupted).?);
         try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission_error.?);
         try std.testing.expect(settled.reader.cancelled.output_owned);
         try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
@@ -319,8 +374,7 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
         if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.pendingHandoff()) return error.CommandHandoff;
-        const size = Terminal.geometry();
+        const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         const admission = try self.submission.advance();
         try self.presentAdmission(admission);
@@ -351,15 +405,19 @@ fn driveActive(self: *Self) !void {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
         }
         if (self.reader.thread == null and self.input.command_length != null) {
-            const kind = inspection(self.input.command_buffer[0..self.input.command_length.?]).?;
+            const text = self.input.command_buffer[0..self.input.command_length.?];
+            const kind = inspection(text).?;
             try self.terminal.screen.latest();
+            // The worker borrows its own copy; the editor may queue another.
+            @memcpy(self.command_text[0..text.len], text);
+            self.command_text_length = text.len;
             self.inspection_kind = kind;
             self.inspection_submission = self.submission.view();
             self.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
             self.read_phase = .inspection;
             self.history_render_started = false;
             self.reader_output_started = false;
-            try self.reader.start(self.init.io, self, inspectPage);
+            try self.reader.start(self.init.io, self, if (kind == .command) runCommand else inspectPage);
             self.input.command_length = null;
         }
         if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null or self.olderWanted()) and self.prepared_action == null) {
@@ -408,7 +466,6 @@ fn driveActive(self: *Self) !void {
             if (self.detached) break;
         }
         if (self.detached) break;
-        if (self.pendingHandoff()) return error.CommandHandoff;
         // Finish chat paste/UTF-8 under its original decoder before consent.
         if (self.reader.thread == null and self.prepared_action != null and self.input.pending() == .none) {
             try self.terminal.screen.prepareAction(self.init.io, self.action_file);
@@ -470,7 +527,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.actionVisible() or self.dirty)) {
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.input.command_length != null or !self.actionVisible() or self.dirty)) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -483,14 +540,12 @@ fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
     if (self.detached or interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    // Unwind the terminal write and its window loan before handing off.
-    if (self.pendingHandoff()) return error.CommandHandoff;
 }
 
 fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     // Input can arrive with Enter before any redraw, including inside output
     // pumping. Sealed bytes render in the escaped transcript, not the composer.
-    const size = Terminal.geometry();
+    const size = self.terminal.geometry();
     Frame.validateGeometry(size.col, size.row) catch |err| {
         self.input.release(ticket) catch unreachable;
         return err;
@@ -505,7 +560,7 @@ fn actionVisible(self: *const Self) bool {
 
 fn approvalReady(self: *const Self) bool {
     if (!self.actionVisible()) return false;
-    const size = Terminal.geometry();
+    const size = self.terminal.geometry();
     return size.row == self.terminal.size.row and size.col == self.terminal.size.col and self.terminal.screen.approvalReady();
 }
 
@@ -550,8 +605,6 @@ fn olderWanted(self: *const Self) bool {
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    // The selected handoff owns the next transition, including queued bytes.
-    if (self.pendingHandoff()) return .handoff;
     const pending = if (self.consent.active()) self.choice.pending() else self.input.pending();
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
@@ -601,6 +654,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                     if (self.input.command_length == null) {
                         @memcpy(self.input.command_buffer[0..text.len], text);
                         self.input.command_length = text.len;
+                        self.admitCommand();
                     } else self.notice = "! Preparing inspection; try again when it finishes.";
                 } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
                 self.consent.invalidate();
@@ -628,7 +682,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         else => {},
     };
     const submission = self.submission.view();
-    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and (submission == null or submission.?.kind == .message))) {
+    // A Message waits for a pending command, which may change its configuration.
+    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and self.input.command_length == null and (submission == null or submission.?.kind == .message))) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -638,9 +693,9 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 // Local read work never cancels the independent Admission owner.
                 self.input.command_length = null;
                 self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
-            }
+            } else self.admitCommand();
         },
-        .busy => self.notice = if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.input.command_length != null) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .width_report, .scroll_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
             .interrupt, .eof => self.detached = true,
@@ -682,7 +737,8 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
-    const mode: departure.Mode = if (self.input.command_length != null and !self.pendingHandoff()) .handoff else .active;
+    // A pending inspection supersedes a silent read it cancelled.
+    const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
     if (end.failure(mode)) |err| return err;
     if (end == .complete and self.read_phase == .history) {
         // The user may have left the transcript while this page loaded.
@@ -693,9 +749,7 @@ fn settleReader(self: *Self) !void {
             if (self.transcript_older == null) try screen.markBeginning();
         }
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
-        try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
-        self.consent.invalidate();
-        if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        try self.showInspection();
     }
     self.applyReader(end);
 }
@@ -814,10 +868,8 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.next_compact_tools else false;
     if (self.read_phase == .history) {
         self.notice = null; // Clears "Loading older conversation…".
-    } else if (self.read_phase == .details) {
-        self.notice = Frame.inspection_ready;
-    } else if (self.read_phase == .inspection) {
-        self.notice = Frame.inspection_ready;
+    } else if (self.read_phase == .details or self.read_phase == .inspection) {
+        // showInspection selected the notice.
     } else if (self.read_phase == .permission) {
         self.current = self.observed;
         self.live = self.observed_live;
@@ -869,59 +921,35 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
-fn handoff(self: *Self) !void {
-    const screen = self.terminal.screen;
-    const settled = self.quiesce();
-    self.applyReader(settled.reader);
-    try departure.handoff(settled, interrupted.stopped.load(.acquire));
-    const result = self.dispatchCommand();
-    try departure.commandReturn(result, interrupted.stopped.load(.acquire));
-    self.terminal = try Terminal.begin(screen);
-    screen.vx.queueRefresh();
-    self.terminal.pump = .{ .context = self, .step = pump };
+fn showInspection(self: *Self) !void {
+    if ((try self.inspection_file.stat(self.init.io)).size == 0) {
+        self.notice = "Command finished with no output.";
+        return;
+    }
+    try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
+    self.notice = Frame.inspection_ready;
     self.consent.invalidate();
-    self.dirty = true;
+    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
 }
 
-fn dispatchCommand(self: *Self) !void {
-    self.compact_tools = false;
-    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
-    {
-        const text = self.input.command_buffer[0..self.input.command_length.?];
-        defer self.input.command_length = null;
-        if (std.mem.eql(u8, text, "/discard")) {
-            self.submission.discardRejected() catch {
-                self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
-            };
-            if (self.submission.view() == null) self.poll_at = 0;
-        } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission.view() != null) {
-            self.submission.requestRecovery(text[9..]) catch {
-                self.notice = "! Recovery key does not match this original submission; nothing sent.";
-            };
-        } else if (std.mem.eql(u8, text, "/wait")) {
-            self.notice = "Work continues while you compose.";
-        } else if (std.mem.eql(u8, text, "/login")) {
-            self.notice = "Login uses rui login codex in your shell.";
-        } else {
-            try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
-            if (self.submission.view()) |submission| if (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests")) {
-                // A reserved key is diagnostic identity, not proof that a
-                // capture exists. Ctrl-R also repairs prepublication failure.
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, &submission.key);
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, if (submission.state == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
-                if (submission.last_error) |err| {
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "Last submission error: ");
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, @errorName(err));
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
-                }
-            };
-            // Normal return can include a printed usage or operational error.
-            // Preserve that complete output, not an invented success receipt.
-            try departure.commandReturn({}, interrupted.stopped.load(.acquire));
-            try self.terminal.awaitReturn(self.init.io, &interrupted.stopped);
-        }
-    }
+/// Host commands keep their one-shot output owners. Their complete stdout and
+/// stderr become an inspection page while the Session screen keeps drawing
+/// through its own descriptor. No command reads terminal input.
+fn runCommand(raw: *anyopaque, task: *Task) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.inspection_file.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, self.inspection_file, 0);
+    const saved = [2]c_int{ std.c.dup(1), std.c.dup(2) };
+    defer for (saved) |fd| if (fd >= 0) {
+        _ = std.c.close(fd);
+    };
+    if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
+    // Redirected descriptors are output custody: any failure now is fatal.
+    self.history_render_started = true;
+    const page = self.inspection_file.handle;
+    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, .{ .io = task.io, .cancellation = &task.cancellation }, self.store, self.session, self.command_text[0..self.command_text_length]);
+    if (std.c.dup2(saved[0], 1) < 0 or std.c.dup2(saved[1], 2) < 0) return error.TerminalCleanupFailed;
+    return result;
 }
 
 fn permission(raw: *anyopaque, task: *Task) !void {
@@ -1017,7 +1045,7 @@ fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui login codex in your shell.\n");
     } else {
         try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.

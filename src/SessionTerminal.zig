@@ -10,6 +10,9 @@ const Self = @This();
 
 original: Editor.Attributes,
 flags: [2]c_int,
+/// A private duplicate of stdout: command output may be redirected while the
+/// Session screen keeps drawing.
+output: c_int = 1,
 screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},
@@ -26,21 +29,28 @@ pub fn begin(screen: *Screen) !Self {
     mode.c_iflag &= ~@as(termios.tcflag_t, termios.IXON);
     mode.c_cc[termios.VMIN] = 1;
     mode.c_cc[termios.VTIME] = 0;
-    const flags = [2]c_int{ std.c.fcntl(0, std.c.F.GETFL), std.c.fcntl(1, std.c.F.GETFL) };
+    const output = std.c.fcntl(1, std.c.F.DUPFD_CLOEXEC, @as(c_int, 3));
+    if (output < 0) return error.TerminalCleanupFailed;
+    var owned = true; // Until finish takes over closing it.
+    errdefer if (owned) {
+        _ = std.c.close(output);
+    };
+    const flags = [2]c_int{ std.c.fcntl(0, std.c.F.GETFL), std.c.fcntl(output, std.c.F.GETFL) };
     if (flags[0] < 0 or flags[1] < 0) return error.TerminalCleanupFailed;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     // SETFL may mutate before reporting failure. Register restoration before
     // each attempt; an enable failure already reports TerminalCleanupFailed.
     errdefer _ = std.c.fcntl(0, std.c.F.SETFL, flags[0]);
     if (std.c.fcntl(0, std.c.F.SETFL, flags[0] | nonblock) < 0) return error.TerminalCleanupFailed;
-    errdefer _ = std.c.fcntl(1, std.c.F.SETFL, flags[1]);
-    if (std.c.fcntl(1, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
+    errdefer _ = std.c.fcntl(output, std.c.F.SETFL, flags[1]);
+    if (std.c.fcntl(output, std.c.F.SETFL, flags[1] | nonblock) < 0) return error.TerminalCleanupFailed;
     try Editor.setAttributes(.FLUSH, mode);
-    var self: Self = .{ .original = original, .flags = flags, .screen = screen };
+    var self: Self = .{ .original = original, .flags = flags, .output = output, .screen = screen };
     // Query width and alternate-scroll modes without changing them. Opening
     // never waits for a reply; unsupported queries are ignored.
     const enter = "\x1b[?1049h\x1b[?2004h\x1b[?2027$p\x1b[?1007$p";
-    if (std.c.write(1, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
+    if (std.c.write(output, enter.ptr, enter.len) != @as(isize, @intCast(enter.len))) {
+        owned = false;
         try self.finish();
         return error.TerminalCleanupFailed;
     }
@@ -54,22 +64,24 @@ pub fn finish(self: *Self) !void {
     self.active = false;
     // The UI owns emitted style, even if a renderer's next window was cancelled.
     // Attempt controls independently; neither may hold restoration on output credit.
-    const synchronized = std.c.write(1, "\x1b[?2026l", 8) == 8;
-    const reset = std.c.write(1, "\x1b[0m", 4) == 4;
-    const disabled = std.c.write(1, "\x1b[?2004l", 8) == 8 and
-        (!self.alternate_scroll or std.c.write(1, "\x1b[?1007l", 8) == 8);
+    const synchronized = std.c.write(self.output, "\x1b[?2026l", 8) == 8;
+    const reset = std.c.write(self.output, "\x1b[0m", 4) == 4;
+    const disabled = std.c.write(self.output, "\x1b[?2004l", 8) == 8 and
+        (!self.alternate_scroll or std.c.write(self.output, "\x1b[?1007l", 8) == 8);
     var screen_ok = true;
     for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
-        if (std.c.write(1, sequence.ptr, sequence.len) != @as(isize, @intCast(sequence.len))) screen_ok = false;
+        if (std.c.write(self.output, sequence.ptr, sequence.len) != @as(isize, @intCast(sequence.len))) screen_ok = false;
     }
     // Input discard is independent of output credit. TCSAFLUSH can drain the
     // same terminal's output and keep it raw while an output peer is absent.
     const flushed = termios.tcflush(0, termios.TCIFLUSH) == 0;
     const restored = Editor.setAttributes(.NOW, self.original);
     var flags_ok = true;
-    for (self.flags, 0..) |flags, fd| {
-        if (std.c.fcntl(@intCast(fd), std.c.F.SETFL, flags) < 0) flags_ok = false;
+    for (self.flags, [2]c_int{ 0, self.output }) |flags, fd| {
+        if (std.c.fcntl(fd, std.c.F.SETFL, flags) < 0) flags_ok = false;
     }
+    // The duplicate shares stdout's description: flags already apply to fd 1.
+    if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
     self.result = if (restored) |_| if (flags_ok and reset and disabled and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
 }
@@ -117,23 +129,6 @@ fn noticeWithOps(self: *Self, bytes: []const u8, ops: anytype) !void {
     // Restore every attempted enable, without writing after a failed attempt.
     if (ops.setFlags(self.flags[1]) < 0) return error.TerminalCleanupFailed;
     if (written != @as(isize, @intCast(bytes.len))) return error.TerminalCleanupFailed;
-}
-
-/// Synchronous command output stays on the restored main screen until dismissed.
-pub fn awaitReturn(self: *Self, io: std.Io, stopped: *const std.atomic.Value(bool)) !void {
-    std.debug.assert(!self.active);
-    if (stopped.load(.acquire)) return error.InteractiveInterrupted;
-    if (termios.tcflush(0, termios.TCIFLUSH) != 0) return error.TerminalCleanupFailed;
-    try self.noticeWithOps("\nPress Enter to return to the Session.\n", NativeNoticeOps{});
-    while (!stopped.load(.acquire)) {
-        const byte = (self.next(io, .none, 16) catch |err| switch (err) {
-            error.IncompleteTerminalLine => return error.InteractiveInterrupted,
-            else => return err,
-        }) orelse continue;
-        if (byte == '\n' or byte == '\r') return;
-        if (byte == 3 or byte == 4) return error.InteractiveInterrupted;
-    }
-    return error.InteractiveInterrupted;
 }
 
 test "detached notice restores flags and requires one complete nonblocking write" {
@@ -226,7 +221,7 @@ pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {
 fn write(self: *Self, bytes: []const u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const n = std.c.write(1, bytes[offset..].ptr, bytes.len - offset);
+        const n = std.c.write(self.output, bytes[offset..].ptr, bytes.len - offset);
         if (n < 0) switch (std.posix.errno(n)) {
             .INTR => continue,
             .AGAIN => {
@@ -240,9 +235,9 @@ fn write(self: *Self, bytes: []const u8) !void {
     }
 }
 
-pub fn geometry() std.posix.winsize {
+pub fn geometry(self: *const Self) std.posix.winsize {
     var size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-    if (std.c.ioctl(1, @intCast(std.c.T.IOCGWINSZ), &size) != 0 or size.row == 0 or size.col == 0)
+    if (std.c.ioctl(self.output, @intCast(std.c.T.IOCGWINSZ), &size) != 0 or size.row == 0 or size.col == 0)
         return .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     return size;
 }
@@ -287,7 +282,7 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     };
     var buffer: [4096]u8 = undefined;
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
-    const size = geometry();
+    const size = self.geometry();
     self.screen.render(&output.writer, size, bytes, cursor, status, prompt, live) catch |err| return output.failure orelse err;
     self.size = size;
 }

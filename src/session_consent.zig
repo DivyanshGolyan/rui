@@ -2,7 +2,7 @@
 //! Editors, decoder deadlines, workers and terminal effects remain caller-owned.
 const std = @import("std");
 
-pub const Service = enum { byte, empty, decoder_pending, decoder_expired, handoff, budget_exhausted };
+pub const Service = enum { byte, empty, decoder_pending, decoder_expired, budget_exhausted };
 pub const Choice = enum { allow_once, deny, other };
 pub const Decision = struct { action: u64, choice: Choice };
 pub const Presentation = enum { complete, preview };
@@ -87,7 +87,7 @@ test "consent requires real emptiness after completed prompt" {
 test "consent bounded lifecycle sequences preserve exact authority" {
     // Every explored prefix is followed by an authorization attempt. The
     // oracle tracks contractual freshness independently of the policy state.
-    const Event = enum { empty, budget, pending, expiry, handoff, redraw, invalid, command, interrupt };
+    const Event = enum { empty, budget, pending, expiry, redraw, invalid, command, interrupt };
     const events = std.enums.values(Event);
     const count = events.len * events.len * events.len;
     for (0..count) |sequence| {
@@ -107,12 +107,11 @@ test "consent bounded lifecycle sequences preserve exact authority" {
                         _ = consent.promptCompleted(.empty, false, !alive);
                         if (alive) fresh = true;
                     },
-                    .budget, .pending, .expiry, .handoff => {
+                    .budget, .pending, .expiry => {
                         const service: Service = switch (event) {
                             .budget => .budget_exhausted,
                             .pending => .decoder_pending,
                             .expiry => .decoder_expired,
-                            .handoff => .handoff,
                             else => unreachable,
                         };
                         _ = consent.promptCompleted(service, event == .pending, !alive);

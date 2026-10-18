@@ -1596,20 +1596,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return;
         };
         setup(init, setup_args[0..count]) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-    } else if (std.mem.eql(u8, text, "/status")) {
-        showSessionStatus(init, requests_context, destination, reference, .full) catch |err| {
-            if (err == error.CanonicalStoreFailure) return err;
-            TerminalText.diagnostic("rui: status: {s}\n", .{@errorName(err)});
-        };
-    } else if (std.mem.eql(u8, text, "/requests")) {
-        // Inline enumeration was unbuffered: preserve partial-output ordering
-        // and finish the local listing before normal interruption detaches.
-        var buffer: [0]u8 = .{};
-        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-        sessionInspect(init, .{ .io = init.io }, destination, reference, text, &writer.interface) catch |err| {
-            TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
-            return;
-        };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
@@ -1667,9 +1653,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
             };
         } else try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-    } else {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
-    }
+    } else return error.UnknownArgument; // The Session frontend admits only the commands above.
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes
