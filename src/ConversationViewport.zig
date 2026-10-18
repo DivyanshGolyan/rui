@@ -11,6 +11,9 @@ pub const Method = gwidth.Method;
 pub const capacity = 256 * 1024;
 /// Clusters wider than the narrowest supported terminal are shown escaped.
 pub const widest_cluster = 8;
+/// Longer clusters (for example thousands of combining marks) are shown
+/// escaped too: every frame that draws a cell writes its whole cluster.
+pub const longest_cluster = 64;
 
 /// A row of laid-out text: the logical line starting at origin-relative byte
 /// `offset`, and the row within that line's wrapping.
@@ -44,6 +47,7 @@ pub const Layout = struct {
 
 pub fn representable(cluster: []const u8, method: gwidth.Method) bool {
     if (std.mem.eql(u8, cluster, "\n") or std.mem.eql(u8, cluster, "\t")) return true;
+    if (cluster.len > longest_cluster) return false;
     const cells = gwidth.gwidth(cluster, method);
     return cells != 0 and cells <= widest_cluster;
 }
@@ -206,10 +210,22 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or representable(raw, self.width_method)) {
                         try self.appendText(raw);
                     } else {
+                        // A run of one scalar is shown once with its count.
                         var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
-                        while (scalars.nextCodepoint()) |point| {
-                            var escaped: [10]u8 = undefined;
-                            try self.appendText(try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{point}));
+                        var run: ?u21 = null;
+                        var count: usize = 0;
+                        while (true) {
+                            const point = scalars.nextCodepoint();
+                            if (run != null and point == run) {
+                                count += 1;
+                                continue;
+                            }
+                            if (run) |previous| {
+                                var escaped: [40]u8 = undefined;
+                                try self.appendText(if (count == 1) try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{previous}) else try std.fmt.bufPrint(&escaped, "\\u{{{x}}}×{d}", .{ previous, count }));
+                            }
+                            run = point orelse break;
+                            count = 1;
                         }
                     }
                 }
@@ -575,6 +591,7 @@ test "invisible and oversized output clusters become visible escapes" {
         .{ "a\u{2060}b", "a\\u{2060}b" },
         .{ "x\n\u{301}y", "x\n\\u{301}y" },
         .{ "e\u{301}", "e\u{301}" },
+        .{ "b" ++ "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}!", "\\u{62}\\u{301}×32!" },
         .{ "🧑‍🧑‍🧑‍🧑‍🧑", "\\u{1f9d1}\\u{200d}\\u{1f9d1}\\u{200d}\\u{1f9d1}\\u{200d}\\u{1f9d1}\\u{200d}\\u{1f9d1}" },
     };
     inline for (cases) |case| {
@@ -588,6 +605,12 @@ test "invisible and oversized output clusters become visible escapes" {
         }
     }
     try std.testing.expect(representable("🧑‍🧑‍🧑‍🧑‍🧑", .unicode));
+    // "e" and 31 combining acute accents fill 63 bytes; one more passes 64.
+    var marks: [1 + 2 * 32]u8 = undefined;
+    marks[0] = 'e';
+    for (0..32) |index| @memcpy(marks[1 + 2 * index ..][0..2], "\u{301}");
+    try std.testing.expect(representable(marks[0..63], .unicode));
+    try std.testing.expect(!representable(marks[0..65], .unicode));
 }
 
 test "older text prepends above the rows in view and trims newer text at capacity" {
