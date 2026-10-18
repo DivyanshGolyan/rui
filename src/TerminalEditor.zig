@@ -745,6 +745,38 @@ fn moveWord(self: *Editor, forward: bool) Event {
     return self.move(word_start);
 }
 
+test "an unbound Alt or Meta chord never inserts its bare character" {
+    var storage: [64]u8 = undefined;
+    // Legacy ESC prefix (Option as Meta, and tmux's re-encoding of Kitty or
+    // modifyOtherKeys chords), Kitty with and without associated text, and
+    // Super/Meta bits. Each rejects the draft rather than adding ".".
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u" }) |chord| {
+        for ([_]bool{ true, false }) |allow_paste| {
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
+            var stream: Input = .{};
+            for ("ok") |byte| _ = editor.feed(&stream, byte);
+            for (chord) |byte| _ = editor.feed(&stream, byte);
+            try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+            try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
+        }
+    }
+    // Vaxis decodes no key from xterm modifyOtherKeys; nothing is inserted.
+    for ([_][]const u8{ "\x1b[27;3;46~", "\x1b[27;3;32~" }) |chord| {
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Input = .{};
+        for ("ok") |byte| _ = editor.feed(&stream, byte);
+        for (chord) |byte| _ = editor.feed(&stream, byte);
+        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+    }
+    // Bound chords, plain text and marked paste keep their meaning.
+    var editor: Editor = .{ .buffer = &storage };
+    var stream: Input = .{};
+    for ("a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
+    try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+}
+
 test "meta-backspace deletes a word without swallowing the next character" {
     var storage: [80]u8 = undefined;
     var editor: Editor = .{ .buffer = &storage };
@@ -962,8 +994,10 @@ test "incomplete escape cannot swallow Enter or Ctrl-C" {
     for ("\x1b[") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqual(Event.interrupt, editor.feed(&stream, 3));
     editor = .{ .buffer = &storage };
-    for ("\x1bZ\n") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqualStrings("Z", storage[0..editor.length]);
+    // ESC with a following key is an Alt chord: unbound, it rejects.
+    for ("\x1bZ") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
 test "word movement skips separators and stops at word edges" {

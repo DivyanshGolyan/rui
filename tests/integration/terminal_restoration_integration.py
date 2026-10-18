@@ -2248,11 +2248,16 @@ def visible_stream_handoff_cases(state, library):
             human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
-                arm.unlink()
-                # A live page shows whole, so its marker frame may already end
-                # the content; that frame is not drawn again.
+                # A live page shows whole: its marker frame already ends the
+                # content. The typed input's own redraw is the first held
+                # write, and the command runs only once that output completes.
                 human.await_screen(master, "VISIBLE-END", composer=True)
                 os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
+                fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-page output gate")
+                time.sleep(0.5)
+                assert fixture.command("session", "inspect", "--store", store,
+                    "--session", "visible/stream")["session"]["permission_mode"] == "ask"
+                arm.unlink()
                 human.read_terminal(master, "Configured.", composer=True)
                 human.await_screen(master, "› UNREAD suffix", composer=True)
                 records = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}

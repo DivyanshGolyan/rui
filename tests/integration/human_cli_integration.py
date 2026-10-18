@@ -3688,15 +3688,42 @@ def renderer_cases():
             shown = tty.send("/status\n", "Session: ")
             for action in actions:
                 assert f"Action requiring attention: {action}" in shown, shown
+            # The update replaces the page in place: what the user scrolled
+            # to and was told stays, and nothing returns to the top.
+            tty.resize(80, 12)
+            tty.wait(predicate=lambda: f"Action requiring attention: {actions[0]}" not in tty.capture.completed or "Session: " not in tty.capture.completed)
+            tty.send("\x1b[6~", predicate=lambda: "Session: " not in tty.capture.completed and f"Action requiring attention: {actions[2]}" in tty.capture.completed)
+            tty.send("/foo\n", "! Unknown command /foo · /help")
+            frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
             def updated():
                 screen = tty.capture.completed
-                return ("Session: " in screen and f"Action requiring attention: {actions[1]}" not in screen and
+                return (f"Action requiring attention: {actions[1]}" not in screen and
                         f"Action requiring attention: {actions[0]}" in screen and f"Action requiring attention: {actions[2]}" in screen)
             tty.wait(predicate=updated, timeout=10)
+            for frame in frames:
+                assert "Session: " not in frame and "! Unknown command /foo · /help" in frame, frame
+            # A command typed at the choice while another runs waits for it,
+            # rather than queueing behind it or replacing its page.
+            reading, release_read = threading.Event(), threading.Event()
+            missing = b"00000000-0000-4000-8000-000000000000"
+            def hold_read(body):
+                if missing not in body:
+                    return True
+                reading.set()
+                return release_read.wait(10)
+            proxy = canonical.ReplyProxy(host, "/v1/observe-command", lambda response: response, before_forward=hold_read)
+            # Nothing redraws while the command is held: wait for the hold.
+            os.write(tty.master, b"/result " + missing + b"\n")
+            assert reading.wait(10), tty.capture.completed
+            tty.send("/requests\n", "! Command still running. Try again when it finishes.")
+            release_read.set()
+            tty.wait(predicate=lambda: "Command still running" not in tty.capture.completed, timeout=10)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        print("renderer: an open /status page follows a later Action decided elsewhere", flush=True)
+        proxy.close()
+        proxy = None
+        print("renderer: an open /status page updates in place and a choice command waits for a running one", flush=True)
 
         # A page that spans several output windows still commits as one
         # capture: a running call never vanishes between footer and history.
@@ -3759,6 +3786,79 @@ def renderer_cases():
         proxy.close()
         proxy = None
         print("renderer: the composer status and history come from one capture", flush=True)
+
+        # /status opens from the capture the composer status shows: a Turn
+        # that ended unseen never reads completed beside Working….
+        session = "renderer/status-open"
+        configure(session)
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-status-open", [
+            ("bash", "status-open-call", json.dumps({"cmd": "sleep 1", "description": "Wait to open status", "timeout_ms": None}))]))
+        marker = answer("status open")
+        holding, release, hold_page = held_pages()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            tty.send("wait to open status\n", "• Wait to open status")
+            holding.set()
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "turn ended", timeout=20)
+            frames = tty.every_frame()
+            os.write(tty.master, b"/status\n")
+            time.sleep(1)
+            release.set()
+            tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, timeout=20)
+            for frame in frames:
+                assert not ("Session: " in frame and "Working…" in frame), frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: /status opens from the capture the composer status shows", flush=True)
+
+        # A Message accepted after its page and many later ones were shown is
+        # already delivered: Sent never outlives it.
+        session = "renderer/sent-late"
+        configure(session)
+        held, release_reply = threading.Event(), threading.Event()
+        def hold_first(response):
+            if not held.is_set():
+                held.set()
+                release_reply.wait(12)
+            return response
+        proxy = canonical.ReplyProxy(host, "/v1/message", hold_first)
+        with terminal(session) as tty:
+            answer("sent late")
+            tty.send("DDD\n", predicate=lambda: held.is_set() and "Sending…" in tty.capture.completed)
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "held Message answered", timeout=20)
+            for index in range(9):
+                answer(f"later {index}")
+                key = admit(home, "session", "send", "--store", store, "--session", session, f"later {index}")["request"]
+                fixture.wait_for(lambda: fixture.completed_observation(store, key), "later answer", timeout=20)
+            unused = [response for response in endpoint.responses if b"later " in response]
+            for response in unused:
+                endpoint.responses.remove(response)
+            tty.wait("› later 8", timeout=20)
+            release_reply.set()
+            tty.wait(predicate=lambda: "Sending…" not in tty.capture.completed, timeout=10)
+            time.sleep(1)
+            tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-3:], timeout=5)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: Sent never outlives a Message delivered before its acceptance joined", flush=True)
+
+        # An unbound Alt chord, as Option-as-Meta or tmux sends it (ESC then
+        # the key), never types its bare key into the draft.
+        session = "renderer/alt-chord"
+        configure(session)
+        with terminal(session) as tty:
+            requests = len(endpoint.requests)
+            shown = tty.send("ok\x1b.\x1b Z\r", "! Input rejected; nothing sent. Enter plain text or paste again.")
+            assert "› ok" not in shown and tty.capture.draft("", 2), shown
+            time.sleep(0.5)
+            assert len(endpoint.requests) == requests, endpoint.requests
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: an unbound Alt chord rejects the draft instead of typing its key", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
