@@ -6,6 +6,8 @@ const Viewport = @import("ConversationViewport.zig");
 const Position = Viewport.Position;
 const Self = @This();
 pub const Call = Viewport.Sized(512, false);
+/// Bytes of status text a frame holds; the frontend fits its status to this.
+pub const status_capacity = 2048;
 pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
@@ -18,7 +20,7 @@ pub fn validateGeometry(width: u16, height: u16) !void {
     if (@as(u32, width) * height > max_cells) return error.TerminalTooLarge;
 }
 
-status: Viewport.Sized(2048, false),
+status: Viewport.Sized(status_capacity, false),
 calls: [3]Call,
 call_heights: [3]u16,
 heading: Viewport.Sized(128, false),
