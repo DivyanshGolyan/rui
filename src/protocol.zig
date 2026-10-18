@@ -107,6 +107,7 @@ pub const Kind = enum {
     proposal_field,
     activity_page,
     activity_content,
+    model_catalog,
 };
 
 pub const ConfigureCommand = struct {
@@ -241,6 +242,12 @@ pub const ReadResult = struct {
 };
 
 pub const ReportProfile = enum { current, full };
+
+/// Reads the Host's Codex model catalog; `refresh` waits for a new fetch.
+pub const ModelCatalogRequest = struct {
+    store: Bounded(max_store_bytes) = .{},
+    refresh: bool = false,
+};
 
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -495,12 +502,13 @@ pub const Request = union(Kind) {
     proposal_field: ReadProposalField,
     activity_page: ActivityPage,
     activity_content: ReadActivityContent,
+    model_catalog: ModelCatalogRequest,
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content => {},
+            .host_info, .host_stop, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .proposal_page, .proposal_field, .activity_page, .activity_content, .model_catalog => {},
         }
     }
 
@@ -858,6 +866,8 @@ const Parser = struct {
             .activity_page
         else if (kind_text.eql("activity_content"))
             .activity_content
+        else if (kind_text.eql("model_catalog"))
+            .model_catalog
         else
             return error.UnknownCommand;
 
@@ -889,6 +899,7 @@ const Parser = struct {
             .proposal_field => .{ .proposal_field = try self.parseProposalField(store) },
             .activity_page => .{ .activity_page = try self.parseActivityPage(store) },
             .activity_content => .{ .activity_content = try self.parseActivityContent(store) },
+            .model_catalog => .{ .model_catalog = try self.parseModelCatalog(store) },
         };
         errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('}');
@@ -1055,6 +1066,22 @@ const Parser = struct {
         }
         if (used == 0 or (used > 1 and digits[0] == '0')) return error.InvalidIdentity;
         return std.fmt.parseInt(u64, digits[0..used], 10) catch error.InvalidIdentity;
+    }
+
+    fn parseModelCatalog(self: *Parser, store: Bounded(max_store_bytes)) !ModelCatalogRequest {
+        var request = ModelCatalogRequest{ .store = store };
+        try self.expectByte(',');
+        try self.expectKey("refresh");
+        try self.skipWhitespace();
+        const first = try self.source.readByte();
+        const rest: []const u8 = switch (first) {
+            't' => "rue",
+            'f' => "alse",
+            else => return error.InvalidJsonShape,
+        };
+        for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        request.refresh = first == 't';
+        return request;
     }
 
     fn parseObserve(self: *Parser, store: Bounded(max_store_bytes)) !ObserveCommand {
@@ -1657,6 +1684,9 @@ pub const max_observe_command_request_bytes =
 pub const max_host_info_request_bytes =
     "{\"version\":\"1\",\"kind\":\"host_info\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + "}".len;
+pub const max_model_catalog_request_bytes =
+    "{\"version\":\"1\",\"kind\":\"model_catalog\",\"store\":".len +
+    maximumJsonStringBytes(max_store_bytes) + ",\"refresh\":false}".len;
 pub const max_host_stop_request_bytes =
     "{\"version\":\"1\",\"kind\":\"host_stop\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) + "}".len;
@@ -1699,7 +1729,7 @@ pub const max_conversation_page_request_bytes =
     "\",\"before_position\":\"".len + 20 +
     "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 pub const max_client_request_bytes = @max(
-    @max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)),
+    @max(@max(@max(max_observe_command_request_bytes, max_read_result_request_bytes), @max(max_host_info_request_bytes, max_host_stop_request_bytes)), max_model_catalog_request_bytes),
     @max(
         @max(max_inspect_session_request_bytes, max_list_sessions_request_bytes),
         @max(@max(max_read_action_arguments_request_bytes, max_read_action_call_id_request_bytes), @max(max_conversation_page_request_bytes, max_conversation_content_request_bytes)),
@@ -1829,7 +1859,20 @@ pub const max_host_info_response_bytes =
     "\",\"descriptor_limit\":\"".len + 20 +
     "\",\"capabilities\":{\"bash\":true,\"model\":true,\"managed_authentication\":true}}".len;
 pub const host_stop_ack = "{\"version\":\"1\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len);
+/// Catalog slugs are printable ASCII, so JSON escaping at most doubles them.
+pub const max_catalog_slug_json_bytes = 2 + 2 * max_model_bytes;
+pub const max_catalog_rejection_slugs = 16;
+pub const max_model_catalog_rejection_bytes =
+    "{\"version\":\"1\",\"type\":\"model_catalog_rejection\",\"code\":\"model_unavailable\",\"model\":".len +
+    max_catalog_slug_json_bytes + ",\"age_seconds\":\"\"".len + 20 +
+    ",\"available_models\":[".len + max_catalog_rejection_slugs * (max_catalog_slug_json_bytes + 1) +
+    "],\"available_count\":\"\"}".len + 20;
+pub const max_model_catalog_response_bytes =
+    "{\"version\":\"1\",\"type\":\"model_catalog\",\"applicable\":false,\"available\":false,\"age_seconds\":\"\"".len + 20 +
+    ",\"last_failure\":\"credential_unavailable\",\"fetching\":false,\"completed\":\"\"".len + 20 +
+    ",\"refresh_target\":\"\",\"models\":[".len + 20 +
+    256 * ("{\"slug\":".len + max_catalog_slug_json_bytes + ",\"visibility\":\"hidden\"},".len) + "]}".len;
+pub const max_response_bytes = @max(@max(@max(max_control_response_bytes, max_host_info_response_bytes), host_stop_ack.len), max_model_catalog_rejection_bytes);
 pub const max_conversation_page_response_bytes =
     "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
     "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +

@@ -85,16 +85,7 @@ pub const Headers = struct {
     pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
-        if (authentication.fixture) {
-            if (!fixtureEndpoint(endpoint, ca_file) or
-                !std.mem.eql(u8, access, codex_auth.fixture_access_token) or
-                !std.mem.eql(u8, account_id, codex_auth.fixture_account_id))
-                return error.InvalidManagedFixture;
-        } else if (!std.mem.eql(u8, endpoint, managed_endpoint)) return error.ManagedEndpointMismatch;
-        if (access.len == 0 or account_id.len == 0)
-            return error.InvalidCredentialHeader;
-        for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
-        for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+        try validateCredentialHeaders(endpoint, ca_file, authentication, access, account_id);
         const bearer = try std.fmt.bufPrintSentinel(&self.bearer, "Authorization: Bearer {s}", .{access}, 0);
         const account = try std.fmt.bufPrintSentinel(&self.account, "ChatGPT-Account-ID: {s}", .{account_id}, 0);
         const session_id = std.fmt.bytesToHex(affinity, .lower);
@@ -113,6 +104,72 @@ pub const Headers = struct {
         self.* = undefined;
     }
 };
+
+/// Codex release whose version the undocumented catalog route receives as
+/// `client_version`: openai/codex `rust-v0.163.0` (2026-10-15). The server may
+/// filter rows by version; see research/codex-model-catalog-sources.md.
+pub const catalog_client_version = "0.163.0";
+pub const max_catalog_url_bytes = 512;
+
+/// The catalog is the responses route's sibling `models` resource.
+pub fn catalogUrl(endpoint: []const u8, buffer: *[max_catalog_url_bytes:0]u8) ![:0]const u8 {
+    const suffix = "/responses";
+    if (!std.mem.endsWith(u8, endpoint, suffix)) return error.UnsupportedCatalogEndpoint;
+    return std.fmt.bufPrintSentinel(buffer, "{s}/models?client_version={s}", .{ endpoint[0 .. endpoint.len - suffix.len], catalog_client_version }, 0) catch
+        error.UnsupportedCatalogEndpoint;
+}
+
+test "catalog URL is the responses route's models sibling" {
+    var buffer: [max_catalog_url_bytes:0]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "https://chatgpt.com/backend-api/codex/models?client_version=" ++ catalog_client_version,
+        try catalogUrl(managed_endpoint, &buffer),
+    );
+    try std.testing.expectEqualStrings("http://127.0.0.1:9/models?client_version=" ++ catalog_client_version, try catalogUrl("http://127.0.0.1:9/responses", &buffer));
+    try std.testing.expectError(error.UnsupportedCatalogEndpoint, catalogUrl("http://127.0.0.1:9/v1/chat", &buffer));
+}
+
+/// Catalog request headers: the responses route's credentials and routing
+/// without Session affinity or an event-stream Accept.
+pub const CatalogHeaders = struct {
+    bearer: [codex_credentials.max_token_bytes + 32:0]u8 = undefined,
+    account: [codex_credentials.max_account_id_bytes + 32:0]u8 = undefined,
+    entries: [5][:0]const u8 = undefined,
+    length: usize = 0,
+
+    pub fn init(self: *CatalogHeaders, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential) !void {
+        const access = credential.record.access_token.slice();
+        const account_id = credential.record.account_id.slice();
+        try validateCredentialHeaders(endpoint, ca_file, authentication, access, account_id);
+        const bearer = try std.fmt.bufPrintSentinel(&self.bearer, "Authorization: Bearer {s}", .{access}, 0);
+        const account = try std.fmt.bufPrintSentinel(&self.account, "ChatGPT-Account-ID: {s}", .{account_id}, 0);
+        self.entries = .{ "Accept: application/json", bearer, account, "originator: rui", "X-OpenAI-Fedramp: true" };
+        self.length = if (credential.record.fedramp) 5 else 4;
+    }
+
+    pub fn slice(self: *const CatalogHeaders) []const [:0]const u8 {
+        return self.entries[0..self.length];
+    }
+
+    pub fn deinit(self: *CatalogHeaders) void {
+        std.crypto.secureZero(u8, &self.bearer);
+        std.crypto.secureZero(u8, &self.account);
+        self.* = undefined;
+    }
+};
+
+fn validateCredentialHeaders(endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, access: []const u8, account_id: []const u8) !void {
+    if (authentication.fixture) {
+        if (!fixtureEndpoint(endpoint, ca_file) or
+            !std.mem.eql(u8, access, codex_auth.fixture_access_token) or
+            !std.mem.eql(u8, account_id, codex_auth.fixture_account_id))
+            return error.InvalidManagedFixture;
+    } else if (!std.mem.eql(u8, endpoint, managed_endpoint)) return error.ManagedEndpointMismatch;
+    if (access.len == 0 or account_id.len == 0)
+        return error.InvalidCredentialHeader;
+    for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+    for (account_id) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+}
 
 pub const PreparationFaults = struct {
     managed_route: bool = false,

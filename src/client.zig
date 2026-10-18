@@ -1,6 +1,7 @@
 const std = @import("std");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const codex_model_catalog = @import("codex_model_catalog.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
 
 /// Pin before spawning a borrower; reset or destroy only after return/join.
@@ -60,6 +61,22 @@ pub const Requests = struct {
         const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .observation = try CommandObservation.parse(reply, key) };
+    }
+
+    /// Reads the Host's Codex model catalog. `refresh` asks for a new fetch
+    /// without waiting; poll until `completed` reaches `refresh_target`.
+    /// Rows borrow `arena` and `reply_buffer`.
+    pub fn modelCatalog(self: Requests, store_path: []const u8, refresh: bool, reply_buffer: *ModelCatalogBuffer, arena: std.mem.Allocator) !ModelCatalogReply {
+        reply_buffer.len = 0;
+        try self.check();
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"1\",\"kind\":\"model_catalog\",\"store\":");
+        try body.appendJsonString(paths.store.slice());
+        try body.append(if (refresh) ",\"refresh\":true}" else ",\"refresh\":false}");
+        const reply = try sendSource(self, &paths, "/v1/model-catalog", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
+        if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
+        return .{ .listing = try ModelCatalogListing.parse(arena, reply.body) };
     }
 
     pub fn observeMessage(self: Requests, address: *const MessageAddress) !ObservationReply {
@@ -652,6 +669,69 @@ pub const PermissionDecisionInput = struct {
 };
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
+/// About 140 KiB; callers place it on the heap.
+pub const ModelCatalogBuffer = protocol.FixedJsonBuffer(protocol.max_model_catalog_response_bytes);
+
+pub const ModelCatalogReply = union(enum) {
+    listing: ModelCatalogListing,
+    failure: ReadFailure,
+};
+
+/// Validated facts from one `model_catalog` reply.
+pub const ModelCatalogListing = struct {
+    pub const Visibility = enum { list, hidden };
+    pub const Row = struct { slug: []const u8, visibility: Visibility };
+
+    applicable: bool,
+    available: bool,
+    age_seconds: ?u64,
+    last_failure: ?codex_model_catalog.Reason,
+    fetching: bool,
+    completed: u64,
+    refresh_target: ?u64,
+    rows: []const Row,
+
+    pub fn parse(arena: std.mem.Allocator, body: []const u8) !ModelCatalogListing {
+        const Wire = struct {
+            version: []const u8,
+            type: []const u8,
+            applicable: bool,
+            available: bool,
+            age_seconds: ?[]const u8,
+            last_failure: ?[]const u8,
+            fetching: bool,
+            completed: []const u8,
+            refresh_target: ?[]const u8,
+            models: []const struct { slug: []const u8, visibility: []const u8 },
+        };
+        const wire = std.json.parseFromSliceLeaky(Wire, arena, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return error.InvalidResponse;
+        if (!std.mem.eql(u8, wire.version, "1") or !std.mem.eql(u8, wire.type, "model_catalog") or
+            wire.available != (wire.age_seconds != null) or wire.models.len > codex_model_catalog.max_rows or
+            (!wire.available and wire.models.len != 0) or (!wire.applicable and (wire.available or wire.last_failure != null))) return error.InvalidResponse;
+        const rows = try arena.alloc(Row, wire.models.len);
+        for (wire.models, rows) |model, *row| {
+            if (model.slug.len == 0 or model.slug.len > protocol.max_model_bytes) return error.InvalidResponse;
+            for (model.slug) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidResponse;
+            row.* = .{ .slug = model.slug, .visibility = std.meta.stringToEnum(Visibility, model.visibility) orelse return error.InvalidResponse };
+        }
+        return .{
+            .applicable = wire.applicable,
+            .available = wire.available,
+            .age_seconds = if (wire.age_seconds) |age| try decimal(age) else null,
+            .last_failure = if (wire.last_failure) |reason| std.meta.stringToEnum(codex_model_catalog.Reason, reason) orelse return error.InvalidResponse else null,
+            .fetching = wire.fetching,
+            .completed = try decimal(wire.completed),
+            .refresh_target = if (wire.refresh_target) |target| try decimal(target) else null,
+            .rows = rows,
+        };
+    }
+
+    fn decimal(text: []const u8) !u64 {
+        if (text.len == 0 or (text.len > 1 and text[0] == '0')) return error.InvalidResponse;
+        for (text) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
+        return std.fmt.parseInt(u64, text, 10) catch error.InvalidResponse;
+    }
+};
 
 pub const HostStatus = union(enum) {
     ready: struct {
@@ -988,10 +1068,29 @@ pub const Current = struct {
         output_reservation_override: ?PolicyNumber(true),
         // Omission is not evidence of provider default on older producers.
         reasoning_effort: OmittableJson(?JsonEnum(enum { none, low, medium, high, xhigh, max })) = .{},
+        // Absent from Hosts that predate the catalog.
+        model_catalog: OmittableJson(ModelCatalog) = .{},
 
         pub fn jsonStringify(self: Settings, jw: anytype) !void {
             try writeObject(self, jw);
         }
+
+        /// The Host's verdict for this Session's model at report time.
+        pub fn modelCatalog(self: *const Settings) ?codex_model_catalog.Observation {
+            const value = self.model_catalog.value orelse return null;
+            const age_ms: ?i64 = if (value.age_seconds) |age| @as(i64, std.fmt.parseInt(u63, age.slice(), 10) catch unreachable) *| 1000 else null;
+            return .{ .age_ms = age_ms, .verdict = switch (value.verdict.value) {
+                .listed => .listed,
+                .hidden => .hidden,
+                .absent => .absent,
+                .unchecked => .{ .unchecked = value.reason.?.value },
+            } };
+        }
+    };
+    pub const ModelCatalog = struct {
+        verdict: JsonEnum(std.meta.Tag(codex_model_catalog.Verdict)),
+        reason: ?JsonEnum(codex_model_catalog.Reason),
+        age_seconds: ?PolicyNumber(true),
     };
     pub const Work = struct {
         status: JsonEnum(enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed }),
@@ -1201,6 +1300,10 @@ pub const Current = struct {
             settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
+        if (settings.model_catalog.value) |catalog| {
+            if ((catalog.verdict.value == .unchecked) != (catalog.reason != null) or
+                (catalog.verdict.value != .unchecked and catalog.age_seconds == null)) return error.InvalidObservation;
+        }
         const work = wire.work.value orelse return error.InvalidObservation;
         if ((work.turn.value == null) != (work.operation.value == null) or (work.latest_outcome != null and work.turn.value == null)) return error.InvalidObservation;
         if (work.latest_outcome) |outcome| {
@@ -2027,6 +2130,24 @@ pub const MutationAnswer = struct {
         conflict,
     },
     replayed: bool,
+    /// The Host's catalog verdict for an explicit configuration model,
+    /// observed at reply time. Absent from Hosts that predate the catalog.
+    model_catalog: ?codex_model_catalog.Observation = null,
+};
+
+/// An unsaved configuration rejection: the model is absent from the Host's
+/// fresh catalog for this account. The key has no saved answer.
+pub const CatalogRejection = struct {
+    model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    age_seconds: u64 = 0,
+    available: [protocol.max_catalog_rejection_slugs]protocol.Bounded(protocol.max_model_bytes) = undefined,
+    available_len: usize = 0,
+    /// Total available models; `available` holds at most the first 16.
+    available_count: u64 = 0,
+
+    pub fn availableModels(self: *const CatalogRejection) []const protocol.Bounded(protocol.max_model_bytes) {
+        return self.available[0..self.available_len];
+    }
 };
 
 pub const InvocationDiagnostic = struct {
@@ -2039,9 +2160,10 @@ pub const InvocationDiagnostic = struct {
 pub const MutationReply = struct {
     status: u16,
     diagnostic: ?InvocationDiagnostic = null,
+    catalog_rejection: ?CatalogRejection = null,
     context: CapturedIdentity = .{},
     target: MutationTarget,
-    answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
+    answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch, ModelUnavailable }!MutationAnswer,
 
     pub fn isAccepted(self: MutationReply) bool {
         const answer = self.answer catch return false;
@@ -2281,11 +2403,27 @@ fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
 pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
     var result: MutationReply = .{ .status = reply.status, .target = target, .answer = error.InvalidResponse };
     result.context.session.set(session) catch return result;
-    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic);
+    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic, &result.catalog_rejection);
     return result;
 }
 
-fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic) @FieldType(MutationReply, "answer") {
+fn decodeModelCatalog(value: anytype) !codex_model_catalog.Observation {
+    const verdict = std.meta.stringToEnum(std.meta.Tag(codex_model_catalog.Verdict), value.verdict.slice()) orelse return error.InvalidResponse;
+    const age_ms: ?i64 = if (value.age_seconds) |age| std.math.mul(i64, std.math.cast(i64, try mutationId(age, true)) orelse return error.InvalidResponse, 1000) catch return error.InvalidResponse else null;
+    if (verdict == .unchecked) {
+        const reason = std.meta.stringToEnum(codex_model_catalog.Reason, (value.reason orelse return error.InvalidResponse).slice()) orelse return error.InvalidResponse;
+        return .{ .verdict = .{ .unchecked = reason }, .age_ms = age_ms };
+    }
+    if (value.reason != null or age_ms == null) return error.InvalidResponse;
+    return .{ .verdict = switch (verdict) {
+        .listed => .listed,
+        .hidden => .hidden,
+        .absent => .absent,
+        .unchecked => unreachable,
+    }, .age_ms = age_ms };
+}
+
+fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic, catalog_rejection: *?CatalogRejection) @FieldType(MutationReply, "answer") {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
     const Wire = struct {
         version: JsonString(8),
@@ -2308,6 +2446,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         queue: OmittableJson(struct { status: JsonString(16), admission: JsonString(20) }) = .{},
         execution: OmittableJson(struct { status: JsonString(16), reason: OmittableJson(JsonString(64)) = .{} }) = .{},
         completion: OmittableJson(struct { status: JsonString(16) }) = .{},
+        model_catalog: OmittableJson(struct { verdict: JsonString(16), reason: ?JsonString(32), age_seconds: ?JsonString(20) }) = .{},
+        // Only in a model_catalog_rejection envelope.
+        model: OmittableJson(JsonString(protocol.max_model_bytes)) = .{},
+        age_seconds: OmittableJson(JsonString(20)) = .{},
+        available_models: OmittableJson([]const JsonString(protocol.max_model_bytes)) = .{},
+        available_count: OmittableJson(JsonString(20)) = .{},
     };
     // Strings are copied into bounded values and immediately freed. Reserve
     // scanner nesting first, as in the canonical classifier; no payload arena.
@@ -2324,6 +2468,23 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         try validateInvocationDiagnostic(reply.status, wire.version.slice(), parsed);
         diagnostic.* = parsed;
         if (parsed.code.eql("canonical_store_failure")) return error.CanonicalStoreFailure;
+        if (target == .configure and reply.status == 422 and parsed.type.eql("model_catalog_rejection") and parsed.code.eql("model_unavailable")) {
+            var rejection: CatalogRejection = .{};
+            rejection.model.set((wire.model.value orelse return error.InvalidResponse).slice()) catch return error.InvalidResponse;
+            if (rejection.model.len == 0) return error.InvalidResponse;
+            rejection.age_seconds = try mutationId(wire.age_seconds.value orelse return error.InvalidResponse, true);
+            const available = wire.available_models.value orelse return error.InvalidResponse;
+            rejection.available_count = try mutationId(wire.available_count.value orelse return error.InvalidResponse, true);
+            if (available.len > rejection.available.len or available.len > rejection.available_count or
+                (available.len < rejection.available.len and available.len != rejection.available_count)) return error.InvalidResponse;
+            for (available, 0..) |slug, index| {
+                rejection.available[index] = .{};
+                rejection.available[index].set(slug.slice()) catch return error.InvalidResponse;
+            }
+            rejection.available_len = available.len;
+            catalog_rejection.* = rejection;
+            return error.ModelUnavailable;
+        }
         return error.HostInvocationFailed;
     }
     if (reply.status != 200 and reply.status != 409) return error.InvalidResponse;
@@ -2402,10 +2563,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     }
     if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
         (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
-        (target != .session_stop and (answer.selection.value != null or wire.completion.value != null))) return error.InvalidResponse;
+        (target != .session_stop and (answer.selection.value != null or wire.completion.value != null)) or
+        ((target != .configure or conflict) and wire.model_catalog.value != null)) return error.InvalidResponse;
     return .{
         .replayed = answer.replayed,
         .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value.?.value },
+        .model_catalog = if (wire.model_catalog.value) |observation| try decodeModelCatalog(observation) else null,
     };
 }
 
@@ -3119,7 +3282,7 @@ fn sendSource(
     bytes: ?[]const u8,
     drop_reply: ?[]const u8,
     instance: ?*const protocol.InstanceId,
-    reply_buffer: *ReplyBuffer,
+    reply_buffer: anytype,
     until: ?i128,
 ) !CommandReply {
     const io = requests.io;
@@ -3345,7 +3508,7 @@ fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !CommandR
     return readCommandResponseRequest(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, reply_buffer, .{}, null);
 }
 
-fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !CommandReply {
+fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: anytype, timing: ResponseTiming, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     const head = try readResponseHeadUntil(requests, fd, timing, until);
     if (head.kind != .command_json) return error.InvalidResponse;
@@ -3422,10 +3585,10 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     }
 }
 
-fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !CommandReply {
+fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: anytype, timing: ResponseTiming, until: ?i128) !CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
-    if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
+    if (head.content_length > reply_buffer.bytes.len) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {

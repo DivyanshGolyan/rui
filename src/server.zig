@@ -4,7 +4,9 @@ const HostDiagnostics = @import("HostDiagnostics.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
+const CodexCatalog = @import("CodexCatalog.zig");
 const bash = @import("bash.zig");
+const codex_model_catalog = @import("codex_model_catalog.zig");
 const descriptor_capacity = @import("descriptor_capacity.zig");
 const descriptor_limit = @import("descriptor_limit.zig");
 const execution = @import("execution.zig");
@@ -122,6 +124,7 @@ const Host = struct {
     provider_ca_file: ?[]const u8 = null,
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
+    model_catalog: ?*CodexCatalog = null,
     capture_writer: ?*provider.CaptureWriter = null,
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
@@ -426,6 +429,7 @@ const Intake = struct {
                         .session_stop => protocol.max_session_stop_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
+                        .model_catalog => protocol.max_model_catalog_request_bytes,
                         else => std.math.maxInt(u64),
                     };
                     if (self.header.content_length > limit) return error.RequestTooLarge;
@@ -851,7 +855,7 @@ pub fn serve(
                 .{ descriptor_observation.soft_limit.?, descriptor_requirement.total - 4 * (descriptor_capacity.default_intake - descriptor_capacity.minimum_intake) },
             );
             stderr.print(
-                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
+                "rui: descriptor capacity insufficient: active_capacity={d} required={d} soft_limit={d} inherited={d} fixed_host={d} clients={d} execution={d} authentication={d} model_catalog={d} self_wake={d} (required is for default intake; RLIMIT_NOFILE).\n",
                 .{
                     active_capacity,
                     descriptor_requirement.total,
@@ -861,6 +865,7 @@ pub fn serve(
                     descriptor_requirement.clients,
                     descriptor_requirement.execution,
                     descriptor_requirement.authentication,
+                    descriptor_requirement.model_catalog,
                     descriptor_requirement.self_wake,
                 },
             );
@@ -1022,6 +1027,17 @@ pub fn serve(
         host.launch_mutex.unlock(host.io);
         execution_thread.join();
         if (provider_endpoint != null) provider.deinitialize();
+    }
+    // The catalog worker needs curl's global state and stops before it. Its
+    // storage outlives intake, which may still observe it after the join.
+    var model_catalog: CodexCatalog = undefined;
+    var model_catalog_started = false;
+    defer if (model_catalog_started) model_catalog.stop();
+    if (provider_endpoint != null and authentication != null and active_capacity != 0) {
+        try model_catalog.init(io, allocator, provider_endpoint.?, provider_ca_file, authentication.?);
+        try model_catalog.start();
+        model_catalog_started = true;
+        host.model_catalog = &model_catalog;
     }
     var ready: protocol.ResponseBuffer = .{};
     try ready.appendFmt("ready store={s} socket={s} active_capacity={d} intake_capacity={d} descriptor_requirement={d} descriptor_limit={s} custody_record_bytes={d} execution_slot_bytes={d} model_preparation_bytes={d} scratch_limit_bytes={d} retention_entry_bytes={d} retention_capacity={d} bash_execution=enabled execution={s}", .{
@@ -3676,6 +3692,7 @@ const Route = enum {
     proposal_field,
     activity_page,
     activity_content,
+    model_catalog,
     unsupported_control,
 
     fn isControl(self: Route) bool {
@@ -3746,7 +3763,19 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
         },
         .configure => |*command| {
+            // Catalog verdicts read only Host memory; a possible rejection
+            // first rereads the credential snapshot, outside the Store lock.
+            var catalog_observation: ?codex_model_catalog.Observation = null;
+            if (command.configuration.model.state == .value) {
+                const model = command.configuration.model.value.slice();
+                catalog_observation = if (host.model_catalog) |model_catalog| observed: {
+                    const first = model_catalog.observe(model);
+                    break :observed if (first.verdict == .absent) model_catalog.confirm(model) else first;
+                } else .{ .verdict = .{ .unchecked = .not_applicable } };
+            }
+            const absent = if (catalog_observation) |value| value.verdict == .absent else false;
             const result = host.store.configure(command, .{
+                .model_absent_from_catalog = absent,
                 .model_available = host.provider_endpoint != null,
                 .content_read = host.faults.content_read,
                 .content_import = host.faults.content_import,
@@ -3757,10 +3786,17 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
             var response: protocol.ResponseBuffer = .{};
-            try renderConfigureReply(&response, command, result);
+            if (result == .model_unavailable) {
+                try renderModelCatalogRejection(&response, host.model_catalog.?, command.configuration.model.value.slice(), catalog_observation.?);
+            } else {
+                try renderConfigureReply(&response, command, result);
+                if (result != .conflict and result != .infrastructure_failure)
+                    if (catalog_observation) |observation| try appendModelCatalog(&response, observation);
+            }
             const status: u16 = switch (result) {
                 .accepted, .rejected => 200,
                 .conflict => 409,
+                .model_unavailable => 422,
                 .infrastructure_failure => 500,
             };
             deliverResponse(host.io, fd, status, response.slice());
@@ -3873,6 +3909,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.setContent(reader, 0, true, false);
         },
         .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
+        .model_catalog => |request_value| {
+            var body: std.Io.Writer.Allocating = try .initCapacity(host.allocator, 1024);
+            defer body.deinit();
+            try renderModelCatalog(host, request_value.refresh, &body.writer);
+            try fd.setJson(200, body.written());
+        },
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
             const report = host.store.captureSessionReport(request_value.session.slice(), .{
@@ -3882,6 +3924,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .profile = request_value.profile,
                 .fail_unlink = host.faults.report_unlink,
                 .execution = executionFacts(host),
+                .model_catalog = if (host.model_catalog) |model_catalog| .{ .context = model_catalog, .observe = observeModelCatalog } else null,
             }) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "session report scratch cleanup", err);
@@ -4127,6 +4170,8 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/model-catalog"))
+            .model_catalog
         else if (std.mem.startsWith(u8, path, "/v1/control/"))
             .unsupported_control
         else
@@ -4180,18 +4225,86 @@ const HeaderReader = struct {
     }
 };
 
+fn observeModelCatalog(context: *anyopaque, model: []const u8) codex_model_catalog.Observation {
+    const model_catalog: *CodexCatalog = @ptrCast(@alignCast(context));
+    return model_catalog.observe(model);
+}
+
+/// The complete bounded catalog (at most 256 rows) for `rui model list`.
+/// Refresh only requests a fetch; callers poll `completed` instead of
+/// holding one of the Host's two intake workers.
+fn renderModelCatalog(host: *Host, refresh: bool, out: *std.Io.Writer) !void {
+    try out.writeAll("{\"version\":\"1\",\"type\":\"model_catalog\"");
+    const model_catalog = host.model_catalog orelse {
+        try out.writeAll(",\"applicable\":false,\"available\":false,\"age_seconds\":null,\"last_failure\":null,\"fetching\":false,\"completed\":\"0\",\"refresh_target\":null,\"models\":[]}");
+        return;
+    };
+    const target: ?u64 = if (refresh) model_catalog.refresh() else null;
+    var rows: [codex_model_catalog.max_rows]codex_model_catalog.Row = undefined;
+    const count = model_catalog.copyRows(&rows, false);
+    const current = model_catalog.summary();
+    try out.print(",\"applicable\":true,\"available\":{},\"age_seconds\":", .{current.has_catalog});
+    if (current.age_ms) |age| try out.print("\"{d}\"", .{@divTrunc(@max(age, 0), 1000)}) else try out.writeAll("null");
+    try out.writeAll(",\"last_failure\":");
+    if (current.last_failure) |reason| try out.print("\"{s}\"", .{@tagName(reason)}) else try out.writeAll("null");
+    try out.print(",\"fetching\":{},\"completed\":\"{d}\",\"refresh_target\":", .{ current.fetching, current.completed });
+    if (target) |value| try out.print("\"{d}\"", .{value}) else try out.writeAll("null");
+    try out.writeAll(",\"models\":[");
+    for (rows[0..@min(count, rows.len)], 0..) |*row, index| {
+        if (index != 0) try out.writeAll(",");
+        try out.writeAll("{\"slug\":");
+        try std.json.Stringify.encodeJsonString(row.slice(), .{}, out);
+        try out.print(",\"visibility\":\"{s}\"}}", .{if (row.visibility == .list) "list" else "hidden"});
+    }
+    try out.writeAll("]}");
+}
+
+/// An unsaved rejection in the existing invocation-error envelope: no new
+/// durable code exists, and older clients see a Host invocation failure.
+fn renderModelCatalogRejection(
+    response: *protocol.ResponseBuffer,
+    model_catalog: *CodexCatalog,
+    model: []const u8,
+    observation: codex_model_catalog.Observation,
+) !void {
+    var rows: [protocol.max_catalog_rejection_slugs]codex_model_catalog.Row = undefined;
+    const count = model_catalog.copyRows(&rows, true);
+    try response.append("{\"version\":\"1\",\"type\":\"model_catalog_rejection\",\"code\":\"model_unavailable\",\"model\":");
+    try response.appendJsonString(model);
+    try response.appendFmt(",\"age_seconds\":\"{d}\",\"available_models\":[", .{@divTrunc(@max(observation.age_ms.?, 0), 1000)});
+    for (rows[0..@min(count, rows.len)], 0..) |*row, index| {
+        if (index != 0) try response.append(",");
+        try response.appendJsonString(row.slice());
+    }
+    try response.appendFmt("],\"available_count\":\"{d}\"}}", .{count});
+}
+
+/// Adds the Host's current verdict for an explicit model to a configuration
+/// reply. Observed at reply time: a replay reports today's verdict.
+fn appendModelCatalog(response: *protocol.ResponseBuffer, observation: codex_model_catalog.Observation) !void {
+    std.debug.assert(response.len > 0 and response.bytes[response.len - 1] == '}');
+    response.len -= 1;
+    try response.append(",\"model_catalog\":");
+    var buffer: [codex_model_catalog.max_observation_json_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    codex_model_catalog.writeObservationJson(observation, &writer) catch unreachable;
+    try response.append(writer.buffered());
+    try response.append("}");
+}
+
 fn renderConfigureReply(
     response: *protocol.ResponseBuffer,
     command: *const protocol.ConfigureCommand,
     result: store_module.ConfigureReply,
 ) !void {
     if (result == .infrastructure_failure) return renderStatic(response, "invocation_error", "canonical_store_failure");
+    std.debug.assert(result != .model_unavailable);
     try response.append("{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"");
     try response.append(@tagName(result));
     const replayed = switch (result) {
         .accepted => |value| value.replayed,
         .rejected => |value| value.replayed,
-        .conflict, .infrastructure_failure => false,
+        .conflict, .model_unavailable, .infrastructure_failure => false,
     };
     try response.append("\",\"replayed\":");
     try response.append(if (replayed) "true" else "false");
@@ -4205,7 +4318,7 @@ fn renderConfigureReply(
         .conflict => {
             try response.append(",\"code\":\"idempotency_key_conflict\"");
         },
-        .infrastructure_failure => unreachable,
+        .model_unavailable, .infrastructure_failure => unreachable,
         .accepted => {},
     }
     if (result == .accepted) {

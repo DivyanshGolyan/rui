@@ -10,6 +10,7 @@ const cores = .{
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
+    .{ "codex_model_catalog.zig", @import("codex_model_catalog.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
