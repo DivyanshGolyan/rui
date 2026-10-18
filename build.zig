@@ -335,6 +335,15 @@ pub fn build(b: *std.Build) void {
     );
     bash_recovery_integration_step.dependOn(&bash_recovery_integration.step);
 
+    const model_catalog_integration = b.addSystemCommand(&.{"python3"});
+    model_catalog_integration.addFileArg(b.path("tests/integration/model_catalog_integration.py"));
+    model_catalog_integration.addFileArg(ci.path(release_safe));
+    const model_catalog_integration_step = b.step(
+        "model-catalog-integration",
+        "Run Host-owned Codex model catalog admission, fail-open, refresh and secrecy journeys",
+    );
+    model_catalog_integration_step.dependOn(&model_catalog_integration.step);
+
     const codex_integration = b.addSystemCommand(&.{"python3"});
     codex_integration.addFileArg(b.path("tests/integration/codex_integration.py"));
     codex_integration.addFileArg(ci.path(release_safe));
