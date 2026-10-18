@@ -73,14 +73,37 @@ OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 +
                       "bash_pipes": 1 + 2}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
-OBSERVATION_FIELDS = (
-    "rui_test_phase", "at_ns", "subject_kind", "subject", "turn", "operation",
-    "attempt", "action", "scratch_used_bytes", "command_key", "kind", "control_key",
-    "store_queued_at_ns", "lock_acquired_at_ns", "store_complete_at_ns",
-    "reply_complete_at_ns", "queue_wait_ns", "store_lock_wait_ns", "store_service_ns",
-    "post_commit_reply_ns", "host_total_ns", "start_ns", "wait_ns", "custody_occupied",
-    "written_bytes", "http_version", "connection_id", "new_connections",
-)
+# Checked against native FieldId and legacy IDs by test_harness_contracts.py.
+OBSERVATION_FIELDS = {
+    0: "rui_test_phase",
+    1: "at_ns",
+    2: "subject_kind",
+    3: "subject",
+    4: "turn",
+    5: "operation",
+    6: "attempt",
+    7: "action",
+    8: "scratch_used_bytes",
+    9: "command_key",
+    10: "kind",
+    11: "control_key",
+    12: "store_queued_at_ns",
+    13: "lock_acquired_at_ns",
+    14: "store_complete_at_ns",
+    15: "reply_complete_at_ns",
+    16: "queue_wait_ns",
+    17: "store_lock_wait_ns",
+    18: "store_service_ns",
+    19: "post_commit_reply_ns",
+    20: "host_total_ns",
+    21: "start_ns",
+    22: "wait_ns",
+    23: "custody_occupied",
+    24: "written_bytes",
+    25: "http_version",
+    26: "connection_id",
+    27: "new_connections",
+}
 
 
 @functools.cache
@@ -181,7 +204,7 @@ class _Observations:
             assert offset + 3 <= length, "incomplete observation field"
             field, size = struct.unpack_from("<BH", frame, offset)
             offset += 3
-            assert field < len(OBSERVATION_FIELDS) and offset + size <= length, "invalid observation field"
+            assert field in OBSERVATION_FIELDS and offset + size <= length, "invalid observation field"
             name = OBSERVATION_FIELDS[field]
             assert name not in record, "duplicate observation field"
             record[name] = frame[offset:offset + size].decode("utf-8")

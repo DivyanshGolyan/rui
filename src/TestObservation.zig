@@ -24,12 +24,43 @@ pub const state_bytes = @sizeOf(Shared);
 // Fixture disposal revokes publication admission, not semantic work. Existing
 // handles retain their low-bit count; a selected attempt after sealing is loss.
 pub const sealed = @as(u64, 1) << 63;
-// Field order is the private fixture codec, not a public protocol.
+// Stable private fixture IDs. Keep encoded meanings independent of Record's
+// declaration order; tests/ci/test_harness_contracts.py checks the Python codec.
+const FieldId = enum(u8) {
+    rui_test_phase = 0,
+    at_ns = 1,
+    subject_kind = 2,
+    subject = 3,
+    turn = 4,
+    operation = 5,
+    attempt = 6,
+    action = 7,
+    scratch_used_bytes = 8,
+    command_key = 9,
+    kind = 10,
+    control_key = 11,
+    store_queued_at_ns = 12,
+    lock_acquired_at_ns = 13,
+    store_complete_at_ns = 14,
+    reply_complete_at_ns = 15,
+    queue_wait_ns = 16,
+    store_lock_wait_ns = 17,
+    store_service_ns = 18,
+    post_commit_reply_ns = 19,
+    host_total_ns = 20,
+    start_ns = 21,
+    wait_ns = 22,
+    custody_occupied = 23,
+    written_bytes = 24,
+    http_version = 25,
+    connection_id = 26,
+    new_connections = 27,
+};
 const Record = struct {
     rui_test_phase: []const u8,
-    at_ns: ?[]const u8 = null,
     subject_kind: ?[]const u8 = null,
     subject: ?[]const u8 = null,
+    at_ns: ?[]const u8 = null,
     turn: ?[]const u8 = null,
     operation: ?[]const u8 = null,
     attempt: ?[]const u8 = null,
@@ -55,6 +86,15 @@ const Record = struct {
     connection_id: ?i64 = null,
     new_connections: ?i64 = null,
 };
+
+comptime {
+    // Neither a new parsed field without an ID nor a stale ID may be silent.
+    if (std.meta.fieldNames(Record).len != std.meta.fieldNames(FieldId).len)
+        @compileError("observation fields and IDs differ");
+    for (std.meta.fieldNames(Record)) |name| {
+        if (!@hasField(FieldId, name)) @compileError("observation field has no stable ID");
+    }
+}
 
 fd: c_int,
 plan: Plan,
@@ -218,7 +258,7 @@ fn record(self: *Self, json: []const u8) void {
     defer parsed.deinit();
     var bytes: [record_bytes]u8 = undefined;
     var length: usize = header_bytes;
-    inline for (comptime std.meta.fieldNames(Record), 0..) |name, index| {
+    inline for (comptime std.meta.fieldNames(FieldId)) |name| {
         var number_buffer: [20]u8 = undefined;
         const value: ?[]const u8 = if (@FieldType(Record, name) == ?i64)
             if (@field(parsed.value, name)) |number| std.fmt.bufPrint(&number_buffer, "{d}", .{number}) catch unreachable else null
@@ -229,7 +269,7 @@ fn record(self: *Self, json: []const u8) void {
                 _ = self.shared.state.fetchOr(1, .acq_rel);
                 return;
             }
-            bytes[length] = @intCast(index);
+            bytes[length] = @intFromEnum(@field(FieldId, name));
             std.mem.writeInt(u16, bytes[length + 1 ..][0..2], @intCast(text.len), .little);
             @memcpy(bytes[length + 3 ..][0..text.len], text);
             length += 3 + text.len;
@@ -270,6 +310,9 @@ test "private owner observations remain bounded under full and closed credit" {
     try std.testing.expectEqual(@as(u64, 1), std.mem.readInt(u64, bytes[4..12], .little));
     try std.testing.expectEqual(@as(u64, 37), std.mem.readInt(u64, bytes[12..20], .little));
     try std.testing.expectEqual(@as(u8, 0), bytes[3]);
+    // Independent legacy bytes, despite Record declaring at_ns after subject.
+    try std.testing.expectEqualSlices(u8, "\x00\x20\x00ordinary_classification_released" ++
+        "\x01\x07\x001234567\x02\x05\x00route\x03\x07\x00message", bytes[header_bytes..@intCast(read)]);
     const unselected = "{"; // Native phase is unselected; malformed optional text cannot taint evidence.
     if (owner.begin("lifecycle_service_observation", null)) |initial| {
         var ignored = initial;
