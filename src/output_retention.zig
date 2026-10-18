@@ -130,17 +130,6 @@ pub const Queue = struct {
         }
     }
 
-    pub fn reserveGrowth(self: *Queue, amount: u64) bool {
-        while (!self.budget.reserve(amount)) {
-            if (!self.evictOldest()) return false;
-        }
-        return true;
-    }
-
-    pub fn releaseGrowth(self: *Queue, amount: u64) void {
-        self.budget.release(amount);
-    }
-
     pub fn publishPair(self: *Queue, pair: Pair) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -235,7 +224,7 @@ pub const Queue = struct {
     fn reclaimForReservation(context: *anyopaque, amount: u64, limit: u64) bool {
         const self: *Queue = @ptrCast(@alignCast(context));
         const limited = self.budget.narrowed(limit);
-        while (!limited.reserve(amount)) {
+        while (!limited.charge(amount)) {
             if (!self.evictOldest()) return false;
         }
         return true;
@@ -267,13 +256,13 @@ test "retention evicts the oldest pair without refunding newer files" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-out", .data = "a" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-err", .data = "b" });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("old-out", 1, "old-err", 1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-out", .data = "c" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-err", .data = "d" });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("new-out", 1, "new-err", 1));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "old-out", .{}));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "old-err", .{}));
@@ -297,10 +286,10 @@ test "shared scratch reservations reclaim retained output and fail when none is 
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
     const shared = queue.sharedBudget();
-    try std.testing.expect(!shared.reserve(3));
+    try std.testing.expect(!shared.charge(3));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expect(shared.allocate(3));
@@ -322,7 +311,7 @@ test "already absent retained files release their entries and scratch charge" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
     try tmp.dir.deleteFile(std.testing.io, "stdout");
     try tmp.dir.deleteFile(std.testing.io, "stderr");
@@ -346,7 +335,7 @@ test "unconfirmed retained-file deletion preserves its entry and scratch charge"
     var entries: [2]Entry = undefined;
     var queue = Queue.initialize(std.testing.io, missing, budget, &entries);
 
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
 
     try std.testing.expectEqual(
@@ -378,7 +367,7 @@ test "reserved output is not evictable before producer aliases close and publica
 
     var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
     var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
 
     const Reservation = struct {
@@ -427,7 +416,7 @@ test "cancelling a reserved pair releases entry capacity without refunding produ
     var queue = Queue.initialize(std.testing.io, root, budget, &entries);
     defer queue.cleanupAll();
 
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
     const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
@@ -462,7 +451,7 @@ test "zero-byte retained files occupy entries without occupying scratch bytes" {
     // Fill the byte budget with unrelated usage, then require eviction:
     // evicting zero-byte entries frees entry capacity but no bytes, so the
     // reservation still fails while occupancy drops.
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     const shared = queue.sharedBudget();
     try std.testing.expect(!shared.allocate(1));
@@ -516,7 +505,7 @@ test "failed eviction retains its charge until the same queue retries successful
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
-    try std.testing.expect(budget.reserve(2));
+    try std.testing.expect(budget.charge(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
 
@@ -555,7 +544,7 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
     // while the sibling is an ordinary file that can be reclaimed.
     try tmp.dir.createDir(std.testing.io, "blocked", .default_dir);
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "removable", .data = "value" });
-    try std.testing.expect(budget.reserve(blocked_charge + removable_charge));
+    try std.testing.expect(budget.charge(blocked_charge + removable_charge));
     try std.testing.expect(try queue.retainPair(
         "blocked",
         blocked_charge,

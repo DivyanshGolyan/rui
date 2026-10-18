@@ -931,8 +931,8 @@ pub fn validateEndpoint(endpoint: []const u8) !void {
 test "scratch reservation is bounded and releases exact charge" {
     var used = std.atomic.Value(u64).init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 10 };
-    try std.testing.expect(budget.reserve(7));
-    try std.testing.expect(!budget.reserve(4));
+    try std.testing.expect(budget.charge(7));
+    try std.testing.expect(!budget.charge(4));
     budget.release(7);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
