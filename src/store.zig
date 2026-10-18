@@ -459,8 +459,9 @@ pub const ModelFailure = union(enum) {
     pub fn requestId(self: *const ModelFailure) []const u8 {
         return switch (self.*) {
             .uncorrelated => "",
-            .correlated => |value| value.request_id.slice(),
-            .rejected => |value| value.request_id.slice(),
+            // Borrow the caller's storage, never a switch-local copy.
+            .correlated => |*value| value.request_id.slice(),
+            .rejected => |*value| value.request_id.slice(),
         };
     }
 };
@@ -9572,6 +9573,12 @@ test "response-stage model failures require their provenance" {
     }
     try std.testing.expect(@hasField(ModelFailure.Correlated, "request_id"));
     try std.testing.expect(@FieldType(ModelFailure.Correlated, "diagnostic") == ?[]const u8);
+    var correlated: ModelFailure = .{ .correlated = .{ .code = "c", .request_id = .{}, .diagnostic = null } };
+    try correlated.correlated.request_id.set("request");
+    try std.testing.expectEqual(@as([*]const u8, &correlated.correlated.request_id.bytes), correlated.requestId().ptr);
+    var rejected: ModelFailure = .{ .rejected = .{ .code = "c", .diagnostic = "d", .request_id = .{} } };
+    try rejected.rejected.request_id.set("request");
+    try std.testing.expectEqual(@as([*]const u8, &rejected.rejected.request_id.bytes), rejected.requestId().ptr);
     try std.testing.expect(@hasField(ModelFailure.Rejected, "request_id"));
     try std.testing.expect(@hasField(ModelFailure.Rejected, "diagnostic"));
     try std.testing.expect(@FieldType(ModelFailure.Rejected, "diagnostic") == []const u8);

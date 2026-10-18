@@ -1680,6 +1680,8 @@ def main():
         assert restarted_failure["result"] == {
             "status": "failed",
             "code": "contradictory_provider_output",
+            "request_id": contradictory_request_id,
+            "diagnostic": restarted_failure["result"]["diagnostic"],
         }, restarted_failure
         report = command(
             "session", "inspect", "--store", contradictory_store,
@@ -1694,6 +1696,7 @@ def main():
             "byte_offset": str(len(contradictory_sse)), "output_index": None,
         }, resolution
         assert len(resolution["content"]["text"].encode()) <= 512
+        assert restarted_failure["result"]["diagnostic"] == resolution["content"]["text"], restarted_failure
         assert "must not publish" not in json.dumps(report), report
         assert report["full"]["turns"][0]["outcome"]["content"] is None, report
         unreadable_result = subprocess.run(

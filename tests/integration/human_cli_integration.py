@@ -698,7 +698,9 @@ def command_entry_cases():
         failed = admit(home, "session", "send", "--session", selected, "failure", cwd=workspace)
         observation = fixture.wait_for(lambda: (value if (value := fixture.observe(store, failed["request"])).get("result") else None),
             "failed provider result")
-        assert observation["result"] == {"status": "failed", "code": "provider_http_401"}, observation
+        assert observation["result"] == {"status": "failed", "code": "provider_http_401",
+            "request_id": None, "diagnostic": observation["result"]["diagnostic"]}, observation
+        assert json.loads(observation["result"]["diagnostic"])["http_status"] == "401", observation
         unavailable = subprocess.run([str(fixture.RUI), "request", "read-result", failed["request"]], env=env,
             capture_output=True, timeout=10)
         # Content stays content-only: the typed diagnostic goes to stderr.
@@ -3838,7 +3840,9 @@ def main(selected="all"):
         failure_release.set()
         failed_result = fixture.wait_for(lambda: fixture.command("request", "inspect", "--store", store,
             "--key", failed_key)["observation"].get("result"), "failed first Turn")
-        assert failed_result == {"status": "failed", "code": "provider_http_422"}, failed_result
+        assert failed_result == {"status": "failed", "code": "provider_http_422",
+            "request_id": None, "diagnostic": failed_result["diagnostic"]}, failed_result
+        assert json.loads(failed_result["diagnostic"])["http_status"] == "422", failed_result
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
         assert fixture.read_result(store, queued_key) == b"successor done"
         with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
