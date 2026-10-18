@@ -351,7 +351,7 @@ pub const CaptureWriter = struct {
             capture.failure = .write_failed;
             return 0;
         }
-        if (!capture.budget.reserve(bytes.len)) {
+        if (!capture.budget.allocate(bytes.len)) {
             capture.failure = .scratch_exhausted;
             return 0;
         }

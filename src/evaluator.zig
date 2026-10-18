@@ -54,7 +54,7 @@ pub const Owner = struct {
 
         fn append(self: *Scratch, bytes: []const u8) !void {
             const end = try std.math.add(u64, self.length, bytes.len);
-            if (!self.budget.reserve(bytes.len)) return error.EvaluatorOutputBudgetExceeded;
+            if (!self.budget.allocate(bytes.len)) return error.EvaluatorOutputBudgetExceeded;
             // A failed positional write may have changed an unknown prefix.
             // Keep the full reservation until confirmed removal and closure.
             self.charged += bytes.len;

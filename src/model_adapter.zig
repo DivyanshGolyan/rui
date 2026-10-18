@@ -150,7 +150,7 @@ const RequestWriter = struct {
             return error.RequestLengthOverflow;
         const next_charged = std.math.add(u64, self.charged, bytes.len) catch
             return error.RequestLengthOverflow;
-        if (!self.budget.reserve(bytes.len)) return error.RequestScratchExhausted;
+        if (!self.budget.allocate(bytes.len)) return error.RequestScratchExhausted;
         // The complete slice is charged before the OS write. A partial/error
         // write retains that full reservation until both file aliases close.
         self.charged = next_charged;

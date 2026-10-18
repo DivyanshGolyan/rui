@@ -802,7 +802,7 @@ pub const OutputMetadataWriter = struct {
     pub fn append(self: *OutputMetadataWriter, record: OutputMetadataRecord) !void {
         std.debug.assert(!self.sealed);
         if (self.fail_writes) return error.InjectedMetadataFailure;
-        if (!self.budget.reserve(output_metadata_record_bytes)) {
+        if (!self.budget.allocate(output_metadata_record_bytes)) {
             return error.MetadataScratchExhausted;
         }
         // A failed write ends validation; retain the complete fixed-record
@@ -1318,7 +1318,7 @@ const SessionReportCapture = struct {
             self.ordinary_failure = true;
             return error.ReportLengthOverflow;
         };
-        if (!self.budget.reserve(amount)) {
+        if (!self.budget.allocate(amount)) {
             self.ordinary_failure = true;
             return error.ReportScratchExhausted;
         }

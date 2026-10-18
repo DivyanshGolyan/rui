@@ -1564,7 +1564,7 @@ const ContentSink = struct {
     fn flush(self: *ContentSink) !void {
         if (self.used == 0) return;
         if (self.scratch_budget) |budget| {
-            if (!budget.reserve(self.used)) return error.ScratchCapacityExhausted;
+            if (!budget.allocate(self.used)) return error.ScratchCapacityExhausted;
             // A failed streaming write may have written a prefix. Retain the
             // complete submitted increment until this file is safely removed.
             self.charged += self.used;
