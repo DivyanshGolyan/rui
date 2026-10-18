@@ -285,7 +285,75 @@ def compaction_cases(state, processes, endpoints, releases):
     stop_endpoint(endpoint, endpoints)
 
 
-def main():
+def failure_correlation_cases(state, processes, endpoints):
+    """Bounded Debug coverage for inline failure provenance through SQLite."""
+    request_id = 'correlated-"request"\\path'
+    for label, status, schema, code in (
+        ("rejected", 200, {"type": "object"}, "unsupported_output_schema"),
+        ("correlated", 401, None, "provider_http_401"),
+        ("exhausted", 503, None, "retry_exhausted"),
+    ):
+        body = sse_answer("response", "reasoning", "message", "private answer")[0] if schema else b'{"error":"synthetic"}'
+        request_ids = ["attempt-1", "", "attempt-3", request_id] if status == 503 else [request_id]
+        endpoint = SuccessEndpoint([
+            ResponseSpec(body, {"X-Request-Id": value} if value else {}, status)
+            for value in request_ids
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / label
+        flags = ["--test-phase-trace", "--test-retry-waits-ms", "1,1,1"]
+        if schema:
+            flags += ["--fault", "response-metadata-unlink"]
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", *flags, observations="control")
+        processes.append(host)
+        diagnostics = HostDiagnostics(host)
+        configure(state, store, label + "-config", "direct/correlation", "model-a", schema)
+        message(state, store, label + "-message", "direct/correlation", "input")
+        deadline = time.monotonic() + 15
+
+        def settled():
+            value = observe(store, label + "-message", deadline=deadline)
+            return value if value.get("result") else None
+
+        result = wait_for(settled, label + " failure settlement", deadline=deadline)
+        assert result["result"]["code"] == code, result
+        resources = wait_model_cleanup(diagnostics, store, "direct/correlation", result, deadline)
+        assert not resources["dispatch_fenced"], resources
+        assert result["processing"]["attempt"] == str(len(request_ids)), result
+        attempts = [
+            {"processing": dict(result["processing"], attempt=str(ordinal))}
+            for ordinal in range(1, len(request_ids) + 1)
+        ]
+        for attempt in attempts:
+            diagnostics.wait_model_cleanup(attempt["processing"], deadline)
+        stop_host(host)
+        assert_model_cleanup_census(diagnostics, *attempts)
+        processes.remove(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            saved = database.execute(
+                "SELECT CAST(request_id AS BLOB),resolution_code,attempt_ordinal FROM model_operation"
+            ).fetchone()
+        assert saved == (request_id.encode(), code, len(request_ids)), ("failure correlation must preserve exact provider bytes", label, saved)
+        reopened = start_host(store, None)
+        processes.append(reopened)
+        report = command(
+            "session", "inspect", "--store", store,
+            "--session", "direct/correlation", "--profile", "full",
+        )
+        operation = report["full"]["model_operations"][0]
+        assert operation["request_id"] == request_id, operation
+        assert operation["resolution"]["code"] == code, operation
+        assert observe(store, label + "-message")["result"] == result["result"]
+        stop_host(reopened)
+        processes.remove(reopened)
+        assert len(endpoint.requests) == len(request_ids), endpoint.requests
+        stop_endpoint(endpoint, endpoints)
+    print("Failure correlation: rejected, HTTP and four-Attempt exhaustion preserve exact bytes through reopen")
+
+
+def main(mode="all"):
     state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -305,6 +373,10 @@ def main():
     continuation_diagnostics = None
     completed = False
     try:
+        if mode == "failure-correlation":
+            failure_correlation_cases(state, processes, endpoints)
+            completed = True
+            return
         endpoint_thread.start()
         compaction_cases(state, processes, endpoints, releases)
         forbidden_effect = state / "proposal-must-not-launch"
@@ -4578,4 +4650,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    mode = sys.argv[2] if len(sys.argv) == 3 else "all"
+    if mode not in ("all", "failure-correlation") or len(sys.argv) not in (2, 3):
+        raise SystemExit("usage: dispatch_integration.py RUI [all|failure-correlation]")
+    main(mode)
