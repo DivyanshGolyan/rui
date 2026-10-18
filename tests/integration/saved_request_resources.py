@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import pty
+from terminal_process import open_pty
 import subprocess
 import sys
 import tempfile
@@ -79,7 +80,7 @@ def retained(state, binary, label):
     records.mkdir(parents=True, mode=0o700)
     for number in range(100):
         (records / f"01234567-89ab-4cde-8012-{number:012x}.json").write_text("invalid but enumerable")
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "live-store"), "--session", "resources/original"]
         if label == "baseline" else ["resume", "--store", str(state / "live-store"), "--", "resources/original"])

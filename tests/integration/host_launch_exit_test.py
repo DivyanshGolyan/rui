@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pty
+from terminal_process import open_pty
 import select
 import shutil
 import subprocess
@@ -149,7 +150,7 @@ def check_process_discovery(cleanup):
 
 @contextmanager
 def child_pty(source, *, close_slave=False):
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     caller = None
     try:
         caller = subprocess.Popen([sys.executable, "-c", source],
@@ -284,7 +285,7 @@ def check_action_ready(action_ready):
     Saturation makes withheld credit deterministic on either platform without
     replacing tcdrain with a fixture notification or sleeping writer.
     """
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     ready_read, ready_write = os.pipe()
     held_read, held_write = os.pipe()
     release_read, release_write = os.pipe()
@@ -303,7 +304,9 @@ while True:
         break
 os.set_blocking(1, True)
 os.write(held, str(count).encode())
-tail = b't' * 65536 + b':final-choice-prompt:'
+# Main-screen bytes, then the committed frame that offers the choice.
+tail = (b't' * 65536 + b'\\x1b[?2026h\\x1b[H\\x1b[2J? Run Bash \\xc2\\xb7 probe\\r\\n'
+        b'Type a + Enter to allow once \\xc2\\xb7 d + Enter to deny\\r\\n> \\x1b[3;3H\\x1b[?2026l')
 while tail:
     tail = tail[os.write(1, tail):]
 termios.tcdrain(1)
@@ -327,7 +330,10 @@ os.read(release, 1)
             raise AssertionError("withheld PTY credit unexpectedly completed readiness")
         assert caller.poll() is None
         output = action_ready(ready_read, master, timeout=5)
-        assert output == "q" * count + "t" * 65536 + ":final-choice-prompt:", "final presentation bytes lost"
+        owner = sys.modules[action_ready.__module__]
+        assert "Type a + Enter to allow once · d + Enter to deny" in output, output
+        assert owner.terminal_capture(master).plain.startswith(
+            "q" * count + "t" * 65536 + "? Run Bash · probe\n"), "final presentation bytes lost"
         assert os.read(ready_read, 1) == b"x", "collector consumed future readiness"
         os.write(release_write, b"x")
         _, errors = caller.communicate(timeout=5)
@@ -347,7 +353,7 @@ os.read(release, 1)
         try:
             action_ready(456, 123, timeout=3)
         except AssertionError as error:
-            assert error.args[0] == ("Action input flush did not finish", b"prefix"), error
+            assert error.args[0] == ("Action input flush did not finish", ""), error
         else:
             raise AssertionError("collector renewed its deadline")
         waited.assert_called_once_with([456, 123], [], [], 2)
