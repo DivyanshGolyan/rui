@@ -43,10 +43,14 @@ pub const OutputRejection = struct {
 };
 
 pub const OutputInterpretation = union(enum) {
-    accepted: Output.Validated,
+    accepted: struct {
+        output: Output.Validated,
+        model_evidence: protocol.Bounded(775),
+    },
     rejected: OutputRejection,
 };
 
+/// Borrowed observations already bounded and UTF-8 validated by transport.
 pub const ModelObservations = struct {
     openai: []const u8 = "",
     alternate: []const u8 = "",
@@ -84,7 +88,19 @@ pub fn interpretOutput(
         .code = "contradictory_provider_output",
         .location = .{ .stage = .response, .byte_offset = source_length },
     } };
-    return .{ .accepted = validated };
+    // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
+    // source absence; agreement never substitutes the requested model.
+    var certificate: protocol.Bounded(775) = .{};
+    certificate.bytes[0] = 1;
+    certificate.len = 1;
+    for ([_][]const u8{ validated.evidence.served_model.slice(), models.openai, models.alternate }) |value| {
+        std.debug.assert(value.len <= protocol.max_model_bytes);
+        std.mem.writeInt(u16, certificate.bytes[certificate.len..][0..2], @intCast(value.len), .little);
+        certificate.len += 2;
+        @memcpy(certificate.bytes[certificate.len..][0..value.len], value);
+        certificate.len += value.len;
+    }
+    return .{ .accepted = .{ .output = validated, .model_evidence = certificate } };
 }
 
 fn modelObservationsAgree(body: []const u8, models: ModelObservations) bool {
@@ -109,12 +125,18 @@ pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, stat
 test "provider interpretation preserves accepted bytes and rejects every model disagreement" {
     const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
     const prefix = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
-    const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool }{
-        .{ .body = "", .models = .{}, .accepted = true },
-        .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true },
+    const model_255 = @as([254]u8, @splat('m')) ++ "z";
+    const model_256 = @as([255]u8, @splat('m')) ++ "z";
+    const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool, certificate: []const u8 = "" }{
+        .{ .body = "", .models = .{}, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x00\x00" },
+        .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x07\x00model-a" },
+        .{ .body = "", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .openai = "model-a", .alternate = "model-b" }, .accepted = false },
-        .{ .body = ",\"model\":\"model-a\"", .models = .{}, .accepted = true },
-        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-a", .alternate = "model-a" }, .accepted = true },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{}, .accepted = true, .certificate = "\x01\x07\x00model-a\x00\x00\x00\x00" },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-a", .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x07\x00model-a\x07\x00model-a\x07\x00model-a" },
+        .{ .body = ",\"model\":\"m-λ\"", .models = .{ .alternate = "m-λ" }, .accepted = true, .certificate = "\x01\x04\x00m-λ\x00\x00\x04\x00m-λ" },
+        .{ .body = ",\"model\":\"" ++ model_255 ++ "\"", .models = .{ .openai = model_255, .alternate = model_255 }, .accepted = true, .certificate = "\x01\xff\x00" ++ model_255 ++ "\xff\x00" ++ model_255 ++ "\xff\x00" ++ model_255 },
+        .{ .body = ",\"model\":\"" ++ model_256 ++ "\"", .models = .{ .openai = model_256, .alternate = model_256 }, .accepted = true, .certificate = "\x01\x00\x01" ++ model_256 ++ "\x00\x01" ++ model_256 ++ "\x00\x01" ++ model_256 },
         .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-b" }, .accepted = false },
         .{ .body = ",\"model\":\"model-a\"", .models = .{ .alternate = "model-a-extra" }, .accepted = false },
     };
@@ -136,10 +158,11 @@ test "provider interpretation preserves accepted bytes and rejects every model d
         const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, .assistant_response, case.models, .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
-            try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.answer_length);
-            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.answer_digest);
-            try std.testing.expectEqualStrings("r", interpreted.accepted.evidence.response_id.slice());
-            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.item_count);
+            try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &interpreted.accepted.output.answer_digest);
+            try std.testing.expectEqualStrings("r", interpreted.accepted.output.evidence.response_id.slice());
+            try std.testing.expectEqualSlices(u8, case.certificate, interpreted.accepted.model_evidence.slice());
+            var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, interpreted.accepted.output.item_count);
             var pressure: ?u64 = null;
             while (try reader.next()) |record| if (record.tag == .usage) {
                 pressure = record.usage_tokens;
@@ -1443,9 +1466,7 @@ fn settleComposedForTesting(
         .answer_length = 0,
         .answer_digest = protocol.contentDigest(""),
         .response_id = .{},
-        .body_model = .{},
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = .{ .len = 7, .bytes = .{1} ++ @as([774]u8, @splat(0)) },
         .request_id = .{},
     }, .{});
 }
@@ -2378,8 +2399,11 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
-    var rejection: Output.Rejection = .{};
-    const result = try Output.validate(std.testing.io, source, sse.len, &metadata, .compaction, &rejection, .{});
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, .compaction, .{}, .{})) {
+        .accepted => |value| value,
+        .rejected => return error.UnexpectedOutputRejection,
+    };
+    const result = accepted.output;
     try setup.submit("compact-later", "compact-later-key", "direct/compact-prep", "later host input");
     try setup.storage.settleModelSuccess(binding, &.{
         .source = source,
@@ -2390,9 +2414,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
         .answer_length = result.answer_length,
         .answer_digest = result.answer_digest,
         .response_id = result.evidence.response_id,
-        .body_model = result.evidence.served_model,
-        .openai_model = .{},
-        .x_openai_model = .{},
+        .model_evidence = accepted.model_evidence,
         .request_id = .{},
     }, .{});
     var successor = (try setup.storage.admitNextModelAttempt(.{})).?;

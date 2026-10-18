@@ -24,6 +24,23 @@ from model_fixture import (
 )
 
 
+def decode_model_evidence(value):
+    """Independent oracle for the adapter's opaque v1 source certificate."""
+    assert isinstance(value, bytes) and 7 <= len(value) <= 775, value
+    assert value[0] == 1, value
+    fields = []
+    offset = 1
+    for _ in range(3):
+        assert offset + 2 <= len(value), value
+        length = int.from_bytes(value[offset:offset + 2], "little")
+        offset += 2
+        assert length <= 256 and offset + length <= len(value), value
+        fields.append(value[offset:offset + length].decode("utf-8") if length else None)
+        offset += length
+    assert offset == len(value), value
+    return tuple(fields)
+
+
 def stop_endpoint(endpoint, endpoints):
     thread = endpoints[endpoint]
 
@@ -995,9 +1012,10 @@ def main():
                 "SELECT CAST(c.payload AS TEXT) FROM model_output_item item JOIN content c ON c.content_id=item.content_id ORDER BY item.operation_id,item.item_ordinal LIMIT 1"
             ).fetchone()[0]
             assert json.loads(raw_reasoning)["created_by"] == "d" * 64
-            assert database.execute(
-                "SELECT response_id,body_model,openai_model,x_openai_model,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
-            ).fetchall() == [
+            observations = database.execute(
+                "SELECT response_id,model_evidence,request_id,resolution_code,usage_content_id IS NOT NULL FROM model_operation ORDER BY operation_id"
+            ).fetchall()
+            assert [(row[0], *decode_model_evidence(row[1]), *row[2:]) for row in observations] == [
                 (
                     "response-1",
                     "model-a-served",
@@ -1547,9 +1565,10 @@ def main():
             assert read_result(evidence_store, f"evidence-{name}-message") == f"answer-{name}".encode()
             database = sqlite3.connect(evidence_store / "rui.sqlite3")
             actual_evidence = database.execute(
-                "SELECT body_model,openai_model,x_openai_model,request_id FROM model_operation"
+                "SELECT model_evidence,request_id FROM model_operation"
             ).fetchone()
             database.close()
+            actual_evidence = (*decode_model_evidence(actual_evidence[0]), actual_evidence[1])
             assert actual_evidence == expected_evidence, (name, actual_evidence, expected_evidence)
             stop_host(reopened)
             processes.remove(reopened)
@@ -1614,8 +1633,8 @@ def main():
         assert len(contradictory_endpoint.requests) == 1
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
-            "SELECT uncertain,resolution_code,response_id,body_model,openai_model,x_openai_model,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, None, None, contradictory_request_id)
+            "SELECT uncertain,resolution_code,response_id,model_evidence,request_id FROM model_operation"
+        ).fetchone() == (0, "contradictory_provider_output", None, None, contradictory_request_id)
         assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
@@ -1744,9 +1763,12 @@ def main():
         for index, request_id in enumerate(schema_request_ids):
             schema_store = state / f"unsupported-schema-store-{index}"
             schema_host = start_host(
-                schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses"
+                schema_store, f"http://127.0.0.1:{schema_endpoint.server_port}/responses",
+                "--fault", "response-metadata-unlink",
+                "--test-phase-trace", observations="control",
             )
             processes.append(schema_host)
+            schema_diagnostics = HostDiagnostics(schema_host)
             configure(
                 state,
                 schema_store,
@@ -1762,12 +1784,17 @@ def main():
                 "direct/unsupported-schema",
                 "return an object",
             )
+            schema_deadline = time.monotonic() + 8
             schema_failure = wait_for(
-                lambda: (value := observe(schema_store, f"schema-message-{index}")).get("result", {}).get("code")
+                lambda: (value := observe(schema_store, f"schema-message-{index}", deadline=schema_deadline)).get("result", {}).get("code")
                 and value,
                 "unsupported structured output rejection",
+                deadline=schema_deadline,
             )
             assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
+            resources = wait_model_cleanup(schema_diagnostics, schema_store, "direct/unsupported-schema", schema_failure, schema_deadline)
+            assert not resources["dispatch_fenced"], resources
+            assert not list((schema_store / "scratch").glob("response-metadata-*.tmp"))
             with sqlite3.connect(schema_store / "rui.sqlite3") as database:
                 assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
                 assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
@@ -1781,6 +1808,7 @@ def main():
                 "--session", "direct/unsupported-schema", "--profile", "full",
             )["full"]["model_operations"][0]
             stop_host(schema_host)
+            assert_model_cleanup_census(schema_diagnostics, schema_failure)
             processes.remove(schema_host)
             reopened = start_host(schema_store, None)
             processes.append(reopened)
