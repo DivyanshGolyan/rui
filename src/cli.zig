@@ -994,12 +994,22 @@ const NewSessionOptions = struct {
     }
 };
 
-fn newSession(init: std.process.Init, args: []const []const u8) !void {
-    const options = try NewSessionOptions.parse(args);
+/// Conversations draw cells on the terminal's alternate screen. Refuse before
+/// any Host or Session change when that terminal is absent or cannot draw.
+fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output to create a Session; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{});
+        TerminalText.diagnostic("rui needs terminal input and output {s}; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
+    if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
+        TerminalText.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed.\n", .{purpose});
+        return error.InteractiveTerminalRequired;
+    }
+}
+
+fn newSession(init: std.process.Init, args: []const []const u8) !void {
+    const options = try NewSessionOptions.parse(args);
+    try requireInteractiveTerminal(init, "to create a Session");
     const saved = (try createSession(init, options)) orelse return;
     runSession(init, saved.store.slice(), saved.session.slice(), options.prompt) catch |err| {
         // Configuration acceptance and local entry are independent outcomes.
@@ -1442,11 +1452,8 @@ fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store
     const report = try inspectWorkTo(init, requester, store, session_ref, out);
     defer report.file.close(init.io);
     const work = &report.current;
-    if (view == .opening) {
-        if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
-            try out.writeAll("Bash runs without approval.\n");
-        return;
-    }
+    // Entry only confirms configuration; the Session screen shows its notice.
+    if (view == .opening) return;
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
@@ -1529,11 +1536,10 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         const directory = requestDirectory(init, &directory_buffer) catch |err| break :run err;
         const scratch = renderScratch(init) catch |err| break :run err;
         defer scratch.close(init.io);
-        const vaxis = SessionFrontend.rendererEnabled(init.environ_map);
-        const action = if (vaxis) renderScratch(init) catch |err| break :run err else scratch;
-        defer if (vaxis) action.close(init.io);
-        const inspection = if (vaxis) renderScratch(init) catch |err| break :run err else scratch;
-        defer if (vaxis) inspection.close(init.io);
+        const action = renderScratch(init) catch |err| break :run err;
+        defer action.close(init.io);
+        const inspection = renderScratch(init) catch |err| break :run err;
+        defer inspection.close(init.io);
         break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, initial_text);
     };
     return outcome catch |err| {
@@ -1565,7 +1571,7 @@ fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
         if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session") and reference == null) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session-hex") and reference == null) reference = try decodeHexIdentity(try takeValue(args, &index), &session_hex) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
     }
     if (last == (reference != null)) return usage();
-    if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
+    try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback));
     const destination = paths.store.slice();
@@ -1635,20 +1641,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return;
         };
         setup(init, setup_args[0..count], true) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
-    } else if (std.mem.eql(u8, text, "/status")) {
-        showSessionStatus(init, requests_context, destination, reference, .full) catch |err| {
-            if (err == error.CanonicalStoreFailure) return err;
-            TerminalText.diagnostic("rui: status: {s}\n", .{@errorName(err)});
-        };
-    } else if (std.mem.eql(u8, text, "/requests")) {
-        // Inline enumeration was unbuffered: preserve partial-output ordering
-        // and finish the local listing before normal interruption detaches.
-        var buffer: [0]u8 = .{};
-        var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-        sessionInspect(init, .{ .io = init.io }, destination, reference, text, &writer.interface) catch |err| {
-            TerminalText.diagnostic("rui: requests: {s}\n", .{@errorName(err)});
-            return;
-        };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
@@ -1706,9 +1698,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
             };
         } else try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-    } else {
-        try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Unknown command. Type /help.\n");
-    }
+    } else return error.UnknownArgument; // The Session frontend admits only the commands above.
 }
 
 // Decode command arguments into the editor's borrowed line. Removing quotes

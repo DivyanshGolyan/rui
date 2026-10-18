@@ -13,7 +13,15 @@ from wcwidth import wcwidth
 
 LIMIT = 1024 * 1024
 BOUNDARY = re.compile(r"\x1b\[\?2026([hl])")
+PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)")
 RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l"
+
+
+def shown(text, screen):
+    """`text` appears on `screen` even where rows broke it: inside a long word
+    the frame breaks between characters; at a space, word wrap drops it."""
+    pattern = "\n?".join("[ \n]" if c == " " else re.escape(c) for c in text)
+    return re.search(pattern, screen) is not None
 
 
 class CombiningScreen(pyte.Screen):
@@ -49,8 +57,21 @@ class ScreenCapture:
         self.stream = pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = self.frame = self.completed = ""
+        # Cells of the latest committed frame, for style oracles.
+        self.completed_cells = []
         self.synchronized = False
         self.generation = 0
+        # Optional observer of every committed frame, not only the latest:
+        # a frame can be replaced within the same read.
+        self.listener = None
+        self.received_bytes = 0  # Output volume, for repaint-cost oracles.
+        self.alternate = False
+        self.plain = ""
+        self.plain_total = 0
+
+    def plain_since(self, total):
+        """Main-screen text written after `plain_total` was `total`."""
+        return self.plain[max(0, len(self.plain) - (self.plain_total - total)):]
 
     def resize(self, columns, rows):
         assert 0 < columns <= 4096 and 0 < rows <= 512
@@ -62,14 +83,24 @@ class ScreenCapture:
             assert len(self.frame.encode()) < LIMIT, "unbounded terminal frame"
         else:
             # pyte does not implement the alternate-screen buffer.
-            for part in re.split(r"(\x1b\[\?1049h)", text):
+            for part in re.split(r"(\x1b\[\?1049[hl])", text):
                 if part == "\x1b[?1049h":
                     self.screen.reset()
                     self.completed = ""
+                    self.alternate = True
+                elif part == "\x1b[?1049l":
+                    self.alternate = False
                 else:
                     self.stream.feed(part)
+                    if not self.alternate:
+                        # Main-screen text (before entry or after restoration),
+                        # such as diagnostics and detach notices, is a stream.
+                        visible = PLAIN_CONTROL.sub("", part).replace("\r\n", "\n")
+                        self.plain = (self.plain + visible)[-LIMIT // 4:]
+                        self.plain_total += len(visible)
 
     def feed(self, data):
+        self.received_bytes += len(data)
         self.pending += self.decoder.decode(data)
         assert len(self.pending.encode()) < LIMIT, "unbounded terminal output"
         while True:
@@ -102,7 +133,33 @@ class ScreenCapture:
                 self.frame = ""
                 self.generation += 1
                 self.completed = "\n".join(line.rstrip() for line in self.screen.display)
+                self.completed_cells = [[self.screen.buffer[y][x] for x in range(self.screen.columns)]
+                                        for y in range(self.screen.lines)]
                 assert len(self.completed.encode()) < LIMIT
+                if self.listener is not None:
+                    self.listener(self.completed, self.screen.cursor.x, self.screen.cursor.y)
+
+    def style(self, text, offset=0):
+        """Committed cell `offset` characters into the first `text`, or None."""
+        text = unicodedata.normalize("NFC", text)
+        for row in self.completed_cells:
+            # A wide character's trailing cell is empty; index drawn cells.
+            drawn = [cell for cell in row if cell.data]
+            starts, position = {}, 0
+            for cell in drawn:
+                starts[position] = cell
+                position += len(cell.data)
+            line = "".join(cell.data for cell in drawn)
+            index = line.find(text)
+            while index >= 0:
+                if index in starts:
+                    cell = starts[index]
+                    for _ in range(offset):
+                        index += len(cell.data)
+                        cell = starts[index]
+                    return cell
+                index = line.find(text, index + 1)
+        return None
 
     def reached(self, marker):
         return (not self.synchronized and self.generation > 0

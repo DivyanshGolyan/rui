@@ -4,6 +4,8 @@ import json
 import os
 import pathlib
 import pty
+from terminal_process import COLUMNS, ROWS, open_pty
+from terminal_screen import ScreenCapture, shown
 import re
 import select
 import shutil
@@ -58,7 +60,7 @@ def expect_mutation_error(result, saved, *, human=False, status=500,
     if human:
         for label, field in (("Store", "store"), ("Session", "session"), ("key", "key")):
             escaped = json.dumps(context[field], ensure_ascii=False)[1:-1]
-            assert f"{label}: {escaped}\n" in result.stdout, result
+            assert shown(f"{label}: {escaped}\n", result.stdout), result
         assert f"invocation: {reason} (HTTP {status}); outcome unconfirmed\n" in result.stdout, result
         if diagnostic:
             assert f"type: {diagnostic['type']}\ncode: {diagnostic['code']}\n" in result.stdout, result
@@ -385,7 +387,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             args = (["session", "resume", "--store", str(store), "--", "original/session"] if line is not None
@@ -405,8 +407,8 @@ def interactive_cases(state, binding=False, null_code=False):
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 if line is not None:
                     if route == "/v1/control/permission-decision":
-                        proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
-                        assert "Run Bash:\n  true" in proposal, proposal
+                        proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
+                        assert "\n? Run Bash · " in proposal and "\n  $ true\n" in proposal, proposal
                         human.assert_permission_workspace(proposal, state)
                         proposal += human.action_ready(ready_read, master)
                     else:
@@ -479,8 +481,9 @@ def interactive_cases(state, binding=False, null_code=False):
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
+                        human.return_to_live(master)
                         os.write(master, b"\n")
-                        human.read_terminal(master, "› ")
+                        human.settle_screen(master, quiet=0.5)
                         assert len(proxy.exchanges) == 1, "empty input retried unconfirmed intent"
                         proxy.rewrite = lambda response: response
                         os.write(master, b"\x12")
@@ -490,8 +493,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         assert recovered["status"] == "accepted" and recovered["replayed"] is True, recovered
                         assert record.read_bytes() == original
                         if route == "/v1/message":
-                            if "a: Allow once / d: Deny (Enter)" not in output:
-                                output += human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                            output += human.await_screen(master, "Type a + Enter to allow once · d + Enter to deny")
                             output += human.action_ready(ready_read, master)
                     os.write(master, b"/exit\n")
                 # Supply output credit during the original exit budget for
@@ -509,8 +511,12 @@ def interactive_cases(state, binding=False, null_code=False):
                 else:
                     assert caller.returncode != 0, "fatal mutation resumed the Session prompt"
                 errors = errors.decode()
-                if not binding or line is None or route == "/v1/configure":
+                if not binding or line is None:
                     assert (reason if binding else "CanonicalStoreFailure") in errors, errors
+                elif route == "/v1/configure":
+                    # The in-screen command showed its own diagnostic; exit
+                    # prints only command output that was never shown.
+                    assert reason in output and reason not in errors, (output, errors)
                 else:
                     assert "CanonicalStoreFailure" not in errors, errors
                 if route == "/v1/activity-page":
@@ -603,7 +609,7 @@ def permission_read_cases(state):
             response = (f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
                 f"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
             proxy = ReplyProxy(host, "/v1/read-action-arguments", lambda reply: response)
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             original = termios.tcgetattr(slave)
             caller = None
             try:
@@ -623,7 +629,12 @@ def permission_read_cases(state):
                     assert "rui: Read failed: HTTP 503; type: busy; code: host_busy\n" in errors, errors
                 else:
                     assert "rui: Read failed:" not in errors and "type:" not in errors and "code:" not in errors, errors
-                assert b"a: Allow once" not in output and b"Run Bash:" not in output, output
+                # No committed frame offered the Action that failed to read.
+                frames = []
+                screen = ScreenCapture(COLUMNS, ROWS)
+                screen.listener = lambda shown, x, y: frames.append(shown)
+                screen.feed(output)
+                assert not any("allow once" in frame or "? Run Bash" in frame for frame in frames), frames
                 assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
                 assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
                 actual = termios.tcgetattr(slave)
@@ -659,7 +670,7 @@ def permission_read_cases(state):
             b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None
         try:

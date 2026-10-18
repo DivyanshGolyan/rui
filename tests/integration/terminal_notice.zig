@@ -8,7 +8,7 @@ pub fn main() !void {
     var terminal: Terminal = .{
         .original = undefined,
         .flags = .{ 0, flags },
-        .colour = false,
+        .screen = undefined,
         .active = false,
     };
     try terminal.detached("/tmp/a' path", "--session", null);
