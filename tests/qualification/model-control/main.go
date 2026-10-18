@@ -137,7 +137,7 @@ func (e *streamEndpoint) Close() error {
 
 func stopSession(client measurement.Client, key, session string) (map[string]any, error) {
 	var reply map[string]any
-	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "stop-session", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session)
+	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "session", "stop", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session)
 	return reply, err
 }
 func interrupt(client measurement.Client, key, session string, processing map[string]any) (map[string]any, error) {
@@ -147,7 +147,7 @@ func interrupt(client measurement.Client, key, session string, processing map[st
 		return nil, fmt.Errorf("processing identity incomplete: %v", processing)
 	}
 	var reply map[string]any
-	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "interrupt-model", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session, "--turn", turn, "--operation", operation)
+	err := measurement.RunJSON(client.Deadline, &reply, client.Binary, "session", "interrupt-model", "--store", client.Store, "--record", filepath.Join(client.Artifacts, key+".json"), "--key", key, "--session", session, "--turn", turn, "--operation", operation)
 	return reply, err
 }
 func accepted(reply map[string]any) bool {
@@ -1404,7 +1404,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	idleStopSelectionTurns["blocked-result-stop"] = nil
 	closeAll(blocked)
 	destination := filepath.Join(directory, "large-answer.bin")
-	output, err := measurement.Run(deadline, binary, "read-result", "--store", store, "--key", "real-settlement-message")
+	output, err := measurement.Run(deadline, binary, "request", "read-result", "--store", store, "--key", "real-settlement-message")
 	if err != nil {
 		return nil, err
 	}

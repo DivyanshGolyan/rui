@@ -218,7 +218,7 @@ def matching_processes(store, *, descendants=False):
             except (ValueError, IndexError):
                 continue
     for pid, text in candidates:
-        if len(text) >= 4 and pathlib.Path(text[0]).resolve() == RUI and text[1:3] == ["serve", "--store"]:
+        if len(text) >= 4 and pathlib.Path(text[0]).resolve() == RUI and text[1:3] == ["host", "serve", "--store"]:
             try:
                 selected = str(pathlib.Path(text[3]).resolve())
             except OSError:
@@ -574,7 +574,7 @@ def main():
         # A held lease is attached, not replaced or reconfigured.
         held_store = root / "held-store"
         held, _ = start_ready_process(
-            [RUI, "serve", "--store", held_store, "--active-capacity", "3"],
+            [RUI, "host", "serve", "--store", held_store, "--active-capacity", "3"],
             required_fields={"active_capacity": "3"},
         )
         try:
@@ -684,7 +684,7 @@ def main():
         # The production default remains 1000. Its descriptor admission runs
         # before the lease/diagnostic writer, so rejection creates no Store.
         rejected_store = root / "default-capacity-rejected"
-        rejected = subprocess.run([RUI, "serve", "--store", rejected_store],
+        rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
             env=clean_env, preexec_fn=lower_descriptor_limit,
             capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
         assert rejected.returncode != 0, rejected
@@ -697,7 +697,7 @@ def main():
         # Capacity 8 is the existing desktop profile. Admit this child so the
         # disconnected pipe exercises readiness output, not pre-lease refusal.
         disconnected_store = root / "disconnected-stdout"
-        disconnected = subprocess.Popen([RUI, "serve", "--store", disconnected_store, "--active-capacity", "8"],
+        disconnected = subprocess.Popen([RUI, "host", "serve", "--store", disconnected_store, "--active-capacity", "8"],
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
@@ -778,7 +778,7 @@ def main():
             assert actual_terminal == original_terminal, (actual_terminal, original_terminal, output)
             assert b"Host ready" not in output and b"Attached to the ready Host" not in output and b"Diagnostics:" not in output, output
             assert instance(status(bare_store, bare_env), 8)
-            inspected = subprocess.run([RUI, "inspect-session", "--store", bare_store, "--session", reference],
+            inspected = subprocess.run([RUI, "session", "inspect", "--store", bare_store, "--session", reference],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert inspected.returncode == 0, inspected.stderr
             current = json.loads(inspected.stdout)["session"]
@@ -786,7 +786,7 @@ def main():
                 "reference": reference, "workspace": str(root.resolve()), "provider": "codex",
                 "model": "gpt-6-luna", "tools": ["bash"], "permission_mode": "bypass",
             }, current
-            recovered = subprocess.run([RUI, "recover", key, "--json"],
+            recovered = subprocess.run([RUI, "request", "recover", key, "--json"],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert recovered.returncode == 0, recovered.stderr
             answer = json.loads(recovered.stdout)["answer"]

@@ -122,7 +122,7 @@ def run(binary, update_delay, iteration):
             result = dispatch.observe(store, "message")["result"]
             assert result["status"] == "completed", result
             assert dispatch.read_result(store, "message") == ANSWER.encode()
-            execution = dispatch.command("inspect-session", "--store", store,
+            execution = dispatch.command("session", "inspect", "--store", store,
                                          "--session", "direct/latency")["execution"]
             assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
             assert endpoint.streams == 1 and endpoint.updates > 0 and endpoint.request_sha256 is not None

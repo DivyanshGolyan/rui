@@ -365,7 +365,7 @@ func readResult(deadline measurement.Deadline, binary, store, key, destination s
 	if runtime.GOOS == "linux" {
 		timeOption = "-v"
 	}
-	cmd := exec.CommandContext(ctx, "/usr/bin/time", timeOption, binary, "read-result", "--store", store, "--key", key)
+	cmd := exec.CommandContext(ctx, "/usr/bin/time", timeOption, binary, "request", "read-result", "--store", store, "--key", key)
 	cmd.Stdout, cmd.Stderr = file, &stderr
 	runError := cmd.Run()
 	closeError := file.Close()
@@ -1352,7 +1352,7 @@ func measureCapacityRound(binary, directory, store, workspace string, round, cap
 			resultDeliveryComplete = false
 			continue
 		}
-		answer, err := measurement.Run(deadline, binary, "read-result", "--store", store, "--key", key)
+		answer, err := measurement.Run(deadline, binary, "request", "read-result", "--store", store, "--key", key)
 		if err != nil {
 			return nil, err
 		}

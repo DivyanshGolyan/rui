@@ -69,12 +69,12 @@ def producer_cases(state):
     text = state / "input"
     text.write_text("original mutation bytes")
     commands = {
-        "configure": ["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
-        "message": ["message", "--text", text],
-        "permission-decision": ["allow-action", "--action", "7"],
-        "permission-denial": ["deny-action", "--action", "7"],
+        "configure": ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
+        "message": ["session", "send", "--text", text],
+        "permission-decision": ["action", "allow", "--action", "7"],
+        "permission-denial": ["action", "deny", "--action", "7"],
         "session-stop": ["stop-session"],
-        "model-interruption": ["interrupt-model", "--turn", "3", "--operation", "5"],
+        "model-interruption": ["session", "interrupt-model", "--turn", "3", "--operation", "5"],
     }
     for name, command in commands.items():
         kind = "permission-decision" if name == "permission-denial" else name
@@ -114,7 +114,7 @@ def producer_cases(state):
                 for recovery_mode in ([], ["--json"]):
                     host = fixture.start_host(store, None, "--fault", "before-commit")
                     try:
-                        recovered = invoke(home, "recover", key, *recovery_mode)
+                        recovered = invoke(home, "request", "recover", key, *recovery_mode)
                         expect_fatal(recovered)
                         expect_mutation_error(recovered, json.loads(original), human=not recovery_mode)
                         assert record.read_bytes() == original, recovered
@@ -122,7 +122,7 @@ def producer_cases(state):
                         fixture.stop_host(host)
             host = fixture.start_host(store, None, "--fault", "before-commit")
             try:
-                retried = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
+                retried = invoke(home, "request", "recover", "--store", store, "--record", record, "--kind", kind)
                 expect_fatal(retried)
                 expect_mutation_error(retried, json.loads(original))
                 assert record.read_bytes() == original, retried
@@ -229,12 +229,12 @@ def binding_cases(state, null_code=False):
     text = home / "input"
     text.write_text("a\nµ")
     commands = (
-        ("configure", "/v1/configure", ["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"]),
-        ("message", "/v1/message", ["message", "--text", text]),
+        ("configure", "/v1/configure", ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"]),
+        ("message", "/v1/message", ["session", "send", "--text", text]),
         ("session-stop", "/v1/control/session-stop", ["stop-session"]),
-        ("model-interruption", "/v1/control/model-interruption", ["interrupt-model", "--turn", "3", "--operation", "11"]),
-        ("permission-decision", "/v1/control/permission-decision", ["deny-action", "--action", "7"]),
-        ("permission-allow", "/v1/control/permission-decision", ["allow-action", "--action", "7"]),
+        ("model-interruption", "/v1/control/model-interruption", ["session", "interrupt-model", "--turn", "3", "--operation", "11"]),
+        ("permission-decision", "/v1/control/permission-decision", ["action", "deny", "--action", "7"]),
+        ("permission-allow", "/v1/control/permission-decision", ["action", "allow", "--action", "7"]),
     )
     try:
         for name, route, command in commands:
@@ -258,8 +258,8 @@ def binding_cases(state, null_code=False):
                 assert record.read_bytes() == request
                 expect_mutation_error(result, saved, human=mode == "human", status=200,
                     reason=reason, diagnostic=None)
-                for recovery in (["retry", "--store", store, "--record", record, "--kind", kind],
-                        *([["recover", key, "--json"]] if mode != "raw" else [])):
+                for recovery in (["request", "recover", "--store", store, "--record", record, "--kind", kind],
+                        *([["request", "recover", key, "--json"]] if mode != "raw" else [])):
                     proxy = ReplyProxy(host, route, rewrite)
                     try:
                         failed = invoke(home, *recovery)
@@ -268,10 +268,10 @@ def binding_cases(state, null_code=False):
                         proxy.close()
                     expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
                     assert record.read_bytes() == request
-                recovered = invoke(home, "retry", "--store", store, "--record", record, "--kind", kind)
+                recovered = invoke(home, "request", "recover", "--store", store, "--record", record, "--kind", kind)
                 assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
                 if mode != "raw":
-                    recovered = invoke(home, "recover", key, "--json")
+                    recovered = invoke(home, "request", "recover", key, "--json")
                     assert recovered.returncode == 0 and json.loads(recovered.stdout)["answer"]["replayed"] is True, recovered
                 assert record.read_bytes() == request
     finally:
@@ -285,13 +285,13 @@ def committed_cases(state):
     store = home / "store"
     host = fixture.start_host(store, None)
     try:
-        configured = invoke(home, "configure", "--store", store, "--session", "original/session",
+        configured = invoke(home, "session", "configure", "--store", store, "--session", "original/session",
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--json")
         assert configured.returncode == 0, configured
         for mode in ("human", "json"):
             proxy = ReplyProxy(host, "/v1/message")
             try:
-                result = invoke(home, "message", "--store", store, "--session", "original/session",
+                result = invoke(home, "session", "send", "--store", store, "--session", "original/session",
                     "original committed bytes", *(["--json"] if mode == "json" else []))
                 expect_fatal(result)
             finally:
@@ -311,7 +311,7 @@ def committed_cases(state):
                 assert captured == {"event": "captured", "request": key}, captured
             expect_mutation_error(result, saved, human=mode == "human")
             for recovery_mode in ([], ["--json"]):
-                recovered = invoke(home, "recover", key, *recovery_mode)
+                recovered = invoke(home, "request", "recover", key, *recovery_mode)
                 assert recovered.returncode == 0, recovered
                 if recovery_mode:
                     assert json.loads(recovered.stdout)["answer"] == {**answer, "replayed": True}, recovered
@@ -326,9 +326,9 @@ def committed_cases(state):
         # Keyed reads retain typed diagnostics and the queried key; the distinct
         # inspection/report route remains outside this owner correction.
         for route, args in (
-            ("/v1/observe-command", ["observe-command", "--key", key]),
-            ("/v1/read-result", ["read-result", "--key", key]),
-            ("/v1/inspect-session", ["inspect-session", "--session", "original/session"]),
+            ("/v1/observe-command", ["request", "inspect", "--key", key]),
+            ("/v1/read-result", ["request", "read-result", "--key", key]),
+            ("/v1/inspect-session", ["session", "inspect", "--session", "original/session"]),
         ):
             proxy = ReplyProxy(host, route)
             try:
@@ -368,7 +368,7 @@ def interactive_cases(state, binding=False, null_code=False):
     endpoint_thread.start()
     host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     try:
-        configured = invoke(home, "configure", "--store", store, "--session", "original/session",
+        configured = invoke(home, "session", "configure", "--store", store, "--session", "original/session",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
         assert configured.returncode == 0, configured
         codex.credentials(home / ".config/rui/codex.json")
@@ -380,7 +380,7 @@ def interactive_cases(state, binding=False, null_code=False):
             master, slave = pty.openpty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
-            args = (["resume", "--store", str(store), "--", "original/session"] if line is not None
+            args = (["session", "resume", "--store", str(store), "--", "original/session"] if line is not None
                 else ["--store", str(store), "--provider", "codex", "--model", "gpt-6-luna"])
             proxy = None
             caller = None
@@ -580,10 +580,10 @@ def permission_read_cases(state):
     host = None
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        assert invoke(home, "configure", "--store", store, "--session", "permission/read",
+        assert invoke(home, "session", "configure", "--store", store, "--session", "permission/read",
             "--workspace", state, "--provider", "codex", "--model", "model-a",
             "--permission-mode", "ask").returncode == 0
-        assert invoke(home, "message", "--store", store, "--session", "permission/read",
+        assert invoke(home, "session", "send", "--store", store, "--session", "permission/read",
             "inspect exact permission").returncode == 0
         records = home / ".config/rui/requests"
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
@@ -599,7 +599,7 @@ def permission_read_cases(state):
             original = termios.tcgetattr(slave)
             caller = None
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "permission/read"],
+                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "permission/read"],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 try:
                     output, errors = human.terminal_exit(caller, master, timeout=10)
@@ -643,7 +643,7 @@ def permission_read_cases(state):
                 os.close(slave)
         # An ordinary details preparation failure stays live and is delivered
         # before the next Activity borrower can reset its diagnostic storage.
-        assert invoke(home, "configure", "--store", store, "--session", "details/read",
+        assert invoke(home, "session", "configure", "--store", store, "--session", "details/read",
             "--workspace", state, "--provider", "codex", "--model", "model-a").returncode == 0
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         body = b'{"version":"1","type":"busy","code":"host_busy"}'
@@ -655,7 +655,7 @@ def permission_read_cases(state):
         original = termios.tcgetattr(slave)
         caller = None
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "details/read"],
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "details/read"],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"/details\n")
@@ -701,7 +701,7 @@ def store_read_cases(state):
     try:
         fixture.configure(home, store, "store-read-configure", "s", "model-a")
         fixture.message(home, store, "store-read-message", "s", "queued work")
-        before = invoke(home, "read-result", "--store", store, "--key", "store-read-message")
+        before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         assert json.loads(before.stdout)["error"]["code"] == "result_not_ready", before
         # The statement still compiles; SQLite fails it at the first step,
         # as for an I/O or corruption fault after preparation.
@@ -713,7 +713,7 @@ def store_read_cases(state):
                     "WHERE abs(-9223372036854775808) IS NOT NULL")
         finally:
             database.close()
-        result = invoke(home, "read-result", "--store", store, "--key", "store-read-message")
+        result = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         expect_fatal(result)
         assert json.loads(result.stdout) == {"key": "store-read-message",
             "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}, result
@@ -737,9 +737,9 @@ def keyed_observation_cases(state, only="keyed"):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         kinds = ("configure", "message", "session_stop", "model_interruption", "permission_decision")
-        commands = (["configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
+        commands = (["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
             ["message", "submitted bytes"], ["stop-session"],
-            ["interrupt-model", "--turn", "733", "--operation", "911"], ["allow-action", "--action", "721"])
+            ["session", "interrupt-model", "--turn", "733", "--operation", "911"], ["action", "allow", "--action", "721"])
         keys = {}
         for kind, command in zip(kinds, commands):
             args = [*command, "--store", store, "--session", "s"]
@@ -748,7 +748,7 @@ def keyed_observation_cases(state, only="keyed"):
             assert submitted.returncode == 0, submitted
             key = json.loads(submitted.stdout.splitlines()[0])["request"] if kind == "message" else kind
             keys[kind] = key
-            observed = json.loads(invoke(home, "observe-command", "--store", store, "--key", key).stdout)["observation"]
+            observed = json.loads(invoke(home, "request", "inspect", "--store", store, "--key", key).stdout)["observation"]
             assert observed["kind"] == kind and observed["target"] == "s", observed
             assert observed["status"] == ("rejected" if kind in ("model_interruption", "permission_decision") else "accepted"), observed
             if kind == "message":
@@ -771,7 +771,7 @@ def keyed_observation_cases(state, only="keyed"):
                 continue
             proxy = ReplyProxy(host, "/v1/observe-command", lambda response: rewrite(response, omitted))
             try:
-                for args in (["observe-command", "--store", store, "--key", key], ["result", key, "--json"], ["follow", key, "--json"]):
+                for args in (["request", "inspect", "--store", store, "--key", key], ["result", key, "--json"], ["follow", key, "--json"]):
                     result = invoke(home, *args)
                     if omitted:
                         assert result.returncode != 0 and "InvalidObservation" in result.stderr, ("omitted processing binding was confirmed", result)
@@ -785,7 +785,7 @@ def keyed_observation_cases(state, only="keyed"):
                 proxy.close()
         human = invoke(home, "result", key)
         assert human.returncode == 0 and "admitted: accepted\nresult: failed\n" in human.stdout, human
-        unavailable = invoke(home, "read-result", "--store", store, "--key", "never-submitted")
+        unavailable = invoke(home, "request", "read-result", "--store", store, "--key", "never-submitted")
         assert unavailable.returncode != 0 and json.loads(unavailable.stdout) == {
             "key": "never-submitted", "error": {"status": 409, "type": "result_unavailable", "code": "result_not_found"}}, unavailable
     finally:

@@ -154,7 +154,7 @@ func StartHost(
 	extra ...string,
 ) (*Host, error) {
 	arguments := []string{
-		"serve", "--store", store,
+		"host", "serve", "--store", store,
 		"--active-capacity", strconv.Itoa(capacity),
 	}
 	if endpoint != "" {

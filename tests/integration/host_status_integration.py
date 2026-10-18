@@ -77,7 +77,7 @@ def prove_fragmented_request():
 
 def start(store, capacity, *options):
     return start_ready_process(
-        [RUI, "serve", "--store", store, "--active-capacity", str(capacity), *options],
+        [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options],
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )

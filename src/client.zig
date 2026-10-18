@@ -3947,18 +3947,30 @@ test "retry and generated recovery select captured mutations by kind" {
     const stop_key = "00000000-0000-4000-8000-000000000001";
     var stop_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const stop_record = try requestPath(root, stop_key, &stop_path);
-    var stop = try captureSessionStop(io, &paths, .{ .store = root, .record = stop_record, .key = stop_key, .session = "s" });
+    _ = paths;
+    var stop = try captureSessionStop(io, .{ .store = root, .session = "s" }, .{ .explicit = .{ .record = stop_record, .key = stop_key } });
     stop.close(io);
+    var interruption = try captureModelInterruption(io, .{ .store = root, .session = "i/µ", .turn_id = 3, .operation_id = 5 }, .{ .generated = root });
+    const interruption_key = interruption.saved.key;
+    interruption.close(io);
     var message = try captureMessage(io, .{ .store = root, .session = "s", .text = "m", .text_path = "" }, .{ .generated = root });
     const message_key = message.saved.key;
     message.close(io);
     var message_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const message_record = try requestPath(root, message_key.slice(), &message_path);
 
-    // Controls are retried explicitly; generated recovery reopens only
-    // configure, message and permission-decision records.
-    try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, stop_key));
-    try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, stop_key));
+    // Every captured mutation kind, including controls whose records hold only
+    // bounded identities, reopens through its generated handle.
+    var stop_recovered = try openCaptured(io, root, stop_key);
+    try std.testing.expect(stop_recovered.target == .session_stop);
+    stop_recovered.close(io);
+    const stop_saved = try inspectCaptured(io, root, stop_key);
+    try std.testing.expect(stop_saved.isKind(.session_stop));
+    try std.testing.expectEqualStrings("s", stop_saved.session.slice());
+    var interruption_recovered = try openCaptured(io, root, interruption_key.slice());
+    try std.testing.expectEqual(@as(u64, 5), interruption_recovered.target.model_interruption.operation);
+    interruption_recovered.close(io);
+    try std.testing.expectEqualStrings("i/µ", (try inspectCaptured(io, root, interruption_key.slice())).session.slice());
     var recovered = try openCaptured(io, root, message_key.slice());
     recovered.close(io);
     try std.testing.expect((try inspectCaptured(io, root, message_key.slice())).isKind(.message));
@@ -4216,8 +4228,9 @@ test "capture recovery closes rejected records and retains only its reader lifet
     Probe.closed = 0;
     for ([_][]const u8{
         "not json",
-        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\"}",
-        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"1\",\"operation\":\"2\"}}",
+        // Control records are recoverable, but never with another kind's payload.
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"x\",\"operation\":\"2\"}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
         "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
@@ -4749,12 +4762,10 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/stop-record",
         .{root_buffer[0..root_length]},
     );
-    var stop_capture = try captureSessionStop(std.testing.io, &paths, .{
+    var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = stop_path,
-        .key = &escaped_key,
         .session = &escaped_session,
-    });
+    }, .{ .record = stop_path, .key = &escaped_key });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
@@ -4769,14 +4780,12 @@ test "control captures attain their exact worst-case request bounds" {
         "{s}/records/interruption-record",
         .{root_buffer[0..root_length]},
     );
-    var interruption_capture = try captureModelInterruption(std.testing.io, &paths, .{
+    var interruption_capture = try writeModelInterruptionCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .record = interruption_path,
-        .key = &escaped_key,
         .session = &escaped_session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
-    });
+    }, .{ .record = interruption_path, .key = &escaped_key });
     defer interruption_capture.close(std.testing.io);
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);

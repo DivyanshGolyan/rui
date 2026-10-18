@@ -135,7 +135,7 @@ def main():
         home.mkdir()
         original_home = os.environ.get("HOME")
         os.environ["HOME"] = str(home)
-        process, fields = start_ready_process([RUI, "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
+        process, fields = start_ready_process([RUI, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
         diagnostics = HostDiagnostics(process)
         try:
             address = fields["socket"]
@@ -187,13 +187,13 @@ def main():
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []
             assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]
-            current = subprocess.run([RUI, "sessions", "--store", store, "--json"],
+            current = subprocess.run([RUI, "session", "list", "--store", store, "--json"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert current.returncode == 0, current.stderr
             current_pages = [json.loads(line) for line in current.stdout.splitlines()]
             assert [row["reference"] for page in current_pages for row in page["sessions"]] == [
                 names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later"]
-            all_workspaces = subprocess.run([RUI, "sessions", "--store", store, "--all"],
+            all_workspaces = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
             assert all_workspaces.stdout.count("Session: ") == 11
@@ -207,7 +207,7 @@ def main():
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
             assert len(json.dumps(after_growth[1]).encode()) < 4096
-            safe = subprocess.run([RUI, "sessions", "--store", store, "--all"],
+            safe = subprocess.run([RUI, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\x00" in safe.stdout and "\x00" not in safe.stdout, safe
             cursor = after_growth[1]["next"]

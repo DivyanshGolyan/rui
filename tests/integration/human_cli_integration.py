@@ -69,7 +69,7 @@ def help_case():
         for flag in ("--compaction-trigger", "--output-reservation"):
             for args in ((flag, "10", flag, "20"), ("--model", "--help"),
                          ("--session", "-h")):
-                output = run(home, "configure", *args, success=False)
+                output = run(home, "session", "configure", *args, success=False)
                 assert "Usage: rui configure" not in output, output
                 assert list(home.iterdir()) == [], "invalid configuration captured a request"
         result = subprocess.run(
@@ -82,9 +82,9 @@ def help_case():
 
 def compaction_settings_case(home, store, workspace):
     session = "human/compaction-settings"
-    run(home, "configure", "--store", store, "--session", session,
+    run(home, "session", "configure", "--store", store, "--session", session,
         "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
-    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+    with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", session], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", "Work: ", composer=True)
@@ -109,15 +109,15 @@ def compaction_settings_case(home, store, workspace):
         assert entered.wait(timeout=5) == 0
     records = set((home / ".config/rui/requests").glob("*.json"))
     for flag in ("--compaction-trigger", "--output-reservation"):
-        run(home, "configure", "--store", store, "--session", session,
+        run(home, "session", "configure", "--store", store, "--session", session,
             flag, "10", flag, "20", success=False)
         assert set((home / ".config/rui/requests").glob("*.json")) == records
-    report = json.loads(run(home, "inspect-session", "--store", store, "--session", session))
+    report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
     unknown = "human/compaction-unknown-model"
-    run(home, "configure", "--store", store, "--session", unknown,
+    run(home, "session", "configure", "--store", store, "--session", unknown,
         "--workspace", workspace, "--provider", "codex", "--model", "unknown-model")
-    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+    with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
         status = terminal_step(master, "/status", "Work: ", composer=True)
@@ -609,23 +609,23 @@ def command_entry_cases():
             actual[3] &= ~mask
             original[3] &= ~mask
         assert actual == original
-        initial_session = json.loads(run(home, "sessions", "--all", "--json"))["sessions"][0]["reference"]
+        initial_session = json.loads(run(home, "session", "list", "--all", "--json"))["sessions"][0]["reference"]
         # More than one eight-row page here; a newer foreign Workspace must not
         # win --last. Exact resume is independent of that cwd filtering.
         other = state / "other"
         other.mkdir()
         for index in range(9):
-            run(home, "configure", "--session", f"last/{index}", "--workspace", workspace,
+            run(home, "session", "configure", "--session", f"last/{index}", "--workspace", workspace,
                 "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
-        run(home, "configure", "--session", "foreign/newer", "--workspace", other,
+        run(home, "session", "configure", "--session", "foreign/newer", "--workspace", other,
             "--provider", "codex", "--model", "model-b", "--permission-mode", "ask")
-        older = admit(home, "message", "--session", "last/0", "older activity")
+        older = admit(home, "session", "send", "--session", "last/0", "older activity")
         fixture.wait_for(lambda: fixture.completed_observation(store, older["request"]), "older Session activity")
         alias = state / "workspace-alias"
         alias.symlink_to(workspace, target_is_directory=True)
         for flags, expected in ((("--last",), "last/8"), ((initial_session,), initial_session)):
             for terminal, no_colour in (("xterm-256color", ""), ("xterm-256color", "1"), ("dumb", "")):
-                caller = subprocess.Popen([str(fixture.RUI), "resume", *flags], cwd=alias,
+                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", *flags], cwd=alias,
                     env={**os.environ, "HOME": str(home), "TERM": terminal, "NO_COLOR": no_colour},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 opening = read_terminal(master, "› ", preserve_colour=True)
@@ -674,21 +674,21 @@ def command_entry_cases():
         proxy.close()
         proxy = None
         fixture.wait_for(lambda: fixture.completed_observation(store, handle), "lost exec original answer")
-        assert json.loads(run(home, "recover", handle, "--json"))["answer"]["replayed"] is True
+        assert json.loads(run(home, "request", "recover", handle, "--json"))["answer"]["replayed"] is True
         assert record.read_bytes() == original_record and len(endpoint.requests) == 6, "exec replaced uncertain input"
         executor = subprocess.Popen([str(fixture.RUI), "exec", "needs approval"], cwd=workspace,
             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for_held_exec_request(executor, endpoint.requests, 7, "exec held tool request",
                                   state / "exec-tool-request-failure.json")
-        pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
+        pages = [json.loads(line) for line in run(home, "session", "list", "--all", "--json").splitlines()]
         selected = pages[-1]["sessions"][-1]["reference"]
         # Permission mode is selected at proposal admission, not dispatch.
-        run(home, "configure", "--session", selected, "--permission-mode", "ask")
+        run(home, "session", "configure", "--session", selected, "--permission-mode", "ask")
         permission_release.set()
         out, errors = executor.communicate(timeout=5)
         assert executor.returncode != 0 and out == b"" and b"approval required" in errors, (out, errors)
         assert b"rui resume --store " in errors and selected.encode() in errors, errors
-        current = fixture.command("inspect-session", "--store", store, "--session", selected)
+        current = fixture.command("session", "inspect", "--store", store, "--session", selected)
         assert current["actionable_permissions"] and not (workspace / "must-not-run").exists(), current
         assert len(endpoint.requests) == 7, "blocked exec authorized or continued work"
         missing_home = state / "missing-home"
@@ -710,7 +710,7 @@ def command_entry_cases():
         assert len(added) == 1, added
         saved = json.loads(next(iter(added)).read_bytes())
         assert "configuration" in saved, saved
-        assert json.loads(run(home, "recover", saved["key"], "--json"))["answer"]["replayed"] is True
+        assert json.loads(run(home, "request", "recover", saved["key"], "--json"))["answer"]["replayed"] is True
         assert f"Configuration request: {saved['key']}".encode() in errors, errors
         assert b"Fix or unset TMPDIR before resuming." in errors, errors
         resume = errors.decode().split("Resume: ", 1)[1].splitlines()[0]
@@ -757,7 +757,7 @@ def command_entry_cases():
                             lambda: os.close(input_read), lambda: os.close(input_write))
         lookalike_store = state / "lookalike-store"
         lookalike_host = fixture.start_host(lookalike_store, None)
-        pages = [json.loads(line) for line in run(home, "sessions", "--all", "--json").splitlines()]
+        pages = [json.loads(line) for line in run(home, "session", "list", "--all", "--json").splitlines()]
         newest = [row["reference"] for page in pages for row in page["sessions"]
             if row["workspace"] == str(workspace)][-1]
         for index, (entry, chosen) in enumerate((("last", newest),
@@ -765,7 +765,7 @@ def command_entry_cases():
             run(home, "setup", "--store", store)
             before_failure = set(records.glob("*.json"))
             proxy = canonical.ReplyProxy(host, "/v1/inspect-session")
-            arguments = ["resume", "--last"] if entry == "last" else ["resume", "--", chosen]
+            arguments = ["session", "resume", "--last"] if entry == "last" else ["session", "resume", "--", chosen]
             caller = subprocess.Popen([str(fixture.RUI), *arguments], cwd=workspace,
                 env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             output, errors = terminal_exit(caller, master)
@@ -777,9 +777,9 @@ def command_entry_cases():
             proxy = None
             caller.stderr.close()
             # Both selectors now have a plausible different destination.
-            run(home, "configure", "--store", store, "--session", f"newer/{index}",
+            run(home, "session", "configure", "--store", store, "--session", f"newer/{index}",
                 "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-            run(home, "configure", "--store", lookalike_store, "--session", chosen,
+            run(home, "session", "configure", "--store", lookalike_store, "--session", chosen,
                 "--workspace", other, "--provider", "codex", "--model", "lookalike-model")
             run(home, "setup", "--store", lookalike_store)
             before_resume = set(records.glob("*.json"))
@@ -808,7 +808,7 @@ def command_entry_cases():
                 b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
                 + str(len(canonical.ERROR_BYTES)).encode() + b"\r\n\r\n" + canonical.ERROR_BYTES)
         proxy = canonical.ReplyProxy(host, "/v1/list-sessions", fail_later_page)
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--last"], cwd=workspace,
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--last"], cwd=workspace,
             env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output, errors = terminal_exit(caller, master)
         assert caller.returncode == 1 and page_count == 2, (output, errors, page_count)
@@ -859,18 +859,18 @@ def persistent_opening_case():
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        run(home, "configure", "--store", store, "--session", "persistent/opening",
+        run(home, "session", "configure", "--store", store, "--session", "persistent/opening",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
-        message = admit(home, "message", "--store", store, "--session", "persistent/opening", "literal **user** é")
+        message = admit(home, "session", "send", "--store", store, "--session", "persistent/opening", "literal **user** é")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "opening saved answer")
         rendered = run(home, "result", message["request"])
         assert "\x1b[1mSaved heading\x1b[0m" in rendered and "OPENING-COMPLETE" in rendered, "keyed result bypassed assistant renderer"
-        assert run(home, "read-result", "--store", store, "--key", message["request"]) == large_answer
+        assert run(home, "request", "read-result", "--store", store, "--key", message["request"]) == large_answer
         assert json.loads(run(home, "result", message["request"], "--json"))["answer"] == large_answer
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "› ")
@@ -903,7 +903,7 @@ def persistent_opening_case():
             lambda response: response[:-1] if b"OPENING-COMPLETE" in response else response)
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         prefix = read_terminal(master, "Saved heading")
@@ -945,7 +945,7 @@ def persistent_opening_case():
             proxy.close()
             proxy = None
         for i in range(1, 10):
-            message = admit(home, "message", "--store", store, "--session", "persistent/opening", f"saved user {i:02d}")
+            message = admit(home, "session", "send", "--store", store, "--session", "persistent/opening", f"saved user {i:02d}")
             fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "history saved answer")
         # A queued local traversal is not eligible until opening establishes its
         # cursor. Both command and inspection cancellation must retain it.
@@ -961,7 +961,7 @@ def persistent_opening_case():
 
             proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_first_opening)
             master, slave = pty.openpty()
-            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
@@ -987,13 +987,13 @@ def persistent_opening_case():
             master = slave = None
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", "persistent/opening"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         output = read_terminal(master, "› ")
         assert "saved user 09" in output and "literal **user** é" not in output, output
         assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
-        message = admit(home, "message", "--store", store, "--session", "persistent/opening", "late input")
+        message = admit(home, "session", "send", "--store", store, "--session", "persistent/opening", "late input")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "late saved answer")
         read_terminal(master, "late beyond captured end")
         # Explicit latest details cannot move the frozen older-history cursor.
@@ -1036,7 +1036,7 @@ def persistent_opening_case():
         assert recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
         export = next(line.removeprefix("Raw export: ") for line in recovered.splitlines() if line.startswith("Raw export: "))
         command = shlex.split(export)
-        assert command[0:3] == ["rui", "read-conversation", "--store-hex"] and bytes.fromhex(command[3]) == str(store).encode(), export
+        assert command[0:3] == ["rui", "session", "read-conversation", "--store-hex"] and bytes.fromhex(command[3]) == str(store).encode(), export
         assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
         executables = state / "bin"
         executables.mkdir()
@@ -1048,7 +1048,7 @@ def persistent_opening_case():
                 ("--session-hex", "61" * 129), ("--store-hex", "61" * 493),
                 ("--session", "persistent/opening", "--session-hex", "61"),
                 ("--store", store, "--store-hex", "61")):
-            rejected = subprocess.run([str(fixture.RUI), "read-conversation", *map(str, flags),
+            rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
             assert rejected.returncode != 0 and not rejected.stdout, (flags, rejected)
             assert b"InvalidHexIdentity" in rejected.stderr or b"DuplicateArgument" in rejected.stderr, rejected.stderr
@@ -1094,12 +1094,12 @@ def persistent_pending_case():
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        run(home, "configure", "--store", store, "--session", "persistent/pending", "--workspace", state,
+        run(home, "session", "configure", "--store", store, "--session", "persistent/pending", "--workspace", state,
             "--provider", "codex", "--model", "model-a")
-        admit(home, "message", "--store", store, "--session", "persistent/pending", "active original")
+        admit(home, "session", "send", "--store", store, "--session", "persistent/pending", "active original")
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "held first provider request")
         for i in range(1, 25):
-            admit(home, "message", "--store", store, "--session", "persistent/pending", f"queued-{i:02d} é")
+            admit(home, "session", "send", "--store", store, "--session", "persistent/pending", f"queued-{i:02d} é")
 
         def hold_opening(response):
             if len(proxy.exchanges) == 1:
@@ -1109,11 +1109,11 @@ def persistent_pending_case():
 
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold_opening)
         master, slave = pty.openpty()
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", "persistent/pending"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         startup = terminal_gate(caller, master, captured, ("pending opening", proxy.exchanges, endpoint.requests))
-        admit(home, "message", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
+        admit(home, "session", "send", "--store", store, "--session", "persistent/pending", "late queued beyond snapshot")
         opening_release.set()
         output = startup.decode(errors="replace").replace("\r\n", "\n") + read_terminal(master, "› ")
         assert "24 queued messages" in output, ("opening counted only its newest page or fresh Current", output)
@@ -1166,7 +1166,7 @@ def persistent_input_cases():
     completed = False
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        run(home, "configure", "--store", store, "--session", "persistent/input",
+        run(home, "session", "configure", "--store", store, "--session", "persistent/input",
             "--workspace", state, "--provider", "codex", "--model", "model-a")
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -1181,7 +1181,7 @@ def persistent_input_cases():
                 assert next_admission_release.wait(15), "next Admission gate was not released"
             return b"" if len(proxy.exchanges) in (1, 4) else response
 
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", "persistent/input"], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
@@ -1284,7 +1284,7 @@ def persistent_input_cases():
         read_terminal(master, "Configured.", composer=True)
         added = [json.loads(path.read_text()) for path in set(records.glob("*.json")) - before_command]
         assert len(added) == 1 and "configuration" in added[0], "command suffix became captured Message intent"
-        assert fixture.command("inspect-session", "--store", store,
+        assert fixture.command("session", "inspect", "--store", store,
             "--session", "persistent/input")["session"]["permission_mode"] == "ask"
         assert len(endpoint.requests) == 5 and len(proxy.exchanges) == 7, "command suffix reached Host"
         os.write(master, b"\x03")
@@ -1363,12 +1363,12 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
             *(("--fault", "bash-signal") if signal_failure else ()), active_capacity=4)
-        run(home, "configure", "--store", store, "--session", reference,
+        run(home, "session", "configure", "--store", store, "--session", reference,
             "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
         original = termios.tcgetattr(slave)
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", reference], env={**os.environ, "HOME": str(home),
                 "TERM": "xterm-256color", "NO_COLOR": "",
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
@@ -1438,13 +1438,13 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             restricted += action_ready(ready_read, master)
             assert "Run Bash:" not in restricted, restricted
             assert set(records.glob("*.json")) == before_choice, "nested prompt created intent"
-        current = fixture.command("inspect-session", "--store", store, "--session", reference)
+        current = fixture.command("session", "inspect", "--store", store, "--session", reference)
         action = current["actionable_permissions"][0]["action"]
         proxy.exchanges.clear()
         proxy.route = "/v1/control/permission-decision"
         proxy.rewrite = lambda response: b"" if lost_reply and len(proxy.exchanges) == 1 else response
         if stale_target:
-            run(home, "deny-action", "--store", store, "--session", reference, "--action", action)
+            run(home, "action", "deny", "--store", store, "--session", reference, "--action", action)
             proxy.exchanges.clear()
         os.write(master, b"d\n" if decision == "deny-action" and not stale_target else b"a\n")
         settled = ""
@@ -1480,7 +1480,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             details = read_terminal(master, "Details complete")
             assert "\n› requires permission" in details, details
             details += action_ready(ready_read, master)
-            assert fixture.command("inspect-session", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
+            assert fixture.command("session", "inspect", "--store", store, "--session", reference)["actionable_permissions"][0]["action"] == current["actionable_permissions"][1]["action"]
             os.write(master, b"/exit\n")
             assert caller.wait(timeout=5) == 0, caller.stderr.read()
             actual = termios.tcgetattr(slave)
@@ -1590,7 +1590,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     for index, label in enumerate(bypass_descriptions)]),
                 fixture.sse_answer("bypass-answer", "bypass-reason", "bypass-message", "bypass complete")[0],
             ])
-            run(home, "configure", "--store", store, "--session", reference,
+            run(home, "session", "configure", "--store", store, "--session", reference,
                 "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "bypass")
             try:
                 os.write(master, b"run without approval\n")
@@ -1636,7 +1636,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 read_terminal(master, "+1 more calls · /status", composer=True)
                 terminal_step(master, "\x01\x0b/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0, caller.stderr.read()
-                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", reference], env={**os.environ, "HOME": str(home), "TERM": "xterm-256color", "NO_COLOR": ""},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 reopened = read_terminal(master, "+1 more calls · /status", composer=True)
@@ -1755,17 +1755,17 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         assert refreshed_release.wait(15), "permission refresh was not released"
                         return response
                     try:
-                        run(home, "configure", "--store", store, "--session", reference, "--permission-mode", "bypass")
+                        run(home, "session", "configure", "--store", store, "--session", reference, "--permission-mode", "bypass")
                         proxy.rewrite = observe_action
                         proxy.route = "/v1/inspect-session"
                         os.write(master, f"external approval race {index}\n".encode())
                         read_terminal(master, f"• {prior_label}", composer=True)
-                        run(home, "configure", "--store", store, "--session", reference, "--permission-mode", "ask")
+                        run(home, "session", "configure", "--store", store, "--session", reference, "--permission-mode", "ask")
                         prior_release.touch()
                         prefix = terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
                         assert len(selected) == 1, selected
                         requests_before = len(endpoint.requests)
-                        run(home, "allow-action", "--store", store, "--session", reference, "--action", selected[0])
+                        run(home, "action", "allow", "--store", store, "--session", reference, "--action", selected[0])
                         fixture.wait_for(lambda: len(endpoint.requests) == requests_before + 1, "successful external approval continuation")
                         proxy.rewrite = hold_refreshed_current
                         proxy.route = "/v1/inspect-session"
@@ -1821,7 +1821,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             hidden_reads.append(len(response))
             return response
         proxy.rewrite = observe_hidden_read
-        caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", reference], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         reopened = read_terminal(master, "› ", composer=True)
@@ -1852,7 +1852,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fixture.message(state, store, key, reference, f"later input {index}")
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
             calls_before_history = len(endpoint.requests)
-            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", reference], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
@@ -2018,7 +2018,7 @@ def saved_capture_cases(state, store, workspace):
     home = state / "capture-home"
     home.mkdir()
     records = home / ".config/rui/requests"
-    args = ["configure", "--store", store, "--session", "capture/original",
+    args = ["session", "configure", "--store", store, "--session", "capture/original",
         "--workspace", workspace, "--provider", "codex", "--model", "model-a"]
     gate = state / "capture-original-reader"
     caller = subprocess.Popen([str(fixture.RUI), *map(str, args), "--json"],
@@ -2028,12 +2028,12 @@ def saved_capture_cases(state, store, workspace):
     record = None
     try:
         fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "capture reader publication")
-        handles = json.loads(run(home, "requests", "--json"))
+        handles = json.loads(run(home, "request", "list", "--json"))
         assert len(handles) == 1, handles
         handle = handles[0]
         record = records / f"{handle}.json"
         original = record.read_bytes()
-        assert fixture.command("observe-command", "--store", store,
+        assert fixture.command("request", "inspect", "--store", store,
             "--key", handle)["observation"]["status"] == "absent"
         # A pathname replacement after publication must not swap the bytes
         # selected by the captured owner before its announcement.
@@ -2047,7 +2047,7 @@ def saved_capture_cases(state, store, workspace):
         assert caller.returncode == 0, (output, errors)
         captured, admission = map(json.loads, output.splitlines())
         assert captured["request"] == handle and admission["admission"]["answer"]["status"] == "accepted"
-        observed = fixture.command("observe-command", "--store", store, "--key", handle)["observation"]
+        observed = fixture.command("request", "inspect", "--store", store, "--key", handle)["observation"]
         assert observed["target"] == "capture/original", ("captured owner transmitted a replaced pathname", observed)
     finally:
         dispose_all(lambda: stop_process(caller, timeout=5),
@@ -2057,7 +2057,7 @@ def saved_capture_cases(state, store, workspace):
     run(home, "setup", "--store", store)
     preferences = home / ".config/rui/preferences"
     preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
-    assert json.loads(run(home, "recover", handle, "--json"))["answer"]["replayed"] is True
+    assert json.loads(run(home, "request", "recover", handle, "--json"))["answer"]["replayed"] is True
 
     # Failure to announce happens after publication but before any send.
     before = set(run(home, "requests").splitlines())
@@ -2065,9 +2065,9 @@ def saved_capture_cases(state, store, workspace):
         environment={"RUI_TEST_CAPTURE_GATE": str(state / "missing-parent/gate")})
     assert output == "", output
     failed_notice, = set(run(home, "requests").splitlines()) - before
-    assert fixture.command("observe-command", "--store", store,
+    assert fixture.command("request", "inspect", "--store", store,
         "--key", failed_notice)["observation"]["status"] == "absent"
-    assert json.loads(run(home, "recover", failed_notice, "--json"))["answer"]["replayed"] is False
+    assert json.loads(run(home, "request", "recover", failed_notice, "--json"))["answer"]["replayed"] is False
 
     # Linux libc fault injection reaches the actual post-rename directory sync,
     # not a fixture-only success path. No automatic send may follow uncertainty.
@@ -2093,9 +2093,9 @@ int fsync(int fd) {
         assert failed.returncode != 0 and "RecordDirectorySyncFailed" in failed.stderr, failed
         assert failed.stdout == "", failed.stdout
         uncertain, = set(run(home, "requests").splitlines()) - before
-        assert fixture.command("observe-command", "--store", store,
+        assert fixture.command("request", "inspect", "--store", store,
             "--key", uncertain)["observation"]["status"] == "absent"
-        assert json.loads(run(home, "recover", uncertain, "--json"))["answer"]["replayed"] is False
+        assert json.loads(run(home, "request", "recover", uncertain, "--json"))["answer"]["replayed"] is False
     else:
         print("capture directory-sync injection: unavailable outside Linux", flush=True)
 
@@ -2106,11 +2106,11 @@ int fsync(int fd) {
         "key": unsupported, "session": "capture/original"}
     (records / f"{unsupported}.json").write_text(json.dumps(stop, separators=(",", ":")))
     (records / "not-a-handle.json").write_text("not a record")
-    listed = json.loads(run(home, "requests", "--json"))
+    listed = json.loads(run(home, "request", "list", "--json"))
     assert invalid in listed and unsupported in listed and "not-a-handle" not in listed, listed
-    assert run(home, "recover", invalid, success=False) == ""
-    assert run(home, "recover", unsupported, success=False) == ""
-    with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+    assert run(home, "request", "recover", invalid, success=False) == ""
+    assert run(home, "request", "recover", unsupported, success=False) == ""
+    with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", "capture/original"], env={**os.environ, "HOME": str(home)},
     ) as (entered, master):
         read_terminal(master, "› ")
@@ -2135,13 +2135,13 @@ def silent_read_edit_cases():
         host = fixture.start_host(store, None)
         for index, route in enumerate(("/v1/inspect-session", "/v1/activity-page")):
             reference = f"silent/{index}"
-            run(home, "configure", "--store", store, "--session", reference,
+            run(home, "session", "configure", "--store", store, "--session", reference,
                 "--workspace", state, "--provider", "codex", "--model", "model-a")
             master, slave = pty.openpty()
             original = termios.tcgetattr(slave)
             held, release = threading.Event(), threading.Event()
             try:
-                caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), reference],
+                caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), reference],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 read_terminal(master, "› ")
                 def hold(response):
@@ -2218,7 +2218,7 @@ def opaque_session_commands_case():
             head, answer = raw_request(host.rui_ready_fields["socket"], "/v1/configure", json.dumps(body).encode())
             assert b" 200 " in head and json.loads(answer)["answer"]["status"] == "accepted", (head, answer)
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--last"],
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "--last"],
             cwd=state, env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=slave)
         read_terminal(master, "› ")
         assert "Session: human/nul\\x00" in terminal_step(master, "/status", "Session: ", composer=True)
@@ -2301,14 +2301,14 @@ def long_input_case(home, store, workspace, endpoint, host):
     import canonical_failure_integration as canonical
     endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
     long_session = "human/long-input"
-    run(home, "configure", "--store", store, "--session", long_session,
+    run(home, "session", "configure", "--store", store, "--session", long_session,
         "--workspace", workspace, "--provider", "codex", "--model", "model-a")
     proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
     master = slave = entered = None
     try:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", long_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         greeting = read_terminal(master, "› ")
@@ -2430,7 +2430,7 @@ def incomplete_input_case(home, store, session, endpoint, host):
             master, slave = pty.openpty()
             try:
                 original = termios.tcgetattr(slave)
-                entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+                entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", session], env={**os.environ, "HOME": str(home)},
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             except BaseException:
@@ -2600,7 +2600,7 @@ def renderer_cases():
             env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color", "RUI_RENDERER": "vaxis"}
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
-            arguments = (["resume", "--store", str(store), "--", session] if initial_text is None else
+            arguments = (["session", "resume", "--store", str(store), "--", session] if initial_text is None else
                 ["--store", str(store), "--provider", "codex", "--model", "model-a", "--", initial_text])
             caller = subprocess.Popen([str(fixture.RUI), *arguments],
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
@@ -2632,7 +2632,7 @@ def renderer_cases():
                 lambda: os.close(master), lambda: os.close(slave))
 
     def configure(session, permission="bypass"):
-        run(home, "configure", "--store", store, "--session", session,
+        run(home, "session", "configure", "--store", store, "--session", session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--permission-mode", permission)
 
     def answer(index):
@@ -2673,7 +2673,7 @@ def renderer_cases():
             assert os.write(tty.master, b"\x15\x0b/exit\n") == 8
             tty.finish()
         env = {**os.environ, "HOME": str(home), "RUI_RENDERER": "vaxis"}
-        rejected = subprocess.run([str(fixture.RUI), "resume", "--store", str(store), "renderer/geometry"],
+        rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), "renderer/geometry"],
             env=env, input=b"", capture_output=True, timeout=5)
         assert rejected.returncode != 0 and b"InteractiveTerminalRequired" in rejected.stderr, rejected
         assert b"\x1b" not in rejected.stdout + rejected.stderr, rejected
@@ -2821,9 +2821,9 @@ def renderer_cases():
                 assert "\n" in shown_workspace, "Workspace wrap witness did not wrap"
                 assert shown_workspace.replace("\n", "") == str(workspace), shown
                 assert set((home / ".config/rui/requests").glob("*.json")) == records, "early a survived until approval readiness"
-                current = fixture.command("inspect-session", "--store", store, "--session", "renderer/consent")
+                current = fixture.command("session", "inspect", "--store", store, "--session", "renderer/consent")
                 action = current["actionable_permissions"][0]["action"]
-                exact = json.loads(run(home, "inspect-action", "--store", store, "--session", "renderer/consent", "--action", action, "--json"))
+                exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", "renderer/consent", "--action", action, "--json"))
                 assert exact["arguments"] == arguments
                 assert not (workspace / "renderer-effect").exists()
                 tty.send("\x1b[200~a\x1b[201~\n", "a: Allow once / d: Deny (Enter)")
@@ -2855,7 +2855,7 @@ def renderer_cases():
         endpoint.responses.append(fixture.sse_tool_calls("renderer-oversized", [("bash", "renderer-oversized-call", arguments)]))
         with terminal("renderer/oversized") as tty:
             tty.send("propose oversized action\n", "Approval disabled")
-            current = fixture.command("inspect-session", "--store", store, "--session", "renderer/oversized")
+            current = fixture.command("session", "inspect", "--store", store, "--session", "renderer/oversized")
             action = current["actionable_permissions"][0]["action"]
             records = set((home / ".config/rui/requests").glob("*.json"))
             tty.send("a\n", "Approval disabled")
@@ -2966,7 +2966,7 @@ def main(selected="all"):
             print("compaction settings and scoped help passed (partial human CLI suite)")
             return
         if selected == "incomplete-input":
-            run(home, "configure", "--store", store, "--session", "incomplete/input",
+            run(home, "session", "configure", "--store", store, "--session", "incomplete/input",
                 "--workspace", workspace, "--provider", "codex", "--model", "model-a")
             incomplete_input_case(home, store, "incomplete/input", endpoint, host)
             completed = True
@@ -3149,7 +3149,7 @@ def main(selected="all"):
         (saved.parent / "real-preferences").rename(saved)
         assert run(preferences_home, "setup", "--model", "bad\nmodel", success=False) == ""
         assert saved.read_text().endswith("model=gpt-6-luna\n")
-        config = admit(home, "configure", "--store", store, "--session", session,
+        config = admit(home, "session", "configure", "--store", store, "--session", session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         assert config["admission"]["answer"]["status"] == "accepted", config
@@ -3162,7 +3162,7 @@ def main(selected="all"):
             "--json", success=False) == ""
         assert json.loads(run(preferences_home, "wait-session", "--store", store,
             "--session", session, "--json")) == {"return": "idle"}
-        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", session], env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
@@ -3172,7 +3172,7 @@ def main(selected="all"):
         saved.unlink()
         fallback.parent.mkdir(parents=True)
         fallback.symlink_to(store, target_is_directory=True)
-        with terminal_process([str(fixture.RUI), "resume", "--", session],
+        with terminal_process([str(fixture.RUI), "session", "resume", "--", session],
             env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
@@ -3184,27 +3184,27 @@ def main(selected="all"):
         saved.chmod(0o600)
         assert run(preferences_home, "wait-session", "--session", session,
             "--json", success=False) == ""
-        before_missing = run(preferences_home, "requests", "--json")
+        before_missing = run(preferences_home, "request", "list", "--json")
         assert not (state / "missing").exists()
         master, slave = pty.openpty()
         try:
-            entered = subprocess.run([str(fixture.RUI), "resume", "--", session],
+            entered = subprocess.run([str(fixture.RUI), "session", "resume", "--", session],
                 env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
                 stdout=slave, stderr=subprocess.PIPE, timeout=5)
         finally:
             dispose_all(lambda: os.close(slave), lambda: os.close(master))
         assert entered.returncode != 0 and b"FileNotFound" in entered.stderr, entered.stderr
         assert not (state / "missing").exists() and not fallback.exists()
-        assert run(preferences_home, "requests", "--json") == before_missing
+        assert run(preferences_home, "request", "list", "--json") == before_missing
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n")
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
             "--json")) == {"return": "idle"}
-        before = run(preferences_home, "requests", "--json")
-        invalid_store = subprocess.run([str(fixture.RUI), "message", "--store", "",
+        before = run(preferences_home, "request", "list", "--json")
+        invalid_store = subprocess.run([str(fixture.RUI), "session", "send", "--store", "",
             "--session", session, "not sent"], env={**os.environ, "HOME": str(preferences_home)},
             capture_output=True, text=True, timeout=5)
         assert invalid_store.returncode != 0 and "InvalidStore" in invalid_store.stderr, invalid_store
-        assert invalid_store.stdout == "" and run(preferences_home, "requests", "--json") == before
+        assert invalid_store.stdout == "" and run(preferences_home, "request", "list", "--json") == before
         no_tty_home = state / "no-tty-home"
         no_tty_home.mkdir()
         no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
@@ -3336,7 +3336,7 @@ def main(selected="all"):
                     handle = record.stem
                     selected = json.loads(record.read_bytes())
                     assert selected["store"] == str(after.resolve()), selected
-                    current = fixture.command("inspect-session", "--store", after,
+                    current = fixture.command("session", "inspect", "--store", after,
                         "--session", f"rui/{handle}")
                     assert current["session"]["model"] == "gpt-6-luna", current
                     assert "Detached." in terminal_step(master, "/exit", "Detached.")
@@ -3350,14 +3350,14 @@ def main(selected="all"):
         for tools, mode, warning in (("none", "bypass", False), ("edit", "bypass", False),
                                      ("bash,edit", "bypass", True), ("bash", "ask", False)):
             warning_ref = f"warnings/{tools}/{mode}"
-            admit(preferences_home, "configure", "--store", store, "--session", warning_ref,
+            admit(preferences_home, "session", "configure", "--store", store, "--session", warning_ref,
                   "--workspace", workspace, "--provider", "codex", "--model", "model-a",
                   "--tools", tools, "--permission-mode", mode)
-            listing = run(preferences_home, "sessions", "--store", store, "--all")
+            listing = run(preferences_home, "session", "list", "--store", store, "--all")
             selected = listing.split(f"Session: {warning_ref}\n", 1)[1].split("Session: ", 1)[0]
             assert "Bash runs without approval" not in selected, selected
             assert f"Permission: {mode}\n" in selected, selected
-            with terminal_process([str(fixture.RUI), "resume", "--store", str(store), "--", warning_ref],
+            with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), "--", warning_ref],
                 env={**os.environ, "HOME": str(preferences_home)},
             ) as (caller, master):
                 welcome = read_terminal(master, "› ")
@@ -3366,7 +3366,7 @@ def main(selected="all"):
                 assert "Bash commands can run without asking you" not in welcome, welcome
                 status = terminal_step(master, "/status", "Session: ", composer=True)
                 assert f"Permission: {mode}\n" in status, status
-                assert fixture.command("inspect-session", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
+                assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert "Bash runs without approval" not in status, status
                 terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
@@ -3395,11 +3395,11 @@ def main(selected="all"):
                 assert f"Session: {reference}" in status and "Permission: bypass" in status, status
                 assert "Bash runs without approval" in welcome, welcome
                 assert "Bash commands can run without asking you" not in welcome, welcome
-                current = fixture.command("inspect-session", "--store", store, "--session", reference)
+                current = fixture.command("session", "inspect", "--store", store, "--session", reference)
                 assert current["session"]["permission_mode"] == mode, current
                 assert current["session"]["workspace"] == str(workspace.resolve()), current
                 assert current["session"]["provider"] == "codex" and current["session"]["model"] == "gpt-6-luna", current
-                assert json.loads(run(preferences_home, "recover", handle, "--json"))["answer"]["replayed"] is True
+                assert json.loads(run(preferences_home, "request", "recover", handle, "--json"))["answer"]["replayed"] is True
                 created.append(reference)
                 assert "Detached." in terminal_step(master, "/exit", "Detached.")
                 assert caller.wait(timeout=5) == 0
@@ -3415,7 +3415,7 @@ def main(selected="all"):
         (blocked_config / "preferences").chmod(0o600)
         (blocked_config / "requests").write_text("not a directory")
         codex_fixture.credentials(blocked_config / "codex.json")
-        sessions_before = run(preferences_home, "sessions", "--store", store, "--all", "--json")
+        sessions_before = run(preferences_home, "session", "list", "--store", store, "--all", "--json")
         master, slave = pty.openpty()
         original_mode = termios.tcgetattr(slave)
         blocked = None
@@ -3431,7 +3431,7 @@ def main(selected="all"):
             assert all(text not in combined for text in (b"New Session intent", b"request: ", "› ".encode())), combined
             assert termios.tcgetattr(slave) == original_mode
             assert (blocked_config / "requests").read_text() == "not a directory"
-            assert run(preferences_home, "sessions", "--store", store, "--all", "--json") == sessions_before
+            assert run(preferences_home, "session", "list", "--store", store, "--all", "--json") == sessions_before
         finally:
             dispose_all(lambda: stop_process(blocked, timeout=5) if blocked is not None else None,
                         lambda: os.close(master), lambda: os.close(slave))
@@ -3452,30 +3452,30 @@ def main(selected="all"):
             assert captured["require_model"] is True, captured
             interrupted.kill()
             interrupted.wait(timeout=5)
-            recovered = json.loads(run(preferences_home, "recover", handle, "--json"))
+            recovered = json.loads(run(preferences_home, "request", "recover", handle, "--json"))
             assert recovered["answer"]["status"] == "accepted" and not recovered["answer"]["replayed"], recovered
-            recovered_again = json.loads(run(preferences_home, "recover", handle, "--json"))
+            recovered_again = json.loads(run(preferences_home, "request", "recover", handle, "--json"))
             assert recovered_again["answer"]["replayed"], recovered_again
-            assert fixture.command("inspect-session", "--store", store,
+            assert fixture.command("session", "inspect", "--store", store,
                 "--session", f"rui/{handle}")["session"]["permission_mode"] == "bypass"
         finally:
             dispose_all(lambda: stop_process(interrupted, timeout=5),
                         lambda: os.close(master), lambda: os.close(slave))
         credential.unlink()
-        initial = fixture.command("inspect-session", "--store", store, "--session", session)
+        initial = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
         assert "InteractiveTerminalRequired" in subprocess.run(
-            [str(fixture.RUI), "resume", "--store", str(store), "--", session],
+            [str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
-        assert config["request"] in json.loads(run(home, "requests", "--json"))
-        assert json.loads(run(home, "recover", config["request"], "--json"))["answer"]["replayed"] is True
-        assert run(home, "recover", config["request"]) == (
+        assert config["request"] in json.loads(run(home, "request", "list", "--json"))
+        assert json.loads(run(home, "request", "recover", config["request"], "--json"))["answer"]["replayed"] is True
+        assert run(home, "request", "recover", config["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {config['request']}\n"
             "admitted: accepted\nreplayed: true\nrevision: 1; created: true\n")
 
         text = state / "input"
         text.write_text("first input")
-        dropped = run(home, "message", "--store", store, "--session", session,
+        dropped = run(home, "session", "send", "--store", store, "--session", session,
             "--text", text, "--test-drop-reply", "after-commit", success=False)
         first = dropped.split("request: ", 1)[1].splitlines()[0]
         record = home / ".config/rui/requests" / f"{first}.json"
@@ -3484,7 +3484,7 @@ def main(selected="all"):
         text.write_text("changed after capture")
         assert first in run(home, "requests").splitlines()
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "first provider request")
-        recovered = json.loads(run(home, "recover", first, "--json"))
+        recovered = json.loads(run(home, "request", "recover", first, "--json"))
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True
         assert record.read_bytes() == captured
         assert len(endpoint.requests) == 1, endpoint.requests
@@ -3502,10 +3502,10 @@ def main(selected="all"):
         assert json.loads(read_pipe_output(terminal_waiter.stdout)) == selected
         time.sleep(0.1)
         assert terminal_waiter.poll() is None, "terminal-only wait returned on permission"
-        queued = admit(home, "message", "--store", store, "--session", session,
+        queued = admit(home, "session", "send", "--store", store, "--session", session,
             "queued behind permission")["request"]
         assert run(home, "result", queued) == "admitted: accepted\nresult: queued\n"
-        queued_fact = fixture.command("observe-command", "--store", store, "--key", queued)["observation"]
+        queued_fact = fixture.command("request", "inspect", "--store", store, "--key", queued)["observation"]
         assert queued_fact["queue"]["status"] == "queued" and queued_fact["progress"] == {
             "status": "waiting_for_permission", "action": action}, queued_fact
         scratch = state / "render-scratch"
@@ -3513,7 +3513,7 @@ def main(selected="all"):
         render_environment = {"TMPDIR": str(scratch)}
         queued_attention = json.loads(run(home, "follow", queued, "--json", environment=render_environment))
         assert queued_attention == {"return": "attention", "status": "waiting_for_permission", "action": action}, queued_attention
-        presentation = run(home, "inspect-action", "--store", store, "--session", session, "--action", action)
+        presentation = run(home, "action", "inspect", "--store", store, "--session", session, "--action", action)
         assert f"Action {action}\n" in presentation, presentation
         assert json.loads(presentation.split("call ID: ", 1)[1].splitlines()[0]) == control_call, presentation
         assert json.loads(presentation.split("Bash arguments: ", 1)[1].splitlines()[0]) == control_arguments, presentation
@@ -3522,37 +3522,37 @@ def main(selected="all"):
         fresh_home = state / "fresh-home"
         fresh_home.mkdir()
         assert not (fresh_home / ".config").exists()
-        assert json.loads(run(fresh_home, "inspect-action", "--store", store, "--session", session,
+        assert json.loads(run(fresh_home, "action", "inspect", "--store", store, "--session", session,
             "--action", action, "--json", environment=render_environment)) == {"action": action, "call_id": control_call, "arguments": control_arguments}
         assert not (fresh_home / ".config").exists()
         assert list(scratch.iterdir()) == []
-        unavailable = subprocess.run([str(fixture.RUI), "inspect-action", "--store", str(store),
+        unavailable = subprocess.run([str(fixture.RUI), "action", "inspect", "--store", str(store),
             "--session", session, "--action", action, "--json"],
             env={**os.environ, "HOME": str(fresh_home), "TMPDIR": str(state / "missing-scratch")},
             capture_output=True, text=True, timeout=20)
         assert unavailable.returncode != 0 and unavailable.stdout == "", unavailable
-        exact = json.loads(run(home, "inspect-action", "--store", store, "--session", session,
+        exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", session,
             "--action", action, "--json"))
         assert exact == {"action": action, "call_id": control_call, "arguments": control_arguments}, exact
         assert run(home, "result", first) == "admitted: accepted\nresult: processing\n"
         assert not counter.exists()
 
-        lost_decision = run(home, "allow-action", "--store", store, "--session", session,
+        lost_decision = run(home, "action", "allow", "--store", store, "--session", session,
             "--action", action, "--test-drop-reply", "after-commit", success=False)
         decision_key = lost_decision.split("request: ", 1)[1].splitlines()[0]
         assert decision_key in run(home, "requests").splitlines()
-        recovered_decision = json.loads(run(home, "recover", decision_key, "--json"))["answer"]
+        recovered_decision = json.loads(run(home, "request", "recover", decision_key, "--json"))["answer"]
         assert recovered_decision["status"] == "accepted" and recovered_decision["replayed"] is True
         fixture.wait_for(lambda: fixture.completed_observation(store, first), "first saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, queued), "queued answer after permission")
         terminal_output, terminal_error = terminal_waiter.communicate(timeout=10)
         assert terminal_waiter.returncode == 0 and json.loads(terminal_output)["observation"]["result"]["status"] == "completed", terminal_error
         terminal_waiter = None
-        stale = admit(home, "deny-action", "--store", store, "--session", session,
+        stale = admit(home, "action", "deny", "--store", store, "--session", session,
             "--action", action)
         assert stale["admission"]["answer"]["status"] == "rejected", stale
         assert run(home, "result", queued) == "admitted: accepted\nresult: completed\nfirst answer\n"
-        current = fixture.command("inspect-session", "--store", store, "--session", session)
+        current = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert current["selected_message"] is None and [r["message"] for r in current["recent_messages"]] == [queued, first], current
         assert [r["outcome"] for r in current["recent_messages"]] == ["completed", "completed"], current
         assert json.loads(run(home, "wait-session", "--store", store, "--session", session,
@@ -3560,7 +3560,7 @@ def main(selected="all"):
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "resume", "--", session],
+            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--", session],
                 env={**os.environ, "HOME": str(preferences_home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -3604,7 +3604,7 @@ def main(selected="all"):
                 terminal_step(master, command, error, composer=True)
                 assert interactive_saved.read_bytes() == cleared_preferences
             terminal_step(master, "/status", "Permission: ask", composer=True)
-            active = fixture.command("inspect-session", "--store", store, "--session", session)["session"]
+            active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert active["model"] == "model-a" and active["permission_mode"] == "ask", active
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             spaced_store = state / "spaced store"
@@ -3620,7 +3620,7 @@ def main(selected="all"):
             assert str(quoted_store.resolve()).replace('"', r'\"') in run(preferences_home, "setup")
             terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
             terminal_step(master, "/status", "Permission: ask", composer=True)
-            assert fixture.command("inspect-session", "--store", store,
+            assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "model-a"
             terminal_step(master, "/configure --session human/other", "Usage: /configure", composer=True)
             terminal_step(master, "/configure --instructions -", "Use a file for", composer=True)
@@ -3637,11 +3637,11 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         assert run(home, "follow", queued) == "return: outcome\nadmitted: accepted\nstatus: completed\n"
-        assert run(home, "recover", stale["request"]) == (
+        assert run(home, "request", "recover", stale["request"]) == (
             f"Store: {store}\nSession: {session}\nkey: {stale['request']}\n"
             f"target Action: {action}; decision: deny\n"
             "admitted: rejected\nreplayed: true\ncode: action_not_pending\n")
-        stale_default = run(home, "deny-action", "--store", store, "--session", session,
+        stale_default = run(home, "action", "deny", "--store", store, "--session", session,
             "--action", action)
         stale_key = stale_default.splitlines()[0].removeprefix("request: ")
         assert stale_default == (
@@ -3661,7 +3661,7 @@ def main(selected="all"):
         before = set(run(home, "requests").splitlines())
         gate = state / "captured-before-handle"
         caller = subprocess.Popen(
-            [str(fixture.RUI), "message", "--store", str(store), "--session", session,
+            [str(fixture.RUI), "session", "send", "--store", str(store), "--session", session,
              "--text", str(text), "--json"],
             env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -3671,14 +3671,14 @@ def main(selected="all"):
         assert len(after - before) == 1, (before, after)
         second = (after - before).pop()
         assert caller.poll() is None
-        assert fixture.command("observe-command", "--store", store,
+        assert fixture.command("request", "inspect", "--store", store,
             "--key", second)["observation"]["status"] == "absent"
         caller.kill()
         output, _ = caller.communicate(timeout=5)
         assert caller.returncode == -signal.SIGKILL and output == b"", output
         assert second != first
         text.unlink()
-        initial_recovery = json.loads(run(home, "recover", second, "--json"))["answer"]
+        initial_recovery = json.loads(run(home, "request", "recover", second, "--json"))["answer"]
         assert initial_recovery["status"] == "accepted" and initial_recovery["replayed"] is False
         fixture.wait_for(lambda: fixture.completed_observation(store, second), "second saved answer")
         assert run(home, "result", first) == "admitted: accepted\nresult: completed\nfirst answer\n"
@@ -3688,15 +3688,15 @@ def main(selected="all"):
         fixture.stop_host(host)
         host = fixture.start_host(store, url, active_capacity=2)
         sibling_session = "human/siblings"
-        sibling_config = run(home, "configure", "--store", store, "--session", sibling_session,
+        sibling_config = run(home, "session", "configure", "--store", store, "--session", sibling_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         assert f"configuration: {sibling_session} in {store}" in sibling_config
         assert f"next: rui resume --store $'{store}' -- $'{sibling_session}'" in sibling_config
-        sibling_key = admit(home, "message", "--store", store, "--session", sibling_session,
+        sibling_key = admit(home, "session", "send", "--store", store, "--session", sibling_session,
             "two independent Actions")["request"]
         def two_actions():
-            candidate = fixture.command("inspect-session", "--store", store, "--session", sibling_session)
+            candidate = fixture.command("session", "inspect", "--store", store, "--session", sibling_session)
             return candidate if len(candidate["actionable_permissions"]) == 2 else None
 
         report = fixture.wait_for(two_actions, "two actionable siblings")
@@ -3708,7 +3708,7 @@ def main(selected="all"):
         assert attention["return"] == "attention" and attention["action"] == pending, attention
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", sibling_session], env={**os.environ, "HOME": str(fresh_home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
@@ -3727,7 +3727,7 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
                         *(lambda fd=fd: os.close(fd) for fd in (master, ready_read, ready_write, slave)))
-        run(home, "allow-action", "--store", store, "--session", sibling_session,
+        run(home, "action", "allow", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
         attention = run(home, "follow", sibling_key, "--json")
@@ -3735,7 +3735,7 @@ def main(selected="all"):
         assert run(home, "result", sibling_key) == "admitted: accepted\nresult: processing\n"
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", sibling_session], env={**os.environ, "HOME": str(home),
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=slave)
@@ -3744,7 +3744,7 @@ def main(selected="all"):
             waiting += action_ready(ready_read, master)
             assert "Run Bash:\n  printf x >> effect-count" in waiting, waiting
             assert counter.read_text() == "x" and not sibling_effect.exists(), "opening authorized pending sibling"
-            run(home, "deny-action", "--store", store, "--session", sibling_session,
+            run(home, "action", "deny", "--store", store, "--session", sibling_session,
                 "--action", pending)
             sibling_release.touch()
             rejected = terminal_step(master, "a", "action_not_pending")
@@ -3783,12 +3783,12 @@ def main(selected="all"):
             fixture.sse_answer("successor-answer", "successor-reason", "successor-message", "successor done")[0],
         ])
         failure_session = "human/failure"
-        run(home, "configure", "--store", store, "--session", failure_session,
+        run(home, "session", "configure", "--store", store, "--session", failure_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        failed_key = admit(home, "message", "--store", store, "--session", failure_session,
+        failed_key = admit(home, "session", "send", "--store", store, "--session", failure_session,
             "first failing Turn")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "held first failed Turn")
-        queued_key = admit(home, "message", "--store", store, "--session", failure_session,
+        queued_key = admit(home, "session", "send", "--store", store, "--session", failure_session,
             "queued successor")["request"]
         assert run(home, "result", queued_key) == "admitted: accepted\nresult: queued\n"
         follower = subprocess.Popen([str(fixture.RUI), "follow", failed_key],
@@ -3798,12 +3798,12 @@ def main(selected="all"):
         follower.kill()
         follower.communicate(timeout=5)
         failure_release.set()
-        fixture.wait_for(lambda: fixture.command("observe-command", "--store", store,
+        fixture.wait_for(lambda: fixture.command("request", "inspect", "--store", store,
             "--key", failed_key)["observation"].get("result"), "failed first Turn")
         assert run(home, "result", failed_key) == "admitted: accepted\nresult: failed\ncode: provider_http_422\n"
         fixture.wait_for(lambda: fixture.completed_observation(store, queued_key), "queued successor")
         assert run(home, "result", queued_key) == "admitted: accepted\nresult: completed\nsuccessor done\n"
-        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", failure_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             read_terminal(master, "› ")
@@ -3819,28 +3819,28 @@ def main(selected="all"):
         endpoint.responses.append((fixture.sse_answer("stopped-answer", "stopped-reason",
             "stopped-message", "must not appear")[0], stop_release))
         stop_session = "human/stopped"
-        run(home, "configure", "--store", store, "--session", stop_session,
+        run(home, "session", "configure", "--store", store, "--session", stop_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        stopped_key = admit(home, "message", "--store", store, "--session", stop_session,
+        stopped_key = admit(home, "session", "send", "--store", store, "--session", stop_session,
             "running when stopped")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 8, "held stopped Turn")
-        excluded_key = admit(home, "message", "--store", store, "--session", stop_session,
+        excluded_key = admit(home, "session", "send", "--store", store, "--session", stop_session,
             "queued when stopped")["request"]
         assert run(home, "result", excluded_key) == "admitted: accepted\nresult: queued\n"
-        stopped = fixture.command("stop-session", "--store", store, "--session", stop_session,
+        stopped = fixture.command("session", "stop", "--store", store, "--session", stop_session,
             "--record", state / "stop.json", "--key", "human-stop")
         assert stopped["answer"]["status"] == "accepted", stopped
         stop_release.set()
-        fixture.wait_for(lambda: fixture.command("observe-command", "--store", store,
+        fixture.wait_for(lambda: fixture.command("request", "inspect", "--store", store,
             "--key", stopped_key)["observation"].get("result"), "stopped Turn")
         assert run(home, "result", stopped_key).startswith("admitted: accepted\nresult: cancelled\n")
         assert run(home, "result", excluded_key) == "admitted: accepted\nresult: cancelled\ncode: session_stopped\n"
 
-        rejected = admit(home, "message", "--store", store, "--session", "human/absent",
+        rejected = admit(home, "session", "send", "--store", store, "--session", "human/absent",
             "unknown session")
         assert rejected["admission"]["answer"]["status"] == "rejected", rejected
         assert run(home, "result", rejected["request"]) == "admitted: rejected\nresult: rejected\ncode: unknown_session\n"
-        assert run(home, "recover", rejected["request"]) == (
+        assert run(home, "request", "recover", rejected["request"]) == (
             f"Store: {store}\nSession: human/absent\nkey: {rejected['request']}\n"
             "admitted: rejected\nreplayed: true\ncode: unknown_session\n")
 
@@ -3848,9 +3848,9 @@ def main(selected="all"):
         endpoint.responses.append(fixture.sse_answer("large-answer", "large-reason",
             "large-message", large_answer)[0])
         large_session = "human/large"
-        run(home, "configure", "--store", store, "--session", large_session,
+        run(home, "session", "configure", "--store", store, "--session", large_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        large_key = admit(home, "message", "--store", store, "--session", large_session,
+        large_key = admit(home, "session", "send", "--store", store, "--session", large_session,
             "large output")["request"]
         fixture.wait_for(lambda: fixture.completed_observation(store, large_key), "large saved answer")
         reader = subprocess.Popen([str(fixture.RUI), "result", large_key, "--json"],
@@ -3869,9 +3869,9 @@ def main(selected="all"):
         failed_observation = run(home, "result", first, success=False)
         assert failed_observation == "", failed_observation
         host = fixture.start_host(store, url)
-        assert json.loads(run(home, "recover", first, "--json"))["answer"]["replayed"] is True
+        assert json.loads(run(home, "request", "recover", first, "--json"))["answer"]["replayed"] is True
         assert run(home, "result", first) == "admitted: accepted\nresult: completed\nfirst answer\n"
-        recovered_session = fixture.command("inspect-session", "--store", store, "--session", session)
+        recovered_session = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert recovered_session["selected_message"] is None
         assert [row["message"] for row in recovered_session["recent_messages"]] == [second, queued, first]
         assert counter.read_text() == "x" and sibling_effect.read_text() == "y" and len(endpoint.requests) == 9
@@ -3883,16 +3883,16 @@ def main(selected="all"):
             fixture.sse_answer("race-b-done", "race-b-done-reason", "race-b-done-message", "B done")[0],
         ])
         race_session = "human/follow-race"
-        run(home, "configure", "--store", store, "--session", race_session,
+        run(home, "session", "configure", "--store", store, "--session", race_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
-        prior_receipt = run(home, "message", "--store", store, "--session", race_session, "prior")
+        prior_receipt = run(home, "session", "send", "--store", store, "--session", race_session, "prior")
         prior = prior_receipt.split("request: ", 1)[1].splitlines()[0]
         assert f"message: {race_session} in {store}" in prior_receipt
         assert f"next: rui resume --store $'{store}' -- $'{race_session}'" in prior_receipt
         assert "next: rui follow" not in prior_receipt
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
-        message_a = admit(home, "message", "--store", store, "--session", race_session, "A")["request"]
+        message_a = admit(home, "session", "send", "--store", store, "--session", race_session, "A")["request"]
         assert run(home, "result", message_a) == "admitted: accepted\nresult: queued\n"
         race_follower = subprocess.Popen([str(fixture.RUI), "follow", message_a, "--json"],
             env={**os.environ, "HOME": str(home), "RUI_TEST_FOLLOW_GATE": str(race_gate)},
@@ -3910,13 +3910,13 @@ def main(selected="all"):
         race_message_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, message_a), "A outcome before Current")
         fixture.wait_for(lambda: fixture.completed_observation(store, prior), "predecessor completion")
-        message_b = admit(home, "message", "--store", store, "--session", race_session, "B")["request"]
+        message_b = admit(home, "session", "send", "--store", store, "--session", race_session, "B")["request"]
         def b_action():
-            report = fixture.command("inspect-session", "--store", store, "--session", race_session)
+            report = fixture.command("session", "inspect", "--store", store, "--session", race_session)
             return report["actionable_permissions"][0]["action"] if report["actionable_permissions"] else None
 
         action_b = fixture.wait_for(b_action, "B permission before Current")
-        assert fixture.command("observe-command", "--store", store, "--key", message_a)["observation"]["result"]["status"] == "completed"
+        assert fixture.command("request", "inspect", "--store", store, "--key", message_a)["observation"]["result"]["status"] == "completed"
         pathlib.Path(f"{race_gate}.release").touch()
         pathlib.Path(f"{wait_gate}.release").touch()
         output, error = race_follower.communicate(timeout=10)
@@ -3932,9 +3932,9 @@ def main(selected="all"):
         assert observed["observation"]["result"]["status"] == "completed", wait_output
         race_waiter = None
         assert b_action() == action_b
-        assert json.loads(run(home, "inspect-action", "--store", store, "--session", race_session,
+        assert json.loads(run(home, "action", "inspect", "--store", store, "--session", race_session,
             "--action", action_b, "--json"))["call_id"] == "race-b-call"
-        denied = admit(home, "deny-action", "--store", store, "--session", race_session,
+        denied = admit(home, "action", "deny", "--store", store, "--session", race_session,
             "--action", action_b)
         assert denied["admission"]["answer"]["status"] == "accepted", denied
         fixture.wait_for(lambda: fixture.completed_observation(store, message_b), "B outcome after decision")
@@ -3950,13 +3950,13 @@ def main(selected="all"):
                 "interactive complete")[0],
         ])
         interactive = "human/interactive"
-        run(home, "configure", "--store", store, "--session", interactive,
+        run(home, "session", "configure", "--store", store, "--session", interactive,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a",
             "--tools", "bash", "--permission-mode", "ask")
         master, slave = pty.openpty()
         ready_read, ready_write = os.pipe()
         try:
-            entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", interactive], env={**os.environ, "HOME": str(home),
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
@@ -3977,20 +3977,20 @@ def main(selected="all"):
             assert_permission_workspace(proposal, workspace.resolve())
             assert "call ID:" not in proposal and "request:" not in proposal and "return:" not in proposal, proposal
             assert "é" in proposal and "\u202e" not in proposal and "hidden" not in proposal, proposal
-            interactive_key = fixture.command("inspect-session", "--store", store, "--session", interactive)["selected_message"]
+            interactive_key = fixture.command("session", "inspect", "--store", store, "--session", interactive)["selected_message"]
             assert interactive_key is not None, proposal
             assert interactive_key in run(home, "requests").splitlines(), "hidden receipt must remain recoverable"
-            current_action = fixture.command("inspect-session", "--store", store, "--session", interactive)
+            current_action = fixture.command("session", "inspect", "--store", store, "--session", interactive)
             action_id = current_action["actionable_permissions"][0]["action"]
             assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
             inspection = terminal_step(master, "/inspect-action", "a: Allow once / d: Deny (Enter)")
             inspection += action_ready(ready_read, master)
             assert json.loads(inspection.split("Bash arguments: ", 1)[1].splitlines()[0]) == padded_arguments, inspection
             assert "\\r  " in inspection and "\u202e" not in inspection, inspection
-            exact = json.loads(run(home, "inspect-action", "--store", store, "--session", interactive,
+            exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", interactive,
                 "--action", action_id, "--json"))
             assert exact == {"action": action_id, "call_id": control_call, "arguments": padded_arguments}, exact
-            mismatch = admit(home, "allow-action", "--store", store, "--session", session,
+            mismatch = admit(home, "action", "allow", "--store", store, "--session", session,
                 "--action", action_id)
             assert mismatch["admission"]["answer"]["status"] == "rejected", mismatch
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
@@ -4010,7 +4010,7 @@ def main(selected="all"):
             decision_record, = set(records.glob("*.json")) - before_choice
             saved_decision = json.loads(decision_record.read_bytes())
             assert saved_decision["action"] == action_id and saved_decision["decision"] == "allow_once" and saved_decision["session"] == interactive, saved_decision
-            assert json.loads(run(home, "recover", decision_record.stem, "--json"))["answer"]["replayed"] is True
+            assert json.loads(run(home, "request", "recover", decision_record.stem, "--json"))["answer"]["replayed"] is True
             # The pasted chat suffix remains a draft, not approval or another
             # submission. Clear only that unsent draft before diagnostics.
             result = terminal_step(master, "\x15/result " + interactive_key, "result: completed", composer=True)
@@ -4024,9 +4024,9 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         control_session = "human/name\n\x1b[2J\u202e"
-        run(home, "configure", "--store", store, "--session", control_session,
+        run(home, "session", "configure", "--store", store, "--session", control_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
-        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", control_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
@@ -4063,20 +4063,20 @@ def main(selected="all"):
         unsafe_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("unsafe-answer", "unsafe-reason",
             "unsafe-message", "safe result")[0], unsafe_release))
-        run(home, "configure", "--store", store, "--session", unsafe_session,
+        run(home, "session", "configure", "--store", store, "--session", unsafe_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
         unsafe_text = state / "unsafe-input"
         unsafe_text.write_text("report status")
-        run(home, "message", "--store", store, "--session", unsafe_session,
+        run(home, "session", "send", "--store", store, "--session", unsafe_session,
             "--record", state / "unsafe-record.json", "--key", unsafe_key, "--text", unsafe_text)
-        fixture.wait_for(lambda: fixture.command("inspect-session", "--store", store,
+        fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store,
             "--session", unsafe_session)["selected_message"] == unsafe_key, "unsafe key selected")
         waiter = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
             "--session", unsafe_session], env={**os.environ, "HOME": str(home)},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             assert read_pipe_output(waiter.stdout).decode() == "selected message: message\\n\\x1b[2J\\u202e\n"
-            with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+            with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", unsafe_session], env={**os.environ, "HOME": str(home)},
             ) as (entered, master):
                 read_terminal(master, "› ")
@@ -4091,9 +4091,9 @@ def main(selected="all"):
                         lambda: waiter.communicate(timeout=max(0, waiter_deadline - time.monotonic())),
                         lambda: stop_process(waiter, timeout=max(0, waiter_deadline - time.monotonic())))
         fixture.wait_for(lambda: fixture.completed_observation(store, unsafe_key), "unsafe key result")
-        assert fixture.command("inspect-session", "--store", store,
+        assert fixture.command("session", "inspect", "--store", store,
             "--session", unsafe_session)["recent_messages"][0]["message"] == unsafe_key
-        with terminal_process([str(fixture.RUI), "resume", "--store", str(store),
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
@@ -4105,19 +4105,19 @@ def main(selected="all"):
             assert "Detached." in terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
         empty_session = "human/empty-key"
-        run(home, "configure", "--store", store, "--session", empty_session,
+        run(home, "session", "configure", "--store", store, "--session", empty_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
         empty_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("empty-answer", "empty-reason", "empty-message",
             "empty key answer")[0], empty_release))
         empty_input = state / "empty-input"
         empty_input.write_text("empty key input")
-        admission = json.loads(run(home, "message", "--store", store, "--session", empty_session,
+        admission = json.loads(run(home, "session", "send", "--store", store, "--session", empty_session,
             "--record", state / "empty-record.json", "--key", "", "--text", empty_input))
         assert admission["answer"]["status"] == "accepted", admission
-        fixture.wait_for(lambda: fixture.command("inspect-session", "--store", store,
+        fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store,
             "--session", empty_session)["work"]["status"] == "in_flight", "empty key active")
-        current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
+        current = fixture.command("session", "inspect", "--store", store, "--session", empty_session)
         assert current["selected_message"] == "", current
         empty_wait = subprocess.Popen([str(fixture.RUI), "wait-session", "--store", str(store),
             "--session", empty_session, "--json"],
@@ -4129,11 +4129,11 @@ def main(selected="all"):
             assert empty_wait.wait(timeout=10) == 0
         finally:
             dispose_all(empty_release.set, lambda: stop_process(empty_wait, timeout=5))
-        current = fixture.command("inspect-session", "--store", store, "--session", empty_session)
+        current = fixture.command("session", "inspect", "--store", store, "--session", empty_session)
         assert current["selected_message"] is None and current["recent_messages"][0]["message"] == "", current
         long_input_case(home, store, workspace, endpoint, host)
         editor_session = "human/editor"
-        run(home, "configure", "--store", store, "--session", editor_session,
+        run(home, "session", "configure", "--store", store, "--session", editor_session,
             "--workspace", workspace, "--provider", "codex", "--model", "model-a")
         cases = [
             ("first second\x1b\x7fZ", "first Z"),
@@ -4151,7 +4151,7 @@ def main(selected="all"):
             f"editor-message-{i}", f"edited {i}")[0] for i in range(len(cases)))
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", editor_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -4247,7 +4247,7 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(master), lambda: os.close(slave))
         master, slave = pty.openpty()
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
             stdin=slave, stdout=slave, stderr=slave)
         try:
@@ -4266,7 +4266,7 @@ def main(selected="all"):
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
             original_terminal = termios.tcgetattr(slave)
             before = set((fresh_home / ".config/rui/requests").glob("*.json"))
-            entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+            entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             try:
@@ -4295,7 +4295,7 @@ def main(selected="all"):
         observation_held, observation_continue = threading.Event(), threading.Event()
         master, slave = pty.openpty()
         original_terminal = termios.tcgetattr(slave)
-        entered = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store),
+        entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(home)},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         proxy = None
@@ -4322,7 +4322,7 @@ def main(selected="all"):
             record = home / ".config/rui/requests" / f"{saved_key}.json"
             original = record.read_bytes()
             assert json.loads(original)["text"]["value"] == "observe after Host loss"
-            assert fixture.command("observe-command", "--store", store,
+            assert fixture.command("request", "inspect", "--store", store,
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
@@ -4344,9 +4344,9 @@ def main(selected="all"):
             endpoint.responses.append(fixture.sse_answer("observed-recovery", "observed-recovery-reason",
                 "observed-recovery-message", "observed after recovery")[0])
             host = fixture.start_host(store, url)
-            assert fixture.command("observe-command", "--store", store,
+            assert fixture.command("request", "inspect", "--store", store,
                 "--key", saved_key)["observation"]["status"] == "accepted"
-            assert json.loads(run(home, "recover", saved_key, "--json"))["answer"]["replayed"] is True
+            assert json.loads(run(home, "request", "recover", saved_key, "--json"))["answer"]["replayed"] is True
             assert record.read_bytes() == original, "activity failure replaced accepted original"
         finally:
             dispose_all(observation_continue.set, observation_release.set,

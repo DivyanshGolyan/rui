@@ -22,7 +22,7 @@ def main():
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
         try:
             for index in range(9):
-                configured = invoke("configure", "--store", store, "--session", f"selected/{index}",
+                configured = invoke("session", "configure", "--store", store, "--session", f"selected/{index}",
                     "--workspace", root, "--provider", "codex", "--model", "model-a")
                 assert configured.returncode == 0, configured
             def rewrite(response):
@@ -55,7 +55,7 @@ def main():
                 for presentation in (("--json",), ()):
                     proxy = ReplyProxy(host, "/v1/list-sessions", rewrite)
                     try:
-                        result = invoke("sessions", "--store", store, *presentation)
+                        result = invoke("session", "list", "--store", store, *presentation)
                     finally:
                         proxy.close()
                     assert proxy.exchanges, "proof never reached the real list producer"

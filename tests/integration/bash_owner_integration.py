@@ -36,7 +36,7 @@ def dispose_owner_case(host, endpoint, thread):
 
 
 def execution_idle(store, session, retained_bytes=0):
-    report = fixture.command("inspect-session", "--store", store, "--session", session)
+    report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == str(retained_bytes) else None
 

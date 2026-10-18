@@ -826,7 +826,7 @@ def prove_observation_disposal():
             (root / "store").mkdir()
             (root / "store/private").write_bytes(b"private Store bytes")
             process = SimpleNamespace(pid=os.getpid(), poll=lambda: None,
-                                      args=["rui", "serve", "--store", root / "store"])
+                                      args=["rui", "host", "serve", "--store", root / "store"])
             reader, writer = os.pipe()
             observations = _Observations(process, reader, "status", observation_state(process.pid, 0))
             snapshot = observations.snapshot()
@@ -863,7 +863,7 @@ def prove_intentional_crash_retirement():
             root = pathlib.Path(directory)
             reader, writer = os.pipe()
             process = SimpleNamespace(pid=os.getpid(), returncode=None, stdout=io.BytesIO(b"out"),
-                stderr=io.BytesIO(b"err"), args=["rui", "serve", "--store", root / "store"])
+                stderr=io.BytesIO(b"err"), args=["rui", "host", "serve", "--store", root / "store"])
             process.poll = lambda: process.returncode
             process.rui_diagnostics = SimpleNamespace(close=lambda: diagnostics_closed.append(True))
             state = observation_state(process.pid, 4 if case == "missing-tail" else 3 if case == "loss" else 2,

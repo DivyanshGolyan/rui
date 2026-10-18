@@ -101,7 +101,7 @@ def check_process_discovery(cleanup):
         store = Path(directory).resolve() / "store"
         proc = Path("/proc")
         vanished, selected, unrelated, other_store, nested, other_executable = (proc / str(pid) for pid in range(41001, 41007))
-        command = [str(owner.RUI), "serve", "--store", str(store)]
+        command = [str(owner.RUI), "host", "serve", "--store", str(store)]
         arguments = {
             selected: command,
             unrelated: [sys.executable, "-c", "pass"],

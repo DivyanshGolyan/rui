@@ -123,7 +123,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
         result = bash.result_text(store, session)
         home = state / "effect-before-result-home"
         home.mkdir()
-        with terminal_process([str(RUI), "resume", "--store", str(store), "--", session],
+        with terminal_process([str(RUI), "session", "resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             human.read_terminal(master, "› ")

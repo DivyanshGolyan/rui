@@ -66,7 +66,7 @@ def run(*, observed=False, intake=100):
         # Ten ordinary clients remain viable after dropping 90 * 4 descriptors.
         default_required = {"linux": 435, "darwin": 439}[sys.platform]
         minimum_required = default_required - 4 * (100 - 10)
-        serve = [fixture.RUI, "serve", "--store", store, "--active-capacity", "1",
+        serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
         def limited(limit):
@@ -92,7 +92,7 @@ def run(*, observed=False, intake=100):
         )
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
-            "configure", "--store", store, "--record", root / "config.json", "--key", "config",
+            "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--session", "managed/h2", "--workspace", fixture.ROOT, "--provider", "codex",
             "--model", "model-a", "--tools", "none",
         )
