@@ -18,7 +18,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import canonical_fixture_root, preserve_failure_metadata
+from host_process import HostDiagnostics, canonical_fixture_root, preserve_failure_metadata
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -698,6 +698,7 @@ def store_read_cases(state):
     home.mkdir(mode=0o700)
     store = home / "store"
     host = fixture.start_host(store, None)
+    diagnostics = HostDiagnostics(host)
     try:
         fixture.configure(home, store, "store-read-configure", "s", "model-a")
         fixture.message(home, store, "store-read-message", "s", "queued work")
@@ -719,10 +720,22 @@ def store_read_cases(state):
             "error": {"status": 500, "type": ERROR["type"], "code": ERROR["code"]}}, result
         fixture.wait_for(lambda: host.poll() is not None, "canonical read fault fences the Host")
         assert host.returncode == 1, host.returncode
-        failure = host.stderr.read()
+        diagnostics.close()
+        failure = diagnostics.tail()
         assert b"dispatch fenced after result observation failure: ResultReadFailed" in failure, failure
     finally:
-        fixture.stop_host(host)
+        failed = sys.exception() is not None
+        returncode_before_cleanup = host.poll()
+        try:
+            fixture.stop_host(host)
+        finally:
+            if failed:
+                preserve_failure_metadata(state / "probe.log", lambda: {
+                    "case": "canonical-store-read",
+                    "host_returncode_before_cleanup": returncode_before_cleanup,
+                    "host_returncode_after_cleanup": host.poll(),
+                    "host_stderr_tail": diagnostics.tail().decode(errors="replace"),
+                })
     print("canonical Store read: step fault fences the Host instead of reporting result_not_found", flush=True)
 
 
