@@ -2746,7 +2746,7 @@ const usage_text =
     \\usage:
     \\  rui [PROMPT] [--store PATH] [--provider codex] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
-    \\    without approval by default. Use -- before a prompt whose first word is a
+    \\    without asking by default. Use -- before a prompt whose first word is a
     \\    resource or former command name.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
