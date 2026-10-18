@@ -208,6 +208,11 @@ def current_screen(master):
     return terminal_capture(master).completed
 
 
+def shown(text, screen):
+    from terminal_screen import shown as wrapped
+    return wrapped(text, screen)
+
+
 def composer_ready(screen, x, y):
     """Input is accepted at the composer: the cursor sits on its prompt row."""
     if "Opening…" in screen:
@@ -990,7 +995,7 @@ def command_entry_cases():
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
             status = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {chosen}\n" in status and f"Store: {store}\n" in status, status
+            assert f"Session: {chosen}\n" in status and shown(f"Store: {store}\n", status), status
             assert "lookalike-model" not in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
@@ -4022,7 +4027,7 @@ def main(selected="all"):
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
             assert "\n› first input" in greeting and "\n  first answer" in greeting, greeting
             binding = terminal_step(master, "/status", "Session: ", composer=True)
-            assert f"Session: {session}" in binding and f"Workspace (Bash cwd): {workspace.resolve()}" in binding, binding
+            assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
             assert "Provider: codex" in binding and "Model: model-a" in binding and "Permission: ask" in binding, binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
@@ -4519,7 +4524,7 @@ def main(selected="all"):
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status", "Session: ", composer=True)
             assert "Session: human/name\\n\\x1b[2J\\u202e" in resumed, resumed
-            assert f"Store: {store}\n" in resumed, resumed
+            assert shown(f"Store: {store}\n", resumed), resumed
             terminal_step(master, "/exit", "Resume: ")
             assert entered.wait(timeout=5) == 0
             run(home, "setup", "--store", store)

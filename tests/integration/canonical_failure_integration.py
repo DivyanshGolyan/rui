@@ -5,7 +5,7 @@ import os
 import pathlib
 import pty
 from terminal_process import COLUMNS, ROWS, open_pty
-from terminal_screen import ScreenCapture
+from terminal_screen import ScreenCapture, shown
 import re
 import select
 import shutil
@@ -45,7 +45,7 @@ def expect_mutation_error(result, saved, *, human=False, status=500,
     if human:
         for label, field in (("Store", "store"), ("Session", "session"), ("key", "key")):
             escaped = json.dumps(context[field], ensure_ascii=False)[1:-1]
-            assert f"{label}: {escaped}\n" in result.stdout, result
+            assert shown(f"{label}: {escaped}\n", result.stdout), result
         assert f"invocation: {reason} (HTTP {status}); outcome unconfirmed\n" in result.stdout, result
         if diagnostic:
             assert f"type: {diagnostic['type']}\ncode: {diagnostic['code']}\n" in result.stdout, result

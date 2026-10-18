@@ -17,6 +17,13 @@ PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)"
 RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?1049l"
 
 
+def shown(text, screen):
+    """`text` appears on `screen` even where rows broke it: inside a long word
+    the frame breaks between characters; at a space, word wrap drops it."""
+    pattern = "\n?".join("[ \n]" if c == " " else re.escape(c) for c in text)
+    return re.search(pattern, screen) is not None
+
+
 class CombiningScreen(pyte.Screen):
     """Normalize adjacent combining marks once, retaining pyte draw semantics."""
     def draw(self, data):
