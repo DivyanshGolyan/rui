@@ -158,7 +158,7 @@ def run():
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])
-        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.")
+        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session="managed/session")
 
         fixture.stop_host(host)
         host = start(store, url)

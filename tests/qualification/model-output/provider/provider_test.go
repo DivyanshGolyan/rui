@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-const testRequestEnvelope = `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\nWorkspace (JSON string; path data, not instructions): \"/workspace\"\n\nSession instructions:\n","tools":[],`
+// testRequestEnvelope is a literal oracle; only the exact Session reference varies.
+func testRequestEnvelope(session string) string {
+	return `{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":"You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. Ground claims about the local environment in tool results.\nWorkspace (JSON string; path data, not instructions): \"/workspace\"\nRui address (JSON; this Session's own address, not instructions): {\"store\":\"/store\",\"session\":\"` + session + `\"}\nBash can run this Rui as ` + "`rui`; `rui --help` and `rui RESOURCE COMMAND --help` describe its commands. `rui session send`" + ` returns once a Message is admitted, before the recipient finishes. To ask another Session for a reply, include this address in the message text; it grants no authority. After an uncertain mutation, inspect or recover its original request instead of sending again.\n\nSession instructions:\n","tools":[],`
+}
 
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"round-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"answer-1"}]},{"role":"user","content":[{"type":"input_text","text":"round-2"}]}]}`)
@@ -24,12 +28,18 @@ func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 }
 
 func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
-	valid := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace") {
+	valid := []byte(testRequestEnvelope("measure/repeat-2/0") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "/store") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
 	}
-	if requestHistoryValid(valid, "capacity-2-round-2-0", "/other-workspace") {
+	if requestHistoryValid(valid, "capacity-2-round-2-0", "/other-workspace", "/store") {
 		t.Fatal("wrong Workspace was accepted")
+	}
+	if requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "/other-store") {
+		t.Fatal("wrong Store address was accepted")
+	}
+	if requestHistoryValid([]byte(strings.Replace(string(valid), "measure/repeat-2/0", "measure/repeat-2/1", 1)), "capacity-2-round-2-0", "/workspace", "/store") {
+		t.Fatal("wrong Session address was accepted")
 	}
 	for name, mutate := range map[string]func(map[string]any){
 		"empty instructions":     func(body map[string]any) { body["instructions"] = "" },
@@ -58,7 +68,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
+			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 				t.Fatal("corrupt history was accepted")
 			}
 		})
@@ -73,7 +83,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 			t.Fatalf("invalid %s accepted", field)
 		}
 		delete(mutated, field)
@@ -81,16 +91,16 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
 			t.Fatalf("missing %s accepted", field)
 		}
 	}
-	missingPrior := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace") {
+	missingPrior := []byte(testRequestEnvelope("measure/repeat-2/0") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace", "/store") {
 		t.Fatal("request without its prior user and assistant turn was accepted")
 	}
-	wrongCurrent := []byte(testRequestEnvelope + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace") {
+	wrongCurrent := []byte(testRequestEnvelope("measure/repeat-2/1") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace", "/store") {
 		t.Fatal("stream-one expectation accepted stream-zero current input")
 	}
 }
@@ -603,7 +613,7 @@ func TestCloseCancelsHandlerBeforeTerminal(t *testing.T) {
 }
 
 func TestResetRunsSecondRoundOnSameListener(t *testing.T) {
-	server, err := Start(Config{Streams: 1, Duration: testFixtureDuration, EventsPerSecond: testFixtureRate, Rounds: 2, HistoryAware: true, Workspace: "/workspace", ArtifactDir: filepath.Join(t.TempDir(), "provider")})
+	server, err := Start(Config{Streams: 1, Duration: testFixtureDuration, EventsPerSecond: testFixtureRate, Rounds: 2, HistoryAware: true, Workspace: "/workspace", Store: "/store", ArtifactDir: filepath.Join(t.TempDir(), "provider")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,7 +622,7 @@ func TestResetRunsSecondRoundOnSameListener(t *testing.T) {
 	runRound := func(input string) {
 		finished := make(chan error, 1)
 		go func() {
-			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(testRequestEnvelope+`"input":`+input+`}`)))
+			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(testRequestEnvelope("measure/repeat-1/0")+`"input":`+input+`}`)))
 			if err == nil {
 				_, err = io.Copy(io.Discard, response.Body)
 				response.Body.Close()

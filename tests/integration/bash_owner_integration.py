@@ -129,9 +129,9 @@ def prove_timeout_feedback(state):
             outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
             assert outputs == [result], replay
             instructions = replay["instructions"]
-            assert instructions == fixture.model_instructions(workspace), instructions
+            assert instructions == fixture.model_instructions(workspace, store=store, session=session), instructions
             assert instructions.count("\n\nSession instructions:\n") == 1, instructions
-            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\n\nSession instructions:\n", 1)[0]
+            quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\nRui address", 1)[0]
             assert json.loads(quoted_path) == str(workspace), quoted_path
             if effective is None:
                 assert result.startswith("Bash succeeded."), result

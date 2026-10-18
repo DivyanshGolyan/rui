@@ -921,7 +921,7 @@ def main():
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT)
+        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session="direct/success")
         assert first_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -1661,7 +1661,7 @@ def main():
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT)
+        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session="direct/pending")
         assert pending_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -2347,7 +2347,7 @@ def main():
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
-            "instructions": model_instructions(ROOT, "A"),
+            "instructions": model_instructions(ROOT, "A", store=store, session="direct/main"),
             "input": [
                 {
                     "role": "user",
@@ -2417,7 +2417,7 @@ def main():
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ], successor
-        assert successor["instructions"] == model_instructions(ROOT, "A"), successor
+        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session="direct/main"), successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor

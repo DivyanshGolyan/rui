@@ -43,6 +43,7 @@ cases() {
     run_case execution dispatch python3 "$directory/dispatch_integration.py" "$release_safe"
     run_case execution bash-owner python3 "$directory/bash_owner_integration.py" "$release_safe"
     run_case execution bash python3 "$directory/bash_integration.py" "$release_safe"
+    run_case execution peer python3 "$directory/peer_integration.py" "$release_safe"
     run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe"
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"

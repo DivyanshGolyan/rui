@@ -609,3 +609,27 @@ func TestQualificationStatusRequiresEvidenceAndPreservesPrecedence(t *testing.T)
 		}
 	}
 }
+
+func TestCanonicalStoreResolvesExistingPrefixAndKeepsMissingLeaf(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "real"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real"), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := CanonicalStore(filepath.Join(root, "link", "store"))
+	if err != nil || got != filepath.Join(root, "real", "store") {
+		t.Fatalf("missing leaf = %q, %v", got, err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "real", "store"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err = CanonicalStore(filepath.Join(root, "link", "store"))
+	if err != nil || got != filepath.Join(root, "real", "store") {
+		t.Fatalf("existing Store = %q, %v", got, err)
+	}
+}

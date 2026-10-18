@@ -1404,7 +1404,7 @@ test "request preparation minimal golden is exact across schedules" {
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, separator));
         const path_prefix = "Workspace (JSON string; path data, not instructions): ";
         const path_start = std.mem.indexOf(u8, instructions, path_prefix).? + path_prefix.len;
-        const path_end = std.mem.indexOf(u8, instructions, separator).?;
+        const path_end = std.mem.indexOf(u8, instructions, "\nRui address").?;
         const decoded_path = try std.json.parseFromSlice([]const u8, std.testing.allocator, instructions[path_start..path_end], .{});
         defer decoded_path.deinit();
         try std.testing.expectEqualStrings(workspace, decoded_path.value);
@@ -1419,10 +1419,13 @@ test "request preparation minimal golden is exact across schedules" {
         try std.testing.expectEqual(@as(u64, full_expected.len), result.length);
         try std.testing.expectEqual(protocol.contentDigest(full_expected), result.digest);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        // Each schedule has its own Store; everything else is identical.
+        const unrooted = try std.mem.replaceOwned(u8, std.testing.allocator, result.bytes, setup.root, "STORE");
         if (first_bytes == null) {
-            first_bytes = try std.testing.allocator.dupe(u8, result.bytes);
+            first_bytes = unrooted;
         } else {
-            try std.testing.expectEqualStrings(first_bytes.?, result.bytes);
+            defer std.testing.allocator.free(unrooted);
+            try std.testing.expectEqualStrings(first_bytes.?, unrooted);
         }
     }
 }
@@ -1512,7 +1515,13 @@ test "request preparation escapes instructions and user content" {
     try preparation_two.init(std.testing.io, view_two, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, .{}, &retained_two);
     const second = try drainPreparation(&preparation_two, 1, 1, 8192);
     defer std.testing.allocator.free(second.bytes);
-    try std.testing.expectEqualStrings(first.bytes, second.bytes);
+    // Only each Operation's own address differs between the two Stores.
+    const moved = try std.mem.replaceOwned(u8, std.testing.allocator, first.bytes, setup.root, setup_two.root);
+    defer std.testing.allocator.free(moved);
+    const readdressed = try std.mem.replaceOwned(u8, std.testing.allocator, moved, "\\\"session\\\":\\\"direct/prep-escape\\\"", "\\\"session\\\":\\\"direct/prep-escape2\\\"");
+    defer std.testing.allocator.free(readdressed);
+    try std.testing.expect(!std.mem.eql(u8, moved, readdressed));
+    try std.testing.expectEqualStrings(readdressed, second.bytes);
 }
 
 test "request preparation frozen selection excludes later messages" {
@@ -2292,7 +2301,7 @@ test "request preparation cancels inside schema and replay emissions" {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
-        const expected = try requestGolden(setup.workspace, setup.root, session, composed_expected);
+        const expected = try requestGolden(setup.workspace, setup.root, "direct/prep-cancel-spans", composed_expected);
         defer std.testing.allocator.free(expected);
         const target = if (schema)
             std.mem.indexOf(u8, expected, "{\"type\":\"object\"}").? + 2

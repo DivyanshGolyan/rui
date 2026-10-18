@@ -509,7 +509,7 @@ def prove_reused_session(state):
         assert fixture.read_result(store, "reuse-second") == b"second-turn-answer"
         assert len(endpoint.requests) == 4, endpoint.requests
         initial_request = json.loads(endpoint.requests[0])
-        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT), initial_request
+        assert initial_request["instructions"] == fixture.model_instructions(fixture.ROOT, store=store, session="direct/reuse"), initial_request
         assert initial_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first work"}]},
         ], initial_request
