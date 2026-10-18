@@ -34,16 +34,23 @@ const test_only_std = [_][]const u8{"std.debug.print"};
 /// names reads as a clock call; give a received time another name. `Clock`
 /// itself adds only `now`, already here, and `resolution`, a common name for
 /// a decision's outcome.
-const clock_methods = ioMethods(.{ std.Io.Timestamp, std.Io.Duration, std.Io.Clock.Timestamp, std.Io.Clock.Duration });
+const clock_methods = ioMethods(time_types);
 
-/// Allowed `std.Io` members whose methods `clock_methods` reflects over; the
-/// test below requires every other allowed `std.Io` member to be `Writer`.
-const time_std = [_][]const u8{ "std.Io.Timestamp", "std.Io.Clock.Timestamp" };
+/// Time types a core can hold: the allowed `std.Io` members, with their
+/// paths, and the durations they return. The test below requires every other
+/// allowed `std.Io` member to be `Writer`.
+const time_types = .{
+    .{ "std.Io.Timestamp", std.Io.Timestamp },
+    .{ "std.Io.Clock.Timestamp", std.Io.Clock.Timestamp },
+    .{ "", std.Io.Duration },
+    .{ "", std.Io.Clock.Duration },
+};
 
 fn ioMethods(comptime types: anytype) []const []const u8 {
     comptime {
         var names: []const []const u8 = &.{};
-        for (types) |T| for (std.meta.declarations(T)) |name| {
+        for (types) |entry| for (std.meta.declarations(entry[1])) |name| {
+            const T = entry[1];
             const info = @typeInfo(@TypeOf(@field(T, name)));
             if (info != .@"fn") continue;
             for (info.@"fn".param_types) |param| if (param == std.Io) {
@@ -181,22 +188,40 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
     var ahead = tokens.*;
     if (ahead.next().tag != .l_paren) return null;
     var parens: usize = 1;
-    var after_comma = false;
-    while (parens > 0) {
+    var second = false;
+    // The second argument: its first token, its token count, its end, and
+    // whether a string literal appears anywhere in it.
+    var first: ?std.zig.Token = null;
+    var count: usize = 0;
+    var end: usize = 0;
+    var literal = false;
+    while (true) {
         const token = ahead.next();
         switch (token.tag) {
             .eof => return null,
             .l_paren => parens += 1,
-            .r_paren => parens -= 1,
-            .comma => after_comma = after_comma or parens == 1,
-            .string_literal => if (after_comma and parens == 1) {
-                var rest = ahead;
-                if (rest.next().tag == .r_paren) return .{ .literal = source[token.loc.start + 1 .. token.loc.end - 1] };
-                return .{ .built = source[token.loc.start..rest.index] };
+            .r_paren => {
+                parens -= 1;
+                if (parens == 0) break;
+            },
+            .comma => if (parens == 1) {
+                if (second) continue; // a trailing comma
+                second = true;
+                continue;
             },
             else => {},
         }
+        if (!second) continue;
+        if (first == null) first = token;
+        count += 1;
+        end = token.loc.end;
+        if (token.tag == .string_literal or token.tag == .multiline_string_literal_line) literal = true;
     }
+    const start = first orelse return null;
+    if (count == 1 and start.tag == .string_literal) return .{ .literal = source[start.loc.start + 1 .. start.loc.end - 1] };
+    // A name built, wrapped or written across lines from literals would hide
+    // it; a lone computed name is left to review.
+    if (literal) return .{ .built = source[start.loc.start..end] };
     return null;
 }
 
@@ -278,7 +303,11 @@ test "the boundary check reads names, not comments or strings" {
         .{ "const t = at.toClock(io, .real);", "toClock" },
         .{ "const t = std.Io.Clock.Timestamp.toClock;", "std.Io.Clock.Timestamp.toClock" },
         .{ "const t = at.clock.now(io);", "now" },
-        .{ "const t = @field(at, \"n\" ++ \"ow\");", "\"n\" ++" },
+        .{ "const t = @field(at, \"n\" ++ \"ow\");", "\"n\" ++ \"ow\"" },
+        .{ "const t = @field(std.Io.Clock.Timestamp, (\"now\"))(io, .awake);", "(\"now\")" },
+        .{ "const p = @field(@This(), (\"std\")).posix;", "(\"std\")" },
+        .{ "const t = @field(T,\n    \\\\now\n);", "\\\\now" },
+        .{ "const t = @field(T, \"now\",);", "now" },
         .{ "const p = @field(@This(), \"std\").posix;", "std" },
         .{ "const p = @\"\\x73td\".posix;", "@\"\\x73td\"" },
         // A path too long to compare fails closed.
@@ -299,6 +328,11 @@ test "the boundary check reads names, not comments or strings" {
 test "clock methods are reflected from every time type a core may hold" {
     for ([_][]const u8{ "now", "wait", "sleep", "fromNow", "untilNow", "durationFromNow", "toClock" }) |name|
         try std.testing.expect(contains(clock_methods, name));
+    const paths = comptime blk: {
+        var list: [time_types.len][]const u8 = undefined;
+        for (time_types, 0..) |entry, index| list[index] = entry[0];
+        break :blk list;
+    };
     for (allowed_std) |allowed| if (within(allowed, "std.Io"))
-        try std.testing.expect(contains(&time_std, allowed) or within(allowed, "std.Io.Writer"));
+        try std.testing.expect(contains(&paths, allowed) or within(allowed, "std.Io.Writer"));
 }
