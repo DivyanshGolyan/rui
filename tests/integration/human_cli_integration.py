@@ -2586,7 +2586,7 @@ def renderer_cases():
             return bytes(output), bytes(errors)
 
     @contextmanager
-    def terminal(session, ready_write=None, *, columns=80, rows=24, opening=True):
+    def terminal(session, ready_write=None, *, columns=80, rows=24, opening=True, initial_text=None):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
@@ -2600,8 +2600,10 @@ def renderer_cases():
             env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color", "RUI_RENDERER": "vaxis"}
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
-            caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "--", session],
-                env=env, pass_fds=(() if ready_write is None else (ready_write,)),
+            arguments = (["resume", "--store", str(store), "--", session] if initial_text is None else
+                ["--store", str(store), "--provider", "codex", "--model", "model-a", "--", initial_text])
+            caller = subprocess.Popen([str(fixture.RUI), *arguments],
+                cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             terminal = Terminal(master, slave, caller)
             if opening:
@@ -2621,7 +2623,8 @@ def renderer_cases():
                 preserve_failure_metadata(state / "screen-failure.json", lambda: {
                     "session": session, "screen": terminal.capture.completed if terminal else None,
                     "cursor": repr(terminal.capture.screen.cursor) if terminal else None,
-                    "returncode": caller.poll() if caller else None})
+                    "returncode": caller.poll() if caller else None,
+                    "stderr": caller.stderr.read().decode(errors="replace") if caller and caller.poll() is not None else None})
             dispose_all(
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: termios.tcflush(slave, termios.TCIFLUSH),
@@ -2651,6 +2654,14 @@ def renderer_cases():
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configure("renderer/geometry")
         codex_fixture.credentials(home / ".config/rui/codex.json")
+        initial = "\u0301literal initial prompt\u200d"
+        marker = answer("initial")
+        with terminal("initial prompt", initial_text=initial, opening=False) as tty:
+            tty.wait(marker)
+            submitted(initial)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: initial zero-width prompt bypasses composer and reaches provider unchanged", flush=True)
         with terminal("renderer/geometry") as tty:
             tty.send("kept\x01", predicate=lambda: tty.capture.draft("kept", 2))
             tty.send("\x1b[200~\u0301discarded\x1b[201~", "! Input rejected")
