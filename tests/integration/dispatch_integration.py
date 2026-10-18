@@ -157,6 +157,13 @@ def compaction_cases(state, processes, endpoints, releases):
             # Each overflow keeps the correlation its provider answer carried.
             assert database.execute("SELECT request_id FROM model_operation WHERE operation_id=1").fetchone()[0] == (
                 overflow_request_id if route == "http" else "request-1")
+            if route == "http":
+                # Overflow keeps the HTTP body summary as well as the correlation.
+                assert database.execute(
+                    "SELECT c.payload FROM model_operation o JOIN content c ON c.content_id=o.resolution_content_id "
+                    "WHERE o.operation_id=1"
+                ).fetchone() == (b'{"http_status":"400","body":"json","body_bytes":"44",'
+                                 b'"excerpt":"error.code=context_length_exceeded","truncated":false}',)
             assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
             assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
         # Reset recovers default selection, then restart reconstructs the same base.

@@ -775,10 +775,11 @@ def main():
             for name in ("MallocMaxMagazines", "MallocSpaceEfficient"):
                 assert os.environ.get(name, "1") == "1", (name, os.environ.get(name))
         prove_accept_pressure(state)
-        # Lease(2), SQLite(4), listener(1), and curl wake objects: two
-        # pipes on macOS, two eventfds on Linux. Two execution slots need
-        # one steady population(5) plus the serial Bash spawn peak(10).
-        fixed_host = 2 + 4 + 1 + (4 if sys.platform == "darwin" else 2)
+        # Lease(2), SQLite(4), listener(1), Host log(2), and curl wake
+        # objects: two pipes on macOS, two eventfds on Linux. Two execution
+        # slots need one steady population(5) plus the serial Bash spawn
+        # peak(10).
+        fixed_host = 2 + 4 + 1 + 2 + (4 if sys.platform == "darwin" else 2)
         execution = 5 + 10
         # The supported burst is 100 ordinary exchanges (socket + up to
         # three content aliases each), two controls and one discovery.

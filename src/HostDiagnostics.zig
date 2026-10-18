@@ -113,7 +113,7 @@ fn fail(self: *Self, err: anyerror) void {
     defer self.mutex.unlock(self.io);
     if (self.failure != null) return;
     self.failure = err;
-    self.reportFailure();
+    self.reportFailureLocked();
 }
 
 fn append(self: *Self, record_bytes: []const u8) void {
@@ -122,12 +122,19 @@ fn append(self: *Self, record_bytes: []const u8) void {
     if (self.failure != null) return;
     self.write(record_bytes) catch |err| {
         self.failure = err;
-        self.reportFailure();
+        self.reportFailureLocked();
     };
 }
 
 /// Retain the failure when readiness exclusion drops the initial notice.
+/// Execution may already be recording, so the failure state is read locked.
 pub fn reportFailure(self: *Self) void {
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
+    self.reportFailureLocked();
+}
+
+fn reportFailureLocked(self: *Self) void {
     if (self.failure) |err|
         stderr.print("rui: diagnostic writer unavailable ({s}); no Host work was changed\n", .{@errorName(err)});
 }

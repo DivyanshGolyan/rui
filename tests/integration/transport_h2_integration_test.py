@@ -237,7 +237,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                         if args[0] == "openssl":
                             return SimpleNamespace(returncode=0)
                         if args[0] == "sh":
-                            fixed, authentication = (11, 10) if platform == "darwin" else (9, 8)
+                            fixed, authentication = (13, 10) if platform == "darwin" else (11, 8)
                             required = inherited + fixed + 403 + 10 + authentication + 2
                             limit = int(args[4])
                             launches.append(limit)
@@ -256,14 +256,14 @@ class ManagedDescriptorTests(unittest.TestCase):
                     def start(args, **kwargs):
                         # Derive the launch contract independently for all
                         # three native inherited populations and both intakes.
-                        full = (435 if platform == "linux" else 439) + inherited - 3
+                        full = (437 if platform == "linux" else 441) + inherited - 3
                         limit = full - (360 if intake == 10 else 0) + (2 if observed else 0)
                         self.assertEqual(int(args[4]), limit)
                         self.assertEqual(kwargs["required_fields"]["intake_capacity"], str(intake))
                         self.assertEqual(kwargs["required_fields"]["descriptor_requirement"], str(limit))
                         self.assertEqual(kwargs["required_fields"]["descriptor_limit"], str(limit))
-                        self.assertEqual(launches, [74 if platform == "linux" else 78] +
-                                         ([79] if inherited == 4 else []))
+                        self.assertEqual(launches, [76 if platform == "linux" else 80] +
+                                         ([81] if inherited == 4 else []))
                         return SimpleNamespace(pid=1), {}
 
                     with contextlib.ExitStack() as stack:
@@ -293,26 +293,26 @@ class ManagedDescriptorTests(unittest.TestCase):
                                 codex_h2.run(observed=observed, intake=intake)
 
     def test_inherited_allocator_descriptor_preserves_exact_managed_boundary(self):
-        for inherited, required in ((3, 439), (4, 440)):
+        for inherited, required in ((3, 441), (4, 442)):
             with self.subTest(inherited=inherited):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=(
                     "rui: descriptor capacity insufficient: active_capacity=1 "
-                    f"required={required} soft_limit=78 inherited={inherited} "
-                    "fixed_host=11 clients=403 execution=10 authentication=10 self_wake=2\n"))
+                    f"required={required} soft_limit=80 inherited={inherited} "
+                    "fixed_host=13 clients=403 execution=10 authentication=10 self_wake=2\n"))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
-                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 78), required)
+                    self.assertEqual(codex_h2.assert_managed_descriptor_rejection(rejected, 80), required)
 
     def test_wrong_owner_populations_cannot_be_accepted_as_inherited_variation(self):
         correct = ("rui: descriptor capacity insufficient: active_capacity=1 "
-                   "required=440 soft_limit=79 inherited=4 fixed_host=11 clients=403 "
+                   "required=442 soft_limit=81 inherited=4 fixed_host=13 clients=403 "
                    "execution=10 authentication=10 self_wake=2\n")
-        for before, after in (("required=440", "required=439"), ("authentication=10", "authentication=9"),
-                              ("inherited=4", "inherited=5"), ("soft_limit=79", "soft_limit=78")):
+        for before, after in (("required=442", "required=441"), ("authentication=10", "authentication=9"),
+                              ("inherited=4", "inherited=5"), ("soft_limit=81", "soft_limit=80")):
             with self.subTest(before=before):
                 rejected = SimpleNamespace(returncode=1, stdout="", stderr=correct.replace(before, after))
                 with patch.object(codex_h2.sys, "platform", "darwin"):
                     with self.assertRaises(AssertionError):
-                        codex_h2.assert_managed_descriptor_rejection(rejected, 79)
+                        codex_h2.assert_managed_descriptor_rejection(rejected, 81)
 
 
 class H1ResponseBoundaryTests(unittest.TestCase):

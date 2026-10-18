@@ -1054,7 +1054,7 @@ pub fn serve(
     if (diagnostic_open_error) |err|
         stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
     if (diagnostics) |*writer| {
-        if (writer.failure != null) writer.reportFailure();
+        writer.reportFailure();
         writer.record("ready", "serving");
     }
 
@@ -2687,7 +2687,7 @@ fn completeTransfer(
             return;
         };
         if (overflow) {
-            attempt.fail("provider_context_overflow", .context_overflow);
+            attempt.failWithSummary("provider_context_overflow", summary.?, .context_overflow);
             active.transfer.deinit();
             beginCleanup(host, slot, owner);
             return;

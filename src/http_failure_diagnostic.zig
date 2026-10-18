@@ -30,11 +30,11 @@ pub fn summarize(http_status: u32, body_length: u64, window: []const u8, buffer:
     const body = classify(window);
     switch (body) {
         .empty, .binary => {},
-        .json => redactJson(window, &excerpt),
+        .json => redactJson(window, body_length > window.len, &excerpt),
         .text => {
             var prose: Prose = .{ .out = &excerpt };
             for (window) |byte| prose.feed(byte);
-            prose.finish();
+            prose.finish(body_length > window.len);
         },
     }
     const truncated = excerpt.truncated or (body != .binary and body_length > window.len);
@@ -144,7 +144,7 @@ const Prose = struct {
                     self.keep(value);
                     return;
                 }
-                self.closeSpan(true);
+                self.closeSpan(true, false);
             } else if (value == quote) {
                 self.closing = true;
                 return;
@@ -158,16 +158,30 @@ const Prose = struct {
                 self.flushWord();
                 if (self.out.len != 0) self.space = true;
             },
-            '\'', '`', '"' => if (self.token_len == 0 and self.seen == 0) {
+            // Any quote opens a span, including one after `=` or `(`, except
+            // an apostrophe inside a word such as `don't` or `users'`.
+            '\'', '`', '"' => if (value == '\'' and self.token_len != 0 and std.ascii.isAlphanumeric(self.token[self.token_len - 1])) {
+                self.keep(value);
+            } else {
+                self.flushWord();
                 self.separate();
                 self.quote = value;
-            } else self.keep(value),
+            },
             else => self.keep(value),
         }
     }
 
-    fn finish(self: *Prose) void {
-        if (self.quote != null) self.closeSpan(self.closing) else self.flushWord();
+    /// `cut` means the text continues past what was fed, so the pending word
+    /// or span may be a credential's prefix and is never kept.
+    fn finish(self: *Prose, cut: bool) void {
+        if (self.quote != null) {
+            self.closeSpan(self.closing and !cut, cut);
+        } else if (cut and self.seen != 0) {
+            self.separate();
+            self.out.redacted(self.seen);
+            self.token_len = 0;
+            self.seen = 0;
+        } else self.flushWord();
     }
 
     fn keep(self: *Prose, value: u8) void {
@@ -192,11 +206,11 @@ const Prose = struct {
         self.seen = 0;
     }
 
-    fn closeSpan(self: *Prose, closed: bool) void {
+    fn closeSpan(self: *Prose, closed: bool, cut: bool) void {
         const quote = self.quote.?;
         const span = self.token[0..self.token_len];
         self.out.byte(quote);
-        if (self.seen <= self.token.len and identifier(span)) self.out.append(span) else self.out.redacted(self.seen);
+        if (!cut and self.seen <= self.token.len and identifier(span)) self.out.append(span) else self.out.redacted(self.seen);
         if (closed) self.out.byte(quote);
         self.quote = null;
         self.closing = false;
@@ -221,7 +235,8 @@ const Frame = struct {
 
 /// A lenient scan of possibly truncated JSON. It emits one `path=value` per
 /// scalar leaf and never validates; malformed bytes only lose structure.
-fn redactJson(window: []const u8, out: *Excerpt) void {
+/// `cut` means the body continues past the window.
+fn redactJson(window: []const u8, cut: bool, out: *Excerpt) void {
     var frames: [max_depth]Frame = undefined;
     var depth: usize = 0;
     var overflow: usize = 0;
@@ -259,10 +274,12 @@ fn redactJson(window: []const u8, out: *Excerpt) void {
                 if (expect_key and overflow == 0) {
                     const frame = &frames[depth - 1];
                     var key: Token = .{};
-                    index = scanString(window, index, &key, null, out);
-                    frame.key_len = key.len;
-                    @memcpy(frame.key[0..key.len], key.bytes[0..key.len]);
-                    frame.key_valid = key.seen <= max_key_bytes and identifier(key.bytes[0..key.len]);
+                    const scan = scanString(window, index, &key, null, out);
+                    index = scan.index;
+                    // Token keeps up to 64 bytes; a frame keeps at most 32.
+                    frame.key_len = @min(key.len, max_key_bytes);
+                    @memcpy(frame.key[0..frame.key_len], key.bytes[0..frame.key_len]);
+                    frame.key_valid = scan.closed and key.seen <= max_key_bytes and identifier(frame.key[0..frame.key_len]);
                     expect_key = false;
                     continue;
                 }
@@ -272,13 +289,15 @@ fn redactJson(window: []const u8, out: *Excerpt) void {
                     proseKey(frames[depth - 1].key[0..frames[depth - 1].key_len]));
                 if (leaf and prose) {
                     var sink: Prose = .{ .out = out };
-                    index = scanString(window, index, null, &sink, out);
-                    sink.finish();
+                    const scan = scanString(window, index, null, &sink, out);
+                    index = scan.index;
+                    sink.finish(!scan.closed);
                 } else {
                     var token: Token = .{};
-                    index = scanString(window, index, &token, null, out);
+                    const scan = scanString(window, index, &token, null, out);
+                    index = scan.index;
                     if (leaf) {
-                        if (token.seen <= max_token_bytes and identifier(token.bytes[0..token.len])) out.append(token.bytes[0..token.len]) else out.redacted(token.seen);
+                        if (scan.closed and token.seen <= max_token_bytes and identifier(token.bytes[0..token.len])) out.append(token.bytes[0..token.len]) else out.redacted(token.seen);
                     }
                 }
             },
@@ -293,7 +312,9 @@ fn redactJson(window: []const u8, out: *Excerpt) void {
                 if (overflow != 0) continue;
                 startLeaf(out, frames[0..depth], &leaves);
                 const literal = window[start..index];
-                if (literal.len <= 24) out.append(literal) else out.redacted(literal.len);
+                // Malformed JSON can carry bare words; only JSON literals and
+                // whole numbers survive, never a cut prefix.
+                if ((index < window.len or !cut) and jsonLiteral(literal)) out.append(literal) else out.redacted(literal.len);
             },
         }
     }
@@ -301,6 +322,16 @@ fn redactJson(window: []const u8, out: *Excerpt) void {
 
 fn literalByte(value: u8) bool {
     return std.ascii.isAlphanumeric(value) or value == '-' or value == '+' or value == '.';
+}
+
+fn jsonLiteral(literal: []const u8) bool {
+    if (std.mem.eql(u8, literal, "true") or std.mem.eql(u8, literal, "false") or std.mem.eql(u8, literal, "null")) return true;
+    if (literal.len > 24 or !(std.ascii.isDigit(literal[0]) or literal[0] == '-')) return false;
+    for (literal) |value| switch (value) {
+        '0'...'9', '-', '+', '.', 'e', 'E' => {},
+        else => return false,
+    };
+    return true;
 }
 
 fn startLeaf(out: *Excerpt, frames: []const Frame, leaves: *usize) void {
@@ -331,14 +362,17 @@ const Token = struct {
     }
 };
 
+const Scan = struct { index: usize, closed: bool };
+
 /// Decodes the string starting at `start` (its opening quote) into exactly
-/// one sink and returns the index after its closing quote, or the window end.
-fn scanString(window: []const u8, start: usize, token: ?*Token, prose: ?*Prose, out: *Excerpt) usize {
+/// one sink and returns the index after its closing quote, or the window end
+/// for an unterminated string.
+fn scanString(window: []const u8, start: usize, token: ?*Token, prose: ?*Prose, out: *Excerpt) Scan {
     var index = start + 1;
     while (index < window.len) {
         var value = window[index];
         index += 1;
-        if (value == '"') return index;
+        if (value == '"') return .{ .index = index, .closed = true };
         if (value == '\\') {
             if (index == window.len) break;
             const escaped = window[index];
@@ -364,7 +398,7 @@ fn scanString(window: []const u8, start: usize, token: ?*Token, prose: ?*Prose, 
         if (token) |sink| sink.feed(value) else prose.?.feed(value);
     }
     out.truncated = true;
-    return window.len;
+    return .{ .index = window.len, .closed = false };
 }
 
 fn expectSummary(expected: []const u8, http_status: u32, body: []const u8) !void {
@@ -410,6 +444,68 @@ test "an apostrophe inside a quoted span does not end its redaction" {
         "{\"http_status\":\"400\",\"body\":\"text\",\"body_bytes\":\"41\",\"excerpt\":\"rejected '<redacted 26 bytes>' now\",\"truncated\":false}",
         400,
         "rejected 'please don't share my plan' now",
+    );
+}
+
+test "quotes after punctuation still open redacted spans" {
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"json\",\"body_bytes\":\"96\",\"excerpt\":\"detail=Rejected input='<redacted 22 bytes>' or arguments=('<redacted 12 bytes>') users' data\",\"truncated\":false}",
+        400,
+        "{\"detail\":\"Rejected input='LEAKPROMPT do not keep' or arguments=(\\\"cat LEAKARGS\\\") users' data\"}",
+    );
+}
+
+test "malformed bare words and cut tokens fail closed" {
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"json\",\"body_bytes\":\"40\",\"excerpt\":\"message=<redacted 6 bytes>; message=<redacted 21 bytes>\",\"truncated\":false}",
+        400,
+        "{\"message\":Bearer abcdef0123456789ghijk}",
+    );
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"json\",\"body_bytes\":\"42\",\"excerpt\":\"code=400; ok=true; x=null; n=-1.5e3\",\"truncated\":false}",
+        400,
+        "{\"code\":400,\"ok\":true,\"x\":null,\"n\":-1.5e3}",
+    );
+    // A credential that the window cuts after six bytes keeps none of them.
+    const credential = "sk-LEAKabcdefghijklmnop";
+    var text: [window_bytes - 6 + credential.len]u8 = undefined;
+    @memset(&text, ' ');
+    text[0] = 'x';
+    @memcpy(text[window_bytes - 6 ..], credential);
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"text\",\"body_bytes\":\"4113\",\"excerpt\":\"x <redacted 6 bytes>\",\"truncated\":true}",
+        400,
+        &text,
+    );
+    var json: [window_bytes - 6 + credential.len]u8 = undefined;
+    @memset(&json, ' ');
+    @memcpy(json[0..12], "{\"detail\":\"x");
+    @memcpy(json[window_bytes - 6 ..], credential);
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"json\",\"body_bytes\":\"4113\",\"excerpt\":\"detail=x <redacted 6 bytes>\",\"truncated\":true}",
+        400,
+        &json,
+    );
+}
+
+test "object keys longer than a frame are elided without overrunning it" {
+    // Separators keep the name identifier-shaped rather than secret-shaped.
+    const name = comptime blk: {
+        var bytes: [100]u8 = undefined;
+        for (&bytes, 0..) |*value, index| value.* = if (index % 4 == 3) '_' else 'k';
+        break :blk bytes;
+    };
+    inline for (.{ 32, 33, 64, 100 }) |length| {
+        const body = "{\"" ++ name[0..length] ++ "\":\"v\"}";
+        var buffer: [max_bytes]u8 = undefined;
+        const summary = summarize(400, body.len, body, &buffer);
+        const expected = if (length == 32) name[0..32] ++ "=v" else "?=v";
+        try std.testing.expect(std.mem.indexOf(u8, summary, "\"excerpt\":\"" ++ expected ++ "\"") != null);
+    }
+    try expectSummary(
+        "{\"http_status\":\"400\",\"body\":\"json\",\"body_bytes\":\"12\",\"excerpt\":\"\",\"truncated\":true}",
+        400,
+        "{\"kkkkkkkkkk",
     );
 }
 

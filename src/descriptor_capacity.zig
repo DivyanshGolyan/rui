@@ -47,8 +47,13 @@ pub fn calculate(
     const store_lease: usize = 2;
     const sqlite: usize = 4;
     const listener: usize = 1;
+    // The Host log writer keeps its diagnostics directory and active file
+    // open until execution joins; rotation closes the file before creating
+    // its successor (2).
+    const diagnostics: usize = 2;
     var fixed_host = try add(store_lease, sqlite);
     fixed_host = try add(fixed_host, listener);
+    fixed_host = try add(fixed_host, diagnostics);
     // Rui's pinned curl creates two wakeup objects for one multi handle. Linux
     // implements each with one eventfd; macOS implements each with a pipe.
     const transport_wake: usize = if (!provider_configured)
@@ -165,32 +170,32 @@ fn multiply(left: usize, right: usize) !usize {
 test "requirement uses simultaneous owner populations rather than summing exclusive maxima" {
     const linux = try calculate(3, 2, 10, 2, true, false, .linux);
     try std.testing.expectEqual(@as(usize, 3), linux.inherited);
-    try std.testing.expectEqual(@as(usize, 9), linux.fixed_host);
+    try std.testing.expectEqual(@as(usize, 11), linux.fixed_host);
     try std.testing.expectEqual(@as(usize, 42), linux.clients);
     try std.testing.expectEqual(@as(usize, 15), linux.execution);
     try std.testing.expectEqual(@as(usize, 0), linux.authentication);
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
-    try std.testing.expectEqual(@as(usize, 71), linux.total);
+    try std.testing.expectEqual(@as(usize, 73), linux.total);
 
     const managed = try calculate(3, 2, 10, 2, true, true, .linux);
     try std.testing.expectEqual(@as(usize, 8), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 79), managed.total);
+    try std.testing.expectEqual(@as(usize, 81), managed.total);
 
     const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
-    try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
-    try std.testing.expectEqual(@as(usize, 69), without_transport.total);
+    try std.testing.expectEqual(@as(usize, 9), without_transport.fixed_host);
+    try std.testing.expectEqual(@as(usize, 71), without_transport.total);
 
     const macos = try calculate(3, 2, 10, 2, true, true, .macos);
-    try std.testing.expectEqual(@as(usize, 11), macos.fixed_host);
+    try std.testing.expectEqual(@as(usize, 13), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 10), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 83), macos.total);
+    try std.testing.expectEqual(@as(usize, 85), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
     const requirement = try calculate(3, 0, 10, 2, false, true, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
-    try std.testing.expectEqual(@as(usize, 54), requirement.total);
+    try std.testing.expectEqual(@as(usize, 56), requirement.total);
 }
 
 test "execution population compares exclusive steady and shared transition overlaps" {
