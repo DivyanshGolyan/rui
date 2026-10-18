@@ -373,12 +373,16 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
     def test_setup_installs_only_selected_fixture_dependencies(self):
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "h2": False})
-        self.assertEqual(setup_requirements(["check-full"]), {"go": False, "h2": False})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "h2": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "h2": False, "terminal": False})
+        self.assertEqual(setup_requirements(["check-full"]), {"go": False, "h2": False, "terminal": True})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "h2": False, "terminal": False})
         for target in ("transport-h2-integration", "codex-h2-integration"):
             self.assertEqual(setup_requirements([target, "measurement-check"]),
-                             {"go": True, "h2": True})
+                             {"go": True, "h2": True, "terminal": False})
+        # Standalone PTY steps decode screens too, including the upgrade workflow's.
+        for target in ("host-launch-integration", "terminal-restoration-integration",
+                       "canonical-failure-integration", "bash-recovery-integration"):
+            self.assertTrue(setup_requirements([target])["terminal"], target)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):
         targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]

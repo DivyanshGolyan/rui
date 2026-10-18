@@ -13,13 +13,18 @@ pub const Prepared = struct {
     page: client.ConversationPage,
     offsets: [protocol.public_conversation_page_items]u64 = undefined,
 
-    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, columns: usize, colour: bool) !void {
+    /// The transcript matches live presentation; details keep exact tool output.
+    pub const Mode = enum { transcript, details };
+
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
+        var compact = false;
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
-            if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, columns, colour, true);
             if (item.content.bytes > item_bytes) {
+                compact = false;
+                if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true);
                 var buffer: [192]u8 = undefined;
                 try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui session read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
                 try writeHex(sink, store);
@@ -28,29 +33,49 @@ pub const Prepared = struct {
                 try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}\n", .{ item.position, item.ordinal }));
                 continue;
             }
-            if (item.kind == .user) {
+            const Staged = struct {
+                io: std.Io,
+                scratch: std.Io.File,
+                start: u64,
+                bytes: u64,
+                window: *[protocol.content_window_bytes]u8,
+                pub fn read(staged: @This(), target: anytype) !void {
+                    var offset: u64 = 0;
+                    while (offset < staged.bytes) {
+                        const wanted: usize = @intCast(@min(staged.bytes - offset, staged.window.len));
+                        if (try staged.scratch.readPositionalAll(staged.io, staged.window[0..wanted], staged.start + offset) != wanted) return error.TruncatedHistoryScratch;
+                        try target.feed(staged.window[0..wanted]);
+                        offset += wanted;
+                    }
+                }
+            };
+            const staged: Staged = .{ .io = io, .scratch = scratch, .start = self.offsets[index], .bytes = item.content.bytes, .window = &window };
+            if (item.kind == .tool_result and mode == .transcript) {
+                try View.toolResult(item.presentation.?, staged, sink, colour, &compact);
+                continue;
+            }
+            compact = false;
+            if (item.kind == .tool_result) {
+                try View.toolHeading(item.presentation.?, sink, colour, true);
+                try sink.feed("  ");
+            } else if (item.kind == .user) {
                 try sink.feed("\n");
                 try sink.feed(View.Style.user.code(colour));
                 try sink.feed("›");
                 try sink.feed(View.Style.normal.code(colour));
                 try sink.feed(" ");
-            } else if (item.kind == .assistant) {
-                try sink.feed("\n  ");
+            } else try sink.feed("\n  ");
+            var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink };
+            if (item.kind == .assistant) {
+                var answer: View.Answer(@TypeOf(&indented)) = undefined;
+                answer.init(&indented);
+                try staged.read(&answer);
+                try answer.finish();
             } else {
-                try sink.feed("  ");
+                var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
+                try staged.read(&escaped);
+                try escaped.finish();
             }
-            var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink, .columns = columns };
-            var answer: View.Answer(@TypeOf(&indented)) = undefined;
-            answer.init(&indented);
-            var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-            var offset: u64 = 0;
-            while (offset < item.content.bytes) {
-                const wanted: usize = @intCast(@min(item.content.bytes - offset, window.len));
-                if (try scratch.readPositionalAll(io, window[0..wanted], self.offsets[index] + offset) != wanted) return error.TruncatedHistoryScratch;
-                if (item.kind == .assistant) try answer.feed(window[0..wanted]) else try escaped.feed(window[0..wanted]);
-                offset += wanted;
-            }
-            if (item.kind == .assistant) try answer.finish() else try escaped.finish();
             try indented.finish();
             try sink.feed("\n");
         }
@@ -137,7 +162,7 @@ test "historical export preserves opaque identities without terminal or shell in
     var prepared: Prepared = .{ .page = .{ .end = 2, .count = 1, .more = false } };
     prepared.page.items[0] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8193, .digest = @splat(0) } };
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, 0, false);
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, .details, false);
     // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
     try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
 }
@@ -175,7 +200,7 @@ test "history body limit preserves contextual tool outcomes" {
             if (size == 8192) try scratch.writePositionalAll(io, body, 0);
             prepared.offsets[0] = if (size == 8192) 0 else std.math.maxInt(u64);
             var sink: Sink = .{};
-            try prepared.render(io, scratch, "store", "session", &sink, 0, false);
+            try prepared.render(io, scratch, "store", "session", &sink, .details, false);
             const output = sink.bytes[0..sink.length];
             try std.testing.expect(std.mem.startsWith(u8, output, case.heading));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, case.heading));
