@@ -75,6 +75,9 @@ pub const Requests = struct {
         try body.appendJsonString(paths.store.slice());
         try body.append(if (refresh) ",\"refresh\":true}" else ",\"refresh\":false}");
         const reply = try sendSource(self, &paths, "/v1/model-catalog", .{}, body.len, null, body.slice(), null, null, reply_buffer, null);
+        // A Host built before the catalog rejects the unknown route as a bad
+        // request; a catalog Host never answers this well-formed request with 400.
+        if (reply.status == 400) return error.HostPredatesModelCatalog;
         if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
         return .{ .listing = try ModelCatalogListing.parse(arena, reply.body) };
     }

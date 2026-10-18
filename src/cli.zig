@@ -126,6 +126,10 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
         // The catalog rejection already explained itself and saved nothing.
         if (err == error.ModelUnavailable) return err;
+        if (err == error.HostPredatesModelCatalog) {
+            TerminalText.diagnostic("rui: the Host serving this Store was started by a Rui version without the model catalog. Restart it with rui host stop, then rui host start.\n", .{});
+            return err;
+        }
         if (err == error.MutationNotAccepted) {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
