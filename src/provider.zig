@@ -966,6 +966,9 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     const context: *HeaderContext = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
     const line = pointer[0..bytes];
+    // Each response, including an interim one, starts with its status line;
+    // only the final response's own Content-Type describes the body.
+    if (std.mem.startsWith(u8, line, "HTTP/")) context.content_type = .absent;
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return bytes;
     const name = std.mem.trim(u8, line[0..colon], " \t");
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
@@ -977,7 +980,6 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
         return bytes;
     }
     if (std.ascii.eqlIgnoreCase(name, "content-type")) {
-        // Interim responses can precede the final one; the last header wins.
         context.content_type_bytes.set(value) catch {
             context.content_type = .{ .oversized = value.len };
             return bytes;
@@ -1129,9 +1131,11 @@ test "response observations use caller-selected names and reject contradictions"
     try std.testing.expectEqualStrings("beta", context.alternate_model.slice());
     try std.testing.expectEqualStrings("ref-1", context.request_id.slice());
     try std.testing.expectEqual(http_failure_diagnostic.ContentType.absent, context.content_type);
-    const interim = "Content-Type: text/plain\r\n";
-    const final = "content-type: application/json; charset=utf-8\r\n";
-    for ([_][]const u8{ interim, final }) |line|
+    // An interim response's type never describes a final response without one.
+    for ([_][]const u8{ "HTTP/1.1 103 Early Hints\r\n", "Content-Type: text/early-hint-only\r\n", "\r\n", "HTTP/1.1 400 Bad Request\r\n", "\r\n" }) |line|
+        try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
+    try std.testing.expectEqual(http_failure_diagnostic.ContentType.absent, context.content_type);
+    for ([_][]const u8{ "HTTP/2 103\r\n", "Content-Type: text/plain\r\n", "HTTP/2 400\r\n", "content-type: application/json; charset=utf-8\r\n" }) |line|
         try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
     try std.testing.expectEqualStrings("application/json; charset=utf-8", context.content_type_bytes.slice());
     var oversized: ["Content-Type: ".len + 200 + 2]u8 = undefined;

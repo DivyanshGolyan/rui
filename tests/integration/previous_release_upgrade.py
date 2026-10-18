@@ -131,13 +131,18 @@ def old_client_reads_worst_case_failure(root, previous_artifact, previous_cli, c
     """The previous client reads the candidate Host's largest failure reply.
 
     Control-byte key and Session names take the six-byte JSON escape, the
-    request ID is the longest shown verbatim, and the redacted summary is cut
-    at its cap. Old clients reject replies above their response bound.
+    request ID is the longest shown verbatim, and every retained envelope
+    field is present at its longest kept shape, so the summary is cut at its
+    cap. Old clients reject replies above their response bound.
     """
     store = root / "compatibility-store"
     key = session = "\x01" * 128
     request_id = "r" * 128
-    body = json.dumps({"detail": " ".join(["unsupported"] * 80)}).encode()
+    # Letter-only identifiers with separators stay verbatim at 64 bytes.
+    identifier = ("invalid_request_error." * 3)[:64]
+    words = " ".join(["unsupported"] * 80)
+    body = json.dumps({"error": {"type": identifier, "code": identifier, "param": identifier, "message": words},
+                       "detail": words}).encode()
     endpoint = fixture.SuccessEndpoint([
         fixture.ResponseSpec(body, {"Content-Type": "application/json", "X-Request-Id": request_id}, 400),
     ])
@@ -162,14 +167,18 @@ def old_client_reads_worst_case_failure(root, previous_artifact, previous_cli, c
             "worst-case failure", deadline=time.monotonic() + 15)["result"]
         assert current["status"] == "failed" and current["code"] == "provider_http_400", current
         assert current["request_id"] == request_id, current
-        assert json.loads(current["diagnostic"])["detail"].startswith("unsupported unsupported"), current
+        summary = json.loads(current["diagnostic"])
+        assert len(current["diagnostic"]) >= 500 and summary.get("truncated") is True, current
+        assert all(summary[name] == identifier for name in ("type", "code", "param")), summary
+        assert summary["message"].startswith("unsupported unsupported"), summary
         command = ("request", "inspect") if previous_cli.resource_first else ("observe-command",)
         old = subprocess.run([str(previous_artifact), *command, "--store", str(store), "--key", key],
                              capture_output=True, text=True, timeout=15)
         assert old.returncode == 0, ("previous client rejected the failure reply", old.stderr)
         result = json.loads(old.stdout)["observation"]["result"]
         assert result["status"] == "failed" and result["code"] == "provider_http_400", result
-        print("Previous client read the candidate Host's worst-case failure reply", flush=True)
+        print(f"Previous client read the candidate Host's worst-case failure reply "
+              f"(diagnostic {len(current['diagnostic'])} bytes)", flush=True)
     finally:
         dispose_all(
             lambda: stop_process(host) if host is not None else None,
