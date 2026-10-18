@@ -24,7 +24,7 @@ pasting: bool = false,
 /// Navigation events leave the draft unchanged. Up/Down beyond the draft's
 /// first/last line scroll the transcript; terminals in the alternate screen
 /// also deliver mouse wheel and trackpad scrolling as these arrow keys.
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, unbound, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view };
 
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
@@ -192,7 +192,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         const old_length = editor.length;
         const event = editor.feed(&input, byte[0]);
         switch (event) {
-            .none, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => {},
+            // The prompt is a one-letter choice; a dropped chord leaves it as typed.
+            .none, .unbound, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
@@ -365,16 +366,16 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches(Key.backspace, .{ .alt = true }) or value.matches(127, .{ .alt = true })) return self.backwardWord(false);
     if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
     if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
-    // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints.
-    // Only the bindings above may consume a modified key without rejecting
-    // input; inserting its bare character (ESC . as ".") or silently
-    // ignoring it would submit text the user did not type.
-    if (value.mods.ctrl or value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta or
-        !validScalar(value.codepoint, false))
-    {
+    // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
+    // those are not text, so they reject the input.
+    if (value.mods.ctrl or !validScalar(value.codepoint, false)) {
         self.reject(.invalid);
         return .none;
     }
+    // Any other chord the bindings above do not consume is dropped whole and
+    // reported. Its bare character (ESC . as ".") was never typed, and the
+    // draft around it was: an Esc pressed just before a key arrives as one.
+    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .unbound;
     if (value.text) |text| return self.insertText(text, false);
     return .none;
 }
@@ -387,9 +388,11 @@ test "modified kitty text cannot become an ordinary permission choice" {
             const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d}{s}u", .{ modifier, text });
             var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
             var stream: Input = .{};
-            for (input) |byte| _ = editor.feed(&stream, byte);
-            try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
+            var event: Event = .none;
+            for (input) |byte| event = editor.feed(&stream, byte);
+            try std.testing.expectEqual(Event.unbound, event);
             try std.testing.expectEqual(@as(usize, 0), editor.length);
+            try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
         }
     }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
@@ -747,15 +750,18 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     var storage: [64]u8 = undefined;
     // Legacy ESC prefix (Option as Meta, and tmux's re-encoding of Kitty or
     // modifyOtherKeys chords), Kitty with and without associated text, and
-    // Super/Meta bits. Each rejects the draft rather than adding ".".
+    // Super/Meta bits. Each is dropped as it arrives, keeping the draft
+    // around it, rather than adding ".".
     for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
-            for ("ok") |byte| _ = editor.feed(&stream, byte);
+            for ("o") |byte| _ = editor.feed(&stream, byte);
             for (chord) |byte| _ = editor.feed(&stream, byte);
+            try std.testing.expectEqualStrings("o", storage[0..editor.length]);
+            for ("k") |byte| _ = editor.feed(&stream, byte);
+            try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
             try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
-            try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
         }
     }
     // Vaxis decodes no key from xterm modifyOtherKeys; nothing is inserted.
@@ -773,6 +779,15 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     for ("a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
     try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+}
+
+test "a dropped chord reports itself as it arrives" {
+    var storage: [16]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    var stream: Input = .{};
+    _ = editor.feed(&stream, 'o');
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '.'));
 }
 
 test "meta-backspace deletes a word without swallowing the next character" {
@@ -895,11 +910,12 @@ test "unknown CSI retains following text; malformed input and marked choice reje
         const event = editor.feed(&stream, byte);
         if (byte == '\n' and !stream.paste) try std.testing.expectEqual(Event.invalid, event);
     }
+    // Alt-a never becomes the choice "a": it is dropped, and the frontend
+    // resets the choice on the report.
     editor = .{ .buffer = &storage, .allow_paste = false };
-    for ("\x1ba\n") |byte| {
-        const event = editor.feed(&stream, byte);
-        if (byte == '\n') try std.testing.expectEqual(Event.invalid, event);
-    }
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, 'a'));
+    try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
 test "inserting a joiner before an emoji leaves the caret at a cluster boundary" {
@@ -992,10 +1008,11 @@ test "incomplete escape cannot swallow Enter or Ctrl-C" {
     for ("\x1b[") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqual(Event.interrupt, editor.feed(&stream, 3));
     editor = .{ .buffer = &storage };
-    // ESC with a following key is an Alt chord: unbound, it rejects.
-    for ("\x1bZ") |byte| _ = editor.feed(&stream, byte);
-    try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\n'));
-    try std.testing.expectEqual(@as(usize, 0), editor.length);
+    // ESC with a following key is an Alt chord: unbound, it is dropped.
+    for ("ok\x1b") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, 'Z'));
+    try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\n'));
+    try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
 }
 
 test "word movement skips separators and stops at word edges" {

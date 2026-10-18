@@ -321,12 +321,19 @@ fn inspection(text: []const u8) ?Inspection {
     return null;
 }
 
+/// The page asked for last is the one shown: a /status not yet rendered
+/// yields to a later /history or /details.
+fn requestHistory(self: *Self, text: []const u8) void {
+    self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+    self.status_requested = false;
+}
+
 /// A slash command typed in the choice field, which never decides.
 fn choiceCommand(self: *Self, text: []const u8) void {
     if (std.mem.eql(u8, text, "/exit")) {
         self.detached = true;
     } else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
-        self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+        self.requestHistory(text);
     } else if (self.command_running) {
         self.notice = "! Command still running. Try again when it finishes.";
     } else if (self.input.command_length == null) {
@@ -846,7 +853,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             self.consent.invalidate();
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         },
-        .invalid, .edit_rejected, .overflow => {
+        .invalid, .edit_rejected, .unbound, .overflow => {
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.consent.invalidate();
             self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
@@ -871,7 +878,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/history") or std.mem.eql(u8, text, "/details")) {
                 // Local read work never cancels the independent Admission owner.
                 self.input.command_length = null;
-                self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+                self.requestHistory(text);
             } else self.admitCommand();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
@@ -879,6 +886,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
+            .unbound => self.notice = "! Key combination not recognized; ignored. Draft unchanged.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
             else => {},
         },

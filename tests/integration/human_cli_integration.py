@@ -3826,6 +3826,31 @@ def renderer_cases():
         proxy = None
         print("renderer: /status opens from the capture the composer status shows", flush=True)
 
+        # A /status not yet shown yields to a later page request: the page
+        # asked for last is the one that stays on screen.
+        session = "renderer/status-yields"
+        configure(session)
+        marker = answer("status yields")
+        holding, release, hold_page = held_pages()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            tty.send("status yields\n", marker)
+            holding.set()
+            os.write(tty.master, b"/status\n/details\n")
+            time.sleep(0.5)
+            release.set()
+            tty.wait("Recent conversation — tool details", timeout=20)
+            frames = tty.every_frame()
+            time.sleep(1.5)
+            assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
+            for frame in frames:
+                assert "Session: " not in frame, frame
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: a later /details replaces a /status not yet shown", flush=True)
+
         # A Message accepted after its page and many later ones were shown is
         # already delivered: Sent never outlives it.
         session = "renderer/sent-late"
@@ -3860,18 +3885,19 @@ def renderer_cases():
         print("renderer: Sent never outlives a Message delivered before its acceptance joined", flush=True)
 
         # An unbound Alt chord, as Option-as-Meta or tmux sends it (ESC then
-        # the key), never types its bare key into the draft.
+        # the key), never types its bare key, and the draft around it stays.
         session = "renderer/alt-chord"
         configure(session)
         with terminal(session) as tty:
             requests = len(endpoint.requests)
-            shown = tty.send("ok\x1b.\x1b Z\r", "! Input rejected; nothing sent. Enter plain text or paste again.")
-            assert "› ok" not in shown and tty.capture.draft("", 2), shown
-            time.sleep(0.5)
+            tty.send("o\x1b.\x1b ", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("o", 3))
             assert len(endpoint.requests) == requests, endpoint.requests
+            marker = answer("alt chord")
+            tty.send("k\r", marker)
+            submitted("ok")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        print("renderer: an unbound Alt chord rejects the draft instead of typing its key", flush=True)
+        print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
@@ -5136,7 +5162,7 @@ def main(selected="all"):
             ("ab\x01\x04\x05\x04", "b"),
             ("ask src/foo-bar\x17", "ask "),
             ("\x1b[123;4~Z", "Z"),
-            ("\x1bZ", "Z"),
+            ("ok\x1bZ", "ok"),
             ("abc\x1b[D\x1b[DZ", "aZbc"),
             ("\x1b[200~line1\nline2\x1b[201~\x1b[A\x01X", "Xline1\nline2"),
         ]
