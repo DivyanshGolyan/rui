@@ -225,6 +225,12 @@ pub fn releaseAction(self: *Self) void {
     self.view = .live;
 }
 
+/// The Action stopped pending elsewhere: leave its page, keep any other view.
+pub fn withdrawAction(self: *Self) void {
+    self.action_view = null;
+    if (self.view == .action) self.view = .live;
+}
+
 /// The draft must have a cell for every cluster; the editor declines edits
 /// that would not.
 fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]const u8 {

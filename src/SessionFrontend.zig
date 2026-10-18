@@ -36,42 +36,35 @@ inspection_file: std.Io.File = undefined,
 command: Command,
 inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
-command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
-command_text_length: usize = 0,
 // An inspection or Host command started and its result has not been
 // presented. A command may change configuration, so Messages and consent wait
 // for every inspection; exit prints an unshown command's output, which can
 // carry recovery warnings.
 command_running: bool = false,
-inspection_submission: ?Submission.View = null,
-inspection_action: ?u64 = null,
 terminal: Terminal,
 colour: bool,
 input: Input = undefined,
 submission: Submission = undefined,
 reader: Task = .{},
+// The reader's only context; the UI reads its result after join.
+job: Job = .{},
 current: client.Current = undefined,
-observed: client.Current = undefined,
 live: View.Live = .{},
-observed_live: View.Live = .{},
 cursor: client.ActivityCursor = .{},
-next_cursor: client.ActivityCursor = .{},
 // UI commits layout alongside delivered Activity; workers borrow a snapshot.
 compact_tools: bool = false,
-next_compact_tools: bool = false,
-next_history_cursor: ?client.ConversationCursor = null,
 // Continues the transcript above its oldest shown row; null at the start.
 transcript_older: ?client.ConversationCursor = null,
+// Each transcript gets a new identity, so a page loaded for one is never
+// joined to another.
+transcript: u64 = 0,
 // A failed older load waits for the next scroll rather than retrying at once.
 older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
 marks: Marks = .{},
-read_mark: ?client.ConversationCursor = null,
 read_phase: ReadPhase = .activity,
-// Worker result is inspected only after join; input policy stays UI-owned.
-history_render_started: bool = false,
 prepared_action: ?u64 = null,
 prepared_summary: View.ActionSummary = .{},
 action_summary: View.ActionSummary = .{},
@@ -127,6 +120,62 @@ test "transcript boundaries survive live eviction and bounded recording" {
     for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
     try std.testing.expectEqual(@as(usize, 64), marks.count);
     try std.testing.expectEqual(@as(u64, 136), marks.from(0).?.offset);
+}
+
+/// One read. Inputs are frozen at launch; the worker writes only `lead`,
+/// before its first output window, and `result`, which the UI reads after
+/// join. No worker reads or writes the controller.
+const Job = struct {
+    init: std.process.Init = undefined,
+    store: []const u8 = "",
+    session: []const u8 = "",
+    scratch: std.Io.File = undefined,
+    action_file: std.Io.File = undefined,
+    inspection_file: std.Io.File = undefined,
+    colour: bool = false,
+    command: Command = undefined,
+    inspect: Inspect = undefined,
+    phase: ReadPhase = .activity,
+    cursor: client.ActivityCursor = .{},
+    opening: bool = false,
+    older: ?client.ConversationCursor = null,
+    transcript: u64 = 0,
+    inspection_kind: Inspection = .status,
+    command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
+    command_text_length: usize = 0,
+    inspection_submission: ?Submission.View = null,
+    inspection_action: ?u64 = null,
+    /// What the first window's output belongs to. The UI applies it with that
+    /// window (the window handoff orders it), so streamed history and the live
+    /// footer always come from one canonical capture.
+    /// A boundary's cursor is null at the conversation's start; a page
+    /// without items records no boundary.
+    lead: struct { mark: ?struct { cursor: ?client.ConversationCursor } = null, live: ?View.Live = null } = .{},
+    result: struct {
+        current: client.Current = undefined,
+        live: View.Live = .{},
+        cursor: client.ActivityCursor = .{},
+        compact_tools: bool = false,
+        history_cursor: ?client.ConversationCursor = null,
+        // Output custody began; a later failure is not a silent preparation one.
+        rendering: bool = false,
+        action: ?u64 = null,
+        summary: View.ActionSummary = .{},
+    } = .{},
+};
+
+fn freeze(self: *const Self, phase: ReadPhase) Job {
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .colour = self.colour, .command = self.command, .inspect = self.inspect, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind };
+    job.result.compact_tools = self.compact_tools;
+    return job;
+}
+
+fn launch(self: *Self, job: Job, worker: Task.Run) !void {
+    std.debug.assert(self.reader.thread == null);
+    self.job = job;
+    self.read_phase = job.phase;
+    self.reader_output_started = false;
+    try self.reader.start(self.init.io, &self.job, worker);
 }
 
 var interrupted: client.Cancellation = .{};
@@ -437,7 +486,10 @@ fn driveActive(self: *Self) !void {
                 // A notice can end the group while a read is still silent.
                 // Restore its separator before the first compact heading.
                 const live = self.read_phase == .activity or self.read_phase == .permission;
-                if (!self.reader_output_started and live) self.marks.record(self.terminal.screen.liveEnd(), self.read_mark);
+                if (!self.reader_output_started and live) {
+                    if (self.job.lead.mark) |mark| self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
+                    if (self.job.lead.live) |footer| self.live = footer;
+                }
                 if (!self.reader_output_started and live and !self.opening and !self.compact_tools and bytes[0] != '\n')
                     try self.terminal.permanent("\n");
                 self.reader_output_started = true;
@@ -454,29 +506,25 @@ fn driveActive(self: *Self) !void {
             const text = self.input.command_buffer[0..self.input.command_length.?];
             const kind = inspection(text).?;
             try self.terminal.screen.latest();
-            // The worker borrows its own copy; the editor may queue another.
-            @memcpy(self.command_text[0..text.len], text);
-            self.command_text_length = text.len;
             self.inspection_kind = kind;
-            self.inspection_submission = self.submission.view();
-            self.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
-            self.read_phase = .inspection;
-            self.history_render_started = false;
-            self.reader_output_started = false;
-            try self.reader.start(self.init.io, self, if (kind == .command) runCommand else inspectPage);
+            // The worker borrows its own copy; the editor may queue another.
+            var job = self.freeze(.inspection);
+            @memcpy(job.command_text[0..text.len], text);
+            job.command_text_length = text.len;
+            job.inspection_submission = self.submission.view();
+            job.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
+            try self.launch(job, if (kind == .command) runCommand else inspectPage);
             self.command_running = true;
             self.input.command_length = null;
         }
-        if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null or self.olderWanted()) and self.prepared_action == null) {
+        // Scans continue during consent, so an Action decided elsewhere leaves.
+        if (self.reader.thread == null and self.prepared_action == null) {
             if (self.history_requested != null and !self.opening) {
                 const requested = self.history_requested.?;
                 self.history_requested = null;
                 if (requested == .latest) {
                     try self.terminal.screen.latest();
-                    self.read_phase = .details;
-                    self.history_render_started = false;
-                    self.reader_output_started = false;
-                    try self.reader.start(self.init.io, self, history);
+                    try self.launch(self.freeze(.details), history);
                 } else {
                     // /history scrolls the transcript to its top; older pages
                     // then load there as for any scroll.
@@ -490,22 +538,12 @@ fn driveActive(self: *Self) !void {
                 }
             }
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
-                self.read_phase = .history;
-                self.history_render_started = false;
-                self.reader_output_started = false;
                 self.notice = "Loading earlier messages…";
-                try self.reader.start(self.init.io, self, history);
+                try self.launch(self.freeze(.history), history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
-                self.read_phase = .activity;
-                self.reader_output_started = false;
-                self.next_compact_tools = self.compact_tools;
-                try self.reader.start(self.init.io, self, scan);
-            } else if (!self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
-                self.read_phase = .permission;
-                self.prepared_action = null;
-                self.reader_output_started = false;
-                self.next_compact_tools = self.compact_tools;
-                try self.reader.start(self.init.io, self, permission);
+                try self.launch(self.freeze(.activity), scan);
+            } else if (!self.consent.active() and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
+                try self.launch(self.freeze(.permission), permission);
             }
         }
         for (0..1024) |_| {
@@ -526,6 +564,15 @@ fn driveActive(self: *Self) !void {
             self.read_phase = .activity;
             self.dirty = true;
         }
+        if (self.consent.active() and self.current.first_action != self.consent.action and self.input.pending() == .none) {
+            // Another client decided, or the Turn ended. Its choice can no
+            // longer decide; a fragmented sequence finishes under the choice
+            // decoder first, so none of it reaches the draft.
+            self.consent.interrupt();
+            self.terminal.screen.withdrawAction();
+            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            self.dirty = true;
+        }
         if (self.dirty) {
             const screen = self.terminal.screen;
             if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
@@ -541,7 +588,7 @@ fn driveActive(self: *Self) !void {
             var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
             var context = std.Io.Writer.fixed(&context_buffer);
             if (self.consent.active() and action_visible)
-                try approvalContext(&context, screen.actionTopHidden(), self.observed.settings.workspace.slice(), self.action_summary);
+                try approvalContext(&context, screen.actionTopHidden(), self.current.settings.workspace.slice(), self.action_summary);
             var status_buffer: [context_buffer.len + 2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
             // Bypass is the default and stays quiet: /status shows Permission.
@@ -689,6 +736,7 @@ fn navigation(self: *Self, event: Editor.Event) !void {
 /// boundary, so older canonical pages continue it without a gap.
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
+    self.transcript += 1;
     if (self.marks.from(screen.live.origin)) |mark| {
         try screen.beginTranscript(mark.offset);
         self.transcript_older = mark.cursor;
@@ -858,9 +906,9 @@ fn settleReader(self: *Self) !void {
     if (end == .complete and self.read_phase == .history) {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
-        if (screen.view == .transcript) {
+        if (screen.view == .transcript and self.job.transcript == self.transcript) {
             try screen.prependFile(self.init.io, self.inspection_file);
-            self.transcript_older = self.next_history_cursor;
+            self.transcript_older = self.job.result.history_cursor;
             if (self.transcript_older == null) try screen.markBeginning();
         }
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
@@ -873,7 +921,7 @@ fn settleReader(self: *Self) !void {
 fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
     const result = self.reader.join();
-    const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.history_render_started, .output_owned = self.reader_output_started };
+    const progress: ReadEnd.Progress = .{ .phase = self.read_phase, .rendering = self.job.result.rendering, .output_owned = self.reader_output_started };
     const end: ReadEnd = if (result) |_| .complete else |err| if (err == error.Cancelled) .{ .cancelled = progress } else .{ .failed = .{ .err = err, .progress = progress } };
     if (self.reader.read_failure) |failure| {
         std.debug.assert(self.pending_diagnostic == null);
@@ -981,20 +1029,22 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     }
     if (end != .complete) return;
     if (self.reader_output_started)
-        self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.next_compact_tools else false;
+        self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.job.result.compact_tools else false;
     if (self.read_phase == .history) {
         self.notice = null; // Clears "Loading older conversation…".
     } else if (self.read_phase == .details or self.read_phase == .inspection) {
         // showInspection selected the notice.
     } else if (self.read_phase == .permission) {
-        self.current = self.observed;
-        self.live = self.observed_live;
-        self.cursor = self.next_cursor;
+        self.current = self.job.result.current;
+        self.live = self.job.result.live;
+        self.cursor = self.job.result.cursor;
+        self.prepared_action = self.job.result.action;
+        self.prepared_summary = self.job.result.summary;
         if (self.prepared_action == null) self.read_phase = .activity;
     } else {
-        self.current = self.observed;
-        self.live = self.observed_live;
-        self.cursor = self.next_cursor;
+        self.current = self.job.result.current;
+        self.live = self.job.result.live;
+        self.cursor = self.job.result.cursor;
         self.opening = false;
     }
     self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
@@ -1023,13 +1073,11 @@ test "frontend commits spacing only for completed visible reads" {
             .terminal = undefined,
             .colour = false,
             .opening = false,
-            .observed = std.mem.zeroes(client.Current),
             .cursor = .{ .position = 7 },
-            .next_cursor = .{ .position = 12 },
             .compact_tools = case.prior,
-            .next_compact_tools = case.next,
             .reader_output_started = case.output,
         };
+        self.job.result = .{ .current = std.mem.zeroes(client.Current), .cursor = .{ .position = 12 }, .compact_tools = case.next };
         self.init.io = std.testing.io;
         self.applyReader(case.end);
         try std.testing.expectEqual(case.expected, self.compact_tools);
@@ -1072,83 +1120,83 @@ fn showInspection(self: *Self) !void {
 /// stderr become an inspection page while the Session screen keeps drawing
 /// through its own descriptor. No command reads terminal input.
 fn runCommand(raw: *anyopaque, task: *Task) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    try self.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, self.inspection_file, 0);
+    const job: *Job = @ptrCast(@alignCast(raw));
+    try job.inspection_file.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
     const saved = [2]c_int{ std.c.dup(1), std.c.dup(2) };
     defer for (saved) |fd| if (fd >= 0) {
         _ = std.c.close(fd);
     };
     if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
     // Redirected descriptors are output custody: any failure now is fatal.
-    self.history_render_started = true;
-    const page = self.inspection_file.handle;
-    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, .{ .io = task.io, .cancellation = &interrupted }, self.store, self.session, self.command_text[0..self.command_text_length]);
+    job.result.rendering = true;
+    const page = job.inspection_file.handle;
+    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else job.command(job.init, .{ .io = task.io, .cancellation = &interrupted }, job.store, job.session, job.command_text[0..job.command_text_length]);
     if (std.c.dup2(saved[0], 1) < 0 or std.c.dup2(saved[1], 2) < 0) return error.TerminalCleanupFailed;
     return result;
 }
 
 fn permission(raw: *anyopaque, task: *Task) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
+    const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
-    if (self.observed.first_action) |action| {
-        try self.action_file.setLength(task.io, 0);
-        var output: DisplayCapture = .{ .task = task, .file = self.action_file };
-        self.prepared_summary = try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, &output, self.colour);
-        self.next_compact_tools = false;
-        self.prepared_action = action;
+    if (job.result.current.first_action) |action| {
+        try job.action_file.setLength(task.io, 0);
+        var output: DisplayCapture = .{ .task = task, .file = job.action_file };
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.current.settings.workspace.slice(), job.scratch, &output, job.colour);
+        job.result.compact_tools = false;
+        job.result.action = action;
     }
 }
 
 fn scan(raw: *anyopaque, task: *Task) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
+    const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    self.observed = try View.current(requests, self.store, self.session, self.scratch);
-    var cursor = self.cursor;
-    if (self.opening) cursor.direction = .backward;
-    const page = switch (try requests.activityPage(self.store, self.session, cursor)) {
+    job.result.current = try View.current(requests, job.store, job.session, job.scratch);
+    var cursor = job.cursor;
+    if (job.opening) cursor.direction = .backward;
+    const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
     };
-    if (self.opening) {
-        self.next_history_cursor = if (page.facts.more) .{ .end = page.facts.end } else null;
+    job.lead.live = View.Live.init(page.facts.call_activity);
+    if (job.opening) {
+        var mark: ?client.ConversationCursor = if (page.facts.more) .{ .end = page.facts.end } else null;
         if (page.facts.more) for (page.facts.items[0..page.facts.count]) |item| {
             switch (item.value) {
-                .user, .assistant, .tool_result => self.next_history_cursor = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
+                .user, .assistant, .tool_result => mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal },
                 else => {},
             }
         };
-        self.read_mark = self.next_history_cursor;
-        const pending = try View.pending(requests, self.store, self.session, page.facts.end);
-        try pending.render(requests, self.store, self.session, task);
+        job.lead.mark = .{ .cursor = mark };
+        const pending = try View.pending(requests, job.store, job.session, page.facts.end);
+        try pending.render(requests, job.store, job.session, task);
     } else if (page.facts.count != 0) {
         // Everything before this page's first item precedes its live output.
         const first = page.facts.items[0];
-        self.read_mark = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal };
+        job.lead.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal } };
     }
-    try View.render(requests, self.store, self.session, &page, task, self.colour, &self.next_compact_tools);
-    if (self.opening) {
-        self.next_cursor = .{ .position = page.facts.end };
+    try View.render(requests, job.store, job.session, &page, task, job.colour, &job.result.compact_tools);
+    if (job.opening) {
+        job.result.cursor = .{ .position = page.facts.end };
     } else {
-        self.next_cursor = page.continuation() orelse .{ .position = page.facts.end };
-        if (!page.facts.more) self.next_cursor.end = null;
+        job.result.cursor = page.continuation() orelse .{ .position = page.facts.end };
+        if (!page.facts.more) job.result.cursor.end = null;
     }
-    // The worker publishes this bounded snapshot only after every result window
-    // was acknowledged; applyReader commits it alongside that successful cursor.
-    self.observed_live = View.Live.init(page.facts.call_activity);
+    // A read without output commits its footer with its cursor after join.
+    job.result.live = job.lead.live.?;
 }
 
 fn history(raw: *anyopaque, task: *Task) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    const latest = self.read_phase == .details;
-    const prepared = try History.prepare(task.requests(), self.store, self.session, if (latest) .{ .end = 0 } else self.transcript_older.?, self.scratch);
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const latest = job.phase == .details;
+    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.scratch);
     // Joined errors before this point retain the cursor without visible content.
-    self.history_render_started = true;
-    try self.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = self.inspection_file };
+    job.result.rendering = true;
+    try job.inspection_file.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, self.scratch, self.store, self.session, &output, if (latest) .details else .transcript, self.colour);
-    if (!latest) self.next_history_cursor = prepared.page.continuation();
+    try prepared.render(task.io, job.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
+    if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
 const DisplayCapture = struct {
@@ -1164,28 +1212,28 @@ const DisplayCapture = struct {
 };
 
 fn inspectPage(raw: *anyopaque, task: *Task) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    try self.inspection_file.setLength(task.io, 0);
-    try task.io.vtable.fileSeekTo(task.io.userdata, self.inspection_file, 0);
+    const job: *Job = @ptrCast(@alignCast(raw));
+    try job.inspection_file.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, job.inspection_file, 0);
     var buffer: [4096]u8 = undefined;
-    var output = self.inspection_file.writerStreaming(task.io, &buffer);
-    if (self.inspection_kind == .help) {
-        if (self.inspection_action) |action| {
+    var output = job.inspection_file.writerStreaming(task.io, &buffer);
+    if (job.inspection_kind == .help) {
+        if (job.inspection_action) |action| {
             const Text = @import("TerminalText.zig");
             try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
             for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
                 try output.interface.print("rui action {s} --store ", .{command});
-                try Text.writeShellWord(&output.interface, self.store);
-                try Text.writeShellSession(&output.interface, self.session, false);
+                try Text.writeShellWord(&output.interface, job.store);
+                try Text.writeShellSession(&output.interface, job.session, false);
                 try output.interface.print(" --action {d}\n", .{action});
             }
             try output.interface.writeAll("\n");
         }
         try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
-        try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
+        try job.inspect(job.init, task.requests(), job.store, job.session, if (job.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.
-        if (self.inspection_submission) |submission| {
+        if (job.inspection_submission) |submission| {
             try output.interface.print("Original reserved request: {s}\n{s}\n", .{ submission.key, if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
             if (submission.last_error) |err| try output.interface.print("Last submission error: {s}\n", .{@errorName(err)});
         }
