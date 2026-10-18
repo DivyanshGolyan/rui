@@ -1407,11 +1407,8 @@ fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store
     const report = try inspectWorkTo(init, requester, store, session_ref, out);
     defer report.file.close(init.io);
     const work = &report.current;
-    if (view == .opening) {
-        if (work.settings.tools.bash and work.settings.permission_mode.value == .bypass)
-            try out.writeAll("Bash runs without approval.\n");
-        return;
-    }
+    // Entry only confirms configuration; the Session screen shows its notice.
+    if (view == .opening) return;
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
