@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import pty
+from terminal_process import open_pty
 import re
 import select
 import shutil
@@ -377,7 +378,7 @@ def interactive_cases(state, binding=False, null_code=False):
                 ("/v1/configure", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
                 continue  # Activity framing/binding is covered by opening cases.
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             original_terminal = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             args = (["resume", "--store", str(store), "--", "original/session"] if line is not None
@@ -595,7 +596,7 @@ def permission_read_cases(state):
             response = (f"HTTP/1.1 {status} Rejected\r\nContent-Type: application/json\r\n"
                 f"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode() + body
             proxy = ReplyProxy(host, "/v1/read-action-arguments", lambda reply: response)
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             original = termios.tcgetattr(slave)
             caller = None
             try:
@@ -651,7 +652,7 @@ def permission_read_cases(state):
             b"X-Rui-Wire-Version: 1\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None
         try:

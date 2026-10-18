@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pty
+from terminal_process import open_pty
 import select
 import shutil
 import subprocess
@@ -149,7 +150,7 @@ def check_process_discovery(cleanup):
 
 @contextmanager
 def child_pty(source, *, close_slave=False):
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     caller = None
     try:
         caller = subprocess.Popen([sys.executable, "-c", source],
@@ -284,7 +285,7 @@ def check_action_ready(action_ready):
     Saturation makes withheld credit deterministic on either platform without
     replacing tcdrain with a fixture notification or sleeping writer.
     """
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     ready_read, ready_write = os.pipe()
     held_read, held_write = os.pipe()
     release_read, release_write = os.pipe()

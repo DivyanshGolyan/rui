@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process
-from terminal_process import terminal_process
+from terminal_process import open_pty, terminal_process
 
 
 class TerminalProcessTest(unittest.TestCase):

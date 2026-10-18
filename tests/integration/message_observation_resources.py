@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import pty
+from terminal_process import open_pty
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ from saved_request_resources import sample
 def retained(state, binary, label, repetition, failed_key):
     home = state / f"{label}-{repetition}"
     home.mkdir()
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     # Keep the historical baseline's original entry; migrate only the candidate.
     entry = (["session", "--store", str(state / "store"), "--session", "resources/message"]
         if label == "baseline" else ["resume", "--store", str(state / "store"), "--", "resources/message"])

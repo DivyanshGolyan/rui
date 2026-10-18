@@ -9,6 +9,7 @@ import hashlib
 import os
 import pathlib
 import pty
+from terminal_process import open_pty
 import re
 import resource
 import select
@@ -728,7 +729,7 @@ def main():
         bare_credential = bare_credential_dir / "codex.json"
         codex_fixture.credentials(bare_credential)
         bare_env = {**os.environ, "HOME": str(bare_home)}
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         caller = None
         try:
             original_terminal = termios.tcgetattr(master)

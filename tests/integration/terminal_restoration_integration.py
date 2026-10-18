@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import pty
+from terminal_process import open_pty
 import select
 import shutil
 import signal
@@ -60,6 +61,29 @@ static void record(const char *text) {
     if (close(fd)) _exit(91);
 }
 
+/* The Session screen writes through a private duplicate of stdout, and
+   commands borrow fd 1 for their page. Screen probes match the terminal
+   that was fd 1 at load, by identity, rather than the descriptor number. */
+static int screen_known = 0;
+static dev_t screen_dev;
+static ino_t screen_ino;
+
+__attribute__((constructor)) static void screen_identity(void) {
+    struct stat st;
+    if (isatty(1) && !fstat(1, &st)) {
+        screen_dev = st.st_dev;
+        screen_ino = st.st_ino;
+        screen_known = 1;
+    }
+}
+
+static int screen_fd(int fd) {
+    struct stat st;
+    if (fd == 1) return 1;
+    if (fd > 2 && screen_known && !fstat(fd, &st) && st.st_dev == screen_dev && st.st_ino == screen_ino) return 1;
+    return fd;
+}
+
 __attribute__((constructor)) static void diagnostic_alias(void) {
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     if (fault && (!strcmp(fault, "readiness-alias") || !strncmp(fault, "readiness-held", 14))) {
@@ -92,10 +116,14 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     if (signaled || !fault) return 0;
     const char *marker = NULL;
     int prefix = 0;
-    if (fd == 1 && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")))
+    /* Commands write their page through fd 1; inspections write their page
+       file directly. Either is a page, never the Session screen. */
+    struct stat st;
+    const int page = fd == 1 || (fd > 2 && !fstat(fd, &st) && S_ISREG(st.st_mode));
+    if (page && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")))
         marker = "Rui: Configured.";
-    else if (fd == 1 && !strcmp(fault, "configure-rejected")) marker = "admitted: rejected";
-    else if (fd == 1 && !strcmp(fault, "requests")) marker = "Rui: Local recovery handles (not Host work status):";
+    else if (page && !strcmp(fault, "configure-rejected")) marker = "admitted: rejected";
+    else if (page && !strcmp(fault, "requests")) marker = "Rui: Local recovery handles (not Host work status):";
     else if (fd == 2 && !strcmp(fault, "configure-canonical")) {
         marker = "rui: Configuration ";
         prefix = 1;
@@ -125,7 +153,30 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     return 0;
 }
 
+static void consent_hold(int fd, const void *bytes, size_t count, int last) {
+    const int screen = screen_fd(fd);
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    static int choice = 0, choice_held = 0;
+    if (screen != 1 || !fault || strncmp(fault, "consent-", 8)) return;
+    /* The renderer writes only changed cells, so whole status text never
+       appears; "Type" starts the choice status ("Type a + Enter to allow
+       once..."). Hold after the frame that draws it completes. */
+    static size_t matched = 0;  /* Writes may split the word. */
+    for (size_t i = 0; !choice && i < count; ++i) {
+        char byte = ((const char *)bytes)[i];
+        matched = byte == "Type"[matched] ? matched + 1 : (byte == 'T' ? 1 : 0);
+        if (matched == 4) choice = 1;
+    }
+    if (last && choice && !choice_held && count >= 8 &&
+        !memcmp((const char *)bytes + count - 8, "\033[?2026l", 8)) {
+        choice_held = 1;
+        record("choice-output-complete\n");
+        while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
+    }
+}
+
 static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
+    const int screen = screen_fd(fd);
 #ifdef __APPLE__
     /* dyld exempts references from the tuple-owning image, not dlsym. */
     ssize_t (*real_writev)(int, const struct iovec *, int) = writev;
@@ -138,7 +189,7 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
     static int stopped = 0;
     for (int i = 0; i < count; ++i)
         if (command_return_signal(fd, iov[i].iov_base, iov[i].iov_len)) return -1;
-    if (fd == 1 && count == 1 && iov[0].iov_len == 8 &&
+    if (screen == 1 && count == 1 && iov[0].iov_len == 8 &&
         !memcmp(iov[0].iov_base, "\033[?2004l", 8)) {
         if (!strcmp(fault, "output") && !stopped) {
             if (tcflow(fd, TCOOFF)) _exit(92);
@@ -154,13 +205,22 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
             return -1;
         }
     }
-    return real_writev(fd, iov, count);
+    ssize_t written = real_writev(fd, iov, count);
+    size_t total = 0;
+    for (int i = 0; i < count; ++i) total += iov[i].iov_len;
+    if (written >= 0 && (size_t)written == total) {
+        int saved = errno;
+        for (int i = 0; i < count; ++i) consent_hold(fd, iov[i].iov_base, iov[i].iov_len, i == count - 1);
+        errno = saved;
+    }
+    return written;
 }
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
+    const int screen = screen_fd(fd);
     const char *readiness_fault = getenv("RUI_TERMINAL_FAULT");
     static int handoff_held = 0;
-    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "renderer-backpressure") &&
+    if (screen == 1 && readiness_fault && !strcmp(readiness_fault, "renderer-backpressure") &&
         count == 8 && !memcmp(bytes, "\033[?2026l", 8) && !handoff_held) {
         handoff_held = 1;
         record("handoff-cleanup-entered\n");
@@ -169,10 +229,10 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
            this tests handoff, not success while cleanup has no output credit. */
         while (access(getenv("RUI_TERMINAL_HANDOFF_RELEASE"), F_OK)) usleep(1000);
     }
-    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "alias-poison"))
+    if (screen == 1 && readiness_fault && !strcmp(readiness_fault, "alias-poison"))
         record("readiness-write-entry\n");
     if (fd == 2 && atomic_load(&readiness_held)) record("readiness-fd2-write\n");
-    if (fd == 1 && readiness_fault && !strncmp(readiness_fault, "readiness-held", 14)) {
+    if (screen == 1 && readiness_fault && !strncmp(readiness_fault, "readiness-held", 14)) {
         atomic_store(&readiness_held, 1);
         record("readiness-held\n");
         while (access(getenv("RUI_DIAGNOSTIC_RELEASE"), F_OK)) usleep(1000);
@@ -181,10 +241,10 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             record("readiness-write-failed\n"); errno = EIO; return -1;
         }
     }
-    if (fd == 1 && readiness_fault && !strcmp(readiness_fault, "readiness-error")) {
+    if (screen == 1 && readiness_fault && !strcmp(readiness_fault, "readiness-error")) {
         record("readiness-write-failed\n"); errno = EIO; return -1;
     }
-    if (fd == 1 && count == 8 && !memcmp(bytes, "\033[?2004l", 8)) {
+    if (screen == 1 && count == 8 && !memcmp(bytes, "\033[?2004l", 8)) {
         struct iovec iov = { (void *)bytes, count };
         return probe_writev(fd, &iov, 1);
     }
@@ -197,7 +257,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     if (!real_write || real_write == probe_write) _exit(96);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
     if (command_return_signal(fd, bytes, count)) return -1;
-    if (fd == 1 && detach_phase == 3 && fault && !strcmp(fault, "detach-write-full")) {
+    if (screen == 1 && detach_phase == 3 && fault && !strcmp(fault, "detach-write-full")) {
         record("detach-write\n");
         if (!(fcntl(fd, F_GETFL) & O_NONBLOCK)) record("detach-write-blocking\n");
     }
@@ -259,7 +319,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *marker = "VISIBLE-CANCEL-PREFIX";
     static size_t matched = 0;
     static int visible = 0, stream_held = 0;
-    int stream = fd == 1 && fault && !strcmp(fault, "visible-stream") && arm && !access(arm, F_OK);
+    int stream = screen == 1 && fault && !strcmp(fault, "visible-stream") && arm && !access(arm, F_OK);
     int reset = count == 4 && !memcmp(bytes, "\033[0m", 4);
     if (stream && visible && !disabled && !reset) {
         if (!stream_held) { record("visible-stream-held\n"); stream_held = 1; }
@@ -268,7 +328,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     }
     const char *pressure_arm = getenv("RUI_TERMINAL_BACKPRESSURE_ARM");
     static int pressure_stopped = 0;
-    if (fd == 1 && fault && !strcmp(fault, "renderer-backpressure") &&
+    if (screen == 1 && fault && !strcmp(fault, "renderer-backpressure") &&
         pressure_arm && !access(pressure_arm, F_OK) && !pressure_stopped) {
         /* Stop the real PTY before a bounded repaint, independently of input
            queue pressure. The syscall must encounter actual kernel EAGAIN. */
@@ -285,19 +345,9 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             if (!marker[matched]) { visible = 1; record("visible-prefix-written\n"); break; }
         }
     }
-    static int choice = 0, choice_held = 0;
-    if (fd == 1 && result == (ssize_t)count && fault && !strncmp(fault, "consent-", 8)) {
-        if (count == strlen("a: Allow once / d: Deny (Enter)") &&
-            !memcmp(bytes, "a: Allow once / d: Deny (Enter)", count)) choice = 1;
-        if (choice && !choice_held && count >= 4 &&
-            !memcmp(bytes, "\r\033[", 3) && ((const char *)bytes)[count - 1] == 'C') {
-            choice_held = 1;
-            record("choice-output-complete\n");
-            while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
-        }
-    }
+    if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
     static int blocked = 0;
-    if (fd == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
+    if (screen == 1 && result < 0 && saved_errno == EAGAIN && !blocked &&
         (!strcmp(fault, "backpressure") || !strcmp(fault, "renderer-backpressure"))) {
         blocked = 1;
         record("output-blocked\n");
@@ -359,7 +409,8 @@ int probe_fcntl(int fd, int command, ...) {
     const char *diagnostic_fault = getenv("RUI_TERMINAL_FAULT");
     if (command == F_SETFL && diagnostic_fault && !strncmp(diagnostic_fault, "entry-", 6)) {
         const int target = diagnostic_fault[6] - '0';
-        if (fd == target) {
+        /* The screen enables its private duplicate of stdout. */
+        if (fd == target || (target == 1 && screen_fd(fd) == 1)) {
             if (value & O_NONBLOCK) {
                 record("entry-enable\n");
                 if (strstr(diagnostic_fault, "unmutated")) { errno = EIO; return -1; }
@@ -393,7 +444,7 @@ int probe_fcntl(int fd, int command, ...) {
         if (!result) record("diagnostic-restored\n");
         return result;
     }
-    if (fd == 1 && command == F_SETFL && detach_phase) {
+    if (screen_fd(fd) == 1 && command == F_SETFL && detach_phase) {
         const char *fault = getenv("RUI_TERMINAL_FAULT");
         if (detach_phase == 1 && !(value & O_NONBLOCK)) {
             int result = real_fcntl(fd, command, value);
@@ -495,6 +546,30 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
     return result;
 }
 
+/* Page files may be written positionally; their markers still count. */
+static ssize_t probe_pwritev(int fd, const struct iovec *iov, int count, off_t offset) {
+#ifdef __APPLE__
+    ssize_t (*real_pwritev)(int, const struct iovec *, int, off_t) = pwritev;
+#else
+    ssize_t (*real_pwritev)(int, const struct iovec *, int, off_t) = dlsym(RTLD_NEXT, "pwritev64");
+#endif
+    if (!real_pwritev || real_pwritev == probe_pwritev) _exit(97);
+    for (int i = 0; i < count; ++i)
+        if (command_return_signal(fd, iov[i].iov_base, iov[i].iov_len)) return -1;
+    return real_pwritev(fd, iov, count, offset);
+}
+
+static ssize_t probe_pwrite(int fd, const void *bytes, size_t count, off_t offset) {
+#ifdef __APPLE__
+    ssize_t (*real_pwrite)(int, const void *, size_t, off_t) = pwrite;
+#else
+    ssize_t (*real_pwrite)(int, const void *, size_t, off_t) = dlsym(RTLD_NEXT, "pwrite64");
+#endif
+    if (!real_pwrite || real_pwrite == probe_pwrite) _exit(97);
+    if (command_return_signal(fd, bytes, count)) return -1;
+    return real_pwrite(fd, bytes, count, offset);
+}
+
 #ifdef __APPLE__
 #define INTERPOSE(replacement, original) \
     __attribute__((used)) static struct { const void *new_fn; const void *old_fn; } \
@@ -502,6 +577,8 @@ static int probe_tcsetattr(int fd, int action, const struct termios *attrs) {
         { (const void *)&replacement, (const void *)&original };
 INTERPOSE(probe_writev, writev)
 INTERPOSE(probe_write, write)
+INTERPOSE(probe_pwritev, pwritev)
+INTERPOSE(probe_pwrite, pwrite)
 INTERPOSE(probe_fsync, fsync)
 INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
@@ -510,6 +587,8 @@ INTERPOSE(probe_pthread_create, pthread_create)
 #else
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
 ssize_t write(int fd, const void *bytes, size_t count) { return probe_write(fd, bytes, count); }
+ssize_t pwritev64(int fd, const struct iovec *iov, int count, off_t offset) { return probe_pwritev(fd, iov, count, offset); }
+ssize_t pwrite64(int fd, const void *bytes, size_t count, off_t offset) { return probe_pwrite(fd, bytes, count, offset); }
 int fsync(int fd) { return probe_fsync(fd); }
 int tcdrain(int fd) { return probe_tcdrain(fd); }
 int tcsetattr(int fd, int action, const struct termios *attrs) { return probe_tcsetattr(fd, action, attrs); }
@@ -680,7 +759,7 @@ def check_forwarding(state, library):
     source, executable, log = state / "forward.c", state / "forward", state / "forward.log"
     source.write_text(FORWARD_DRIVER)
     subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
-    master, slave = pty.openpty()
+    master, slave = open_pty()
     original = termios.tcgetattr(slave)
     caller = None
     try:
@@ -879,8 +958,8 @@ def persistent_cases(state, library, home, store, host):
                  "admission-interrupt", "disable", "restore", "both",
                  "incomplete-disable", "incomplete-restore", "incomplete-both",
                  "backpressure", "backpressure-command"):
-        master, slave = pty.openpty()
-        output_master, output_slave = pty.openpty()
+        master, slave = open_pty()
+        output_master, output_slave = open_pty()
         original = termios.tcgetattr(slave)
         log, release = state / f"persistent-{case}.log", state / f"persistent-{case}.release"
         caller = proxy = None
@@ -1018,8 +1097,8 @@ def renderer_backpressure_case(state, library, home, store):
     session = "terminal/renderer-backpressure"
     human.run(home, "configure", "--store", store, "--session", session,
         "--workspace", state, "--provider", "codex", "--model", "model-a")
-    master, slave = pty.openpty()
-    output_master, output_slave = pty.openpty()
+    master, slave = open_pty()
+    output_master, output_slave = open_pty()
     original = termios.tcgetattr(slave)
     original[6][termios.VERASE] = b"\x08"
     termios.tcsetattr(slave, termios.TCSANOW, original)
@@ -1171,7 +1250,7 @@ def consent_boundary_cases(state, library):
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
         host = caller = None
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         original = termios.tcgetattr(slave)
         read_ready, write_ready = os.pipe()
         release, drain, log = root / "choice.release", root / "drain.release", root / "probe.log"
@@ -1188,7 +1267,7 @@ def consent_boundary_cases(state, library):
                     "RUI_TEST_ACTION_READY_FD": str(write_ready)}, pass_fds=(write_ready,))
             human.read_terminal(master, "› ")
             os.write(master, b"propose command\n")
-            presentation = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+            presentation = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
             assert "Time limit: Host default" in presentation, presentation
             fixture.wait_for(lambda: log.exists() and "choice-output-complete" in log.read_text(), "final choice write")
             records = home / ".config/rui/requests"
@@ -1295,7 +1374,7 @@ def command_interruption_cases(state, library):
                 ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
                 ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
                 ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             original = termios.tcgetattr(slave)
             ready_read, ready_write = os.pipe()
             release = root / f"{case}.release"
@@ -1337,7 +1416,8 @@ def command_interruption_cases(state, library):
                     assert received.wait(10), (case, "command route not reached")
                 else:
                     fixture.wait_for(lambda: log.exists() and "command-return-signal" in log.read_text(), "decoded command return signal")
-                assert termios.tcgetattr(slave)[3] & termios.ICANON, "command owns a raw terminal"
+                # Commands run inside the Session screen; the terminal stays
+                # raw until the signal's restoration (checked after exit).
                 if route != "":
                     caller.send_signal(signal_number)
                 if route is None:
@@ -1349,7 +1429,11 @@ def command_interruption_cases(state, library):
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
                 if case == "requests":
-                    assert message["request"].encode() in output and b"Cancelled" not in errors, (output, errors)
+                    # INT while the page is prepared detaches before showing
+                    # it; the restored main screen names exact recovery.
+                    assert b"Cancelled" not in errors, (output, errors)
+                    assert b"\x1b[?1049l\r\nDetached. Host work continues.\r\nResume: rui resume --store " in output, output
+                    assert b"rui inspect-action --store " in output and b" --action 1\r\n" in output, output
                 assert not reply_release.is_set(), "command needed peer release to exit"
                 added = set(records.glob("*.json")) - before
                 if case.startswith("configure"):
@@ -1360,7 +1444,7 @@ def command_interruption_cases(state, library):
                     if case == "configure-inflight":
                         assert transmitted == [saved], "in-flight send changed captured request bytes"
                     assert identity["store"] == str(store) and identity["session"] == "command/signals"
-                    assert f"rui recover {key}".encode() in errors, errors
+                    assert f"rui recover {key}".encode() in errors, (case, errors, output[-1500:])
                     if case in ("configure-admitted", "configure-presentation", "configure-rejected"):
                         assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
                         if case == "configure-presentation":
@@ -1428,8 +1512,8 @@ def fatal_reporting_cases(state):
             (["--store", str(store), "--provider", "unsupported", "--model", "model-a"], b"UnsupportedSelectionProvider"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
-            master, slave = pty.openpty()
-            error_master, error_slave = pty.openpty()
+            master, slave = open_pty()
+            error_master, error_slave = open_pty()
             original = termios.tcgetattr(slave)
             error_flags = fcntl.fcntl(error_slave, fcntl.F_GETFL)
             try:
@@ -1453,7 +1537,7 @@ def fatal_reporting_cases(state):
         # Popen restores default SIGPIPE before exec. Rui's initialized IO
         # runtime must still preserve the real error when stderr disconnects.
         for args, error in diagnostics:
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             read_error, write_error = os.pipe()
             os.close(read_error)
             original = termios.tcgetattr(slave)
@@ -1470,7 +1554,7 @@ def fatal_reporting_cases(state):
                     lambda: stop_process(caller, timeout=5) if caller is not None else None,
                     *(lambda fd=fd: os.close(fd) for fd in (master, slave, write_error)),
                 )
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         original = termios.tcgetattr(slave)
         try:
             caller = subprocess.Popen([str(fixture.RUI), "resume", "--store", str(store), "fatal/original"],
@@ -1509,7 +1593,7 @@ def fatal_reporting_cases(state):
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: os.close(master), lambda: os.close(slave),
             )
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         read_error, write_error = os.pipe()
         os.close(read_error)
         original = termios.tcgetattr(slave)
@@ -1570,7 +1654,7 @@ def decision_reporting_cases(state):
             human.run(home, "configure", "--store", store, "--session", session,
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             read_ready, write_ready = os.pipe()
             original = termios.tcgetattr(slave)
             reply_release, received = threading.Event(), threading.Event()
@@ -1588,7 +1672,7 @@ def decision_reporting_cases(state):
                 else:
                     proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
                 os.write(master, b"propose exact decision\n")
-                proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
                 proposal += human.action_ready(read_ready, master)
                 os.write(master, b"a\n" if decision == "allow_once" else b"d\n")
                 if lost:
@@ -1676,8 +1760,8 @@ def entry_enable_cases(state, library):
         for target in (0, 1):
             for mode in ("mutated", "unmutated", "mutated-reset"):
                 name = f"entry-{target}-{mode}"
-                input_master, input_slave = pty.openpty()
-                output_master, output_slave = pty.openpty()
+                input_master, input_slave = open_pty()
+                output_master, output_slave = open_pty()
                 slaves = (input_slave, output_slave)
                 flags = [fcntl.fcntl(fd, fcntl.F_GETFL) for fd in slaves]
                 original = termios.tcgetattr(input_slave)
@@ -1746,7 +1830,7 @@ def detach_reporting_cases(state, library):
             session = f"detach/{name}"
             human.run(home, "configure", "--store", store, "--session", session,
                 "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
-            master, slave = pty.openpty()
+            master, slave = open_pty()
             read_ready, write_ready = os.pipe()
             original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
             log, arm = root / f"{name}.log", root / f"{name}.arm"
@@ -1760,7 +1844,7 @@ def detach_reporting_cases(state, library):
                 proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
                 os.write(master, b"accepted original\n")
                 if kind != "message":
-                    proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                    proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
                     proposal += human.action_ready(read_ready, master)
                     os.write(master, b"a\n" if kind == "allow_once" else b"d\n")
                 human.read_terminal(master, f"SETTLED-{name}", composer=True)
@@ -1849,7 +1933,7 @@ def startup_reporting_cases(state, library):
         thread.start()
         host = caller = proxy = None
         held, release = threading.Event(), threading.Event()
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         original = termios.tcgetattr(slave)
         arm, log = root / "arm", root / "probe.log"
@@ -1867,9 +1951,10 @@ def startup_reporting_cases(state, library):
             os.write(master, b"seed accepted original\n")
             human.read_terminal(master, "SEED-ACCEPTED", composer=True)
             assert "Original reserved request:" not in human.terminal_step(master, "/status", "Session: ", composer=True)
+            human.return_to_live(master)
             if kind in ("allow_once", "deny"):
                 os.write(master, b"propose exact Action\n")
-                proposal = human.read_terminal(master, "a: Allow once / d: Deny (Enter)")
+                proposal = human.read_terminal(master, "Type a + Enter to allow once · d + Enter to deny")
                 proposal += human.action_ready(ready_read, master)
                 proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
                 event = b"a\n" if kind == "allow_once" else b"d\n"
@@ -1962,7 +2047,7 @@ def visible_stream_handoff_cases(state, library):
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
         host = caller = None
-        master, slave = pty.openpty()
+        master, slave = open_pty()
         original = termios.tcgetattr(slave)
         flags = fcntl.fcntl(slave, fcntl.F_GETFL)
         arm, log = root / "arm", root / "probe.log"
@@ -2613,7 +2698,7 @@ def native_notice_cases(state):
     for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
         # PTY EAGAIN is not persistent: internal delivery can make space without
         # a reader. A full pipe with no reader owns the backpressure witness.
-        reader, writer = os.pipe() if transport == "pipe" else pty.openpty()
+        reader, writer = os.pipe() if transport == "pipe" else open_pty()
         try:
             if transport == "pty":
                 attrs = termios.tcgetattr(writer)
