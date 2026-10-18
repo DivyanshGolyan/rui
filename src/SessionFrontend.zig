@@ -13,6 +13,7 @@ const View = @import("session_view.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -202,16 +203,18 @@ fn quiesce(self: *Self) Settled {
 /// can name a saved request to recover, so it follows restoration on stderr.
 fn commandOutputGuide(self: *const Self) void {
     const io = self.init.io;
-    const stderr = std.Io.File.stderr();
     const size = (self.inspection_file.stat(io) catch return).size;
     if (size == 0) return;
-    stderr.writeStreamingAll(io, "rui: Interrupted command output:\n") catch return;
+    // Optional like every exit diagnostic: a full or stopped stderr drops the
+    // rest instead of holding the restored caller.
+    if (!stderr.tryAcquire()) return;
+    defer stderr.release();
+    if (!stderr.writeHeld("rui: Interrupted command output:\n")) return;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (true) {
         const count = self.inspection_file.readPositionalAll(io, &buffer, offset) catch return;
-        if (count == 0) return;
-        stderr.writeStreamingAll(io, buffer[0..count]) catch return;
+        if (count == 0 or !stderr.writeHeld(buffer[0..count])) return;
         offset += count;
     }
 }
