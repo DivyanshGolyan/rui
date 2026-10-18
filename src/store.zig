@@ -957,7 +957,7 @@ const SessionReportCapture = struct {
             self.ordinary_failure = true;
             return error.ReportLengthOverflow;
         };
-        if (!self.budget.reserve(amount)) {
+        if (!self.budget.allocate(amount)) {
             self.ordinary_failure = true;
             return error.ReportScratchExhausted;
         }

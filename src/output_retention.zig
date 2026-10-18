@@ -235,7 +235,7 @@ pub const Queue = struct {
     fn reclaimForReservation(context: *anyopaque, amount: u64, limit: u64) bool {
         const self: *Queue = @ptrCast(@alignCast(context));
         const limited = self.budget.narrowed(limit);
-        while (!limited.reserveWithoutReclaim(amount)) {
+        while (!limited.reserve(amount)) {
             if (!self.evictOldest()) return false;
         }
         return true;
@@ -300,10 +300,13 @@ test "shared scratch reservations reclaim retained output and fail when none is 
     try std.testing.expect(budget.reserve(2));
     try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
     const shared = queue.sharedBudget();
-    try std.testing.expect(shared.reserve(3));
+    try std.testing.expect(!shared.reserve(3));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expect(shared.allocate(3));
     try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
-    try std.testing.expect(!shared.reserve(1));
+    try std.testing.expect(!shared.allocate(1));
     shared.release(3);
 }
 
@@ -325,7 +328,7 @@ test "already absent retained files release their entries and scratch charge" {
     try tmp.dir.deleteFile(std.testing.io, "stderr");
 
     const shared = queue.sharedBudget();
-    try std.testing.expect(shared.reserve(2));
+    try std.testing.expect(shared.allocate(2));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
     shared.release(2);
@@ -355,7 +358,7 @@ test "unconfirmed retained-file deletion preserves its entry and scratch charge"
     try std.testing.expectEqual(State.failed, entries[0].state);
     try std.testing.expectEqual(State.retained, entries[1].state);
     const shared = queue.sharedBudget();
-    try std.testing.expect(!shared.reserve(1));
+    try std.testing.expect(!shared.allocate(1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 2), queue.occupied());
     try std.testing.expectEqual(State.failed, entries[0].state);
@@ -383,7 +386,7 @@ test "reserved output is not evictable before producer aliases close and publica
         result: *std.atomic.Value(bool),
 
         fn run(context: @This()) void {
-            context.result.store(context.queue.sharedBudget().reserve(1), .release);
+            context.result.store(context.queue.sharedBudget().allocate(1), .release);
         }
     };
     var reclaimed: std.atomic.Value(bool) = .init(true);
@@ -462,7 +465,7 @@ test "zero-byte retained files occupy entries without occupying scratch bytes" {
     try std.testing.expect(budget.reserve(2));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     const shared = queue.sharedBudget();
-    try std.testing.expect(!shared.reserve(1));
+    try std.testing.expect(!shared.allocate(1));
     try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), queue.occupied());
     shared.release(2);
