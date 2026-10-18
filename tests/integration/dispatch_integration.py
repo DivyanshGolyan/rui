@@ -3963,12 +3963,14 @@ def main():
         # while one byte below it fails before HTTP.
         endpoint.requests.clear()
         endpoint.release.clear()
-        framing_store = state / "framing-store"
+        # Store and Session names share one byte length across the three
+        # cases: each request carries its own address.
+        framing_store = state / "framing-meter-store"
         host = start_host(framing_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
-        configure(state, framing_store, "framing-config", "direct/framing", "model-a")
+        configure(state, framing_store, "framing-config", "direct/framing-meter", "model-a")
         for index in range(40):
-            message(state, framing_store, f"framing-{index}", "direct/framing", "")
+            message(state, framing_store, f"framing-{index}", "direct/framing-meter", "")
         stop_host(host)
         processes.remove(host)
         host = start_host(framing_store, url)
@@ -3976,7 +3978,7 @@ def main():
         wait_for(lambda: len(endpoint.requests) == 1, "many-input materialization")
         actual_request_bytes = len(endpoint.requests[0])
         resources = command(
-            "session", "inspect", "--store", framing_store, "--session", "direct/framing"
+            "session", "inspect", "--store", framing_store, "--session", "direct/framing-meter"
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
         endpoint.release.set()

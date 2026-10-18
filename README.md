@@ -157,6 +157,8 @@ After reviewing the command, approve it once:
 
 Use `action deny` to reject it instead. If a command loses its reply or exits nonzero, its work may still have been accepted. Use `request inspect HANDLE` to check, and `request recover HANDLE` to resend the same saved request. `request list` lists saved handles. Do not submit a new message to guess whether the first arrived.
 
+Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host, with the Host's `HOME` but none of its other environment, such as credentials. Each model request tells the agent its own Store and Session address. To get an answer from another Session, an agent includes that address in its message, and the other Session replies with an ordinary `session send` to it.
+
 ## Manage the background process
 
 The **Host** runs work in the background. The **Store** is its private directory of saved state. Commands use an explicit `--store`, then your saved preference, then `$HOME/.local/share/rui/store`. Pin `--store` in scripts for a predictable destination.
