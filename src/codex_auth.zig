@@ -13,15 +13,14 @@ pub const fixture_access_token = policy.fixture_access_token;
 pub const fixture_id_token = policy.fixture_id_token;
 pub const fixture_account_id = policy.fixture_account_id;
 pub const response_limit = wire.response_limit;
-pub const parseAccount = policy.parseAccount;
-pub const parseExpiry = policy.parseExpiry;
+pub const loginRecord = wire.loginRecord;
 pub const LocalStatus = policy.LocalStatus;
 /// Owns all credential bytes. Callers must keep this value out of diagnostics.
 pub const Tokens = wire.Tokens;
 
 pub const failureCode = policy.failureCode;
 
-fn nowSeconds(io: std.Io) i64 {
+pub fn nowSeconds(io: std.Io) i64 {
     return @intCast(@divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s));
 }
 

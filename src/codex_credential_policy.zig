@@ -112,8 +112,12 @@ pub fn validateSelected(record: *const Record, fixture: bool) !void {
     const account = try parseAccount(record.id_token.slice());
     if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
         account.fedramp != record.fedramp) return error.AccountMismatch;
-    if (((try parseExpiry(record.access_token.slice())) orelse 0) != record.expires_at)
-        return error.InvalidCredentialExpiry;
+    if (try expiryOf(record) != record.expires_at) return error.InvalidCredentialExpiry;
+}
+
+/// The expiry a record's access token carries; an opaque token has none (0).
+pub fn expiryOf(record: *const Record) !i64 {
+    return (try parseExpiry(record.access_token.slice())) orelse 0;
 }
 
 /// A pending record means an earlier claimant may have consumed the refresh
