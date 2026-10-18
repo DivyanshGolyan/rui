@@ -51,7 +51,7 @@ fn run(init: std.process.Init) !void {
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a conversation with this text, use rui -- {s}.\n", .{ args[1], replacement, replacement_resource, args[1] });
+        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a conversation with this text, put -- before it: rui -- TEXT.\n", .{ args[1], replacement, replacement_resource });
         return error.InvalidArguments;
     }
     const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return newSession(init, args[1..]);
@@ -118,7 +118,8 @@ fn run(init: std.process.Init) !void {
         }
         // Missing sockets and named files share FileNotFound; say both rather
         // than guess. One-shot commands never start a Host implicitly.
-        if (err == error.FileNotFound or err == error.ConnectionRefused)
+        // Defaults and auth never contact a Host.
+        if ((err == error.FileNotFound or err == error.ConnectionRefused) and resource != .defaults and resource != .auth)
             TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
         if (err == error.MutationNotAccepted) {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
@@ -2708,7 +2709,8 @@ const usage_text =
     \\usage:
     \\  rui [PROMPT] [--store PATH] [--provider codex] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
-    \\    without approval by default. Use -- before a prompt equal to a resource name.
+    \\    without approval by default. Use -- before a prompt whose first word is a
+    \\    resource or former command name.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
     \\    Resources: session, request, action, host, defaults, auth.

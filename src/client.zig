@@ -3403,6 +3403,7 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     const io = requests.io;
     var remaining = length;
     var buffer: [protocol.content_window_bytes]u8 = undefined;
+    if (length == 0 and delivery == .withhold_final_window) try completeContentEOF(requests, fd, undefined, null);
     while (remaining != 0) {
         const wanted: usize = @intCast(@min(remaining, buffer.len));
         var filled: usize = 0;
@@ -4992,6 +4993,21 @@ test "truncated result body leaves only an unsuccessful destination prefix" {
     );
     // The final window is withheld until every advertised byte arrives.
     try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
+}
+
+test "result body publishes nothing unless EOF follows the advertised bytes" {
+    inline for (.{ "Content-Length: 2\r\nX-Rui-Wire-Version: 1\r\n\r\nabX", "Content-Length: 0\r\nX-Rui-Wire-Version: 1\r\n\r\nX" }) |tail| {
+        const descriptors = try testPipe();
+        defer closeTestDescriptor(descriptors[0]);
+        try writeTestResponse(descriptors[1], "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" ++ tail);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const destination = try tmp.dir.createFile(std.testing.io, "answer", .{ .read = true });
+        defer destination.close(std.testing.io);
+        var buffer: ReplyBuffer = .{};
+        try std.testing.expectError(error.InvalidResponse, readResultResponse(std.testing.io, descriptors[0], destination, &buffer));
+        try std.testing.expectEqual(@as(u64, 0), try destination.length(std.testing.io));
+    }
 }
 
 test "keyed observation retains request acceptance independently of later work" {

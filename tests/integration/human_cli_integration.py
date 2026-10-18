@@ -118,6 +118,7 @@ def help_case():
                 (("session", "send", "hi"), "missing --session REF or --session-hex HEX"),
                 (("session", "send", "--session", "help/half", "--key", "half-key", "hi"), "missing --record FILE"),
                 (("session", "send", "--session", "help/half", "--record", record, "hi"), "missing --key KEY or --key-hex HEX"),
+                (("request", "recover", "--record", record, "--kind", "message"), "missing --store PATH or --store-hex HEX"),
                 (("auth", "login"), "missing PROVIDER")):
             result = subprocess.run([str(fixture.RUI), *map(str, args)], env={**os.environ, "HOME": str(home)},
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
@@ -140,7 +141,7 @@ def help_case():
             dispose_all(lambda: os.close(master), lambda: os.close(slave))
         assert caller.returncode == 1, (output, errors)
         assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
-            "Nothing was captured or sent. To start a conversation with this text, use rui -- setup.\n").encode() in errors, errors
+            "Nothing was captured or sent. To start a conversation with this text, put -- before it: rui -- TEXT.\n").encode() in errors, errors
         assert b"Provider:" not in output + errors and b"Codex login" not in output + errors, (output, errors)
         assert b"usage:" not in errors and b"rui [PROMPT]" not in errors, errors
         assert list(home.iterdir()) == [], "retired name created runtime state"

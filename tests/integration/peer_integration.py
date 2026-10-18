@@ -228,7 +228,9 @@ def main():
         # Peers left nothing running beside the Host, and nobody signed in or
         # saved defaults: HOME holds only generated request captures.
         processes = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout.splitlines()
-        running = {int(line.split(None, 1)[0]) for line in processes if line.split(None, 1)[1].startswith(str(installed))}
+        # Bash launches peers through PATH, so their argv begins with bare `rui`.
+        running = {int(pid) for pid, args in (line.split(None, 1) for line in processes)
+                   if args.startswith(str(installed)) or args == "rui" or args.startswith("rui ")}
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "

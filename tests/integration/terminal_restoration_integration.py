@@ -1372,7 +1372,7 @@ def command_interruption_cases(state, library):
                         if case == "configure-presentation":
                             assert b"InputOutput" in errors, errors
                     else:
-                        assert b"not confirmed" in errors, errors
+                        assert b"not confirmed" in errors and f"rui request recover {key}".encode() in errors, errors
                 else:
                     assert not added, "read command captured a mutation"
                 actual = termios.tcgetattr(slave)

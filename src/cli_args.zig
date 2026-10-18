@@ -174,6 +174,8 @@ pub const Definition = struct {
             .{ &.{"record"}, if (self.optionNamed("kind") != null) &.{"kind"} else &.{ "key", "key-hex" } },
             .{ &.{ "key", "key-hex" }, &.{"record"} },
             .{ &.{"kind"}, &.{"record"} },
+            // Only recovery has --kind; its record form names no saved Store.
+            .{ &.{"record"}, if (self.optionNamed("kind") != null) &.{ "store", "store-hex" } else &.{"record"} },
         };
         if (self.mutation) for (halves) |half| {
             if (self.optionNamed(half[0][0]) == null) continue;
