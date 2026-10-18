@@ -65,11 +65,16 @@ def qualify(previous, candidate):
                            QUAL_BASELINE=str(baseline), QUAL_PATHS=str(paths))
         first = blocks[0].replace('STORE="/absolute/path/from/the/error"', 'STORE=' + shlex.quote(str(store)))
         script = '\n'.join([
-            'set -euo pipefail', first,
-            'if "$RUI" host status --store "$STORE" | grep -q "Host: ready"; then', blocks[1], 'fi',
+            'set -euo pipefail', 'printf "Recipe phase: initial status\\n"', first,
+            'if "$RUI" host status --store "$STORE" | grep -q "Host: ready"; then',
+            'printf "Ready probe pipeline statuses: %s\\n" "${PIPESTATUS[*]}"',
+            'printf "Recipe phase: stopping original Host\\n"', blocks[1],
+            'else', 'printf "Ready probe declined; pipeline statuses: %s\\n" "${PIPESTATUS[*]}"', 'fi',
+            'printf "Recipe phase: waiting for original ownership release\\n"',
             'until "$RUI" host status --store "$STORE" | grep -q "Host: unavailable"; do sleep 0.025; done',
+            'printf "Recipe phase: stopped Store snapshot and backup\\n"',
             '"$QUAL_PYTHON" "$QUAL_SCRIPT" snapshot "$STORE" "$QUAL_BASELINE"',
-            blocks[2], blocks[3],
+            blocks[2], 'printf "Recipe phase: fresh Store start and selection\\n"', blocks[3],
             'printf "%s\\n%s\\n" "$BACKUP" "$FRESH_STORE" > "$QUAL_PATHS"',
             '"$RUI" host status',
         ])
@@ -79,8 +84,24 @@ def qualify(previous, candidate):
                 # Exercise the running-Host block with a compatible retained
                 # installation. Legacy input is already stopped instead.
                 subprocess.run([previous_artifact, 'host', 'start', '--store', store], check=True, timeout=16)
-            result = subprocess.run(['bash', '-c', script], env=environment,
-                                    capture_output=True, text=True, timeout=45)
+                probe = subprocess.run(['bash', '-c', '''set -o pipefail
+bad=0
+for ((i=0; i<100; i++)); do
+  if "$1" host status --store "$2" | grep -q "Host: ready"; then :
+  else printf 'Ready pipeline misclassified: %s\n' "${PIPESTATUS[*]}"; ((bad++)); fi
+done
+printf 'Diagnostic ready pipeline misclassifications: %s/100\n' "$bad"
+test "$bad" -eq 0
+''', 'ready-pipeline-probe', str(binary), str(store)], capture_output=True, text=True, timeout=20)
+                print(probe.stdout + probe.stderr, flush=True)
+                assert probe.returncode == 0, 'ready status pipeline can skip the required Host stop'
+            try:
+                result = subprocess.run(['bash', '-c', script], env=environment,
+                                        capture_output=True, text=True, timeout=45)
+            except subprocess.TimeoutExpired as error:
+                print('Timed-out recipe output:\n' + (error.stdout or b'').decode(errors='replace')
+                      + (error.stderr or b'').decode(errors='replace'), flush=True)
+                raise
             print(result.stdout + result.stderr, flush=True)
             assert result.returncode == 0, result
             backup_parent, fresh = (Path(value) for value in paths.read_text().splitlines())
