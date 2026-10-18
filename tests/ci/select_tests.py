@@ -19,7 +19,8 @@ RULES = (
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
-    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig"),
+    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
+      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig"),
      ("test-logic", "check", "admission-debug-integration"),
      ("test-logic", "check", "admission-debug-integration"),
      "Frontend value decisions and native terminal/borrower handoffs"),
@@ -131,9 +132,16 @@ CHECK_COVERS = {
 }
 
 
+# Targets whose PTY oracles decode screens with pyte (tests/integration/terminal_screen.py).
+TERMINAL_TARGETS = {"check", "check-full", "terminal-restoration-integration",
+                    "canonical-failure-integration", "host-launch-integration",
+                    "bash-recovery-integration"}
+
+
 def setup_requirements(targets):
     return {"go": "measurement-check" in targets,
-            "h2": bool(set(targets) & {"transport-h2-integration", "codex-h2-integration"})}
+            "h2": bool(set(targets) & {"transport-h2-integration", "codex-h2-integration"}),
+            "terminal": bool(set(targets) & TERMINAL_TARGETS)}
 
 
 def execution_batches(targets, check_part="all"):
