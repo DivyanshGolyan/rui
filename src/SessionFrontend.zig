@@ -541,8 +541,8 @@ fn driveActive(self: *Self) !void {
             };
             var status_buffer: [2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
-            const bypass = !self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass;
-            for ([_][]const u8{ self.notice orelse "", base_status, if (bypass) "Bash runs without approval." else "" }) |line| {
+            // Bypass is the default and stays quiet: /status shows Permission.
+            for ([_][]const u8{ self.notice orelse "", base_status }) |line| {
                 if (line.len == 0) continue;
                 if (status.buffered().len != 0) try status.writeAll("\n");
                 try status.writeAll(line);
@@ -1120,7 +1120,7 @@ fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nBash runs without approval unless /configure --permission-mode ask; then a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.
