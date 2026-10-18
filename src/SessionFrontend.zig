@@ -3,6 +3,7 @@
 const std = @import("std");
 const client = @import("client.zig");
 const Input = @import("SessionInput.zig");
+const TerminalInput = @import("TerminalInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
 const Terminal = @import("SessionTerminal.zig");
@@ -559,7 +560,7 @@ fn driveActive(self: *Self) !void {
                 self.consent.invalidate();
                 self.dirty = true;
             }
-            if (self.consent.active() and action_visible and self.actionVisible() and !self.dirty and !self.consent.acceptsInput() and self.choice.pending() == .none) {
+            if (self.consent.active() and action_visible and self.actionVisible() and !self.dirty and !self.consent.acceptsInput() and self.input.pending() == .none) {
                 // Every prompt byte was accepted by stdout. Discard input
                 // through its decoder, not tcflush: a paste prefix or Ctrl-C
                 // arriving during the final write must retain its meaning.
@@ -572,7 +573,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.commandActive() or !self.actionVisible() or self.dirty)) {
+                if (self.consent.promptCompleted(service, self.input.pending() != .none, self.commandActive() or !self.actionVisible() or self.dirty)) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -614,11 +615,9 @@ fn approvalReady(self: *const Self) bool {
     return size.row == self.terminal.size.row and size.col == self.terminal.size.col and self.terminal.screen.approvalReady();
 }
 
-fn navigation(self: *Self, event: Editor.Event, editor: *const Editor) !void {
+fn navigation(self: *Self, event: Editor.Event) !void {
     const screen = self.terminal.screen;
     switch (event) {
-        .width_report => screen.setWidth(editor.input.report.?.width),
-        .scroll_report => try self.terminal.enableAlternateScroll(),
         .page_up, .page_down, .scroll_up, .scroll_down => {
             const down = event == .page_down or event == .scroll_down;
             if (screen.view == .live) {
@@ -655,11 +654,11 @@ fn olderWanted(self: *const Self) bool {
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    const pending = if (self.consent.active()) self.choice.pending() else self.input.pending();
+    const stream = &self.input.stream;
+    const pending = stream.pending();
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            const event = if (self.consent.active()) try self.choice.expire() else try self.input.expire();
-            if (event != .none) try self.navigation(event, if (self.consent.active()) &self.choice else &self.input.editors[self.input.active]);
+            if (try stream.expire()) try self.navigation(.close_view);
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -668,70 +667,81 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         else => return err,
     }) orelse return if (pending == .none) .empty else .decoder_pending;
     self.notice = null;
-    if (self.consent.active()) {
-        const visible = self.actionVisible();
-        if (!visible) self.consent.invalidate();
-        if (visible and !self.consent.acceptsInput()) {
-            // Discard text but retain fragmented input's decoder custody.
-            const event = self.choice.feed(byte);
-            if (event == .interrupt or event == .eof) {
-                self.consent.interrupt();
-                self.detached = true;
-            }
-            try self.navigation(event, &self.choice);
-            // Only a slash command survives: it can never become a decision.
-            const text = self.choice.buffer[0..self.choice.length];
-            const command = text.len != 0 and text[0] == '/';
-            if (event == .submit and command) self.choiceCommand(text);
-            if (self.choice.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-            self.dirty = true;
-            return .byte;
-        }
-        const event = self.choice.feed(byte);
-        try self.navigation(event, &self.choice);
-        switch (event) {
-            .latest, .close_view => {
-                if (!visible) {
-                    self.consent.invalidate();
-                    self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-                }
-            },
-            .submit => {
-                const text = self.choice.buffer[0..self.choice.length];
-                const decision = if (self.approvalReady()) self.consent.submit(text) else null;
-                if (decision) |selected| {
-                    self.terminal.screen.releaseAction();
-                    try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
-                } else if (std.mem.startsWith(u8, text, "/")) {
-                    self.choiceCommand(text);
-                } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
-                self.consent.invalidate();
-                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-            },
-            .invalid, .edit_rejected, .overflow => {
-                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-                self.consent.invalidate();
-                self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
-            },
-            .interrupt, .eof => {
-                self.consent.interrupt();
-                self.detached = true;
-            },
-            else => {},
-        }
-        self.dirty = true;
+    self.dirty = true;
+    if (!self.consent.active() and pending == .none and byte == 18) {
+        try self.submission.requestRecovery(null);
         return .byte;
     }
-    if (self.input.pending() == .none) switch (byte) {
-        18 => {
-            try self.submission.requestRecovery(null);
-            return .byte;
+    // One stream decodes every byte; replies never reach an editor, and an
+    // event left in a suffix is delivered in order before the next byte.
+    var decoded = stream.feed(byte);
+    while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
+        .report => |report| switch (report) {
+            .width => |method| self.terminal.screen.setWidth(method),
+            .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
+        },
+        else => if (self.consent.active()) try self.choiceEvent(decoded) else try self.draftEvent(decoded),
+    };
+    return .byte;
+}
+
+fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+    const stream = &self.input.stream;
+    const visible = self.actionVisible();
+    if (!visible) self.consent.invalidate();
+    if (visible and !self.consent.acceptsInput()) {
+        // Discard text; the stream keeps any fragmented sequence.
+        const event = self.choice.apply(decoded);
+        if (event == .interrupt or event == .eof) {
+            self.consent.interrupt();
+            self.detached = true;
+        }
+        try self.navigation(event);
+        // Only a slash command survives: it can never become a decision.
+        const text = self.choice.buffer[0..self.choice.length];
+        const command = text.len != 0 and text[0] == '/';
+        if (event == .submit and command) self.choiceCommand(text);
+        if (stream.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        return;
+    }
+    const event = self.choice.apply(decoded);
+    try self.navigation(event);
+    switch (event) {
+        .latest, .close_view => {
+            if (!visible) {
+                self.consent.invalidate();
+                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            }
+        },
+        .submit => {
+            const text = self.choice.buffer[0..self.choice.length];
+            const decision = if (self.approvalReady()) self.consent.submit(text) else null;
+            if (decision) |selected| {
+                self.terminal.screen.releaseAction();
+                try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
+            } else if (std.mem.startsWith(u8, text, "/")) {
+                self.choiceCommand(text);
+            } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
+            self.consent.invalidate();
+            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        },
+        .invalid, .edit_rejected, .overflow => {
+            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            self.consent.invalidate();
+            self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
+        },
+        .interrupt, .eof => {
+            self.consent.interrupt();
+            self.detached = true;
         },
         else => {},
-    };
+    }
+}
+
+fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const submission = self.submission.view();
     // A Message waits for a pending command, which may change its configuration.
-    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
+    switch (self.input.applySelected(decoded, !self.opening and self.read_phase != .permission and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -745,15 +755,13 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
-            .width_report, .scroll_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
+            .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
             else => {},
         },
     }
-    self.dirty = true;
-    return .byte;
 }
 
 fn joinAdmission(self: *Self) AdmissionEnd {
