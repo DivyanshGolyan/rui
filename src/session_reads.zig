@@ -165,11 +165,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             }
         };
         job.result.mark = .{ .cursor = mark };
-    } else if (page.facts.count != 0) {
-        // Everything before this page's first item precedes its live output.
-        const first = page.facts.items[0];
-        job.result.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal } };
-    }
+    } else for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
+        // Everything before this page's first conversation item precedes its
+        // live output. Only conversation items are cursors into it; an
+        // Admission or call row is not.
+        .user, .assistant, .tool_result => {
+            job.result.mark = .{ .cursor = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal } };
+            break;
+        },
+        else => {},
+    };
     try job.inspection_file.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
     if (job.opening) {
