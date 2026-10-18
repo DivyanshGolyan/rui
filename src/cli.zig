@@ -1451,9 +1451,14 @@ fn showSessionStatus(init: std.process.Init, requester: client.Requests, store: 
 fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, view: SessionStatusView, out: *std.Io.Writer) !void {
     const report = try inspectWorkTo(init, requester, store, session_ref, out);
     defer report.file.close(init.io);
-    const work = &report.current;
-    // Entry only confirms configuration; the Session screen shows its notice.
+    // Entry only confirms configuration.
     if (view == .opening) return;
+    try writeSessionStatus(init.io, store, session_ref, &report.current, report.file, out);
+}
+
+/// Everything /status reports, from one Current capture; `file` holds the
+/// capture's attention rows.
+pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8, work: *const client.Current, file: std.Io.File, out: *std.Io.Writer) anyerror!void {
     try writeSafeFieldTo(out, "Session: ", session_ref);
     try writeSafeFieldTo(out, "Store: ", store);
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
@@ -1483,7 +1488,7 @@ fn renderSessionStatus(init: std.process.Init, requester: client.Requests, store
     try writeSafeFieldTo(out, "Work: ", @tagName(work.work.status.value));
     if (work.selected_message) |selected|
         try writeSafeFieldTo(out, "Current message: ", selected.slice());
-    if (work.actionable_count != 0) try renderActionable(init.io, &report, out);
+    if (work.actionable_count != 0) try renderActionable(io, work, file, out);
     if (work.first_indeterminate) |action| {
         var buffer: [20]u8 = undefined;
         try writeSafeFieldTo(out, "Indeterminate Action: ", try std.fmt.bufPrint(&buffer, "{d}", .{action}));
@@ -1544,7 +1549,7 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
         defer action.close(init.io);
         const inspection = renderScratch(init) catch |err| break :run err;
         defer inspection.close(init.io);
-        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, initial_text);
+        break :run SessionFrontend.run(init, destination, reference, directory, .{ .scratch = scratch, .action = action, .inspection = inspection }, sessionCommand, sessionInspect, writeSessionStatus, initial_text);
     };
     return outcome catch |err| {
         notice: {
@@ -2635,7 +2640,7 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     }
 }
 
-fn renderActionable(io: std.Io, report: *const SessionObservation, out: *std.Io.Writer) !void {
+fn renderActionable(io: std.Io, current: *const client.Current, file: std.Io.File, out: *std.Io.Writer) !void {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn visit(self: *@This(), row: client.Current.Attention) !void {
@@ -2646,7 +2651,7 @@ fn renderActionable(io: std.Io, report: *const SessionObservation, out: *std.Io.
         }
     };
     var sink: Sink = .{ .out = out };
-    try report.current.traverse(io, report.file, &sink);
+    try current.traverse(io, file, &sink);
 }
 
 fn inspectAction(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
