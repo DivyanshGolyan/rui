@@ -97,7 +97,10 @@ def compaction_cases(state, processes, endpoints, releases):
     def user_texts(request):
         return [item["content"][0]["text"] for item in request["input"] if item.get("role") == "user"]
 
-    overflow_http = ResponseSpec(b'{"error":{"code":"context_length_exceeded"}}', {}, status=400)
+    overflow_request_id = 'overflow-"quoted"\\request'
+    overflow_http = ResponseSpec(
+        b'{"error":{"code":"context_length_exceeded"}}', {"X-Request-Id": overflow_request_id}, status=400
+    )
     overflow_sse = encode_sse([{"type": "response.failed", "response": {
         "status": "failed", "error": {"code": "context_length_exceeded"},
     }}], done=False)
@@ -146,6 +149,9 @@ def compaction_cases(state, processes, endpoints, releases):
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute("SELECT purpose,resolution_code FROM model_operation ORDER BY operation_id").fetchall() == [
                 (0, "context_overflow"), (1, "continued"), (0, "completed")]
+            # Each overflow keeps the correlation its provider answer carried.
+            assert database.execute("SELECT request_id FROM model_operation WHERE operation_id=1").fetchone()[0] == (
+                overflow_request_id if route == "http" else "request-1")
             assert database.execute("SELECT count(*) FROM model_output_item WHERE operation_id=2").fetchone()[0] == 3
             assert database.execute("SELECT count(*) FROM conversation_entry WHERE source_operation_id=2").fetchone()[0] == 0
         # Reset recovers default selection, then restart reconstructs the same base.
@@ -157,6 +163,8 @@ def compaction_cases(state, processes, endpoints, releases):
         current = command("inspect-session", "--store", store, "--session", session)["session"]
         assert current["compaction_trigger"] is None and current["compaction_trigger_override"] is None, current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
+        overflowed = command("inspect-session", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
+        assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
         message(state, store, f"{route}-followup-input", session, "followup input")
         wait_for(lambda: completed_observation(store, f"{route}-followup-input"), "reconstructed base after restart")
         assert read_result(store, f"{route}-followup-input") == b"after restart"
@@ -1091,43 +1099,65 @@ def main():
         stop_endpoint(dated_endpoint, endpoints)
 
         # A permanent request/authentication-class HTTP failure is terminal
-        # after one Attempt and is never blindly retried.
-        permanent_endpoint = SuccessEndpoint(
-            [ResponseSpec(b"authentication rejected", {}, 401)]
-        )
+        # after one Attempt and is never blindly retried. It keeps the
+        # provider's own request correlation, or none, through restart.
+        permanent_request_ids = ('permanent-"quoted"\\request', None)
+        permanent_endpoint = SuccessEndpoint([
+            ResponseSpec(b"authentication rejected", {"X-Request-Id": request_id} if request_id else {}, 401)
+            for request_id in permanent_request_ids
+        ])
         permanent_thread = threading.Thread(
             target=permanent_endpoint.serve_forever, daemon=True
         )
         endpoints[permanent_endpoint] = permanent_thread
         permanent_thread.start()
-        permanent_store = state / "permanent-store"
-        permanent_host = start_host(
-            permanent_store,
-            f"http://127.0.0.1:{permanent_endpoint.server_port}/responses",
-        )
-        processes.append(permanent_host)
-        configure(
-            state, permanent_store, "permanent-config", "direct/permanent", "model-a"
-        )
-        message(
-            state,
-            permanent_store,
-            "permanent-message",
-            "direct/permanent",
-            "do not retry",
-        )
-        permanent_failure = wait_for(
-            lambda: (
-                value := observe(permanent_store, "permanent-message")
-            ).get("result", {}).get("code")
-            and value,
-            "permanent provider failure",
-        )
-        assert permanent_failure["result"]["code"] == "provider_http_401"
-        time.sleep(1.2)
-        assert len(permanent_endpoint.requests) == 1
-        stop_host(permanent_host)
-        processes.remove(permanent_host)
+        for index, request_id in enumerate(permanent_request_ids):
+            permanent_store = state / f"permanent-store-{index}"
+            permanent_host = start_host(
+                permanent_store,
+                f"http://127.0.0.1:{permanent_endpoint.server_port}/responses",
+            )
+            processes.append(permanent_host)
+            configure(
+                state, permanent_store, f"permanent-config-{index}", "direct/permanent", "model-a"
+            )
+            message(
+                state,
+                permanent_store,
+                f"permanent-message-{index}",
+                "direct/permanent",
+                "do not retry",
+            )
+            permanent_failure = wait_for(
+                lambda: (
+                    value := observe(permanent_store, f"permanent-message-{index}")
+                ).get("result", {}).get("code")
+                and value,
+                "permanent provider failure",
+            )
+            assert permanent_failure["result"]["code"] == "provider_http_401"
+            time.sleep(1.2)
+            assert len(permanent_endpoint.requests) == index + 1
+            with sqlite3.connect(permanent_store / "rui.sqlite3") as database:
+                assert database.execute(
+                    "SELECT resolution_code,resolution_content_id,request_id FROM model_operation"
+                ).fetchone() == ("provider_http_401", None, request_id)
+            stop_host(permanent_host)
+            processes.remove(permanent_host)
+            reopened = start_host(permanent_store, None)
+            processes.append(reopened)
+            report = command(
+                "inspect-session", "--store", permanent_store,
+                "--session", "direct/permanent", "--profile", "full",
+            )
+            operation = report["full"]["model_operations"][0]
+            assert operation["request_id"] == request_id, operation
+            assert operation["resolution"]["code"] == "provider_http_401", operation
+            assert operation["resolution"]["content"] is None, operation
+            assert observe(permanent_store, f"permanent-message-{index}")["result"] == permanent_failure["result"]
+            assert len(permanent_endpoint.requests) == index + 1
+            stop_host(reopened)
+            processes.remove(reopened)
         stop_endpoint(permanent_endpoint, endpoints)
 
         # Redirects are disabled and contradictory provider headers are
