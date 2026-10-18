@@ -189,18 +189,17 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
     if (ahead.next().tag != .l_paren) return null;
     var parens: usize = 1;
     var second = false;
-    // The second argument: its first token, its token count, its end, and
-    // whether a string literal appears anywhere in it.
+    // The second argument: its first token, its token count and its end.
     var first: ?std.zig.Token = null;
     var count: usize = 0;
     var end: usize = 0;
-    var literal = false;
     while (true) {
         const token = ahead.next();
         switch (token.tag) {
             .eof => return null,
-            .l_paren => parens += 1,
-            .r_paren => {
+            // Braces and brackets nest too, so their commas stay inside.
+            .l_paren, .l_brace, .l_bracket => parens += 1,
+            .r_paren, .r_brace, .r_bracket => {
                 parens -= 1;
                 if (parens == 0) break;
             },
@@ -215,14 +214,13 @@ fn fieldName(source: []const u8, tokens: *const std.zig.Tokenizer) ?union(enum) 
         if (first == null) first = token;
         count += 1;
         end = token.loc.end;
-        if (token.tag == .string_literal or token.tag == .multiline_string_literal_line) literal = true;
     }
     const start = first orelse return null;
     if (count == 1 and start.tag == .string_literal) return .{ .literal = source[start.loc.start + 1 .. start.loc.end - 1] };
-    // A name built, wrapped or written across lines from literals would hide
-    // it; a lone computed name is left to review.
-    if (literal) return .{ .built = source[start.loc.start..end] };
-    return null;
+    // A lone computed name, such as an `inline for` capture, is left to
+    // review; any other expression could spell a hidden name.
+    if (count == 1 and start.tag == .identifier) return null;
+    return .{ .built = source[start.loc.start..end] };
 }
 
 fn allowedStd(path: []const u8) bool {
@@ -265,6 +263,8 @@ test "the boundary check reads names, not comments or strings" {
         \\pub const reexport = self.mystd.posix;
         \\test { _ = std.testing.allocator; errdefer std.debug.print("context", .{}); }
         \\const e = @field(anyerror, "AccountMismatch");
+        \\const f = @field(anyerror, name);
+        \\const g = @field(S{ .a = 1, .b = 2 }, "a");
         \\const Phase = enum { wait, done }; const waiting = phase == .wait; const v = .{ .now = 1 };
         \\const eql = std . mem . eql;
         \\const tag = @import("builtin").os.tag;
@@ -308,6 +308,9 @@ test "the boundary check reads names, not comments or strings" {
         .{ "const p = @field(@This(), (\"std\")).posix;", "(\"std\")" },
         .{ "const t = @field(T,\n    \\\\now\n);", "\\\\now" },
         .{ "const t = @field(T, \"now\",);", "now" },
+        .{ "const t = @field(std.Io.Clock.Timestamp, @tagName(.now))(io, .awake);", "@tagName(.now)" },
+        .{ "const p = @field(@This(), @tagName(.std)).posix;", "@tagName(.std)" },
+        .{ "const t = @field(T, &[_]u8{ 'n', 'o', 'w' });", "&[_]u8{ 'n', 'o', 'w' }" },
         .{ "const p = @field(@This(), \"std\").posix;", "std" },
         .{ "const p = @\"\\x73td\".posix;", "@\"\\x73td\"" },
         // A path too long to compare fails closed.
