@@ -616,7 +616,7 @@ test "tool summary hides only complete routine metadata and retains warnings" {
 }
 
 fn workEnded(sink: anytype, code: []const u8) !void {
-    try print(sink, "\n! Work ended: {s}. /status for details.\n", .{code});
+    try print(sink, "\n! Work ended: {s}. Send a message to continue.\n", .{code});
 }
 
 test "an ended Turn says what happened and what to do next where it ended" {
