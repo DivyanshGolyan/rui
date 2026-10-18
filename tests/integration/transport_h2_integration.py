@@ -23,7 +23,7 @@ import h2.settings
 
 import control_integration as control
 import model_fixture as dispatch
-from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, wait_for_execution_release as wait_for_drain
+from host_process import HostDiagnostics, ReleaseGate, TestHTTPServer, TRANSPORT_EXCHANGE_LIMIT, _failure_destination, preserve_failure_metadata, wait_for_execution_release as wait_for_drain
 
 
 class Endpoint(socketserver.ThreadingTCPServer):
@@ -1116,18 +1116,24 @@ def connection_failure(root, endpoint):
     host = dispatch.start_host(
         store, f"https://localhost:{endpoint.server_address[1]}/responses",
         "--provider-ca-file", str(root / "cert.pem"),
-        "--test-retry-waits-ms", "100,60000,60000", active_capacity=2,
+        "--test-retry-waits-ms", "100,60000,60000", "--test-phase-trace", active_capacity=2,
     )
+    diagnostics = None
+    observed = {}
     try:
+        diagnostics = HostDiagnostics(host)
         for index in range(2):
             dispatch.configure(root, store, f"drop-config-{index}", f"direct/drop-{index}", "model-a")
             dispatch.message(root, store, f"drop-message-{index}", f"direct/drop-{index}", f"drop-{index}")
         result_deadline = time.monotonic() + 20
+
+        def settled(index):
+            observed[index] = dispatch.observe(store, f"drop-message-{index}", deadline=result_deadline)
+            return observed[index].get("result")
+
         for index in range(2):
             result = dispatch.wait_for(
-                lambda index=index: dispatch.observe(
-                    store, f"drop-message-{index}", deadline=result_deadline,
-                ).get("result"),
+                lambda index=index: settled(index),
                 f"connection failure settlement {index}", deadline=result_deadline,
             )
             assert result["code"] == "provider_http_422", result
@@ -1144,8 +1150,70 @@ def connection_failure(root, endpoint):
                 "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
             ).fetchall() == [(2, 2), (2, 2)]
         print(json.dumps({"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}), flush=True)
+    except BaseException:
+        retain_connection_failure(store, host, diagnostics, endpoint, observed)
+        raise
     finally:
         dispatch.stop_host(host)
+
+
+def retain_connection_failure(store, host, diagnostics, endpoint, observed):
+    """Keep where each Attempt went: peer streams per connection, live Host
+    execution facts, durable retry state and Attempt milestones. Fixture
+    texts, codes, counts and clocks only; never bodies or the Store itself.
+
+    Decide from Store rows, peer streams and execution facts. Trace and
+    optional stderr are try-only and lossy, so milestones only corroborate.
+    Retention is optional: no step of it may replace the original failure."""
+    try:
+        _retain_connection_failure(store, host, diagnostics, endpoint, observed)
+    except Exception as error:
+        try:
+            print(f"Connection failure diagnostics unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
+def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
+    execution = {}
+    if host.poll() is None:
+        for index in range(2):  # Live facts first; a fence is visible only here.
+            try:
+                execution[index] = dispatch.command(
+                    "inspect-session", "--store", store, "--session", f"direct/drop-{index}", timeout=2,
+                )["execution"]
+            except Exception as error:
+                execution[index] = type(error).__name__
+    dispatch.stop_host(host)  # Reap: the Store and stderr are then final.
+
+    def collect():
+        with endpoint.lock:
+            connections = list(endpoint.connections)
+            streams = [{"connection": connections.index(address), "stream": stream_id, "text": text}
+                       for address, stream_id, text, _ in endpoint.streams]
+            dropped = endpoint.dropped
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            operations = database.execute(
+                "SELECT operation_id,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,"
+                "last_failure_code,resolution_code FROM model_operation ORDER BY operation_id"
+            ).fetchall()
+        records = diagnostics.records if diagnostics else []
+        return {
+            "case": "connection_failure", "collected_at_unix_ms": int(time.time() * 1000),
+            "dropped": dropped, "connections": len(connections), "streams": streams,
+            "operations": operations, "execution": execution, "last_observation": observed,
+            "milestones": [{name: record.get(name) for name in ("sequence", "rui_test_phase", "operation", "attempt", "at_ns")}
+                           for record in records
+                           if "attempt" in record or record["rui_test_phase"] == "attempt_admission_rolled_back"],
+            "first_lost_sequence": next((record.get("sequence") for record in records
+                                         if record.get("trace_lost")), None),
+            "stderr_tail": [line for line in (diagnostics.tail() if diagnostics else b"").decode("utf-8", "replace").splitlines()
+                            if '"trace_lost":' not in line],
+        }
+
+    path = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS")) / f"connection-failure-{host.pid}.json"
+    if preserve_failure_metadata(path, collect):
+        print(f"retained connection failure diagnostics: {path}", file=sys.stderr, flush=True)
 
 
 def unsupported_https(root):

@@ -28,21 +28,13 @@ jobs:
             const changed = !previous || previous.head_sha !== context.sha;
             core.setOutput('changed', String(changed));
             await core.summary.addRaw(`Scheduled main SHA: ${context.sha}. ` +
-              (changed ? 'Run native ordinary suite.' :
+              (changed ? 'Run fresh sharded native qualification.' :
                 `Unchanged since prior ${previous.conclusion} attempt; no retry or new test evidence.`)).write();
   macos:
     needs: changed
     if: ${{ needs.changed.outputs.changed == 'true' }}
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-      - uses: ./.github/actions/setup
-      - name: Ordinary suite on the actual scheduled main SHA
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          echo "Tested main SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m). No coverage claim for intermediate merges." | tee -a "$GITHUB_STEP_SUMMARY"
-          zig build check --summary all
+    uses: ./.github/workflows/qualify-macos.yml
+    with:
+      ref: ${{ github.sha }}
+      platform: macos
+      suite: native

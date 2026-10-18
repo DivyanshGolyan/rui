@@ -5,16 +5,18 @@ const std = @import("std");
 pub const Service = enum { byte, empty, decoder_pending, decoder_expired, handoff, budget_exhausted };
 pub const Choice = enum { allow_once, deny, other };
 pub const Decision = struct { action: u64, choice: Choice };
+pub const Presentation = enum { complete, preview };
 
 pub const Consent = struct {
     action: ?u64 = null,
+    presentation: Presentation = .complete,
     ready: bool = false,
 
     /// The exact proposal has been completely presented and its worker joined;
     /// the chat decoder has relinquished custody.
-    pub fn adopt(self: *Consent, action: u64) void {
+    pub fn adopt(self: *Consent, action: u64, presentation: Presentation) void {
         std.debug.assert(self.action == null);
-        self.* = .{ .action = action };
+        self.* = .{ .action = action, .presentation = presentation };
     }
 
     pub fn active(self: Consent) bool {
@@ -22,13 +24,13 @@ pub const Consent = struct {
     }
 
     pub fn acceptsInput(self: Consent) bool {
-        return self.active() and self.ready;
+        return self.active() and self.presentation == .complete and self.ready;
     }
 
     /// Called after the complete prompt write, using post-write owner facts.
     /// Ordinary redraw does not revoke an already fresh typing scope.
     pub fn promptCompleted(self: *Consent, service: Service, decoder_pending: bool, stopped: bool) bool {
-        if (!self.active() or self.ready or service != .empty or decoder_pending or stopped) return false;
+        if (!self.active() or self.presentation != .complete or self.ready or service != .empty or decoder_pending or stopped) return false;
         self.ready = true;
         return true;
     }
@@ -63,7 +65,7 @@ pub fn classify(text: []const u8) Choice {
 test "consent requires real emptiness after completed prompt" {
     for (std.enums.values(Service)) |service| {
         var consent: Consent = .{};
-        consent.adopt(913);
+        consent.adopt(913, .complete);
         const opened = consent.promptCompleted(service, false, false);
         try std.testing.expectEqual(service == .empty, opened);
         const decision = consent.submit("a");
@@ -76,7 +78,7 @@ test "consent requires real emptiness after completed prompt" {
     }
     for ([_]bool{ true, false }) |pending| {
         var consent: Consent = .{};
-        consent.adopt(42);
+        consent.adopt(42, .complete);
         try std.testing.expect(!consent.promptCompleted(.empty, pending, !pending));
         try std.testing.expect(consent.submit("d") == null);
     }
@@ -92,7 +94,7 @@ test "consent bounded lifecycle sequences preserve exact authority" {
         for ([_][]const u8{ "a", "d" }) |text| {
             errdefer std.debug.print("consent sequence={d}, choice={s}\n", .{ sequence, text });
             var consent: Consent = .{};
-            consent.adopt(0xfeed);
+            consent.adopt(0xfeed, .complete);
             var fresh = false;
             var alive = true;
             var index = sequence;
@@ -149,7 +151,7 @@ test "consent bounded lifecycle sequences preserve exact authority" {
 
 test "consent reentry and successor proposals require separate fresh scopes" {
     var consent: Consent = .{};
-    consent.adopt(71);
+    consent.adopt(71, .complete);
     try std.testing.expect(consent.submit("a") == null);
     try std.testing.expect(consent.promptCompleted(.empty, false, false));
     // Complete commands and invalid text retain the same exact target, but
@@ -163,8 +165,20 @@ test "consent reentry and successor proposals require separate fresh scopes" {
     try std.testing.expect(consent.submit("a") == null);
     try std.testing.expect(consent.promptCompleted(.empty, false, false));
     try std.testing.expectEqual(Decision{ .action = 71, .choice = .deny }, consent.submit("d").?);
-    consent.adopt(902);
+    consent.adopt(902, .complete);
     try std.testing.expect(consent.submit("a") == null);
     try std.testing.expect(consent.promptCompleted(.empty, false, false));
     try std.testing.expectEqual(Decision{ .action = 902, .choice = .allow_once }, consent.submit("a").?);
+}
+
+test "an oversized preview cannot authorize even after completed output and empty input" {
+    for (std.enums.values(Service)) |service| {
+        var consent: Consent = .{};
+        consent.adopt(918, .preview);
+        try std.testing.expect(!consent.promptCompleted(service, false, false));
+        try std.testing.expect(!consent.acceptsInput());
+        try std.testing.expect(consent.submit("a") == null);
+        try std.testing.expect(consent.submit("d") == null);
+        try std.testing.expectEqual(@as(?u64, 918), consent.action);
+    }
 }

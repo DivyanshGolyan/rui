@@ -13,6 +13,8 @@ import subprocess
 RULES = (
     (("src/logic_tests.zig", "src/execution_turn.zig", "src/request_encoding.zig", "src/AnswerRenderer.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
+    (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
+     "Response policy values alongside native timeout consumers"),
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
@@ -20,7 +22,10 @@ RULES = (
      ("test-logic", "check", "admission-debug-integration"),
      ("test-logic", "check", "admission-debug-integration"),
      "Frontend value decisions and native terminal/borrower handoffs"),
-    (("src/cli.zig", "src/client.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig",
+    (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
+     ("test-logic", "check"), ("test-logic", "check"),
+     "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/cli.zig", "src/client.zig", "src/ResponseTiming.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig",
       "src/new_session_selection.zig", "src/preference_values.zig"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "CLI selection and otherwise unnamed native terminal/caller checks"),
@@ -42,6 +47,8 @@ RULES = (
      ("check",), ("check",), "Shared protocol, native execution or resource ownership"),
     (("src/BashLifecycle.zig", "src/deadline.zig"), ("test-logic",), ("test-logic",),
      "Portable Bash lifecycle and service-turn deadlines; native owner checks follow below"),
+    (("src/codex_credential_policy.zig", "src/codex_token_wire.zig"), ("test-logic",), ("test-logic",),
+     "Portable Codex credential decisions and token messages; native owner checks follow below"),
     (("src/bash*", "src/BashLifecycle.zig", "src/deadline.zig", "tests/integration/bash*"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
@@ -126,7 +133,8 @@ def execution_batches(targets, check_part="all"):
     if check_part != "all" and "check-full" not in targets:
         raise ValueError("A full-check part requires check-full in the selection")
     if check_part == "execution":
-        return [["check-full", "-Dcheck-part=execution"]]
+        return [["check-full", "-Dcheck-part=execution"],
+                *execution_batches([target for target in targets if target != "check-full"])]
     if check_part not in {"all", "callers"}:
         raise ValueError(f"Unknown full-check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
@@ -148,7 +156,8 @@ def select(paths, phase, available):
         if path.endswith(".md") or path.startswith(("docs/", "research/")):
             reasons.add("Documentation: references and diff whitespace, no runtime change")
             continue
-        if path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml":
+        if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
+                or path == "tests/integration/previous_release_upgrade.py"):
             reasons.add("CI policy: selector and workflow checks")
             targets.add("test-logic")
             native_targets.add("test-logic")
@@ -181,7 +190,7 @@ def select(paths, phase, available):
             targets.add("check")
             native_targets.add("check")
             reasons.add("Unmapped source: full fallback")
-        if path == "src/client.zig":
+        if path in ("src/client.zig", "src/ResponseTiming.zig"):
             targets.add("test-full")  # Response wait/inactivity owner.
             native_targets.add("test-full")
         if "evaluator_string" in path:
@@ -196,13 +205,18 @@ def select(paths, phase, available):
         # Development does not replace final boundary/native acceptance.
         targets = {"test-logic"} if targets else set()
         native_targets = set()
+    cache_execution_checks = any(path == "build.zig" or path.startswith(".github/")
+                                 or path == "tests/ci/cache_execution.py" for path in paths)
+    if cache_execution_checks and phase == "review":
+        # One explicit shard owns auxiliary cache-policy checks on each platform.
+        targets.add("test-logic")
+        native_targets.add("test-logic")
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
-            "cache_execution_checks": any(path == "build.zig" or path.startswith(".github/")
-                                          or path == "tests/ci/cache_execution.py" for path in paths),
+            "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "reasons": sorted(reasons), "acceptance_reused": False}
 

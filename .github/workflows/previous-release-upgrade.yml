@@ -1,0 +1,80 @@
+name: Previous installed-release upgrade
+on:
+  push:
+    branches: ['wip/**', 'main']
+    paths:
+      - 'src/**'
+      - 'build.zig*'
+      - 'install.sh'
+      - 'tests/integration/previous_release_upgrade.py'
+      - 'tests/integration/model_fixture.py'
+      - 'tests/integration/host_process.py'
+      - '.github/actions/setup/**'
+      - '.github/workflows/previous-release-upgrade.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Restore shared compilation inputs without competing with the selected suites.
+cache-mode: read
+
+concurrency:
+  group: previous-release-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    if: ${{ !github.event.repository.private }}
+    name: upgrade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Normal detached startup under the default soft limit
+        env:
+          RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
+        run: zig build host-launch-integration -j2 --summary all
+      - name: Check out the previous known installed build
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Prior known serving build, not inferred Store-creation provenance.
+          ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+          path: .amp/previous-release
+          persist-credentials: false
+      - name: Install, save real work, reinstall and restart the same Store
+        run: |
+          set -euo pipefail
+          uname -sm
+          git rev-parse HEAD
+          zig version
+          mkdir -p "$RUI_UPGRADE_FAILURES"
+          mv .amp/previous-release "$RUNNER_TEMP/previous-release"
+          python3 -B tests/integration/previous_release_upgrade.py . .
+          python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .
+        env:
+          RUI_UPGRADE_FAILURES: ${{ runner.temp }}/rui-upgrade-data
+      - name: Retain bounded failed-fixture diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: startup-failure-${{ matrix.os }}
+          path: ${{ runner.temp }}/rui-failure-artifacts
+          retention-days: 3
+          if-no-files-found: ignore
+      - name: Retain failed synthetic Stores and Host diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upgrade-failure-${{ matrix.os }}
+          path: ${{ runner.temp }}/rui-upgrade-data/**/store/**
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: ignore

@@ -7,6 +7,12 @@ inputs:
   check-part:
     description: Full-check partition, keeping concurrent cache writers separate
     default: all
+  cold:
+    description: Use genuinely empty build, package and global compiler caches
+    default: 'false'
+  compiled:
+    description: A verified same-run artifact supplies emitted executables and pinned package sources
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -59,6 +65,7 @@ runs:
         key: rui-compiler-${{ runner.os }}-${{ runner.arch }}-0.17.0
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       id: build-cache
+      if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       with:
         # build.zig marks every Zig test run side-effectful: no acceptance
         # manifests are written/read. Output-producing build steps stay cached.
@@ -96,18 +103,36 @@ runs:
         test "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
-    - name: Install the selected H2 fixture dependency
-      if: ${{ steps.requirements.outputs.h2 == 'true' }}
+        mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"
+    - name: Install the selected Python fixture dependencies
+      if: ${{ steps.requirements.outputs.h2 == 'true' || contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}
       shell: bash
       run: |
         set -euo pipefail
         python3 -m venv "$RUNNER_TEMP/rui-python"
-        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 'h2==4.3.0'
+        packages=()
+        if [ '${{ steps.requirements.outputs.h2 }}' = true ]; then
+          packages+=('h2==4.3.0')
+        fi
+        if [ '${{ contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}' = true ]; then
+          packages+=('pyte==0.8.2' 'wcwidth==0.2.13')
+        fi
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 "${packages[@]}"
         echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
-    - name: Fetch the existing pinned dependency graph
-      if: ${{ steps.build-cache.outputs.cache-hit != 'true' }}
+    - name: Select empty caches for scheduled acceptance
+      if: ${{ inputs.cold == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
-        mkdir -p "$HOME/.cache/zig/tmp"
+        root=$(mktemp -d "$RUNNER_TEMP/rui-cold.XXXXXX")
+        mkdir -p "$root/local/tmp" "$root/global/tmp" "$root/packages"
+        echo "ZIG_LOCAL_CACHE_DIR=$root/local" >> "$GITHUB_ENV"
+        echo "ZIG_GLOBAL_CACHE_DIR=$root/global" >> "$GITHUB_ENV"
+        echo "ZIG_LOCAL_PKG_DIR=$root/packages" >> "$GITHUB_ENV"
+    - name: Fetch the existing pinned dependency graph
+      if: ${{ inputs.compiled != 'true' && (inputs.cold == 'true' || steps.build-cache.outputs.cache-hit != 'true') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
         bash src/fetch_dependencies.sh

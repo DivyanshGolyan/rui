@@ -2,8 +2,29 @@ const std = @import("std");
 const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
+    const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
+    // Hosted workers can have different CPUs. Transfer only the platform's
+    // baseline instruction set; ordinary local builds still target their host.
+    const ci_mode = ci_targets != null or ci.directory != null;
+    const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
+    const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
+    if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
+        @panic("CI artifacts require the native platform, baseline CPU and default optimization");
+    const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
+        .policy = "baseline",
+        .arch = @tagName(target.result.cpu.arch),
+        .model = target.result.cpu.model.name,
+        .features = std.fmt.bytesToHex(target.result.cpu.features.asBytes().*, .lower),
+    }, .{}) catch @panic("OOM");
+    if (ci.directory) |directory| {
+        const manifest_path = b.pathJoin(&.{ directory, "ci-cpu.json" });
+        b.dependOnFileContents(.{ .cwd_relative = manifest_path });
+        const recorded = std.Io.Dir.cwd().readFileAlloc(b.graph.io, manifest_path, b.allocator, .limited(4096)) catch
+            @panic("Missing CI CPU identity");
+        if (!std.mem.eql(u8, recorded, ci_cpu)) @panic("CI CPU identity mismatch");
+    }
     const pinned_transport = addPinnedTransport(b, target);
 
     const rui = addRui(b, target, optimize, "rui", pinned_transport);
@@ -39,16 +60,16 @@ pub fn build(b: *std.Build) void {
     });
     const evaluator_integration = b.addSystemCommand(&.{"python3"});
     evaluator_integration.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    evaluator_integration.addArtifactArg(evaluator);
-    evaluator_integration.addArtifactArg(evaluator_driver);
-    evaluator_integration.addArtifactArg(evaluator_probe);
+    evaluator_integration.addFileArg(ci.path(evaluator));
+    evaluator_integration.addFileArg(ci.path(evaluator_driver));
+    evaluator_integration.addFileArg(ci.path(evaluator_probe));
     const evaluator_step = b.step("workflow-check", "Run the isolated QuickJS evaluator boundary checks");
     evaluator_step.dependOn(&evaluator_integration.step);
 
     const evaluator_churn = b.addSystemCommand(&.{"python3"});
     evaluator_churn.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    evaluator_churn.addArtifactArg(evaluator);
-    evaluator_churn.addArtifactArg(evaluator_driver);
+    evaluator_churn.addFileArg(ci.path(evaluator));
+    evaluator_churn.addFileArg(ci.path(evaluator_driver));
     evaluator_churn.addArg("--churn-only");
     const evaluator_churn_step = b.step("evaluator-churn", "Qualify 1,000 same-parent evaluator lifecycles (not a routine gate)");
     evaluator_churn_step.dependOn(&evaluator_churn.step);
@@ -73,13 +94,14 @@ pub fn build(b: *std.Build) void {
     evaluator_host.root_module.addImport("evaluator", evaluator_module);
     configurePosix(b, evaluator_host.root_module);
     configureEvaluatorParent(b, evaluator_host);
-    const run_evaluator_host = b.addRunArtifact(evaluator_host);
-    run_evaluator_host.addArtifactArg(evaluator);
+    const run_evaluator_host = ci.run(evaluator_host);
+    run_evaluator_host.addFileArg(ci.path(evaluator));
     run_evaluator_host.step.dependOn(&evaluator_integration.step);
     const evaluator_host_step = b.step("evaluator-host-integration", "Run the production evaluator Owner integration");
     evaluator_host_step.dependOn(&run_evaluator_host.step);
 
     const test_filter = b.option([]const u8, "test-filter", "Run tests whose names contain this text");
+    if (ci.directory != null and test_filter != null) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -94,14 +116,14 @@ pub fn build(b: *std.Build) void {
     configureHostLaunch(b, tests);
     configureTerminalEditor(b, tests);
     configureTransport(b, tests, target, pinned_transport);
-    const run_tests = b.addRunArtifact(tests);
+    const run_tests = ci.run(tests);
     // Reuse compiled artifacts, never a prior test outcome (even with a fixed seed).
     run_tests.has_side_effects = true;
     run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
-    const run_full_tests = b.addRunArtifact(tests);
+    const run_full_tests = ci.run(tests);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
     const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
@@ -116,7 +138,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
     configureTerminalEditor(b, logic_tests);
-    const run_logic_tests = b.addRunArtifact(logic_tests);
+    const run_logic_tests = ci.run(logic_tests);
     run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(
         "test-logic",
@@ -137,7 +159,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
     }));
-    const run_renderer_allocation = b.addRunArtifact(renderer_allocation);
+    const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);
     test_step.dependOn(&run_renderer_allocation.step);
 
@@ -156,15 +178,16 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     configurePosix(b, terminal_module);
+    configureVaxis(b, terminal_module);
     terminal_notice.root_module.addImport("terminal", terminal_module);
     terminal_notice.root_module.link_libc = true;
 
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
-    terminal_restoration.addPrefixedArtifactArg("RUI_TEST_TERMINAL_NOTICE=", terminal_notice);
+    terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
-    terminal_restoration.addArtifactArg(release_safe);
+    terminal_restoration.addFileArg(ci.path(release_safe));
     terminal_restoration.addPassthruArgs();
     const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
     terminal_restoration_step.dependOn(&terminal_restoration.step);
@@ -197,8 +220,8 @@ pub fn build(b: *std.Build) void {
     proposal_client.root_module.addImport("rui_client", read_client);
     const proposal_integration = b.addSystemCommand(&.{"python3"});
     proposal_integration.addFileArg(b.path("tests/integration/proposal_integration.py"));
-    proposal_integration.addArtifactArg(release_safe);
-    proposal_integration.addArtifactArg(proposal_client);
+    proposal_integration.addFileArg(ci.path(release_safe));
+    proposal_integration.addFileArg(ci.path(proposal_client));
     b.step("proposal-integration", "Run historical proposal discovery and complete typed Client reads").dependOn(&proposal_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
@@ -212,12 +235,12 @@ pub fn build(b: *std.Build) void {
     activity_client.root_module.addImport("rui_client", read_client);
     const activity_integration = b.addSystemCommand(&.{"python3"});
     activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
-    activity_integration.addArtifactArg(release_safe);
-    activity_integration.addArtifactArg(activity_client);
+    activity_integration.addFileArg(ci.path(release_safe));
+    activity_integration.addFileArg(ci.path(activity_client));
     b.step("activity-integration", "Run complete Session activity reads and typed Client consumption").dependOn(&activity_integration.step);
     const integration = b.addSystemCommand(&.{"sh"});
     integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
-    integration.addArtifactArg(release_safe);
+    integration.addFileArg(ci.path(release_safe));
     const integration_step = b.step(
         "admission-integration",
         "Run fresh-process configuration/message admission and recovery cases",
@@ -226,7 +249,7 @@ pub fn build(b: *std.Build) void {
 
     const dispatch_integration = b.addSystemCommand(&.{"python3"});
     dispatch_integration.addFileArg(b.path("tests/integration/dispatch_integration.py"));
-    dispatch_integration.addArtifactArg(release_safe);
+    dispatch_integration.addFileArg(ci.path(release_safe));
     const dispatch_integration_step = b.step(
         "dispatch-integration",
         "Run the targeted model dispatch, output, retry, and recovery shortcut",
@@ -235,30 +258,30 @@ pub fn build(b: *std.Build) void {
 
     const login_signal_integration = b.addSystemCommand(&.{"python3"});
     login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
-    login_signal_integration.addArtifactArg(release_safe);
+    login_signal_integration.addFileArg(ci.path(release_safe));
     b.step("login-signal-integration", "Run the Linux-only one-shot login signal loader witness").dependOn(&login_signal_integration.step);
 
     const current_facts_integration = b.addSystemCommand(&.{"python3"});
     current_facts_integration.addFileArg(b.path("tests/integration/current_facts_integration.py"));
-    current_facts_integration.addArtifactArg(release_safe);
+    current_facts_integration.addFileArg(ci.path(release_safe));
     b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
 
     const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
-    canonical_failure_integration.addArtifactArg(release_safe);
+    canonical_failure_integration.addFileArg(ci.path(release_safe));
     b.step("canonical-failure-integration", "Run canonical invocation failure at real producer and caller boundaries").dependOn(&canonical_failure_integration.step);
 
     const server_delivery_integration = b.addSystemCommand(&.{"python3"});
     server_delivery_integration.addFileArg(b.path("tests/integration/server_delivery_integration.py"));
-    server_delivery_integration.addArtifactArg(release_safe);
+    server_delivery_integration.addFileArg(ci.path(release_safe));
     b.step("server-delivery-integration", "Run real reply inactivity, connection headroom and Host drain separately from load").dependOn(&server_delivery_integration.step);
 
     const h2_integration = b.addSystemCommand(&.{"python3"});
     h2_integration.addFileArg(b.path("tests/integration/transport_h2_integration.py"));
-    h2_integration.addArtifactArg(release_safe);
+    h2_integration.addFileArg(ci.path(release_safe));
     const h2_oracle_tests = b.addSystemCommand(&.{"python3"});
     h2_oracle_tests.addFileArg(b.path("tests/integration/transport_h2_integration_test.py"));
-    h2_oracle_tests.addArtifactArg(release_safe);
+    h2_oracle_tests.addFileArg(ci.path(release_safe));
     h2_integration.step.dependOn(&h2_oracle_tests.step);
     const h2_integration_step = b.step(
         "transport-h2-integration",
@@ -268,7 +291,7 @@ pub fn build(b: *std.Build) void {
 
     const bash_integration = b.addSystemCommand(&.{"python3"});
     bash_integration.addFileArg(b.path("tests/integration/bash_integration.py"));
-    bash_integration.addArtifactArg(release_safe);
+    bash_integration.addFileArg(ci.path(release_safe));
     const bash_integration_step = b.step(
         "bash-integration",
         "Run authorized Bash execution, stop, failure, and recovery cases",
@@ -277,7 +300,7 @@ pub fn build(b: *std.Build) void {
 
     const bash_walkthrough = b.addSystemCommand(&.{"python3"});
     bash_walkthrough.addFileArg(b.path("tests/integration/bash_integration.py"));
-    bash_walkthrough.addArtifactArg(release_safe);
+    bash_walkthrough.addFileArg(ci.path(release_safe));
     bash_walkthrough.addArg("--walkthrough");
     const bash_walkthrough_step = b.step(
         "bash-walkthrough",
@@ -287,7 +310,7 @@ pub fn build(b: *std.Build) void {
 
     const bash_owner_integration = b.addSystemCommand(&.{"python3"});
     bash_owner_integration.addFileArg(b.path("tests/integration/bash_owner_integration.py"));
-    bash_owner_integration.addArtifactArg(release_safe);
+    bash_owner_integration.addFileArg(ci.path(release_safe));
     const bash_owner_integration_step = b.step(
         "bash-owner-integration",
         "Run focused Bash owner transition cases",
@@ -296,7 +319,7 @@ pub fn build(b: *std.Build) void {
 
     const bash_lifecycle_integration = b.addSystemCommand(&.{"python3"});
     bash_lifecycle_integration.addFileArg(b.path("tests/integration/bash_lifecycle_integration.py"));
-    bash_lifecycle_integration.addArtifactArg(release_safe);
+    bash_lifecycle_integration.addFileArg(ci.path(release_safe));
     const bash_lifecycle_integration_step = b.step(
         "bash-lifecycle-integration",
         "Run Bash lifecycle syscall-failure and custody cases",
@@ -305,7 +328,7 @@ pub fn build(b: *std.Build) void {
 
     const bash_recovery_integration = b.addSystemCommand(&.{"python3"});
     bash_recovery_integration.addFileArg(b.path("tests/integration/bash_recovery_integration.py"));
-    bash_recovery_integration.addArtifactArg(release_safe);
+    bash_recovery_integration.addFileArg(ci.path(release_safe));
     const bash_recovery_integration_step = b.step(
         "bash-recovery-integration",
         "Run fresh-Host Bash recovery cuts for admitted and committed Actions",
@@ -314,7 +337,7 @@ pub fn build(b: *std.Build) void {
 
     const codex_integration = b.addSystemCommand(&.{"python3"});
     codex_integration.addFileArg(b.path("tests/integration/codex_integration.py"));
-    codex_integration.addArtifactArg(release_safe);
+    codex_integration.addFileArg(ci.path(release_safe));
     const codex_integration_step = b.step(
         "codex-integration",
         "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey",
@@ -339,7 +362,7 @@ pub fn build(b: *std.Build) void {
     credential_actor.root_module.addImport("codex_credentials", credentials_module);
     const credential_integration = b.addSystemCommand(&.{"python3"});
     credential_integration.addFileArg(b.path("tests/integration/codex_credential_integration.py"));
-    credential_integration.addArtifactArg(credential_actor);
+    credential_integration.addFileArg(ci.path(credential_actor));
     const credential_integration_step = b.step(
         "codex-credential-integration",
         "Run native cross-process credential lock and refresh-generation transitions",
@@ -364,13 +387,13 @@ pub fn build(b: *std.Build) void {
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
     const preference_policy_integration = b.addSystemCommand(&.{"python3"});
     preference_policy_integration.addFileArg(b.path("tests/integration/preference_policy_integration.py"));
-    preference_policy_integration.addArtifactArg(preference_policy_actor);
+    preference_policy_integration.addFileArg(ci.path(preference_policy_actor));
     const preference_policy_step = b.step("preference-policy-integration", "Run native preference publication and privacy cases");
     preference_policy_step.dependOn(&preference_policy_integration.step);
 
     const codex_h2_integration = b.addSystemCommand(&.{"python3"});
     codex_h2_integration.addFileArg(b.path("tests/integration/codex_h2_integration.py"));
-    codex_h2_integration.addArtifactArg(release_safe);
+    codex_h2_integration.addFileArg(ci.path(release_safe));
     const codex_h2_integration_step = b.step(
         "codex-h2-integration",
         "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)",
@@ -379,7 +402,7 @@ pub fn build(b: *std.Build) void {
 
     const control_integration = b.addSystemCommand(&.{"python3"});
     control_integration.addFileArg(b.path("tests/integration/control_integration.py"));
-    control_integration.addArtifactArg(release_safe);
+    control_integration.addFileArg(ci.path(release_safe));
     const control_integration_step = b.step(
         "control-integration",
         "Run Session-stop, exact-interruption, and protected-capacity cases",
@@ -388,7 +411,7 @@ pub fn build(b: *std.Build) void {
 
     const descriptor_capacity_integration = b.addSystemCommand(&.{"python3"});
     descriptor_capacity_integration.addFileArg(b.path("tests/integration/descriptor_capacity_integration.py"));
-    descriptor_capacity_integration.addArtifactArg(release_safe);
+    descriptor_capacity_integration.addFileArg(ci.path(release_safe));
     const descriptor_capacity_integration_step = b.step(
         "descriptor-capacity-integration",
         "Run reduced-limit startup rejection and adequate-limit fill/drain cases",
@@ -407,28 +430,28 @@ pub fn build(b: *std.Build) void {
     host_status_actor.root_module.addImport("client", read_client);
     const host_status_integration = b.addSystemCommand(&.{"python3"});
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
-    host_status_integration.addArtifactArg(release_safe);
-    host_status_integration.addArtifactArg(host_status_actor);
+    host_status_integration.addFileArg(ci.path(release_safe));
+    host_status_integration.addFileArg(ci.path(host_status_actor));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
     const host_launch_integration = b.addSystemCommand(&.{"python3"});
     host_launch_integration.addFileArg(b.path("tests/integration/host_launch_integration.py"));
-    host_launch_integration.addArtifactArg(release_safe);
+    host_launch_integration.addFileArg(ci.path(release_safe));
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
     const host_stop_integration = b.addSystemCommand(&.{"python3"});
     host_stop_integration.addFileArg(b.path("tests/integration/host_stop_integration.py"));
-    host_stop_integration.addArtifactArg(release_safe);
-    host_stop_integration.addArtifactArg(host_status_actor);
+    host_stop_integration.addFileArg(ci.path(release_safe));
+    host_stop_integration.addFileArg(ci.path(host_status_actor));
     const host_stop_step = b.step("host-stop-integration", "Run native exact-instance Host shutdown and custody drain");
     host_stop_step.dependOn(&host_stop_integration.step);
 
     const debug = addRui(b, target, .Debug, "rui-debug-check", pinned_transport);
     const debug_integration = b.addSystemCommand(&.{"sh"});
     debug_integration.addFileArg(b.path("tests/integration/admission_integration.sh"));
-    debug_integration.addArtifactArg(debug);
+    debug_integration.addFileArg(ci.path(debug));
     const debug_integration_step = b.step(
         "admission-debug-integration",
         "Run the documented Debug artifact through configuration/message recovery",
@@ -450,18 +473,18 @@ pub fn build(b: *std.Build) void {
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
     const fast_integrations = b.addSystemCommand(&.{"sh"});
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
-    fast_integrations.addArtifactArg(release_safe);
-    fast_integrations.addArtifactArg(debug);
+    fast_integrations.addFileArg(ci.path(release_safe));
+    fast_integrations.addFileArg(ci.path(debug));
     fast_integrations.addArg("parallel");
-    fast_integrations.addArtifactArg(tests);
-    fast_integrations.addArtifactArg(host_status_actor);
-    fast_integrations.addArtifactArg(session_list_client);
-    fast_integrations.addArtifactArg(proposal_client);
-    fast_integrations.addArtifactArg(activity_client);
-    fast_integrations.addArtifactArg(preference_policy_actor);
-    fast_integrations.addArtifactArg(terminal_notice);
+    fast_integrations.addFileArg(ci.path(tests));
+    fast_integrations.addFileArg(ci.path(host_status_actor));
+    fast_integrations.addFileArg(ci.path(session_list_client));
+    fast_integrations.addFileArg(ci.path(proposal_client));
+    fast_integrations.addFileArg(ci.path(activity_client));
+    fast_integrations.addFileArg(ci.path(preference_policy_actor));
+    fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.step.dependOn(&format.step);
-    fast_integrations.step.dependOn(&release.step);
+    fast_integrations.addFileInput(ci.path(release));
     fast_integrations.step.dependOn(&run_evaluator_host.step);
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     check_step.dependOn(&fast_integrations.step);
@@ -473,31 +496,31 @@ pub fn build(b: *std.Build) void {
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
-    process_integrations.addArtifactArg(release_safe);
-    process_integrations.addArtifactArg(debug);
-    process_integrations.addArtifactArg(host_status_actor);
-    process_integrations.addArtifactArg(session_list_client);
-    process_integrations.addArtifactArg(proposal_client);
-    process_integrations.addArtifactArg(activity_client);
-    process_integrations.addArtifactArg(preference_policy_actor);
+    process_integrations.addFileArg(ci.path(release_safe));
+    process_integrations.addFileArg(ci.path(debug));
+    process_integrations.addFileArg(ci.path(host_status_actor));
+    process_integrations.addFileArg(ci.path(session_list_client));
+    process_integrations.addFileArg(ci.path(proposal_client));
+    process_integrations.addFileArg(ci.path(activity_client));
+    process_integrations.addFileArg(ci.path(preference_policy_actor));
     process_integrations.addArg(@tagName(check_part));
-    process_integrations.addArtifactArg(terminal_notice);
+    process_integrations.addFileArg(ci.path(terminal_notice));
     const full_evaluator = b.addSystemCommand(&.{"python3"});
     full_evaluator.addFileArg(b.path("tests/integration/evaluator_integration.py"));
-    full_evaluator.addArtifactArg(evaluator);
-    full_evaluator.addArtifactArg(evaluator_driver);
-    full_evaluator.addArtifactArg(evaluator_probe);
+    full_evaluator.addFileArg(ci.path(evaluator));
+    full_evaluator.addFileArg(ci.path(evaluator_driver));
+    full_evaluator.addFileArg(ci.path(evaluator_probe));
     full_evaluator.step.dependOn(&run_tests.step);
     full_evaluator.step.dependOn(&run_renderer_allocation.step);
     full_evaluator.step.dependOn(string_sanitizer_step);
-    const full_evaluator_host = b.addRunArtifact(evaluator_host);
-    full_evaluator_host.addArtifactArg(evaluator);
+    const full_evaluator_host = ci.run(evaluator_host);
+    full_evaluator_host.addFileArg(ci.path(evaluator));
     full_evaluator_host.step.dependOn(&full_evaluator.step);
     process_integrations.step.dependOn(&format.step);
     // The execution part owns native tests and evaluator/sanitizer work. The
     // callers part runs on another machine, isolated from that child-process load.
     if (check_part != .callers) process_integrations.step.dependOn(&full_evaluator_host.step);
-    process_integrations.step.dependOn(&release.step);
+    process_integrations.addFileInput(ci.path(release));
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{
@@ -516,7 +539,8 @@ pub fn build(b: *std.Build) void {
     });
     queue_audit_test.setCwd(b.path("tests/qualification"));
     queue_audit_test.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    queue_audit_test.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    const sqlite_shell = addSqliteShell(b, target, .ReleaseSmall);
+    queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
 
     const linux_cross_step = b.step(
@@ -584,7 +608,7 @@ pub fn build(b: *std.Build) void {
     });
     measure.setCwd(b.path("tests/qualification"));
     measure.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure.addArtifactArg(release);
+    measure.addFileArg(ci.path(release));
     const measure_step = b.step(
         "measure-admission",
         "Measure macOS Host and direct-client memory for configuration admission",
@@ -596,7 +620,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_messages.setCwd(b.path("tests/qualification"));
     measure_messages.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_messages.addArtifactArg(release);
+    measure_messages.addFileArg(ci.path(release));
     const measure_messages_step = b.step(
         "measure-message-admission",
         "Measure macOS message admission and observation scaling",
@@ -608,7 +632,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_dispatch.setCwd(b.path("tests/qualification"));
     measure_dispatch.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_dispatch.addArtifactArg(release);
+    measure_dispatch.addFileArg(ci.path(release));
     const measure_dispatch_step = b.step(
         "measure-model-dispatch",
         "Measure macOS frozen-request transport, scratch, descriptors, and custody",
@@ -620,7 +644,8 @@ pub fn build(b: *std.Build) void {
     });
     measure_output.setCwd(b.path("tests/qualification"));
     measure_output.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_output.addArtifactArg(release);
+    measure_output.addPassthruArgs();
+    measure_output.addFileArg(ci.path(release));
     const measure_output_step = b.step(
         "measure-model-output",
         "Measure macOS model-output bytes, item counts, storage, and retained memory",
@@ -632,7 +657,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_repeat_work.setCwd(b.path("tests/qualification"));
     measure_repeat_work.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_repeat_work.addArtifactArg(release);
+    measure_repeat_work.addFileArg(ci.path(release));
     const measure_repeat_work_step = b.step(
         "measure-repeat-work",
         "Measure 20 same-Host waves across 100 stable Sessions with growing history",
@@ -644,7 +669,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_retry.setCwd(b.path("tests/qualification"));
     measure_retry.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_retry.addArtifactArg(release);
+    measure_retry.addFileArg(ci.path(release));
     const measure_retry_step = b.step(
         "measure-model-retry",
         "Measure macOS retry discovery, launch separation, churn, and custody",
@@ -659,8 +684,8 @@ pub fn build(b: *std.Build) void {
     if (model_queue_output) |output| {
         measure_queue.addArgs(&.{ "-output", output });
     }
-    measure_queue.addArtifactArg(release);
-    measure_queue.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    measure_queue.addFileArg(ci.path(release));
+    measure_queue.addFileArg(ci.path(sqlite_shell));
     const measure_queue_step = b.step(
         "measure-model-queue",
         "Measure model queue discovery, ordering, settlement, and portable mixed resources",
@@ -672,7 +697,7 @@ pub fn build(b: *std.Build) void {
     });
     measure_control.setCwd(b.path("tests/qualification"));
     measure_control.setEnvironmentVariable("GOTOOLCHAIN", "local");
-    measure_control.addArtifactArg(release);
+    measure_control.addFileArg(ci.path(release));
     const measure_control_step = b.step(
         "measure-model-control",
         "Measure control headroom, acknowledgment latency, and cleanup resources",
@@ -685,8 +710,8 @@ pub fn build(b: *std.Build) void {
     measure_call_classification.setCwd(b.path("tests/qualification"));
     measure_call_classification.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_call_classification.addPassthruArgs();
-    measure_call_classification.addArtifactArg(release);
-    measure_call_classification.addArtifactArg(addSqliteShell(b, target, .ReleaseSmall));
+    measure_call_classification.addFileArg(ci.path(release));
+    measure_call_classification.addFileArg(ci.path(sqlite_shell));
     const measure_call_classification_step = b.step(
         "measure-call-classification",
         "Measure production call classification, exact denial, recovery, and population scaling",
@@ -699,13 +724,84 @@ pub fn build(b: *std.Build) void {
     measure_execution_service.setCwd(b.path("tests/qualification"));
     measure_execution_service.setEnvironmentVariable("GOTOOLCHAIN", "local");
     measure_execution_service.addPassthruArgs();
-    measure_execution_service.addArtifactArg(release);
+    measure_execution_service.addFileArg(ci.path(release));
     const measure_execution_service_step = b.step(
         "measure-execution-service",
         "Measure production execution service across completions, history, replay fields, and owner populations",
     );
     measure_execution_service_step.dependOn(&measure_execution_service.step);
+
+    // Compile the selected gates once, without executing their fixture Run
+    // steps. Workers still execute the original gates and their assertions.
+    const ci_build = b.step("ci-build", "Compile selected CI gates without running tests");
+    if (ci_targets) |selected| {
+        const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
+        ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
+        var names = std.mem.splitScalar(u8, selected, ',');
+        var installed: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+        var inventory: std.ArrayList(struct { target: []const u8, executables: []const []const u8 }) = .empty;
+        while (names.next()) |name| {
+            const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
+            if (&root.step == ci_build) @panic("ci-build cannot select itself");
+            var visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty;
+            var files: std.ArrayList([]const u8) = .empty;
+            collectCiCompiles(b, ci_build, &root.step, &visited, &installed, &files);
+            inventory.append(b.allocator, .{ .target = name, .executables = files.toOwnedSlice(b.allocator) catch @panic("OOM") }) catch @panic("OOM");
+        }
+        const target_json = std.json.Stringify.valueAlloc(b.allocator, inventory.items, .{}) catch @panic("OOM");
+        const target_manifest = b.addWriteFiles().add("ci-targets.json", target_json);
+        ci_build.dependOn(&b.addInstallBinFile(target_manifest, "ci-targets.json").step);
+    }
 }
+
+fn collectCiCompiles(
+    b: *std.Build,
+    destination: *std.Build.Step,
+    source: *std.Build.Step,
+    visited: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
+    installed: *std.AutoHashMapUnmanaged(*std.Build.Step, void),
+    files: *std.ArrayList([]const u8),
+) void {
+    const entry = visited.getOrPut(b.allocator, source) catch @panic("OOM");
+    if (entry.found_existing) return;
+    if (source.cast(std.Build.Step.Compile)) |compile| {
+        const name = ciName(b, compile);
+        files.append(b.allocator, name) catch @panic("OOM");
+        const installation = installed.getOrPut(b.allocator, source) catch @panic("OOM");
+        if (!installation.found_existing)
+            destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), name).step);
+        return;
+    }
+    for (source.dependencies.items) |dependency| collectCiCompiles(b, destination, dependency, visited, installed, files);
+}
+
+fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
+    // Both test roots use Zig's default executable name; distinguish their
+    // source-owned roots without changing normal compilation or cache keys.
+    return if (compile.kind == .@"test")
+        b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(compile.root_module.root_source_file.?.src_path.sub_path) })
+    else
+        compile.name;
+}
+
+const CiArtifacts = struct {
+    b: *std.Build,
+    directory: ?[]const u8,
+
+    fn path(ci: CiArtifacts, compile: *std.Build.Step.Compile) std.Build.LazyPath {
+        return if (ci.directory) |directory|
+            .{ .cwd_relative = ci.b.pathJoin(&.{ directory, ciName(ci.b, compile) }) }
+        else
+            compile.getEmittedBin();
+    }
+
+    fn run(ci: CiArtifacts, compile: *std.Build.Step.Compile) *std.Build.Step.Run {
+        if (ci.directory == null) return ci.b.addRunArtifact(compile);
+        const command = ci.b.addRunFile(ci.path(compile));
+        if (compile.kind == .@"test") command.enableTestRunnerMode();
+        return command;
+    }
+};
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
     return a.result.cpu.arch == b.result.cpu.arch and
@@ -904,12 +1000,46 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
 fn configureTerminalEditor(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const utf8proc = b.dependency("utf8proc", .{});
     configurePosix(b, compile.root_module);
+    configureVaxis(b, compile.root_module);
     compile.root_module.link_libc = true;
     compile.root_module.addIncludePath(utf8proc.path("."));
     compile.root_module.addCSourceFile(.{
         .file = utf8proc.path("utf8proc.c"),
         .flags = &.{ "-std=c99", "-O2" },
     });
+}
+
+fn configureVaxis(b: *std.Build, module: *std.Build.Module) void {
+    const dependency = b.dependency("vaxis", .{
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    const upstream = dependency.module("vaxis");
+    const prepare = b.addSystemCommand(&.{"bash"});
+    prepare.addFileArg(b.path("src/prepare_vaxis.sh"));
+    prepare.addDirectoryArg(dependency.path("."));
+    prepare.addFileArg(b.path("src/vaxis-parser.patch"));
+    const patched = prepare.addOutputDirectoryArg("vaxis");
+    const vaxis = b.createModule(.{
+        .root_source_file = patched.path(b, "src/main.zig"),
+        .target = module.resolved_target.?,
+        .optimize = module.optimize.?,
+    });
+    var imports = upstream.import_table.iterator();
+    while (imports.next()) |entry| vaxis.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    // Layout can import only the dependency's value-only Unicode modules,
+    // without acquiring its TTY, process or event-loop capabilities.
+    for ([_][]const u8{ "unicode", "gwidth" }, [_][]const u8{ "terminal_unicode", "terminal_width" }) |source, name| {
+        const pure = b.createModule(.{
+            .root_source_file = patched.path(b, b.fmt("src/{s}.zig", .{source})),
+            .target = module.resolved_target.?,
+            .optimize = module.optimize.?,
+        });
+        pure.addImport("uucode", upstream.import_table.get("uucode").?);
+        module.addImport(name, pure);
+        vaxis.addImport(name, pure);
+    }
+    module.addImport("vaxis", vaxis);
 }
 
 fn configureEvaluatorParent(b: *std.Build, compile: *std.Build.Step.Compile) void {

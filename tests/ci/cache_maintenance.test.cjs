@@ -79,6 +79,20 @@ test('a late read failure cannot leave an earlier closed PR partially pruned', a
   assert.deepEqual(result.ids, []);
 });
 
+test('current compiler and named shard caches retain independent snapshots', async () => {
+  const entries = [
+    cache(1, 'refs/pull/12/merge', 'Linux-X64', 'test-full'),
+    cache(2, 'refs/pull/12/merge', 'Linux-X64', 'test-full'),
+    cache(3, 'refs/pull/12/merge', 'Linux-X64', 'full-callers'),
+    cache(4, 'refs/pull/13/merge', 'macOS-ARM64', 'codex-h2-integration'),
+    {...cache(5, 'refs/pull/13/merge'), key: 'rui-compiler-Linux-X64-0.17.0'},
+    cache(6, 'refs/heads/feature', 'Linux-X64', 'test-full'),
+  ].map(entry => ({...entry, key: entry.key.replace('0.16.0', '0.17.0')}));
+  const result = await run(entries, {12: 'open', 13: 'closed'});
+  assert.ifError(result.error);
+  assert.deepEqual(result.ids, [2, 3, 6]);
+});
+
 test('only already-absent deletion is recoverable', async () => {
   const caches = [cache(1, 'refs/pull/1/merge'), cache(2, 'refs/pull/1/merge')];
   const missing = await run(caches, {1: 'closed'}, {deletion: 404});
@@ -107,6 +121,7 @@ test('cleanup follows every cache producer, including failed workflows with succ
   for (const file of readdirSync(directory).filter(file => file.endsWith('.yml') && file !== 'cache-maintenance.yml')) {
     const producer = readFileSync(`${directory}/${file}`, 'utf8');
     if (!/uses: (?:\.\/\.github\/actions\/setup|actions\/cache(?:\/save)?@)/.test(producer)) continue;
+    if (/^cache-mode: read$/m.test(producer) && producer.match(/^\s*cache-mode:/gm).length === 1) continue;
     const name = producer.match(/^name: (.+)$/m)[1];
     assert.ok(jobs.workflow_run.includes(name), `${file} needs post-publication cleanup`);
   }
