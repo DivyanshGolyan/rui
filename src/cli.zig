@@ -1243,6 +1243,7 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         if (credential_path) |path| model_adapter.Authentication{ .path = path, .fixture = fixture_endpoint != null } else null,
         bash_path,
         bash_timeout_ms,
+        init.environ_map.get("HOME"),
     );
 }
 
