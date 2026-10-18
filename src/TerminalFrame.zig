@@ -1,14 +1,17 @@
-//! Pure alternate-screen layout. Inputs and documents are values; this module
-//! neither owns terminal custody nor performs rendering, file or clock effects.
+//! Alternate-screen row budget. vaxis measures and wraps text; this module
+//! decides which rows each region gets and which Action rows a frame delivers.
+//! It owns no terminal custody, cells, files or clocks.
 const std = @import("std");
 const Viewport = @import("ConversationViewport.zig");
+const Position = Viewport.Position;
 const Self = @This();
-pub const Composer = Viewport.Sized(65_536, false);
 pub const Call = Viewport.Sized(512, false);
-pub const inspection_ready = "Inspection ready · PgUp/PgDn · Ctrl-G returns";
+pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
 pub const max_cells = 24 * 2048;
+/// Drafts beyond this many rows scroll to keep the caret in view.
+const draft_rows = 5;
 
 pub fn validateGeometry(width: u16, height: u16) !void {
     if (height < 2 or width < 8) return error.TerminalTooSmall;
@@ -17,26 +20,32 @@ pub fn validateGeometry(width: u16, height: u16) !void {
 
 status: Viewport.Sized(2048, false),
 calls: [3]Call,
+call_heights: [3]u16,
 heading: Viewport.Sized(128, false),
 used: usize,
-height: usize,
-first: usize,
+height: u16,
+/// Document rows a transcript would have with this frame's status and draft:
+/// no calls, and a heading row when one fits.
+browsing_height: u16,
+first: Position,
 document_rows: usize,
 navigation_height: u16,
 overflow_height: u16,
 status_height: u16,
 status_row: u16,
-draft_first: usize,
-draft_height: usize,
+draft_first: u16,
+draft_height: u16,
 draft_top: u16,
 caret_row: u16,
 caret_column: u16,
-action_seen: usize,
+action_seen: Position,
 approval_ready: bool,
 
 pub const Input = struct {
     width: u16,
     height: u16,
+    method: Viewport.Method = .wcwidth,
+    draft: []const u8 = "",
     cursor: usize,
     status: []const u8,
     approval: bool,
@@ -45,26 +54,30 @@ pub const Input = struct {
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
-    action_seen: usize = 0,
+    /// The first Action row not yet delivered in a frame.
+    action_seen: Position = .{},
     preview_complete: bool,
 };
 
-pub fn enabled(setting: []const u8, term: []const u8) bool {
-    return std.mem.eql(u8, setting, "vaxis") and !std.mem.eql(u8, term, "dumb");
+fn rows(text: anytype, layout: Viewport.Layout) !u16 {
+    try text.prepare();
+    return @intCast(text.measure(layout, .{}, std.math.maxInt(u16)).rows);
 }
 
-/// Returned row decisions borrow only the supplied document/composer values.
-/// The shell consumes the plan before pumping input or changing either value.
-pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, input: Input) !void {
+/// Plans rows for vaxis to fill. Decisions borrow only the supplied document
+/// and draft; the shell consumes the plan before pumping input or changing them.
+pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     try validateGeometry(input.width, input.height);
-    const method = composer.width_method;
+    const layout: Viewport.Layout = .{ .width = input.width, .method = input.method };
     self.* = .{
-        .status = .{ .width_method = method },
-        .calls = .{ .{}, .{}, .{} },
-        .heading = .{ .width_method = method },
+        .status = .{ .width_method = input.method },
+        .calls = .{ .{ .width_method = input.method }, .{ .width_method = input.method }, .{ .width_method = input.method } },
+        .call_heights = .{ 0, 0, 0 },
+        .heading = .{ .width_method = input.method },
         .used = if (input.selected) 0 else input.calls.len,
         .height = 0,
-        .first = 0,
+        .browsing_height = 0,
+        .first = .{},
         .document_rows = 0,
         .navigation_height = 0,
         .overflow_height = 0,
@@ -78,36 +91,33 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
         .action_seen = input.action_seen,
         .approval_ready = false,
     };
-    if (input.width < 45 and std.mem.startsWith(u8, input.status, inspection_ready)) {
-        try self.status.append(if (input.width >= 18) "PgUp/PgDn · Ctrl-G" else "PgUp\nPgDn\nCtrl-G");
-        try self.status.append(input.status[inspection_ready.len..]);
-    } else try self.status.append(input.status);
-    try self.status.layout(input.width);
+    try self.status.append(input.status);
     const reserve: u16 = if (input.approval) 2 else 1;
-    if (input.approval and self.status.displayRows() > input.height - reserve and
-        std.mem.eql(u8, input.status, "a: Allow once / d: Deny (Enter)"))
-    {
+    var status_rows = try rows(&self.status, layout);
+    if (input.approval and status_rows > input.height - reserve and std.mem.eql(u8, input.status, approval_choice)) {
         self.status.clear();
         try self.status.append("a Allow / d Deny\nEnter");
-        try self.status.layout(input.width);
+        status_rows = try rows(&self.status, layout);
     }
-    self.status_height = if (input.status.len == 0) 0 else @intCast(self.status.displayRows());
+    self.status_height = status_rows;
     if (self.status_height > input.height - reserve) return error.TerminalTooSmall;
-    self.draft_height = @max(1, @min(@min(composer.row_count, 5), (input.height - self.status_height) -| 2));
-    const caret_row = composer.rowAt(input.cursor);
-    self.draft_first = caret_row -| (self.draft_height - 1);
-    const available: u16 = @intCast(input.height - self.draft_height - self.status_height);
-    try document.layout(input.width);
+    const draft: Viewport.Layout = .{ .width = input.width - 2, .method = input.method };
+    const caret = Viewport.caret(draft, input.draft[0..input.cursor]);
+    // An exactly filled last row puts the caret on a row of its own.
+    const needed = @max(Viewport.draftRows(draft, input.draft), caret.row + 1);
+    self.draft_height = @max(1, @min(@min(needed, draft_rows), (input.height - self.status_height) -| 2));
+    self.draft_first = caret.row -| (self.draft_height - 1);
+    const available: u16 = input.height - self.draft_height - self.status_height;
+    try document.prepare();
     for (input.calls, 0..) |line, index| {
-        self.calls[index].width_method = method;
         try self.calls[index].append(line);
-        try self.calls[index].layout(input.width);
+        self.call_heights[index] = try rows(&self.calls[index], layout);
     }
     var call_rows: u16 = 0;
     var heading_height: u16 = 0;
     while (true) {
         call_rows = 0;
-        for (self.calls[0..self.used]) |*call| call_rows += @intCast(call.displayRows());
+        for (self.call_heights[0..self.used]) |height| call_rows += height;
         const omitted = if (input.selected) 0 else input.total_calls - self.used;
         var compact = input.width < 24;
         while (true) {
@@ -115,9 +125,8 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
             if (omitted != 0) {
                 var storage: [128]u8 = undefined;
                 try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
-                try self.heading.layout(input.width);
-                heading_height = @intCast(self.heading.displayRows());
-            } else heading_height = if ((if (input.selected) !input.action_visible or !input.preview_complete or document.displayRows() > available else document.origin != 0) and available -| call_rows > 1) 1 else 0;
+                heading_height = try rows(&self.heading, layout);
+            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.measure(layout, .{}, available).next.order(.end) != .eq) and available -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= available) break;
             if (omitted != 0 and !compact) {
                 compact = true;
@@ -130,47 +139,35 @@ pub fn plan(self: *Self, document: *Viewport.Document, composer: *Composer, inpu
         self.used -= 1;
     }
     if (self.heading.length == 0 and heading_height != 0) {
-        try self.heading.append(if (input.action_visible) "Action preview · too large to approve here" else if (input.selected)
-            (if (input.action_pending) "Browsing · Ctrl-G returns to Action" else "Browsing · PgUp/PgDn · Ctrl-G latest")
-        else
-            "Latest · PgUp browse · /history older");
-        try self.heading.layout(input.width);
-        if (self.heading.displayRows() > heading_height) {
+        try self.heading.append(if (input.action_visible) "Action preview · too large to approve here" else if (input.action_pending) "Browsing · Esc returns to Action" else "Browsing · Esc returns");
+        if (try rows(&self.heading, layout) > heading_height) {
             self.heading.clear();
-            try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.selected)
-                (if (input.width < "Ctrl-G latest".len) "Ctrl-G" else if (input.action_pending) "Ctrl-G Action" else "Ctrl-G latest")
-            else if (input.width < "PgUp /help".len) "PgUp" else "PgUp /help");
-            try self.heading.layout(input.width);
+            try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
     self.height = available - heading_height - call_rows;
-    try document.layout(input.width);
-    self.first = document.first(self.height);
-    self.document_rows = if (document.text().len == 0) 0 else @min(self.height, document.displayRows() -| self.first);
+    self.browsing_height = available - @intFromBool(available > 1);
+    self.first = document.first(layout, self.height);
+    const shown = document.measure(layout, self.first, self.height);
+    self.document_rows = shown.rows;
     if (input.action_visible and input.preview_complete) {
-        if (self.first <= input.action_seen) self.action_seen = @max(input.action_seen, self.first + self.document_rows);
-        self.approval_ready = self.action_seen >= document.displayRows();
+        // Only rows delivered contiguously from the top count as read.
+        if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt) self.action_seen = shown.next;
+        self.approval_ready = self.action_seen.order(.end) == .eq;
         if (heading_height != 0) {
             self.heading.clear();
             try self.heading.append(if (self.approval_ready) (if (input.width >= 11) "Action read" else "Read") else if (input.width >= 24) "Action continues · PgDn" else "PgDn");
-            try self.heading.layout(input.width);
         }
     }
+    try self.heading.prepare();
     self.overflow_height = if (!input.selected and input.total_calls > self.used) heading_height else 0;
     self.navigation_height = heading_height - self.overflow_height;
-    const end = self.navigation_height + self.document_rows;
+    const end: u16 = self.navigation_height + @as(u16, @intCast(self.document_rows));
     const spacer = @intFromBool(self.document_rows != 0 and end + self.status_height + call_rows + self.overflow_height + self.draft_height < input.height);
-    self.status_row = @intCast(end + spacer);
+    self.status_row = end + spacer;
     self.draft_top = self.status_row + self.status_height + call_rows + self.overflow_height;
-    self.caret_row = self.draft_top + @as(u16, @intCast(caret_row - self.draft_first));
-    self.caret_column = @min(try composer.columnAt(input.cursor) + 2, input.width - 1);
-}
-
-test "renderer selection is explicit and dumb terminals retain inline output" {
-    for ([_][]const u8{ "", "1", "inline", "VAXIS", "vaxis" }) |setting| {
-        try std.testing.expectEqual(std.mem.eql(u8, setting, "vaxis"), enabled(setting, "xterm-256color"));
-        try std.testing.expect(!enabled(setting, "dumb"));
-    }
+    self.caret_row = self.draft_top + (caret.row - self.draft_first);
+    self.caret_column = @min(caret.col + 2, input.width - 1);
 }
 
 test "geometry is bounded before the shell allocates cells" {
@@ -182,102 +179,91 @@ test "geometry is bounded before the shell allocates cells" {
 
 test "compact frame keeps exact-fit transcript and multiline caret without bottom pinning" {
     var document: Viewport.Document = .{};
-    var composer: Composer = .{};
     try document.append("› inspect\n  Done.\n");
-    try composer.append("next\nline");
-    try composer.layout(78);
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
-    try frame.plan(&document, &composer, input);
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 3), frame.draft_top);
     try std.testing.expectEqual(@as(u16, 4), frame.caret_row);
     try std.testing.expectEqual(@as(u16, 6), frame.caret_column);
     document.clear();
     for (0..24) |_| try document.append("row\n");
-    composer.clear();
-    try composer.layout(78);
+    input.draft = "";
     input.cursor = 0;
-    try frame.plan(&document, &composer, input);
-    try std.testing.expectEqual(@as(usize, 1), frame.first);
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(Position{ .offset = 4 }, frame.first);
     try std.testing.expectEqual(@as(u16, 23), frame.draft_top);
+}
+
+test "an exactly filled draft row puts the caret on the next row" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    // Eight columns leave six for the draft: "abcdef" fills its row.
+    for ([_][]const u8{ "abcde", "abcdef" }, [_]u16{ 1, 2 }, [_]u16{ 7, 2 }) |draft, height, column| {
+        try frame.plan(&document, .{ .width = 8, .height = 12, .draft = draft, .cursor = draft.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+        try std.testing.expectEqual(height, frame.draft_height);
+        try std.testing.expectEqual(frame.draft_top + height - 1, frame.caret_row);
+        try std.testing.expectEqual(column, frame.caret_column);
+    }
 }
 
 test "complete approval and overflow survive short layouts or fail before rendering" {
     var document: Viewport.Document = .{};
-    var composer: Composer = .{};
-    try composer.layout(22);
     var frame: Self = undefined;
     var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = "Idle", .approval = false, .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
-    try frame.plan(&document, &composer, input);
+    try frame.plan(&document, input);
     try std.testing.expectEqualStrings("+100 · /status", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 2), frame.draft_top);
     input.height = 2;
-    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, &composer, input));
+    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
     input.height = 3;
     input.width = 12;
     input.approval = true;
-    input.status = "a: Allow once / d: Deny (Enter)\n! Original retained";
-    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, &composer, input));
+    input.status = approval_choice ++ "\n! Original retained";
+    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
 }
 
 test "inspection navigation names its actual return target at narrow widths" {
     var document: Viewport.Document = .{};
-    var composer: Composer = .{};
     var frame: Self = undefined;
     var input: Input = .{ .width = 20, .height = 16, .cursor = 0, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
     for ([_]bool{ false, true }) |pending| {
         input.action_pending = pending;
         for ([_]u16{ 20, 8 }) |width| {
             input.width = width;
-            try composer.layout(width - 2);
-            try frame.plan(&document, &composer, input);
-            try std.testing.expectEqualStrings(if (width == 8) "Ctrl-G" else if (pending) "Ctrl-G Action" else "Ctrl-G latest", frame.heading.text());
+            try frame.plan(&document, input);
+            try std.testing.expectEqualStrings(if (width == 8) "Esc" else if (pending) "Esc · Action" else "Esc returns", frame.heading.text());
         }
-    }
-}
-
-test "inspection notice preserves navigation and work status at narrow widths" {
-    var document: Viewport.Document = .{};
-    var composer: Composer = .{};
-    var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = inspection_ready ++ "\nWorking…", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = false, .preview_complete = true };
-    for ([_]u16{ 80, 20, 8 }) |width| {
-        input.width = width;
-        try composer.layout(width - 2);
-        try frame.plan(&document, &composer, input);
-        try std.testing.expectEqualStrings(if (width == 80) input.status else if (width == 20) "PgUp/PgDn · Ctrl-G\nWorking…" else "PgUp\nPgDn\nCtrl-G\nWorking…", frame.status.text());
-        try std.testing.expect(frame.caret_row < input.height);
     }
 }
 
 test "Action approval requires contiguous displayed rows and resets after resize" {
     var document: Viewport.Document = .{};
     for (0..100) |_| try document.append("command line\n");
-    var composer: Composer = .{};
-    try composer.layout(78);
     var frame: Self = undefined;
-    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "a: Allow once / d: Deny (Enter)", .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
-    document.top = 0;
-    try frame.plan(&document, &composer, input);
+    var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = approval_choice, .approval = true, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
+    const layout: Viewport.Layout = .{ .width = 80, .method = .wcwidth };
+    document.top = .{};
+    try frame.plan(&document, input);
     try std.testing.expect(!frame.approval_ready);
     try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
     const seen = frame.action_seen;
-    document.top = 70; // A jump must not certify the skipped rows.
+    document.top = .{ .offset = 70 * 13 }; // A jump must not certify the skipped rows.
     input.action_seen = seen;
-    try frame.plan(&document, &composer, input);
+    try frame.plan(&document, input);
     try std.testing.expect(!frame.approval_ready);
-    document.top = 0;
+    try std.testing.expectEqual(seen, frame.action_seen);
+    document.top = .{};
     for (0..8) |_| {
         input.action_seen = frame.action_seen;
         // Coalesced repeat cannot scroll past the first unread row even when
         // many more keys arrive than could fit between two physical frames.
-        for (0..20) |_| document.browse(true, frame.height, if (frame.approval_ready) null else input.action_seen);
-        try frame.plan(&document, &composer, input);
+        for (0..20) |_| document.browse(layout, true, frame.height, frame.height, if (frame.approval_ready) null else input.action_seen);
+        try frame.plan(&document, input);
     }
     try std.testing.expect(frame.approval_ready);
-    input.action_seen = 0;
+    input.action_seen = .{};
     input.width = 40;
-    try composer.layout(38);
-    try frame.plan(&document, &composer, input);
+    try frame.plan(&document, input);
     try std.testing.expect(!frame.approval_ready);
 }

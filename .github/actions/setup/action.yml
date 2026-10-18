@@ -105,7 +105,7 @@ runs:
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
         mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"
     - name: Install the selected Python fixture dependencies
-      if: ${{ steps.requirements.outputs.h2 == 'true' || contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}
+      if: ${{ steps.requirements.outputs.h2 == 'true' || steps.requirements.outputs.terminal == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -114,7 +114,7 @@ runs:
         if [ '${{ steps.requirements.outputs.h2 }}' = true ]; then
           packages+=('h2==4.3.0')
         fi
-        if [ '${{ contains(fromJSON(inputs.targets), 'check') || contains(fromJSON(inputs.targets), 'check-full') }}' = true ]; then
+        if [ '${{ steps.requirements.outputs.terminal }}' = true ]; then
           packages+=('pyte==0.8.2' 'wcwidth==0.2.13')
         fi
         "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 "${packages[@]}"

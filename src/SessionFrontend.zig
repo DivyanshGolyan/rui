@@ -13,15 +13,13 @@ const View = @import("session_view.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
 pub const Inspect = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []const u8, *std.Io.Writer) anyerror!void;
 pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File };
-pub fn rendererEnabled(environ: *const std.process.Environ.Map) bool {
-    return Frame.enabled(environ.get("RUI_RENDERER") orelse "", environ.get("TERM") orelse "");
-}
-const Inspection = enum { status, requests, help };
+const Inspection = enum { status, requests, help, command };
 const ReadPhase = departure.ReadPhase;
 const ReadEnd = departure.ReadEnd;
 const AdmissionEnd = Submission.End;
@@ -36,6 +34,13 @@ inspection_file: std.Io.File = undefined,
 command: Command,
 inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
+command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
+command_text_length: usize = 0,
+// An inspection or Host command started and its result has not been
+// presented. A command may change configuration, so Messages and consent wait
+// for every inspection; exit prints an unshown command's output, which can
+// carry recovery warnings.
+command_running: bool = false,
 inspection_submission: ?Submission.View = null,
 inspection_action: ?u64 = null,
 terminal: Terminal,
@@ -52,11 +57,17 @@ next_cursor: client.ActivityCursor = .{},
 // UI commits layout alongside delivered Activity; workers borrow a snapshot.
 compact_tools: bool = false,
 next_compact_tools: bool = false,
-history_cursor: ?client.ConversationCursor = null,
 next_history_cursor: ?client.ConversationCursor = null,
+// Continues the transcript above its oldest shown row; null at the start.
+transcript_older: ?client.ConversationCursor = null,
+// A failed older load waits for the next scroll rather than retrying at once.
+older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
+// Where each read's live output began, so a transcript whose live copy lost
+// its front still continues from a canonical position without a gap.
+marks: Marks = .{},
+read_mark: ?client.ConversationCursor = null,
 read_phase: ReadPhase = .activity,
-read_columns: usize = 0,
 // Worker result is inspected only after join; input policy stays UI-owned.
 history_render_started: bool = false,
 prepared_action: ?u64 = null,
@@ -74,6 +85,46 @@ pending_diagnostic: ?struct { failure: client.ReadFailure, phase: ReadPhase, rec
 notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
+/// Read boundaries in live output, oldest first. A boundary pairs the
+/// absolute live offset where a read's output began with the canonical cursor
+/// for everything before it (null: the conversation's start).
+const Marks = struct {
+    const Mark = struct { offset: u64, cursor: ?client.ConversationCursor };
+    items: [64]Mark = undefined,
+    count: usize = 0,
+
+    fn record(self: *Marks, offset: u64, cursor: ?client.ConversationCursor) void {
+        if (self.count == self.items.len) {
+            // The oldest boundary is the first to leave live output anyway.
+            std.mem.copyForwards(Mark, self.items[0 .. self.count - 1], self.items[1..self.count]);
+            self.count -= 1;
+        }
+        self.items[self.count] = .{ .offset = offset, .cursor = cursor };
+        self.count += 1;
+    }
+
+    /// The first boundary still retained when live output starts at `front`.
+    fn from(self: *const Marks, front: u64) ?Mark {
+        for (self.items[0..self.count]) |mark| if (mark.offset >= front) return mark;
+        return null;
+    }
+};
+
+test "transcript boundaries survive live eviction and bounded recording" {
+    var marks: Marks = .{};
+    try std.testing.expect(marks.from(0) == null);
+    marks.record(0, null);
+    marks.record(40, .{ .end = 9, .before_position = 7 });
+    try std.testing.expectEqual(@as(u64, 0), marks.from(0).?.offset);
+    try std.testing.expect(marks.from(0).?.cursor == null);
+    // Live output lost its first 10 bytes: continue from the next boundary.
+    try std.testing.expectEqual(@as(u64, 7), marks.from(10).?.cursor.?.before_position);
+    try std.testing.expect(marks.from(41) == null);
+    for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
+    try std.testing.expectEqual(@as(usize, 64), marks.count);
+    try std.testing.expectEqual(@as(u64, 136), marks.from(0).?.offset);
+}
+
 var interrupted: client.Cancellation = .{};
 fn interrupt(_: std.posix.SIG) callconv(.c) void {
     interrupted.requestStop();
@@ -88,19 +139,18 @@ fn signals(self: *Self, install: bool) void {
 
 pub fn run(init: std.process.Init, store: []const u8, session: []const u8, directory: []const u8, files: Files, command: Command, inspect: Inspect, initial_text: ?[]const u8) !void {
     const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
-    const colour = no_colour.len == 0 and !std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb");
-    const screen = if (rendererEnabled(init.environ_map)) try init.gpa.create(Screen) else null;
-    defer if (screen) |value| init.gpa.destroy(value);
-    if (screen) |value| try value.init(init.io, init.environ_map, colour);
-    defer if (screen) |value| value.deinit();
+    const colour = no_colour.len == 0;
+    const screen = try init.gpa.create(Screen);
+    defer init.gpa.destroy(screen);
+    try screen.init(init.io, init.environ_map, colour);
+    defer screen.deinit();
     var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = files.scratch, .action_file = files.action, .inspection_file = files.inspection, .command = command, .inspect = inspect, .terminal = undefined, .colour = colour };
     self.input.init();
-    self.input.vaxis_input = screen != null;
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
     interrupted.stopped.store(false, .release);
     self.signals(true);
     defer self.signals(false);
-    self.terminal = try Terminal.begin(colour, screen);
+    self.terminal = try Terminal.begin(screen);
     self.terminal.pump = .{ .context = &self, .step = pump };
     const result = self.drive(initial_text);
     const settled = self.quiesce();
@@ -114,22 +164,23 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const cause: ?anyerror = if (result) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
+    if (self.command_running and self.inspection_kind == .command) self.commandOutputGuide();
     if (plan.failure) |err| {
-        if (screen != null) switch (err) {
+        switch (err) {
             error.TerminalTooSmall => @import("TerminalText.zig").diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
-            error.TerminalTooLarge => @import("TerminalText.zig").diagnostic("rui: The vaxis renderer supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged.\n", .{}),
-            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds the bounded renderer. Shrink the terminal or unset RUI_RENDERER and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
+            error.TerminalTooLarge => @import("TerminalText.zig").diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
+            error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => @import("TerminalText.zig").diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
             else => {},
-        };
-        if (screen) |value| if (value.action_view != null) {
+        }
+        if (screen.action_view != null) {
             if (settled.restored) |_| {
                 self.terminal.detached(store, session, self.current.first_action) catch |notice_error|
                     @import("TerminalText.zig").diagnostic("rui: Action recovery notice failed: {s}\n", .{@errorName(notice_error)});
             } else |_| {} // Never write a main-screen notice before confirmed restoration.
-        };
+        }
         return err;
     }
-    const action = if (screen) |value| (if (value.action_view != null) self.current.first_action else null) else null;
+    const action = if (screen.action_view != null) self.current.first_action else null;
     self.terminal.detached(store, session, action) catch |err| {
         if (!plan.recovery_before_notice) self.recoveryGuide();
         return err;
@@ -137,6 +188,8 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
 }
 
 fn quiesce(self: *Self) Settled {
+    // A running command observes exit as an interruption, exactly as a signal.
+    if (self.command_running) interrupted.requestStop();
     const restored = self.terminal.finish();
     self.reader.cancel();
     self.submission.cancel();
@@ -144,6 +197,26 @@ fn quiesce(self: *Self) Settled {
     const admission = self.joinAdmission();
     if (self.reader.take() != null) self.reader.acknowledge();
     return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
+}
+
+/// Exit interrupted a Host command before its output was shown. That output
+/// can name a saved request to recover, so it follows restoration on stderr.
+fn commandOutputGuide(self: *const Self) void {
+    const io = self.init.io;
+    const size = (self.inspection_file.stat(io) catch return).size;
+    if (size == 0) return;
+    // Optional like every exit diagnostic: a full or stopped stderr drops the
+    // rest instead of holding the restored caller.
+    if (!stderr.tryAcquire()) return;
+    defer stderr.release();
+    if (!stderr.writeHeld("rui: Interrupted command output:\n")) return;
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const count = self.inspection_file.readPositionalAll(io, &buffer, offset) catch return;
+        if (count == 0 or !stderr.writeHeld(buffer[0..count])) return;
+        offset += count;
+    }
 }
 
 fn recoveryGuide(self: *const Self) void {
@@ -196,27 +269,92 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 fn drive(self: *Self, initial_text: ?[]const u8) !void {
     if (initial_text) |text| try self.beginMessage(self.input.submitText(text));
-    while (!self.detached) {
-        self.driveActive() catch |err| {
-            const failure = departure.activeFailure(err, interrupted.stopped.load(.acquire));
-            if (failure != error.CommandHandoff) return failure;
-            try self.handoff();
-        };
-    }
-}
-
-fn pendingHandoff(self: *Self) bool {
-    if (self.input.command_length) |length| {
-        return self.terminal.screen == null or inspection(self.input.command_buffer[0..length]) == null;
-    }
-    return false;
+    try self.driveActive();
 }
 
 fn inspection(text: []const u8) ?Inspection {
     if (std.mem.eql(u8, text, "/status")) return .status;
     if (std.mem.eql(u8, text, "/requests")) return .requests;
     if (std.mem.eql(u8, text, "/help")) return .help;
+    for ([_][]const u8{ "/inspect-action", "/setup", "/configure" }) |name| {
+        if (std.mem.eql(u8, text, name)) return .command;
+    }
+    for ([_][]const u8{ "/setup ", "/configure ", "/result " }) |prefix| {
+        if (std.mem.startsWith(u8, text, prefix)) return .command;
+    }
     return null;
+}
+
+/// A slash command typed in the choice field, which never decides.
+fn choiceCommand(self: *Self, text: []const u8) void {
+    if (std.mem.eql(u8, text, "/exit")) {
+        self.detached = true;
+    } else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
+        self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+    } else if (self.input.command_length == null) {
+        @memcpy(self.input.command_buffer[0..text.len], text);
+        self.input.command_length = text.len;
+        self.admitCommand();
+    } else self.notice = "! Preparing inspection; try again when it finishes.";
+}
+
+/// Answers local commands at once. Inspections, including Host commands,
+/// wait for the reader and then show their page.
+fn admitCommand(self: *Self) void {
+    const text = self.input.command_buffer[0..self.input.command_length.?];
+    if (inspection(text) != null) return;
+    self.input.command_length = null;
+    if (std.mem.eql(u8, text, "/discard")) {
+        self.submission.discardRejected() catch {
+            self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
+        };
+        if (self.submission.view() == null) self.poll_at = 0;
+    } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission.view() != null) {
+        self.submission.requestRecovery(text[9..]) catch {
+            self.notice = "! Recovery key does not match this original submission; nothing sent.";
+        };
+    } else if (std.mem.eql(u8, text, "/wait")) {
+        self.notice = "Work continues while you compose.";
+    } else if (std.mem.eql(u8, text, "/login")) {
+        self.notice = "Login uses rui auth login codex in your shell.";
+    } else {
+        // Name the command only when it is short printable ASCII.
+        const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+        var shown = name.len <= 32;
+        for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
+        var writer = std.Io.Writer.fixed(&self.notice_buffer);
+        writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+        self.notice = writer.buffered();
+    }
+}
+
+test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    self.input.init();
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+    const cases = .{
+        .{ "/foo bar", "! Unknown command /foo · /help" },
+        .{ "/\x1b[2J", "! Unknown command · /help" },
+        .{ "/result", "! Unknown command /result · /help" },
+        .{ "/wait", "Work continues while you compose." },
+        .{ "/configure --permission-mode ask", "" },
+        .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
+        .{ "/inspect-action", "" },
+        .{ "/status", "" },
+    };
+    inline for (cases) |case| {
+        self.notice = null;
+        @memcpy(self.input.command_buffer[0..case[0].len], case[0]);
+        self.input.command_length = case[0].len;
+        self.admitCommand();
+        if (case[1].len != 0) {
+            try std.testing.expectEqualStrings(case[1], self.notice.?);
+            try std.testing.expect(self.input.command_length == null);
+        } else {
+            try std.testing.expect(self.notice == null);
+            try std.testing.expectEqual(@as(?usize, case[0].len), self.input.command_length);
+        }
+    }
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -242,7 +380,6 @@ test "frontend consumed canonical reader and admission failures survive external
             return error.TestUnexpectedResult;
         };
         try std.testing.expectEqual(error.CanonicalStoreFailure, failure);
-        try std.testing.expectEqual(error.CanonicalStoreFailure, departure.activeFailure(failure, true));
     }
 }
 
@@ -256,7 +393,7 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
         }
     };
     for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
-        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .colour = false, .active = false, .result = error.TerminalRestoreFailed }, .colour = false, .read_phase = phase };
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .screen = undefined, .active = false, .result = error.TerminalRestoreFailed }, .colour = false, .read_phase = phase };
         self.init.io = std.testing.io;
         self.input.init();
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .intent = .{ .message = self.input.submitText("current original B") } };
@@ -265,7 +402,7 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
         while (self.reader.take() == null) std.Thread.yield() catch {};
         self.reader_output_started = true;
         const settled = self.quiesce();
-        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.handoff, error.InteractiveInterrupted).?);
+        try std.testing.expectEqual(error.TerminalRestoreFailed, settled.failure(.inspection, error.InteractiveInterrupted).?);
         try std.testing.expectEqual(error.CanonicalStoreFailure, settled.admission_error.?);
         try std.testing.expect(settled.reader.cancelled.output_owned);
         try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
@@ -279,11 +416,8 @@ test "frontend cleanup joins both borrowers and retires output before reporting 
 fn driveActive(self: *Self) !void {
     while (!self.detached) {
         if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.pendingHandoff()) return error.CommandHandoff;
-        if (self.terminal.screen != null) {
-            const size = Terminal.geometry();
-            if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
-        }
+        const size = self.terminal.geometry();
+        if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         const admission = try self.submission.advance();
         try self.presentAdmission(admission);
         if (admission.failure()) |err| if (err == error.CanonicalStoreFailure) return err;
@@ -298,11 +432,13 @@ fn driveActive(self: *Self) !void {
             if ((!inspecting or self.reader_output_started) and bytes.len != 0) {
                 // A notice can end the group while a read is still silent.
                 // Restore its separator before the first compact heading.
-                if (!self.reader_output_started and (self.read_phase == .activity or self.read_phase == .permission) and !self.opening and !self.compact_tools and bytes[0] != '\n')
+                const live = self.read_phase == .activity or self.read_phase == .permission;
+                if (!self.reader_output_started and live) self.marks.record(self.terminal.screen.liveEnd(), self.read_mark);
+                if (!self.reader_output_started and live and !self.opening and !self.compact_tools and bytes[0] != '\n')
                     try self.terminal.permanent("\n");
                 self.reader_output_started = true;
                 try self.terminal.permanent(bytes);
-                if (self.terminal.screen != null) self.dirty = true;
+                self.dirty = true;
             }
             self.reader.acknowledge();
         }
@@ -310,31 +446,51 @@ fn driveActive(self: *Self) !void {
         if (self.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
         }
-        if (self.terminal.screen != null and self.reader.thread == null and self.input.command_length != null) {
-            const kind = inspection(self.input.command_buffer[0..self.input.command_length.?]).?;
-            try self.terminal.screen.?.latest();
+        if (self.reader.thread == null and self.input.command_length != null) {
+            const text = self.input.command_buffer[0..self.input.command_length.?];
+            const kind = inspection(text).?;
+            try self.terminal.screen.latest();
+            // The worker borrows its own copy; the editor may queue another.
+            @memcpy(self.command_text[0..text.len], text);
+            self.command_text_length = text.len;
             self.inspection_kind = kind;
             self.inspection_submission = self.submission.view();
             self.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
             self.read_phase = .inspection;
             self.history_render_started = false;
             self.reader_output_started = false;
-            try self.reader.start(self.init.io, self, inspectPage);
+            try self.reader.start(self.init.io, self, if (kind == .command) runCommand else inspectPage);
+            self.command_running = true;
             self.input.command_length = null;
         }
-        if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null) and self.prepared_action == null) {
-            // Retain logical lines. SessionScreen reflows them at current size.
-            self.read_columns = if (self.terminal.screen != null) 0 else Terminal.geometry().col;
+        if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null or self.olderWanted()) and self.prepared_action == null) {
             if (self.history_requested != null and !self.opening) {
                 const requested = self.history_requested.?;
                 self.history_requested = null;
-                if (requested == .latest or self.history_cursor != null) {
-                    if (self.terminal.screen) |screen| try screen.latest();
-                    self.read_phase = if (requested == .latest) .details else .history;
+                if (requested == .latest) {
+                    try self.terminal.screen.latest();
+                    self.read_phase = .details;
                     self.history_render_started = false;
                     self.reader_output_started = false;
                     try self.reader.start(self.init.io, self, history);
-                } else self.notice = "  No older Conversation rows.";
+                } else {
+                    // /history scrolls the transcript to its top; older pages
+                    // then load there as for any scroll.
+                    const screen = self.terminal.screen;
+                    if (screen.view != .transcript) {
+                        try screen.latest();
+                        if (screen.view == .live) try self.beginTranscript();
+                    }
+                    if (screen.view == .transcript) screen.browsing.top = .{};
+                    self.dirty = true;
+                }
+            }
+            if (self.reader.thread != null) {} else if (self.olderWanted()) {
+                self.read_phase = .history;
+                self.history_render_started = false;
+                self.reader_output_started = false;
+                self.notice = "Loading earlier messages…";
+                try self.reader.start(self.init.io, self, history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 self.read_phase = .activity;
                 self.reader_output_started = false;
@@ -348,45 +504,30 @@ fn driveActive(self: *Self) !void {
                 try self.reader.start(self.init.io, self, permission);
             }
         }
-        // Notices belong to the status region, including while a frozen
-        // document obscures live output. Never append them into an answer.
-        if (self.terminal.screen == null and self.notice != null and !self.opening and (self.reader.thread == null or !self.reader_output_started)) {
-            const notice = self.notice.?;
-            self.notice = null;
-            self.compact_tools = false;
-            try self.terminal.permanent("\n");
-            try self.terminal.permanent((if (std.mem.startsWith(u8, notice, "!")) View.Style.failure else View.Style.normal).code(self.colour));
-            try self.terminal.permanent(notice);
-            try self.terminal.permanent(View.Style.normal.code(self.colour));
-            try self.terminal.permanent("\n");
-            self.dirty = true;
-        }
         for (0..1024) |_| {
             if (try self.step(0) != .byte) break;
             if (self.detached) break;
         }
         if (self.detached) break;
-        if (self.pendingHandoff()) return error.CommandHandoff;
         // Finish chat paste/UTF-8 under its original decoder before consent.
         if (self.reader.thread == null and self.prepared_action != null and self.input.pending() == .none) {
-            if (self.terminal.screen) |screen| try screen.prepareAction(self.init.io, self.action_file);
+            try self.terminal.screen.prepareAction(self.init.io, self.action_file);
             // Preparation is complete and the file remains immutable through
             // this choice. A bounded preview is export-only, never consent.
-            const presentation: ConsentPolicy.Presentation = if (self.terminal.screen == null or (try self.action_file.stat(self.init.io)).size <= @import("ConversationViewport.zig").capacity) .complete else .preview;
+            const presentation: ConsentPolicy.Presentation = if ((try self.action_file.stat(self.init.io)).size <= @import("ConversationViewport.zig").capacity) .complete else .preview;
             self.consent.adopt(self.prepared_action.?, presentation);
             self.prepared_action = null;
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.read_phase = .activity;
             self.dirty = true;
         }
-        if (self.dirty and (self.terminal.screen != null or (!self.opening and (self.reader.thread == null or !self.reader_output_started)))) {
-            if (self.terminal.screen) |screen| {
-                if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
-            }
+        if (self.dirty) {
+            const screen = self.terminal.screen;
+            if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
             const view: Input.View = if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const action_visible = self.actionVisible();
             const approval_ready = self.approvalReady();
-            const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) "a: Allow once / d: Deny (Enter)" else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Ctrl-G returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
+            const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) Frame.approval_choice else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Esc returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
                 .not_started => "Not sent · Ctrl-R retries original",
                 .submitting => "Sending…",
                 .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
@@ -400,12 +541,12 @@ fn driveActive(self: *Self) !void {
             };
             var status_buffer: [2048]u8 = undefined;
             var status = std.Io.Writer.fixed(&status_buffer);
-            if (self.terminal.screen != null) if (self.notice) |notice| {
-                try status.print("{s}\n", .{notice});
-            };
-            try status.writeAll(base_status);
-            if (self.terminal.screen != null and !self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass)
-                try status.writeAll("\nBash runs without approval.");
+            const bypass = !self.opening and self.current.settings.tools.bash and self.current.settings.permission_mode.value == .bypass;
+            for ([_][]const u8{ self.notice orelse "", base_status, if (bypass) "Bash runs without approval." else "" }) |line| {
+                if (line.len == 0) continue;
+                if (status.buffered().len != 0) try status.writeAll("\n");
+                try status.writeAll(line);
+            }
             self.dirty = false;
             try self.terminal.redraw(view.bytes, view.cursor, status.buffered(), if (self.consent.active() and action_visible) "> " else "› ", &self.live);
             if (!approval_ready and self.approvalReady()) {
@@ -431,7 +572,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.pendingHandoff() or !self.actionVisible() or (self.terminal.screen != null and self.dirty))) {
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.commandActive() or !self.actionVisible() or self.dirty)) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -444,54 +585,81 @@ fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     _ = try self.step(16);
     if (self.detached or interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    // Unwind the terminal write and its window loan before handing off.
-    if (self.pendingHandoff()) return error.CommandHandoff;
 }
 
 fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     // Input can arrive with Enter before any redraw, including inside output
     // pumping. Sealed bytes render in the escaped transcript, not the composer.
-    if (self.terminal.screen != null) {
-        const size = Terminal.geometry();
-        Frame.validateGeometry(size.col, size.row) catch |err| {
-            self.input.release(ticket) catch unreachable;
-            return err;
-        };
-    }
+    const size = self.terminal.geometry();
+    Frame.validateGeometry(size.col, size.row) catch |err| {
+        self.input.release(ticket) catch unreachable;
+        return err;
+    };
     try self.submission.begin(.{ .message = ticket });
 }
 
 fn actionVisible(self: *const Self) bool {
-    return self.consent.presentation == .complete and (if (self.terminal.screen) |screen| screen.actionVisible() and screen.preview_complete else true);
+    const screen = self.terminal.screen;
+    return self.consent.presentation == .complete and screen.actionVisible() and screen.preview_complete;
+}
+
+/// A queued or running command ends consent freshness until it completes.
+fn commandActive(self: *const Self) bool {
+    return self.input.command_length != null or self.command_running;
 }
 
 fn approvalReady(self: *const Self) bool {
-    if (!self.actionVisible()) return false;
-    if (self.terminal.screen) |screen| {
-        const size = Terminal.geometry();
-        return size.row == self.terminal.size.row and size.col == self.terminal.size.col and screen.approvalReady();
-    }
-    return true;
+    if (!self.actionVisible() or self.commandActive()) return false;
+    const size = self.terminal.geometry();
+    return size.row == self.terminal.size.row and size.col == self.terminal.size.col and self.terminal.screen.approvalReady();
 }
 
 fn navigation(self: *Self, event: Editor.Event, editor: *const Editor) !void {
-    const screen = self.terminal.screen orelse return;
+    const screen = self.terminal.screen;
     switch (event) {
-        .width_report => screen.setWidth(editor.input.reported_width.?),
-        .page_up => try screen.browse(false),
-        .page_down => try screen.browse(true),
+        .width_report => screen.setWidth(editor.input.report.?.width),
+        .scroll_report => try self.terminal.enableAlternateScroll(),
+        .page_up, .page_down, .scroll_up, .scroll_down => {
+            const down = event == .page_down or event == .scroll_down;
+            if (screen.view == .live) {
+                if (down) return; // Live output already shows the latest rows.
+                try self.beginTranscript();
+            }
+            self.older_failed = false; // A new scroll may retry a failed load.
+            if (screen.browse(down, event == .page_up or event == .page_down)) try screen.latest();
+        },
         .latest, .close_view => try screen.latest(),
         else => {},
     }
 }
 
+/// Freezes live output for scrolling. The copy starts at a recorded read
+/// boundary, so older canonical pages continue it without a gap.
+fn beginTranscript(self: *Self) !void {
+    const screen = self.terminal.screen;
+    if (self.marks.from(screen.live.origin)) |mark| {
+        try screen.beginTranscript(mark.offset);
+        self.transcript_older = mark.cursor;
+        if (mark.cursor == null) try screen.markBeginning();
+    } else {
+        // No read boundary remains in view (one read exceeded it). Show the
+        // gap instead of joining older pages to the wrong row.
+        try screen.beginTranscript(screen.live.origin);
+        self.transcript_older = null;
+        try screen.markGap();
+    }
+}
+
+fn olderWanted(self: *const Self) bool {
+    return self.transcript_older != null and !self.older_failed and self.terminal.screen.transcriptAtTop() and !self.opening;
+}
+
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    // The selected handoff owns the next transition, including queued bytes.
-    if (self.pendingHandoff()) return .handoff;
     const pending = if (self.consent.active()) self.choice.pending() else self.input.pending();
     const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            if (self.consent.active()) try self.choice.expire() else try self.input.expire();
+            const event = if (self.consent.active()) try self.choice.expire() else try self.input.expire();
+            if (event != .none) try self.navigation(event, if (self.consent.active()) &self.choice else &self.input.editors[self.input.active]);
             // Successful expiry releases decoder custody. Revisit redraw and
             // its drained-input readiness gate, just as after ordinary input.
             self.dirty = true;
@@ -499,9 +667,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         },
         else => return err,
     }) orelse return if (pending == .none) .empty else .decoder_pending;
-    if (self.terminal.screen != null) self.notice = null;
+    self.notice = null;
     if (self.consent.active()) {
-        self.choice.vaxis_input = self.terminal.screen != null;
         const visible = self.actionVisible();
         if (!visible) self.consent.invalidate();
         if (visible and !self.consent.acceptsInput()) {
@@ -512,7 +679,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 self.detached = true;
             }
             try self.navigation(event, &self.choice);
-            if (self.choice.pending() == .none) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            // Only a slash command survives: it can never become a decision.
+            const text = self.choice.buffer[0..self.choice.length];
+            const command = text.len != 0 and text[0] == '/';
+            if (event == .submit and command) self.choiceCommand(text);
+            if (self.choice.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.dirty = true;
             return .byte;
         }
@@ -529,16 +700,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 const text = self.choice.buffer[0..self.choice.length];
                 const decision = if (self.approvalReady()) self.consent.submit(text) else null;
                 if (decision) |selected| {
-                    if (self.terminal.screen) |screen| screen.releaseAction();
+                    self.terminal.screen.releaseAction();
                     try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
-                } else if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
-                    self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
                 } else if (std.mem.startsWith(u8, text, "/")) {
-                    if (self.input.command_length == null) {
-                        @memcpy(self.input.command_buffer[0..text.len], text);
-                        self.input.command_length = text.len;
-                    } else self.notice = "! Preparing inspection; try again when it finishes.";
-                } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Ctrl-G returns to the Action before deciding.";
+                    self.choiceCommand(text);
+                } else self.notice = if (visible) (if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.") else "! Nothing authorized. Esc returns to the Action before deciding.";
                 self.consent.invalidate();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             },
@@ -564,7 +730,8 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         else => {},
     };
     const submission = self.submission.view();
-    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and (submission == null or submission.?.kind == .message))) {
+    // A Message waits for a pending command, which may change its configuration.
+    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -574,11 +741,11 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 // Local read work never cancels the independent Admission owner.
                 self.input.command_length = null;
                 self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
-            }
+            } else self.admitCommand();
         },
-        .busy => self.notice = if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
-            .width_report, .page_up, .page_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
+            .width_report, .scroll_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
             .interrupt, .eof => self.detached = true,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .overflow => self.notice = "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
@@ -618,12 +785,26 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
-    const mode: departure.Mode = if (self.input.command_length != null and !self.pendingHandoff()) .handoff else .active;
+    // A pending inspection supersedes a silent read it cancelled.
+    const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
+    // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
-    if (self.terminal.screen != null and end == .complete and (self.read_phase == .history or self.read_phase == .details or self.read_phase == .inspection)) {
-        try self.terminal.screen.?.showFile(self.init.io, self.inspection_file, false);
+    if (end != .complete and self.command_running) {
+        // Nothing to show: the command failed before writing output.
+        self.command_running = false;
         self.consent.invalidate();
-        if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    }
+    if (end == .complete and self.read_phase == .history) {
+        // The user may have left the transcript while this page loaded.
+        const screen = self.terminal.screen;
+        if (screen.view == .transcript) {
+            try screen.prependFile(self.init.io, self.inspection_file);
+            self.transcript_older = self.next_history_cursor;
+            if (self.transcript_older == null) try screen.markBeginning();
+        }
+    } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
+        try self.showInspection();
+        self.command_running = false; // Shown; exit no longer prints it.
     }
     self.applyReader(end);
 }
@@ -653,7 +834,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     try out.writeAll(switch (pending.phase) {
         .details => "! Details unavailable; draft retained. ",
         .inspection => "! Inspection unavailable; draft retained. ",
-        else => "! History unavailable; older cursor and draft retained. ",
+        else => "! Earlier messages unavailable; scroll up to retry. Draft retained. ",
     });
     try self.writePendingDiagnostic(&out);
     try sink.permanent("\n");
@@ -661,10 +842,8 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     try sink.permanent(out.buffered());
     try sink.permanent(View.Style.normal.code(self.colour));
     try sink.permanent("\n");
-    if (self.terminal.screen != null) {
-        @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
-        self.notice = self.notice_buffer[0..out.buffered().len];
-    }
+    @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
+    self.notice = self.notice_buffer[0..out.buffered().len];
     self.pending_diagnostic = null;
     self.dirty = true;
 }
@@ -708,7 +887,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.reader.join();
             self.input.init();
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
-            self.terminal = .{ .original = undefined, .flags = undefined, .colour = false, .active = false };
+            self.terminal = .{ .original = undefined, .flags = undefined, .screen = undefined, .active = false };
             const settled = self.quiesce();
             for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
                 try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
@@ -720,19 +899,21 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.presentReadDiagnostic(&sink);
             try std.testing.expect(self.pending_diagnostic == null);
             try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], out.buffered()) != null);
-            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "History unavailable") != null);
-            try std.testing.expect(self.notice == null); // Inline output was already presented once.
+            try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], if (phase == .details) "Details unavailable" else "Earlier messages unavailable") != null);
+            // The status region repeats it while the transcript holds the record.
+            try std.testing.expect(std.mem.indexOf(u8, self.notice.?, out.buffered()) != null);
         }
     }
 }
 
 fn applyReader(self: *Self, end: ReadEnd) void {
     if (end.preparationFailure()) {
+        if (self.read_phase == .history) self.older_failed = true;
         if (self.pending_diagnostic == null)
             self.notice = switch (self.read_phase) {
                 .details => "! Details unavailable; draft retained.",
                 .inspection => "! Inspection unavailable; draft retained.",
-                else => "! History unavailable; older cursor and draft retained.",
+                else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
         self.dirty = true;
         return;
@@ -741,12 +922,9 @@ fn applyReader(self: *Self, end: ReadEnd) void {
     if (self.reader_output_started)
         self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.next_compact_tools else false;
     if (self.read_phase == .history) {
-        self.history_cursor = self.next_history_cursor;
-        self.notice = "  History page complete.";
-    } else if (self.read_phase == .details) {
-        self.notice = "  Details complete.";
-    } else if (self.read_phase == .inspection) {
-        self.notice = Frame.inspection_ready;
+        self.notice = null; // Clears "Loading older conversation…".
+    } else if (self.read_phase == .details or self.read_phase == .inspection) {
+        // showInspection selected the notice.
     } else if (self.read_phase == .permission) {
         self.current = self.observed;
         self.live = self.observed_live;
@@ -756,7 +934,6 @@ fn applyReader(self: *Self, end: ReadEnd) void {
         self.current = self.observed;
         self.live = self.observed_live;
         self.cursor = self.next_cursor;
-        if (self.opening) self.history_cursor = self.next_history_cursor;
         self.opening = false;
     }
     self.poll_at = std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
@@ -799,72 +976,64 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
-fn handoff(self: *Self) !void {
-    const screen = self.terminal.screen;
-    const settled = self.quiesce();
-    self.applyReader(settled.reader);
-    try departure.handoff(settled, interrupted.stopped.load(.acquire));
-    const result = self.dispatchCommand();
-    try departure.commandReturn(result, interrupted.stopped.load(.acquire));
-    self.terminal = try Terminal.begin(self.colour, screen);
-    if (screen) |value| value.vx.queueRefresh();
-    self.terminal.pump = .{ .context = self, .step = pump };
+fn showInspection(self: *Self) !void {
+    // Any completed inspection or command requires a fresh choice afterwards.
     self.consent.invalidate();
-    self.dirty = true;
-}
-
-fn dispatchCommand(self: *Self) !void {
-    self.compact_tools = false;
-    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
-    {
-        const text = self.input.command_buffer[0..self.input.command_length.?];
-        defer self.input.command_length = null;
-        if (std.mem.eql(u8, text, "/discard")) {
-            self.submission.discardRejected() catch {
-                self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
-            };
-            if (self.submission.view() == null) self.poll_at = 0;
-        } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission.view() != null) {
-            self.submission.requestRecovery(text[9..]) catch {
-                self.notice = "! Recovery key does not match this original submission; nothing sent.";
-            };
-        } else if (std.mem.eql(u8, text, "/wait")) {
-            self.notice = "Work continues while you compose.";
-        } else if (std.mem.eql(u8, text, "/login")) {
-            self.notice = "Login uses rui auth login codex in your shell.";
-        } else if (std.mem.eql(u8, text, "/help")) {
-            try std.Io.File.stdout().writeStreamingAll(self.init.io, "Actions show their command here. Type a + Enter to allow once, d + Enter to deny.\n/status settings and work · /inspect-action exact diagnostics\n/details recent conversation with full saved tool output\n/history older conversation\nCtrl-R: retry the same unconfirmed input or decision, keeping the draft\n/requests recovery records · /result KEY saved answer\n/setup future defaults · /configure Session settings\n/recover KEY original intent · /discard rejected intent\n/exit detach (Host work continues; unsent draft is lost)\nLogin: rui auth login codex in your shell.\n");
-        } else {
-            try self.command(self.init, .{ .io = self.init.io, .cancellation = &interrupted }, self.store, self.session, text);
-            if (self.submission.view()) |submission| if (std.mem.eql(u8, text, "/status") or std.mem.eql(u8, text, "/requests")) {
-                // A reserved key is diagnostic identity, not proof that a
-                // capture exists. Ctrl-R also repairs prepublication failure.
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, "Original reserved request: ");
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, &submission.key);
-                try std.Io.File.stdout().writeStreamingAll(self.init.io, if (submission.state == .rejected) "\nSubmission rejected; /discard releases only this original, retaining the next draft.\n" else "\nPublication/admission may be incomplete; Ctrl-R retries this exact original.\n");
-                if (submission.last_error) |err| {
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "Last submission error: ");
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, @errorName(err));
-                    try std.Io.File.stdout().writeStreamingAll(self.init.io, "\n");
-                }
-            };
-            // Normal return can include a printed usage or operational error.
-            // Preserve that complete output, not an invented success receipt.
-            try departure.commandReturn({}, interrupted.stopped.load(.acquire));
-            if (self.terminal.screen != null) try self.terminal.awaitReturn(self.init.io, &interrupted.stopped);
+    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    const size = (try self.inspection_file.stat(self.init.io)).size;
+    if (size == 0) {
+        self.notice = "Command finished with no output.";
+        return;
+    }
+    // A short command result is a notice, not a page. Inside the Session the
+    // speaker is known: CLI "Rui: " text loses its prefix and "rui: "
+    // diagnostics become failure notices.
+    if (self.read_phase == .inspection and self.inspection_kind == .command and size <= 256) {
+        var bytes: [256]u8 = undefined;
+        const text = std.mem.trimEnd(u8, bytes[0..try self.inspection_file.readPositionalAll(self.init.io, bytes[0..@intCast(size)], 0)], "\n");
+        if (std.mem.count(u8, text, "\n") < 2) {
+            var writer = std.Io.Writer.fixed(&self.notice_buffer);
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            while (lines.next()) |line| {
+                if (writer.buffered().len != 0) try writer.writeAll("\n");
+                if (std.mem.startsWith(u8, line, "Rui: ")) try writer.writeAll(line[5..]) else if (std.mem.startsWith(u8, line, "rui: ")) try writer.print("! {s}", .{line[5..]}) else try writer.writeAll(line);
+            }
+            self.notice = writer.buffered();
+            return;
         }
     }
+    try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
+    // The page heading already says how to return.
+    self.notice = null;
+}
+
+/// Host commands keep their one-shot output owners. Their complete stdout and
+/// stderr become an inspection page while the Session screen keeps drawing
+/// through its own descriptor. No command reads terminal input.
+fn runCommand(raw: *anyopaque, task: *Task) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.inspection_file.setLength(task.io, 0);
+    try task.io.vtable.fileSeekTo(task.io.userdata, self.inspection_file, 0);
+    const saved = [2]c_int{ std.c.dup(1), std.c.dup(2) };
+    defer for (saved) |fd| if (fd >= 0) {
+        _ = std.c.close(fd);
+    };
+    if (saved[0] < 0 or saved[1] < 0) return error.TerminalCleanupFailed;
+    // Redirected descriptors are output custody: any failure now is fatal.
+    self.history_render_started = true;
+    const page = self.inspection_file.handle;
+    const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, .{ .io = task.io, .cancellation = &interrupted }, self.store, self.session, self.command_text[0..self.command_text_length]);
+    if (std.c.dup2(saved[0], 1) < 0 or std.c.dup2(saved[1], 2) < 0) return error.TerminalCleanupFailed;
+    return result;
 }
 
 fn permission(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try scan(raw, task);
     if (self.observed.first_action) |action| {
-        if (self.terminal.screen != null) {
-            try self.action_file.setLength(task.io, 0);
-            var output: DisplayCapture = .{ .task = task, .file = self.action_file };
-            try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, &output, 0, self.colour);
-        } else try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, task, self.read_columns, self.colour);
+        try self.action_file.setLength(task.io, 0);
+        var output: DisplayCapture = .{ .task = task, .file = self.action_file };
+        try View.permission(task.requests(), self.store, self.session, action, self.observed.settings.workspace.slice(), self.scratch, &output, self.colour);
         self.next_compact_tools = false;
         self.prepared_action = action;
     }
@@ -888,10 +1057,15 @@ fn scan(raw: *anyopaque, task: *Task) !void {
                 else => {},
             }
         };
+        self.read_mark = self.next_history_cursor;
         const pending = try View.pending(requests, self.store, self.session, page.facts.end);
         try pending.render(requests, self.store, self.session, task);
+    } else if (page.facts.count != 0) {
+        // Everything before this page's first item precedes its live output.
+        const first = page.facts.items[0];
+        self.read_mark = .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal };
     }
-    try View.render(requests, self.store, self.session, &page, task, self.read_columns, self.colour, &self.next_compact_tools);
+    try View.render(requests, self.store, self.session, &page, task, self.colour, &self.next_compact_tools);
     if (self.opening) {
         self.next_cursor = .{ .position = page.facts.end };
     } else {
@@ -906,18 +1080,13 @@ fn scan(raw: *anyopaque, task: *Task) !void {
 fn history(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const latest = self.read_phase == .details;
-    const prepared = try History.prepare(task.requests(), self.store, self.session, if (latest) .{ .end = 0 } else self.history_cursor.?, self.scratch);
+    const prepared = try History.prepare(task.requests(), self.store, self.session, if (latest) .{ .end = 0 } else self.transcript_older.?, self.scratch);
     // Joined errors before this point retain the cursor without visible content.
     self.history_render_started = true;
-    if (self.terminal.screen != null) {
-        try self.inspection_file.setLength(task.io, 0);
-        var output: DisplayCapture = .{ .task = task, .file = self.inspection_file };
-        if (latest) try output.feed("\nRecent conversation — tool details\n");
-        try prepared.render(task.io, self.scratch, self.store, self.session, &output, 0, self.colour);
-    } else {
-        if (latest) try task.feed("\nRecent conversation — tool details\n");
-        try prepared.render(task.io, self.scratch, self.store, self.session, task, self.read_columns, self.colour);
-    }
+    try self.inspection_file.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = self.inspection_file };
+    if (latest) try output.feed("\nRecent conversation — tool details\n");
+    try prepared.render(task.io, self.scratch, self.store, self.session, &output, if (latest) .details else .transcript, self.colour);
     if (!latest) self.next_history_cursor = prepared.page.continuation();
 }
 
@@ -951,7 +1120,7 @@ fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn browse · Ctrl-G returns to latest or the pending Action\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nWhen approval is enabled: a + Enter allows once, d + Enter denies\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         try self.inspect(self.init, task.requests(), self.store, self.session, if (self.inspection_kind == .status) "/status" else "/requests", &output.interface);
         // Snapshot before launch: this read cannot race Admission settlement.
