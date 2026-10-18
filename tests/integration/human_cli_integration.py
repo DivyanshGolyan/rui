@@ -1912,7 +1912,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "\n› next cafXaYé!" in submitted_draft, submitted_draft
         fixture.wait_for(lambda: proxy.exchanges, "retained draft queued Message")
         assert json.loads(proxy.exchanges[0][0])["text"]["value"] == "next cafXaYé!"
-        quiet_status = terminal_step(master, "/status", "Session: ", composer=True)
+        terminal_step(master, "/status", "Session: ", composer=True)
+        # The page, not the live frames drawn while it loaded: the transcript
+        # rightly keeps the outcome above the composer.
+        quiet_status = current_screen(master)
         assert f"✓ {description}" not in quiet_status and "Bash succeeded." not in quiet_status, (
             "already presented outcome repeated on refresh", quiet_status)
         if exit_code:
@@ -4085,7 +4088,9 @@ def main(selected="all"):
             terminal_step(master, "/configure --instructions -", "Use a file for", composer=True)
             terminal_step(master, "/configure --output-schema -", "Use a file for", composer=True)
             terminal_step(master, "/status", f"Session: {session}", composer=True)
-            configured = terminal_step(master, '/configure --model "model-a"', "Configured.", composer=True)
+            terminal_step(master, '/configure --model "model-a"', "Configured.", composer=True)
+            # The result frame; frames before it may still show the /status page.
+            configured = current_screen(master)
             assert "Configured." in configured and "request:" not in configured, configured
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
