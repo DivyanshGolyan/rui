@@ -381,7 +381,8 @@ def tap_main(args):
         # wrapper shell, not the tap, observes the restored termios.
         wrapper = ('stty -g > "$1/stty-before.txt"; shift; "$@"; rc=$?; '
                    'stty -g > "$VERIFY_RUI_TERM/stty-after.txt"; printf "%s\\n" "$rc" > "$VERIFY_RUI_TERM/target-rc.txt"; exit "$rc"')
-        env = {**json.loads(args.env), "VERIFY_RUI_TERM": str(term)}
+        loaded = json.loads(pathlib.Path(args.env[1:]).read_text()) if args.env.startswith("@") else json.loads(args.env)
+        env = {**loaded, "VERIFY_RUI_TERM": str(term)}
         os.execve("/bin/sh", ["/bin/sh", "-c", wrapper, "verify-rui-wrapper", str(term), *args.argv], env)
     meta = {"t_start_ns": now_ns(), "wall": wall(), "tap_pid": os.getpid(), "child_pid": pid,
             "argv": args.argv, "mode": args.mode, "columns": columns, "rows": rows,
@@ -1138,6 +1139,373 @@ def cmd_gui(args):
         print(f"  - {item}")
 
 
+# ---------------------------------------------------------------- physical session (L4) with automatic grading
+
+PHYSICAL_STEPS = [
+    # id, instruction shown to the human, grader name, timeout seconds
+    ("type", "Click once inside the Rui window, then TYPE exactly:  hello physical\n(do not press Enter yet)", "type", 60),
+    ("enter", "Press  Enter  once.", "submit", 40),
+    ("pgup", "Press  Page Up  twice  (laptop: fn + Up arrow).", "pgup", 40),
+    ("ctrl-g", "Press  Control-G  (back to the latest messages).", "ctrl_g", 30),
+    ("wheel-up", "Over the Rui window, scroll the mouse wheel or trackpad UP a few notches.", "wheel_up", 40),
+    ("wheel-down", "Scroll DOWN until you are back at the bottom (the  ›  prompt is live).", "wheel_down", 40),
+    ("arrows", "Press  Up arrow  three times, then  Down arrow  three times.", "arrows", 40),
+    ("esc", "Press  Page Up  once, then  Esc.", "esc", 40),
+    ("consent", "TYPE:  consent check   then press  Enter.", "consent_shown", 60),
+    ("read", "Press  Page Down  until this coach says the choices are enabled.", "consent_read", 60),
+    ("allow", "TYPE  a  then press  Enter  (allow once).", "allow", 60),
+    ("deny", "TYPE:  consent check  + Enter, press  Page Down  until enabled, then TYPE  d  + Enter  (deny).", "deny", 120),
+    ("ctrl-c", "Press  Control-C  (Rui closes; the window shows 'Detached').", "ctrl_c", 30),
+]
+TMUX_STEPS = [
+    ("tmux-type", "In the NEW tmux window: click inside it, TYPE  hello tmux  and press  Enter.", "tmux_submit", 90),
+    ("tmux-wheel", "Over the tmux window, scroll the wheel UP a few notches, then press  Control-G.", "tmux_wheel", 60),
+    ("tmux-status", "TYPE  /status  and press  Enter.", "tmux_status", 40),
+    ("tmux-exit", "Press  Esc, then  Control-C.", "tmux_exit", 40),
+]
+UP = (b"\x1b[A", b"\x1bOA")
+DOWN = (b"\x1b[B", b"\x1bOB")
+
+
+class Grader:
+    """Reads only this run's evidence: bytes Rui received, committed frames, provider, captures, files."""
+
+    def __init__(self, run, term):
+        self.run, self.term = run, term
+        self.mark()
+
+    def mark(self):
+        self.inputs_at = len(read_jsonl(self.run.term_dir(self.term) / "input.jsonl"))
+        self.frames_at = len(frames(self.run, self.term))
+        self.provider_at = len([r for r in read_jsonl(self.run.evidence / "provider.jsonl") if "kind" in r])
+        self.keys_at = set(json.loads(self.run.rui_cmd("request", "list", log=False).stdout or "[]"))
+        self.t0 = now_ns()
+
+    def received(self):
+        chunks = read_jsonl(self.run.term_dir(self.term) / "input.jsonl")[self.inputs_at:]
+        return chunks, b"".join(bytes.fromhex(c["hex"]) for c in chunks)
+
+    def new_frames(self):
+        return frames(self.run, self.term)[self.frames_at:]
+
+    def provider(self):
+        return [r for r in read_jsonl(self.run.evidence / "provider.jsonl") if "kind" in r][self.provider_at:]
+
+    def latest(self):
+        """What is shown now: an unchanged screen commits no new frame."""
+        return (frames(self.run, self.term) or [None])[-1]
+
+    def live(self, frame):
+        return frame and not frame["screen"].startswith("Browsing") and composer_ready(frame["screen"], frame["cursor"])
+
+    def progress_lines(self):
+        path = self.run.project / "progress.log"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def new_captures(self):
+        keys = set(json.loads(self.run.rui_cmd("request", "list", log=False).stdout or "[]")) - self.keys_at
+        out = []
+        for key in sorted(keys):
+            path = self.run.home / ".config/rui/requests" / f"{key}.json"
+            out.append({"key": key, "capture": json.loads(path.read_text()) if path.exists() else None})
+        return out
+
+    # Each grader returns (done, facts). done=True means the expected physical effect was observed.
+    def type(self):
+        chunks, data = self.received()
+        typed = [c for c in chunks if not c["text"].startswith("\x1b")]
+        shown = any("› hello physical" in f["screen"].split("\n")[f["cursor"][1]] for f in self.new_frames()
+                    if f["cursor"][1] < len(f["screen"].split("\n")))
+        return (b"hello physical" in data and shown and len(typed) >= 5 and b"\x1b[200~" not in data,
+                {"typed_chunks": len(typed), "paste_marker": b"\x1b[200~" in data, "draft_shown": shown,
+                 "non_key_bytes": [c["text"] for c in chunks if c["text"].startswith("\x1b")]})
+
+    def submit(self, text="hello physical", marker="Fixture answer"):
+        _, data = self.received()
+        provider = self.provider()
+        captures = self.new_captures()
+        answered = any(marker in f["screen"] for f in self.new_frames())
+        ok = (data.count(b"\r") == 1 and len(provider) == 1 and provider[0]["user_text"] == text and len(captures) == 1
+              and (captures[0]["capture"] or {}).get("text", {}).get("value") == text and answered)
+        return ok, {"cr_received": data.count(b"\r"), "provider": [(p["n"], p["user_text"]) for p in provider],
+                    "captures": captures, "answered": answered}
+
+    def pgup(self):
+        _, data = self.received()
+        browsing = any(f["screen"].startswith("Browsing") for f in self.new_frames())
+        count = data.count(b"\x1b[5~") + data.count(b"\x1b[5;2~")
+        return count >= 2 and browsing, {"pgup_sequences": count, "browsing_frame": browsing, "bytes": data.hex()}
+
+    def ctrl_g(self):
+        _, data = self.received()
+        last = self.latest()
+        return b"\x07" in data and bool(self.live(last)), {"ctrl_g": b"\x07" in data, "live": bool(self.live(last))}
+
+    def wheel_up(self):
+        _, data = self.received()
+        ups = sum(data.count(seq) for seq in UP)
+        mouse = data.count(b"\x1b[<") + data.count(b"\x1b[M")
+        moved = any(f["screen"].startswith("Browsing") for f in self.new_frames())
+        return (ups + mouse) >= 1 and moved, {"arrow_up_sequences": ups, "mouse_reports": mouse, "scrolled": moved,
+                                              "bytes": data.hex()[:400]}
+
+    def wheel_down(self):
+        _, data = self.received()
+        downs = sum(data.count(seq) for seq in DOWN)
+        last = self.latest()
+        return downs >= 1 and bool(self.live(last)), {"arrow_down_sequences": downs, "live": bool(self.live(last))}
+
+    def arrows(self):
+        _, data = self.received()
+        ups, downs = sum(data.count(s) for s in UP), sum(data.count(s) for s in DOWN)
+        last = self.latest()
+        return ups >= 3 and downs >= 3 and bool(self.live(last)), {"up": ups, "down": downs, "live": bool(self.live(last))}
+
+    def esc(self):
+        chunks, data = self.received()
+        lone_esc = any(c["hex"] == "1b" for c in chunks)
+        browsed = any(f["screen"].startswith("Browsing") for f in self.new_frames())
+        last = self.latest()
+        return lone_esc and browsed and bool(self.live(last)), {"lone_esc": lone_esc, "browsed": browsed, "live": bool(self.live(last))}
+
+    def consent_shown(self):
+        shown = [f for f in self.new_frames() if "Run Bash" in f["screen"]]
+        provider = self.provider()
+        return bool(shown) and any(p["kind"] == "consent-call" for p in provider), {
+            "prompt_frame_gen": shown[0]["gen"] if shown else None, "provider": [(p["n"], p["kind"]) for p in provider]}
+
+    def consent_read(self):
+        _, data = self.received()
+        enabled = [f for f in self.new_frames() if "wc -l progress.log" in f["screen"] and "a + Enter" in f["screen"]]
+        return data.count(b"\x1b[6~") >= 1 and bool(enabled), {"pgdn_sequences": data.count(b"\x1b[6~"),
+                                                               "enabled_frame_gen": enabled[0]["gen"] if enabled else None}
+
+    def allow(self):
+        _, data = self.received()
+        lines = self.progress_lines()
+        summary = any(p["kind"] == "tool-summary" for p in self.provider())
+        return b"a" in data and b"\r" in data and lines == 30 and summary, {"progress_lines": lines, "tool_summary_request": summary}
+
+    def deny(self):
+        _, data = self.received()
+        provider = self.provider()
+        lines = self.progress_lines()
+        proposed = any(p["kind"] == "consent-call" for p in provider)
+        summary = any(p["kind"] == "tool-summary" for p in provider)
+        return proposed and summary and b"d\r" in data.replace(b"\x1b[6~", b"") and lines == 30, {
+            "progress_lines": lines, "proposed": proposed, "tool_result_delivered": summary}
+
+    def ctrl_c(self):
+        exit_path = self.run.term_dir(self.term) / "exit.json"
+        exited = json.loads(exit_path.read_text()) if exit_path.exists() else None
+        _, data = self.received()
+        ok = exited is not None and b"\x03" in data and exited["target_rc"] == "0" and exited["termios_restored"] \
+            and exited["alternate_screen_active_at_exit"] is False
+        return ok, {"ctrl_c": b"\x03" in data, "exit": exited and {k: exited[k] for k in
+                    ("target_rc", "termios_restored", "alternate_screen_active_at_exit")}}
+
+    def tmux_submit(self):
+        return self.submit("hello tmux")
+
+    def tmux_wheel(self):
+        _, data = self.received()
+        ups = sum(data.count(seq) for seq in UP)
+        moved = any(f["screen"].startswith("Browsing") for f in self.new_frames())
+        last = self.latest()
+        return ups >= 1 and moved and b"\x07" in data and bool(self.live(last)), {
+            "arrow_up_sequences": ups, "scrolled": moved, "back_live": bool(self.live(last)), "bytes": data.hex()[:400]}
+
+    def tmux_status(self):
+        page = [f for f in self.new_frames() if "Session: demo" in f["screen"] and "Work:" in f["screen"]]
+        return bool(page) and not self.provider(), {"status_frame_gen": page[0]["gen"] if page else None,
+                                                    "provider_requests": len(self.provider())}
+
+    def tmux_exit(self):
+        return self.ctrl_c()
+
+
+def coach_write(run, lines):
+    atomic_write(run.evidence / "physical" / "coach.txt", "\n".join(lines) + "\n")
+
+
+def cmd_coach_view(args):
+    """Runs inside the coach window: shows coach.txt; no input is read or recorded."""
+    path = pathlib.Path(args.run) / "evidence" / "physical" / "coach.txt"
+    (path.parent / "coach-view.pid").write_text(str(os.getpid()))
+    shown = None
+    while True:
+        text = path.read_text() if path.exists() else "waiting for verify-rui…\n"
+        if text != shown:
+            sys.stdout.write("\x1b[2J\x1b[H" + text)
+            sys.stdout.flush()
+            shown = text
+            if text.startswith("DONE"):
+                return
+        time.sleep(0.2)
+
+
+REHEARSAL_INPUT = {
+    "type": [b"hello physical"], "enter": [b"\r"], "pgup": [b"\x1b[5~", b"\x1b[5~"], "ctrl-g": [b"\x07"],
+    "wheel-up": [b"\x1b[A"] * 3, "wheel-down": [b"\x1b[B"] * 3, "arrows": [b"\x1b[A"] * 3 + [b"\x1b[B"] * 3,
+    "esc": [b"\x1b[5~", b"\x1b"], "consent": [b"consent check", b"\r"], "read": [b"\x1b[6~"] * 4,
+    "allow": [b"a", b"\r"], "deny": [b"consent check", b"\r", b"WAIT:Run Bash"] + [b"\x1b[6~"] * 4 + [b"d", b"\r"],
+    "ctrl-c": [b"\x03"], "tmux-type": [b"hello tmux", b"\r"], "tmux-wheel": [b"\x1b[A"] * 3 + [b"\x07"],
+    "tmux-status": [b"/status", b"\r"], "tmux-exit": [b"\x1b", b"\x03"],
+}
+
+
+def rehearse_inject(run, term, step, via):
+    """Synthetic stand-in for the human. Typing goes one byte per write, like key presses."""
+    for payload in REHEARSAL_INPUT[step]:
+        if payload.startswith(b"WAIT:"):
+            marker = payload[5:].decode()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and not any(marker in f["screen"] for f in frames(run, term)[-3:]):
+                time.sleep(0.1)
+            continue
+        pieces = [bytes([b]) for b in payload] if not payload.startswith(b"\x1b") and len(payload) > 1 else [payload]
+        for piece in pieces:
+            subprocess.run([sys.executable, str(HERE), "send", str(run.root), term, "--hex", piece.hex(), "--via", via],
+                           check=True, capture_output=True)
+            time.sleep(0.06 if len(pieces) > 1 else 0.6)
+
+
+def cmd_physical(args):
+    """Guided ~5-minute physical-input session, graded automatically from owned evidence."""
+    created = subprocess.run([sys.executable, str(HERE), "new", args.sha, "--seed", "4",
+                              "--label", "physical-rehearsal" if args.rehearse else "physical"], capture_output=True, text=True)
+    if created.returncode != 0:
+        die(f"new run failed: {created.stderr}")
+    run = Run(created.stdout.strip().splitlines()[-1])
+    doctor = subprocess.run([sys.executable, str(HERE), "doctor", str(run.root), "--expect-sha", args.sha], capture_output=True, text=True)
+    if doctor.returncode != 0:
+        print(doctor.stdout)
+        die("doctor failed; not driving this run")
+    physical = run.evidence / "physical"
+    physical.mkdir(parents=True)
+    mode = "REHEARSAL (synthetic L1/L3 input; validates tooling only, NOT physical evidence)" if args.rehearse \
+        else "SMOKE (GUI launch and restore only; no input, NOT physical evidence)" if args.smoke \
+        else "PHYSICAL (L4: a human's keyboard, wheel and trackpad in Terminal.app)"
+    print(f"run: {run.root}\nmode: {mode}\nbuild: {run.meta['sha']} rui sha256 {run.meta['binary_sha256']}")
+    results = {"mode": mode, "rehearsal": args.rehearse, "sha": run.meta["sha"], "binary_sha256": run.meta["binary_sha256"],
+               "run": str(run.root), "app": args.app, "started": wall(), "steps": []}
+    python = str(VENV_PYTHON if VENV_PYTHON.exists() else sys.executable)
+
+    def open_gui_tap(name, argv, columns_rows="100x30"):
+        term = run.term_dir(name)
+        term.mkdir(parents=True)
+        env_file = term / "env.json"
+        env_file.write_text(json.dumps(run.env(COLORTERM="truecolor")))
+        script = run.scratch / f"{name}.command"
+        script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui %s (owned test window)\\007'\nexec %s %s _tap %s --source %s --cwd %s --env @%s --mode terminal --hold -- %s\n" % (
+            name, shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(term)), shlex.quote(run.meta["source"]),
+            shlex.quote(str(run.project)), shlex.quote(str(env_file)), shlex.join(argv)))
+        script.chmod(0o700)
+        atomic_write(term / "term.json", json.dumps({"name": name, "surface": "gui", "app": args.app, "argv": argv, "script": str(script)}, indent=1))
+        subprocess.run(["open", "-a", args.app, str(script)], check=True)
+        wait_meta(term, timeout=30)
+        meta = json.loads((term / "meta.json").read_text())
+        run.own("tap", meta["tap_pid"], term=name)
+        append_jsonl(run.evidence / "injections.jsonl", {"t_ns": now_ns(), "wall": wall(), "term": name, "via": "gui-open", "app": args.app})
+
+    def run_steps(term, steps, via):
+        grader = Grader(run, term)
+        for index, (step_id, instruction, grade, timeout) in enumerate(steps, 1):
+            grader.mark()
+            started, deadline = now_ns(), time.monotonic() + timeout
+            coach_write(run, [f"verify-rui physical session — {mode}", f"step {index}/{len(steps)}  [{step_id}]", "",
+                              instruction, "", f"(waiting up to {timeout}s; this window only shows instructions)"])
+            print(f"[{step_id}] {instruction.splitlines()[0]}", flush=True)
+            if args.rehearse and step_id not in (args.rehearse_omit or []):
+                rehearse_inject(run, term, step_id, via)
+            done, facts = False, {}
+            while time.monotonic() < deadline:
+                done, facts = getattr(grader, grade)()
+                if done:
+                    break
+                time.sleep(0.25)
+            if done and grade in ("submit", "tmux_submit", "allow", "deny"):
+                time.sleep(1.0)  # catch a late duplicate before grading final
+                done, facts = getattr(grader, grade)()
+            chunks, _ = grader.received()
+            record = {"step": step_id, "term": term, "instruction": instruction, "result": "PASS" if done else "MISSING",
+                      "t_start_ns": started, "t_end_ns": now_ns(), "facts": facts,
+                      "received": [{"t_ns": c["t_ns"], "hex": c["hex"], "text": c["text"]} for c in chunks],
+                      "input_layer": "L1-FIFO synthetic" if args.rehearse and via == "fifo" else ("L3 synthetic client bytes" if args.rehearse else "L4 physical")}
+            results["steps"].append(record)
+            append_jsonl(physical / "steps.jsonl", record)
+            subprocess.run([sys.executable, str(HERE), "screen", str(run.root), term, "--label", f"phys-{index:02d}-{step_id}"],
+                           capture_output=True)
+            print(f"   -> {record['result']} {json.dumps(facts, ensure_ascii=False)[:300]}", flush=True)
+            if not done and step_id in ("ctrl-c", "tmux-exit"):
+                pass
+            elif not done:
+                coach_write(run, [f"step {step_id}: not observed — moving on", "", instruction])
+                time.sleep(2)
+
+    try:
+        if args.rehearse:
+            subprocess.run([sys.executable, str(HERE), "term", str(run.root), "phys", "--surface", "pty", "--session", "approve",
+                            "--size", "100x30"], check=True, capture_output=True)
+        else:
+            open_gui_tap("phys", [str(run.rui), "session", "resume", "--store", str(run.store), "--", "approve"])
+            coach_script = run.scratch / "coach.command"
+            coach_script.write_text("#!/bin/sh\nprintf '\\033]0;verify-rui COACH (read only)\\007'\nexec %s %s _coach-view %s\n" % (
+                shlex.quote(python), shlex.quote(str(HERE)), shlex.quote(str(run.root))))
+            coach_script.chmod(0o700)
+            coach_write(run, ["verify-rui physical session", "", "Starting… the Rui window is the other new window."])
+            subprocess.run(["open", "-a", args.app, str(coach_script)], check=True)
+            deadline = time.monotonic() + 20
+            while not (physical / "coach-view.pid").exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            if (physical / "coach-view.pid").exists():
+                run.own("coach-view", int((physical / "coach-view.pid").read_text()))
+        subprocess.run([sys.executable, str(HERE), "wait", str(run.root), "phys", "--marker", "›", "--composer", "--timeout", "30"],
+                       check=True, capture_output=True)
+        if args.smoke:
+            # Launch check only: the owned GUI window reached Rui's composer; end it by SIGTERM.
+            subprocess.run([sys.executable, str(HERE), "screen", str(run.root), "phys", "--label", "smoke-composer"], capture_output=True)
+            subprocess.run([sys.executable, str(HERE), "signal", str(run.root), "phys", "TERM"], check=True, capture_output=True)
+            deadline = time.monotonic() + 10
+            while not (run.term_dir("phys") / "exit.json").exists() and time.monotonic() < deadline:
+                time.sleep(0.1)
+            exited = json.loads((run.term_dir("phys") / "exit.json").read_text()) if (run.term_dir("phys") / "exit.json").exists() else None
+            ok = bool(exited and exited["target_rc"] == "0" and exited["termios_restored"] and exited["alternate_screen_active_at_exit"] is False)
+            received = read_jsonl(run.term_dir("phys") / "input.jsonl")
+            results["steps"].append({"step": "smoke-launch", "result": "PASS" if ok else "MISSING", "input_layer": "none (no input injected)",
+                                     "facts": {"exit": exited and {k: exited[k] for k in ("target_rc", "termios_restored", "alternate_screen_active_at_exit")},
+                                               "terminal_replies_received": [c["text"] for c in received]}})
+            print(json.dumps(results["steps"][-1], ensure_ascii=False))
+            return
+        run_steps("phys", PHYSICAL_STEPS, "fifo")
+        if not args.no_tmux:
+            subprocess.run([sys.executable, str(HERE), "term", str(run.root), "phys-tmux", "--surface",
+                            "tmux-attached" if args.rehearse else "tmux-detached", "--session", "demo", "--size", "100x30"],
+                           check=True, capture_output=True)
+            if not args.rehearse:
+                subprocess.run([sys.executable, str(HERE), "gui", str(run.root), "phys-tmux", "--open", "--app", args.app],
+                               check=True, capture_output=True)
+            subprocess.run([sys.executable, str(HERE), "wait", str(run.root), "phys-tmux", "--marker", "›", "--composer", "--timeout", "30"],
+                           check=True, capture_output=True)
+            run_steps("phys-tmux", TMUX_STEPS, "client")
+    finally:
+        missing = [s["step"] for s in results["steps"] if s["result"] != "PASS"]
+        expected = 1 if args.smoke else len(PHYSICAL_STEPS) + (0 if args.no_tmux else len(TMUX_STEPS))
+        results["ended"] = wall()
+        results["missing"] = missing
+        results["incomplete"] = len(results["steps"]) < expected
+        results["verdict"] = ("REHEARSAL-" if args.rehearse else "SMOKE-" if args.smoke else "") + ("PASS" if not missing and not results["incomplete"] else "ISSUES")
+        (physical / "result.json").write_text(json.dumps(results, indent=1, ensure_ascii=False))
+        coach_write(run, [f"DONE  verdict: {results['verdict']}", f"missing: {missing or 'none'}", "You can close both verify-rui windows."])
+        print(f"\nVERDICT {results['verdict']}  missing={missing}  result: {physical / 'result.json'}")
+        if missing or results["incomplete"]:
+            print("FAIL: physical events missing — these rows are NOT verified.", file=sys.stderr)
+        if not args.keep:
+            subprocess.run([sys.executable, str(HERE), "cleanup", str(run.root)], capture_output=True)
+            print(f"cleaned up; evidence preserved under {run.evidence}")
+    sys.exit(0 if results["verdict"].endswith("PASS") else 1)
+
+
 # ---------------------------------------------------------------- cleanup
 
 
@@ -1156,6 +1524,14 @@ def cmd_cleanup(args):
             act("exported evidence")
         except Exception as error:
             act("export failed", error=repr(error))
+    for meta_path in sorted((run.evidence / "terms").glob("*/meta.json")) if (run.evidence / "terms").exists() else []:
+        meta = json.loads(meta_path.read_text())
+        wrapper = process_start(meta["child_pid"])
+        if wrapper and wrapper[0] == meta["child_lstart"]:
+            for child in subprocess.run(["pgrep", "-P", str(meta["child_pid"])], capture_output=True, text=True).stdout.split():
+                os.kill(int(child), signal.SIGTERM)
+                act("SIGTERM live client of owned terminal", term=meta_path.parent.name, pid=int(child))
+            time.sleep(0.5)
     if run.sock.exists():
         result = run.tmux("kill-server", check=False)
         act("tmux kill-server (private socket)", socket=str(run.sock), rc=result.returncode)
@@ -1261,6 +1637,16 @@ def main():
     p.add_argument("run"); p.add_argument("name"); p.add_argument("--open", action="store_true")
     p.add_argument("--app", default="Terminal")
     p.set_defaults(func=cmd_gui)
+    p = sub.add_parser("physical", help="guided ~5-minute physical keys/wheel/consent session, auto-graded (or --rehearse)")
+    p.add_argument("sha"); p.add_argument("--rehearse", action="store_true", help="synthetic input; validates tooling only")
+    p.add_argument("--rehearse-omit", nargs="+", metavar="STEP", help="rehearsal negative control: skip these steps' input")
+    p.add_argument("--app", default="Terminal"); p.add_argument("--no-tmux", action="store_true")
+    p.add_argument("--keep", action="store_true", help="skip cleanup at the end")
+    p.add_argument("--smoke", action="store_true", help="open the owned GUI windows, reach the composer, SIGTERM; no input")
+    p.set_defaults(func=cmd_physical)
+    p = sub.add_parser("_coach-view")
+    p.add_argument("run")
+    p.set_defaults(func=cmd_coach_view)
     p = sub.add_parser("cleanup", help="stop owned processes/tmux server; archive Store; keep evidence")
     p.add_argument("run"); p.add_argument("--no-export", action="store_true")
     p.set_defaults(func=cmd_cleanup)

@@ -84,7 +84,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 | Snapshot | `$V screen "$RUN" NAME --label 02-draft` (committed frame; tmux also gets `capture-pane` plain/ANSI and pane flags) |
 | One-shot Rui | `$V rui "$RUN" request inspect --store STORE --key KEY` (STORE = `jq -r .store "$RUN/run.json"`) |
 | Replay input | `$V replay "$RUN" SRC NEW [--from-run OTHER] [--skip-reports]` (re-feeds SRC's received bytes, with original gaps, into a new PTY) |
-| Physical terminal | `$V gui "$RUN" NAME --open` (Terminal.app attached to NAME's tmux window, for a human) |
+| Physical terminal | `$V physical FULLSHA` (guided, auto-graded L4 session for a present human; `--smoke` launch check, `--rehearse` tooling check). `$V gui "$RUN" NAME --open` attaches Terminal.app to one tmux window by hand |
 
 `wait` matches committed frames only. A committed frame is the cells at a synchronized-update close, decoded by the repo's `tests/integration/terminal_screen.ScreenCapture`. Raw-byte markers are not evidence. Always pass `--after GEN` from the previous step, so the match is a new frame and not history. `--composer` additionally requires the cursor to sit on the `› ` prompt row.
 
