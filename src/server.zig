@@ -254,6 +254,27 @@ const Intake = struct {
             self.fd = -1;
         }
 
+        fn canCleanupOnIntake(self: *const Exchange) bool {
+            if (self.retained_scratch != null) return false;
+            if (self.reply) |reply| {
+                if (reply.body != .none and reply.body != .json) return false;
+            }
+            if (self.ingress == null and self.request == null) return true;
+            // Reserved routes can own metadata, but cannot capture files.
+            const route = self.route orelse return false;
+            return route.isControl() or route == .host_info;
+        }
+
+        fn finishRetirement(self: *Exchange) void {
+            self.closeSocket();
+            // File-free retirement must not wait for a local worker while
+            // holding either a classification or a total intake place.
+            if (self.canCleanupOnIntake()) {
+                std.debug.assert(self.cleanup());
+                self.state = .closed;
+            }
+        }
+
         fn cleanup(self: *Exchange) bool {
             const host = self.host;
             if (self.reply) |reply| {
@@ -334,7 +355,10 @@ const Intake = struct {
                 else => "invocation_error",
             };
             respondStatic(self.host.io, reply, status, kind, code);
-            self.state = .reply;
+            // Detect a disconnected predecessor before classifying another
+            // peer in this socket pass. Half-closed clients still receive
+            // their bounded error through the ordinary reply state.
+            self.state = if (reply.advance(self.fd) catch true) .retired else .reply;
         }
 
         fn read(self: *Exchange) !void {
@@ -366,6 +390,12 @@ const Intake = struct {
                             var discovery: usize = 0;
                             for (self.host.intake.?.exchanges.items) |peer| {
                                 if (peer.route) |route| {
+                                    // A prior reply can finish earlier in this
+                                    // same socket pass, before retirement is
+                                    // serviced. Ordinary scratch custody still
+                                    // counts until its worker releases it.
+                                    if (peer.state == .closed or
+                                        (peer.state == .retired and peer.canCleanupOnIntake())) continue;
                                     if (route.isControl()) {
                                         control += 1;
                                     } else if (route == .host_info) {
@@ -525,7 +555,7 @@ const Intake = struct {
     fn serviceWorkers(self: *Intake) void {
         // Retire peers even when both workers are busy or cleanup is not due.
         for (self.exchanges.items) |exchange| {
-            if (exchange.state == .retired) exchange.closeSocket();
+            if (exchange.state == .retired) exchange.finishRetirement();
         }
         for (&self.workers, 0..) |*worker, worker_index| {
             worker.mutex.lockUncancelable(self.host.io);
@@ -546,7 +576,7 @@ const Intake = struct {
                             exchange.deadline = @as(i128, nowNs(self.host)) + 60 * std.time.ns_per_s;
                     }
                 }
-                if (exchange.state == .retired) exchange.closeSocket();
+                if (exchange.state == .retired) exchange.finishRetirement();
                 worker.failure = null;
                 worker.exchange = null;
                 worker.state = .idle;
@@ -616,8 +646,8 @@ const Intake = struct {
                         if (now >= exchange.deadline) exchange.fail(error.TransferInactive) else fd = exchange.fd;
                     },
                     .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
-                        exchange.prepare() catch |err| exchange.fail(err);
                         exchange.state = .reply;
+                        exchange.prepare() catch |err| exchange.fail(err);
                     },
                     .reply => {
                         if (exchange.reply) |reply| {
@@ -665,16 +695,7 @@ const Intake = struct {
                     else => {},
                 }
             }
-            var index: usize = 0;
-            while (index < self.exchanges.items.len) {
-                if (self.exchanges.items[index].state != .closed) {
-                    index += 1;
-                    continue;
-                }
-                if (self.exchanges.items[index].destroy()) {
-                    _ = self.exchanges.orderedRemove(index);
-                } else index += 1;
-            }
+            self.retireExchanges();
             if (!listener_open.* and self.exchanges.items.len == 0) return failure orelse error.EffectAwareShutdown;
             if (!listener_open.* or self.polls.items[0].revents == 0) continue;
             // Accept a bounded batch, then return to existing exchanges.
@@ -726,6 +747,23 @@ const Intake = struct {
                 if (self.host.intake_capacity < descriptor_capacity.default_intake and
                     self.exchanges.items.len >= self.host.intake_capacity + 3) break;
             }
+        }
+    }
+
+    fn retireExchanges(self: *Intake) void {
+        var index: usize = 0;
+        while (index < self.exchanges.items.len) {
+            const exchange = self.exchanges.items[index];
+            // Finish this socket pass's retirements before considering the
+            // listener. No unclassified peer needs evicting for a freed place.
+            if (exchange.state == .retired) exchange.finishRetirement();
+            if (exchange.state != .closed) {
+                index += 1;
+                continue;
+            }
+            if (exchange.destroy()) {
+                _ = self.exchanges.orderedRemove(index);
+            } else index += 1;
         }
     }
 
@@ -6661,6 +6699,258 @@ test "control response variants fit exact worst-case JSON bounds" {
     );
 }
 
+test "retired reserved exchanges cannot block their successors while workers are occupied" {
+    for (std.enums.values(Route)) |route| {
+        if (!route.isControl() and route != .host_info) continue;
+        for ([_]Intake.Exchange.State{ .retired, .closed }) |retired_state| {
+            var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+            var intake: Intake = .{ .host = &host };
+            host.intake = &intake;
+            defer intake.exchanges.deinit(host.allocator);
+            defer for (intake.exchanges.items) |exchange| {
+                std.debug.assert(exchange.destroy());
+            };
+            // Neither local-work lane can reclaim these entries for us.
+            for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+            const places: usize = if (route == .host_info) 1 else 2;
+            for (0..places) |_| {
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try intake.accept(sockets[0]);
+                const peer = intake.exchanges.items[intake.exchanges.items.len - 1];
+                peer.route = route;
+                peer.state = retired_state;
+                if (retired_state == .closed) peer.closeSocket();
+            }
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try intake.accept(sockets[0]);
+            const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
+            const path = switch (route) {
+                .host_info => "host-info",
+                .host_stop => "control/host-stop",
+                .session_stop => "control/session-stop",
+                .model_interruption => "control/model-interruption",
+                .permission_decision => "control/permission-decision",
+                .unsupported_control => "control/unknown",
+                else => unreachable,
+            };
+            var header: [128]u8 = undefined;
+            const line = try std.fmt.bufPrint(&header, "POST /v1/{s} HTTP/1.1\r\n", .{path});
+            try writeAll(host.io, sockets[1], line);
+            try successor.read();
+            try std.testing.expectEqual(.header, successor.state);
+            // A live reservation must still reject excess work.
+            for (intake.exchanges.items[0..places]) |peer| peer.state = .header;
+            successor.route = null;
+            try writeAll(host.io, sockets[1], line);
+            successor.header_bytes.clearRetainingCapacity();
+            try std.testing.expectError(if (route == .host_info) error.DiscoveryCapacity else error.ControlCapacity, successor.read());
+            for (intake.exchanges.items[0..places]) |peer| peer.state = .retired;
+            intake.serviceWorkers();
+            for (intake.exchanges.items[0..places]) |peer| {
+                try std.testing.expectEqual(.closed, peer.state);
+                try std.testing.expectEqual(@as(c_int, -1), peer.fd);
+            }
+        }
+    }
+}
+
+test "disconnected reserved peers release classification while half-closed peers receive errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    for ([_][]const u8{ "host-info", "control/session-stop" }) |path| {
+        for ([_]bool{ false, true }) |half_closed| {
+            for ([_]bool{ true, false }) |body| {
+                var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+                var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
+                host.retention = &retention;
+                var intake: Intake = .{ .host = &host };
+                host.intake = &intake;
+                defer intake.exchanges.deinit(host.allocator);
+                defer for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
+                const places: usize = if (std.mem.eql(u8, path, "host-info")) 1 else 2;
+                var clients: [2]c_int = .{ -1, -1 };
+                defer for (clients) |fd| {
+                    if (fd >= 0) _ = std.c.close(fd);
+                };
+                var header: [128]u8 = undefined;
+                const line = try std.fmt.bufPrint(&header, "POST /v1/{s} HTTP/1.1\r\n", .{path});
+                for (0..places) |index| {
+                    var sockets: [2]c_int = undefined;
+                    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                    clients[index] = sockets[1];
+                    try setNonblocking(sockets[0]);
+                    try intake.accept(sockets[0]);
+                    const peer = intake.exchanges.items[index];
+                    try writeAll(host.io, sockets[1], line);
+                    if (body) try writeAll(host.io, sockets[1], "Content-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: 2\r\n\r\n{");
+                    try peer.read();
+                    if (half_closed) {
+                        try std.testing.expectEqual(@as(c_int, 0), std.c.shutdown(sockets[1], std.c.SHUT.WR));
+                    } else {
+                        _ = std.c.close(sockets[1]);
+                        clients[index] = -1;
+                    }
+                    // The listener can already have accepted the successor when
+                    // this socket pass observes EOF on its predecessor.
+                    peer.read() catch |err| peer.fail(err);
+                }
+                var sockets: [2]c_int = undefined;
+                try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+                defer _ = std.c.close(sockets[1]);
+                try intake.accept(sockets[0]);
+                const successor = intake.exchanges.items[places];
+                try writeAll(host.io, sockets[1], line);
+                if (half_closed) {
+                    try std.testing.expectError(if (places == 1) error.DiscoveryCapacity else error.ControlCapacity, successor.read());
+                    for (intake.exchanges.items[0..places], clients[0..places]) |peer, client| {
+                        while (!try peer.reply.?.advance(peer.fd)) {}
+                        peer.state = .retired;
+                        var response: [1024]u8 = undefined;
+                        const length = try std.posix.read(client, &response);
+                        try std.testing.expect(std.mem.startsWith(u8, response[0..length], "HTTP/1.1 400 "));
+                        try std.testing.expect(std.mem.indexOf(u8, response[0..length], "UnexpectedEndOfBody") != null);
+                    }
+                    successor.route = null;
+                    successor.header_bytes.clearRetainingCapacity();
+                    try writeAll(host.io, sockets[1], line);
+                }
+                const failure: ?anyerror = if (successor.read()) |_| null else |err| err;
+                try std.testing.expectEqual(@as(?anyerror, null), failure);
+                try std.testing.expectEqual(.header, successor.state);
+            }
+        }
+    }
+}
+
+test "file-free retirement releases intake places before acceptance with occupied workers" {
+    for ([_]?Route{ null, .host_info, .host_stop, .configure, .inspect }) |route| {
+        for ([_]bool{ false, true }) |service_workers| {
+            var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
+            var intake: Intake = .{ .host = &host };
+            defer intake.exchanges.deinit(host.allocator);
+            defer for (intake.exchanges.items) |exchange| {
+                std.debug.assert(exchange.destroy());
+            };
+            for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try setNonblocking(sockets[1]);
+            try intake.accept(sockets[0]);
+            const peer = intake.exchanges.items[0];
+            peer.route = route;
+            peer.fail(error.ClientCapacity);
+            // Complete a real bounded error reply, as the socket pass does.
+            while (!try peer.reply.?.advance(peer.fd)) {}
+            peer.state = .retired;
+            if (service_workers) intake.serviceWorkers();
+            // This is the same owner transition used between poll and accept.
+            intake.retireExchanges();
+            try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
+            var byte: [1024]u8 = undefined;
+            while (try std.posix.read(sockets[1], &byte) != 0) {}
+        }
+    }
+}
+
+test "retired ordinary capture still consumes its intake classification and resource place" {
+    for (std.enums.values(enum { ingress, retained_scratch, report })) |custody| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.scratch.set(root);
+        var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
+        var intake: Intake = .{ .host = &host };
+        host.intake = &intake;
+        defer intake.exchanges.deinit(host.allocator);
+        defer {
+            for (intake.exchanges.items) |exchange| {
+                if (exchange.retained_scratch) |*scratch| scratch.resources.?.removal = .native;
+                exchange.cleanup_retry_at = 0;
+                std.debug.assert(exchange.destroy());
+            }
+            std.debug.assert(host.scratch_used.load(.acquire) == 0);
+        }
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake, .state = .running };
+        for (0..host.intake_capacity) |_| {
+            var sockets: [2]c_int = undefined;
+            try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+            defer _ = std.c.close(sockets[1]);
+            try intake.accept(sockets[0]);
+            intake.exchanges.items[intake.exchanges.items.len - 1].route = .message;
+        }
+        const retained = intake.exchanges.items[0];
+        var retained_fd: ?c_int = null;
+        const budget: protocol.ScratchBudget = .{ .used = &host.scratch_used, .limit = 9000 };
+        switch (custody) {
+            .ingress => {
+                const ingress = try host.allocator.create(protocol.Ingress);
+                ingress.* = protocol.Ingress.init(host.allocator, .{
+                    .io = host.io,
+                    .fd = retained.fd,
+                    .content_length = 4096,
+                    .scratch_path = root,
+                    .request_number = 7,
+                    .retained_scratch = &retained.retained_scratch,
+                    .scratch_budget = budget,
+                    .expected_kind = .message,
+                });
+                retained.ingress = ingress;
+                // Seal the content file, but leave request framing incomplete.
+                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+            },
+            .retained_scratch, .report => {
+                const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
+                try file.writeStreamingAll(host.io, "abc");
+                try std.testing.expect(budget.reserve(3));
+                retained_fd = file.handle;
+                if (custody == .retained_scratch) {
+                    // Failed reclaim must stay off intake, even with no ingress left.
+                    retained.retained_scratch = named_scratch.Owner.init(host.io, file, null, "retained", budget, 3, .injected_failure);
+                } else {
+                    retained.route = .inspect;
+                    const reply = try retained.ensureReply();
+                    try reply.setReport(.{ .io = host.io, .file = file, .length = 3, .charged = 3, .budget = budget });
+                }
+            },
+        }
+        retained.state = .retired;
+        var sockets: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
+        defer _ = std.c.close(sockets[1]);
+        try intake.accept(sockets[0]);
+        const successor = intake.exchanges.items[intake.exchanges.items.len - 1];
+        try writeAll(host.io, sockets[1], "POST /v1/message HTTP/1.1\r\n");
+        try std.testing.expectError(error.ClientCapacity, successor.read());
+        intake.serviceWorkers();
+        intake.retireExchanges();
+        try std.testing.expectEqual(host.intake_capacity + 1, intake.exchanges.items.len);
+        try std.testing.expectEqual(.retired, retained.state);
+        try std.testing.expectEqual(@as(u64, 3), host.scratch_used.load(.acquire));
+        if (retained_fd) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFL) >= 0);
+        // Only worker cleanup releases the file and charge, once reclamation can
+        // succeed; the occupied lanes above must not perform it on intake.
+        if (retained.retained_scratch) |*scratch| scratch.resources.?.removal = .native;
+        retained.job = .cleanup;
+        retained.state = try retained.work();
+        try std.testing.expectEqual(.closed, retained.state);
+        try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
+        if (retained_fd) |fd| try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(fd, std.c.F.GETFL));
+    }
+}
+
 test "shutdown fences every unhanded route while preserving request and reply custody" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
     var exchange = Intake.Exchange{ .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
@@ -6690,6 +6980,9 @@ test "shutdown fences every unhanded route while preserving request and reply cu
     try intake.exchanges.append(std.testing.allocator, &exchange);
     exchange.route = .configure;
     exchange.state = .ready;
+    exchange.request = try std.testing.allocator.create(protocol.Request);
+    exchange.request.?.* = .{ .configure = .{} };
+    defer exchange.releaseRequest();
     host.effect_shutdown.store(true, .release);
     intake.serviceWorkers();
     try std.testing.expectEqual(.retired, exchange.state);
