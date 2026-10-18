@@ -76,7 +76,7 @@ It also prints macOS Accessibility and Screen Recording status for information o
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
-| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r BSpace PgUp PgDn S-PgUp Up Down End Home Tab WheelUp WheelDown` (wheel = SGR mouse report bytes) |
+| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r BSpace PgUp PgDn S-PgUp Up Down End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
 | Raw bytes | `$V send "$RUN" NAME --hex 1b5b4d2069730a` (tmux: `send-keys -H`) |
 | Through the attached client | add `--via client` (bytes enter tmux as terminal input, not `send-keys`) |
 | Signal Rui | `$V signal "$RUN" NAME INT\|TERM\|HUP` (verifies the PID is this terminal's Rui) |
