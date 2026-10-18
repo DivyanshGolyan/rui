@@ -3118,7 +3118,6 @@ fn formatModelFailure(
     try out.writeAll("\n");
 }
 
-
 fn finishCustodyNow(host: *Host, slot: *ExecutionSlot, token: execution.CustodyToken) void {
     // Capture checked identity while attached, but observe only after callers
     // have retired resources and this owner has released custody and the slot.
