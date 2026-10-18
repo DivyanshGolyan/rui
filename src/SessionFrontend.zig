@@ -35,6 +35,10 @@ inspect: Inspect = undefined,
 inspection_kind: Inspection = .status,
 command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
 command_text_length: usize = 0,
+// A Host command's worker started and its output has not been presented.
+// It may change configuration, so Messages and consent wait for it; exit
+// prints its output, which can carry recovery warnings.
+command_running: bool = false,
 inspection_submission: ?Submission.View = null,
 inspection_action: ?u64 = null,
 terminal: Terminal,
@@ -158,6 +162,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     const cause: ?anyerror = if (result) |_| null else |err| err;
     const plan = departure.exit(settled, cause, self.submission.view() != null);
     if (plan.recovery_before_notice) self.recoveryGuide();
+    if (self.command_running) self.commandOutputGuide();
     if (plan.failure) |err| {
         switch (err) {
             error.TerminalTooSmall => @import("TerminalText.zig").diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
@@ -188,6 +193,24 @@ fn quiesce(self: *Self) Settled {
     const admission = self.joinAdmission();
     if (self.reader.take() != null) self.reader.acknowledge();
     return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
+}
+
+/// Exit interrupted a Host command before its output was shown. That output
+/// can name a saved request to recover, so it follows restoration on stderr.
+fn commandOutputGuide(self: *const Self) void {
+    const io = self.init.io;
+    const stderr = std.Io.File.stderr();
+    const size = (self.inspection_file.stat(io) catch return).size;
+    if (size == 0) return;
+    stderr.writeStreamingAll(io, "rui: Interrupted command output:\n") catch return;
+    var buffer: [4096]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const count = self.inspection_file.readPositionalAll(io, &buffer, offset) catch return;
+        if (count == 0) return;
+        stderr.writeStreamingAll(io, buffer[0..count]) catch return;
+        offset += count;
+    }
 }
 
 fn recoveryGuide(self: *const Self) void {
@@ -418,6 +441,7 @@ fn driveActive(self: *Self) !void {
             self.history_render_started = false;
             self.reader_output_started = false;
             try self.reader.start(self.init.io, self, if (kind == .command) runCommand else inspectPage);
+            self.command_running = kind == .command;
             self.input.command_length = null;
         }
         if (self.reader.thread == null and (!self.consent.active() or self.history_requested != null or self.olderWanted()) and self.prepared_action == null) {
@@ -529,7 +553,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.input.command_length != null or !self.actionVisible() or self.dirty)) {
+                if (self.consent.promptCompleted(service, self.choice.pending() != .none, self.commandActive() or !self.actionVisible() or self.dirty)) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -560,8 +584,13 @@ fn actionVisible(self: *const Self) bool {
     return self.consent.presentation == .complete and screen.actionVisible() and screen.preview_complete;
 }
 
+/// A queued or running command ends consent freshness until it completes.
+fn commandActive(self: *const Self) bool {
+    return self.input.command_length != null or self.command_running;
+}
+
 fn approvalReady(self: *const Self) bool {
-    if (!self.actionVisible()) return false;
+    if (!self.actionVisible() or self.commandActive()) return false;
     const size = self.terminal.geometry();
     return size.row == self.terminal.size.row and size.col == self.terminal.size.col and self.terminal.screen.approvalReady();
 }
@@ -685,7 +714,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     };
     const submission = self.submission.view();
     // A Message waits for a pending command, which may change its configuration.
-    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and self.input.command_length == null and (submission == null or submission.?.kind == .message))) {
+    switch (self.input.feedSelected(byte, !self.opening and self.read_phase != .permission and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -697,7 +726,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
                 self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
             } else self.admitCommand();
         },
-        .busy => self.notice = if (self.input.command_length != null) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .width_report, .scroll_report, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event, &self.input.editors[self.input.active]),
             .interrupt, .eof => self.detached = true,
@@ -741,7 +770,11 @@ fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     // A pending inspection supersedes a silent read it cancelled.
     const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
+    // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
+    const command = self.command_running;
+    self.command_running = false;
+    if (command and end != .complete) self.consent.invalidate();
     if (end == .complete and self.read_phase == .history) {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
@@ -924,6 +957,9 @@ test "frontend commits spacing only for completed visible reads" {
 }
 
 fn showInspection(self: *Self) !void {
+    // Any completed inspection or command requires a fresh choice afterwards.
+    self.consent.invalidate();
+    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
     const size = (try self.inspection_file.stat(self.init.io)).size;
     if (size == 0) {
         self.notice = "Command finished with no output.";
@@ -949,8 +985,6 @@ fn showInspection(self: *Self) !void {
     try self.terminal.screen.showFile(self.init.io, self.inspection_file, false);
     // The page heading already says how to return.
     self.notice = null;
-    self.consent.invalidate();
-    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
 }
 
 /// Host commands keep their one-shot output owners. Their complete stdout and
