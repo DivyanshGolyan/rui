@@ -5,6 +5,7 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
 const transport_options = @import("transport_options");
+const transport_policy = @import("transport_policy.zig");
 
 const c = @import("curl");
 
@@ -58,25 +59,6 @@ fn retainedNamedScratch(
     return .init(io, file, secondary_file, name, budget, charged, removal);
 }
 
-pub const TransportDisposition = enum {
-    success,
-    permanent_http,
-    temporary_http,
-    temporary_connection,
-    permanent_transport,
-    authentication_failure,
-    tls_verification_failure,
-    invalid_headers,
-    unsupported_http_version,
-};
-
-pub const TransportEvidence = struct {
-    disposition: TransportDisposition,
-    http_status: u16 = 0,
-    retry_after_ms: ?u64 = null,
-    retry_after_deadline_ms: ?i64 = null,
-};
-
 pub const ProtocolObservation = struct {
     http_version: c_long,
     connection_id: c.curl_off_t,
@@ -91,7 +73,7 @@ pub const TransportHandleIdentity = *const opaque {};
 pub const CompletionOutcome = union(enum) {
     response_capture_failed: CaptureFailure,
     request_source_failed,
-    transport_finished: TransportEvidence,
+    transport_finished: transport_policy.Evidence,
 };
 
 pub const Completion = struct {
@@ -137,7 +119,7 @@ pub const Reactor = struct {
     }
 
     pub fn add(self: *Reactor, transfer: *Transfer) !void {
-        transfer.armTimeout();
+        transfer.inactivity.arm(transfer.now());
         const private: ?*anyopaque = switch (transfer.completion_identity_fault) {
             .none => @ptrCast(transfer),
             .missing => null,
@@ -171,13 +153,13 @@ pub const Reactor = struct {
             transfer.finish(.{ .response_capture_failed = failure }, 0);
             return .progressed;
         }
-        if (resume_allowed and transfer.in_reactor and transfer.timeout_context.isPaused()) {
+        if (resume_allowed and transfer.in_reactor and transfer.inactivity.isPaused()) {
             if (response_write_on_resume.*) {
                 transfer.response.fail_write = true;
                 response_write_on_resume.* = false;
             }
             // Clear before unpausing: curl may synchronously pause again in its callback.
-            transfer.timeout_context.resumeAfterPause(std.Io.Clock.Timestamp.now(transfer.timeout_context.io, .awake));
+            transfer.inactivity.resumeAfterPause(transfer.now());
             const result = c.curl_easy_pause(transfer.easy, c.CURLPAUSE_CONT);
             if (result != c.CURLE_OK) {
                 const outcome = try transfer.completionOutcome(result);
@@ -187,9 +169,11 @@ pub const Reactor = struct {
             }
             return .progressed;
         }
-        if (!transfer.queueDeadlineExpired()) return .not_ready;
+        // curl does not invoke progress callbacks for an easy waiting in the
+        // multi connection queue, so waiting consumes the same interval here.
+        if (!transfer.inactivity.expiredAt(transfer.now())) return .not_ready;
         self.cancel(transfer);
-        transfer.finish(.{ .transport_finished = .{ .disposition = .temporary_connection } }, 0);
+        transfer.finish(.{ .transport_finished = transport_policy.expired_in_queue }, 0);
         return .progressed;
     }
 
@@ -537,44 +521,6 @@ pub const ObservationNames = struct {
     alternate_model: []const u8 = "",
 };
 
-const TimeoutContext = struct {
-    io: std.Io,
-    inactivity_ns: i64,
-    last_download: c.curl_off_t = 0,
-    last_progress: std.Io.Clock.Timestamp = undefined,
-    paused_at: ?std.Io.Clock.Timestamp = null,
-    armed: bool = false,
-    expired: bool = false,
-
-    fn isPaused(self: *const TimeoutContext) bool {
-        return self.paused_at != null;
-    }
-
-    fn pause(self: *TimeoutContext, now: std.Io.Clock.Timestamp) void {
-        std.debug.assert(self.paused_at == null);
-        self.paused_at = now;
-    }
-
-    fn resumeAfterPause(self: *TimeoutContext, now: std.Io.Clock.Timestamp) void {
-        const paused_at = self.paused_at orelse unreachable;
-        self.last_progress = self.last_progress.addDuration(paused_at.durationTo(now));
-        self.paused_at = null;
-    }
-
-    fn noteDownload(self: *TimeoutContext, now: std.Io.Clock.Timestamp, downloaded: c.curl_off_t) void {
-        if (downloaded == self.last_download) return;
-        self.last_download = downloaded;
-        self.last_progress = now;
-    }
-
-    fn expiredAt(self: *TimeoutContext, now: std.Io.Clock.Timestamp) bool {
-        if (!self.armed or self.isPaused()) return false;
-        if (self.last_progress.durationTo(now).raw.nanoseconds < self.inactivity_ns) return false;
-        self.expired = true;
-        return true;
-    }
-};
-
 pub const Transfer = struct {
     const Local = union(enum) {
         receiving,
@@ -594,7 +540,7 @@ pub const Transfer = struct {
     response_owned: bool = true,
     header_context: HeaderContext = .{},
     error_buffer: [c.CURL_ERROR_SIZE]u8 = @splat(0),
-    timeout_context: TimeoutContext,
+    inactivity: transport_policy.Inactivity,
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
     binding: store.AttemptBinding,
@@ -656,10 +602,7 @@ pub const Transfer = struct {
             .binding = binding,
             .requires_h2 = !std.mem.startsWith(u8, endpoint, "http://"),
             .completion_identity_fault = options.completion_identity_fault,
-            .timeout_context = .{
-                .io = request.io,
-                .inactivity_ns = inactivity_ns,
-            },
+            .inactivity = .{ .limit_ns = inactivity_ns },
         };
         try setOpt(easy, c.CURLOPT_URL, endpoint_z.ptr);
         try setOpt(easy, c.CURLOPT_POST, @as(c_long, 1));
@@ -687,7 +630,7 @@ pub const Transfer = struct {
         try setOpt(easy, c.CURLOPT_CONNECTTIMEOUT_MS, connect_timeout_ms);
         try setOpt(easy, c.CURLOPT_NOPROGRESS, @as(c_long, 0));
         try setOpt(easy, c.CURLOPT_XFERINFOFUNCTION, xferInfoCallback);
-        try setOpt(easy, c.CURLOPT_XFERINFODATA, &self.timeout_context);
+        try setOpt(easy, c.CURLOPT_XFERINFODATA, self);
         try setOpt(easy, c.CURLOPT_HTTP_VERSION, @as(c_long, if (std.mem.startsWith(u8, endpoint, "http://"))
             c.CURL_HTTP_VERSION_1_1
         else
@@ -740,9 +683,7 @@ pub const Transfer = struct {
                 std.debug.assert(!self.in_reactor);
                 if (!finished.seal_queued and self.captureFailure() == null) {
                     switch (finished.completion.outcome) {
-                        .transport_finished => |evidence| if (evidence.disposition == .success or
-                            evidence.disposition == .permanent_http or evidence.disposition == .temporary_http)
-                        {
+                        .transport_finished => |evidence| if (evidence.disposition.retainsResponse()) {
                             if (!self.writer.seal(&self.response, fail_seal)) return .pending;
                             finished.seal_queued = true;
                         },
@@ -758,69 +699,31 @@ pub const Transfer = struct {
         }
     }
 
-    fn transportEvidence(self: *Transfer, result: c.CURLcode) !TransportEvidence {
+    fn transportEvidence(self: *Transfer, result: c.CURLcode) !transport_policy.Evidence {
         var version: c_long = 0;
         if (c.curl_easy_getinfo(self.easy, c.CURLINFO_HTTP_VERSION, &version) != c.CURLE_OK)
             return error.InvalidHttpEvidence;
-        // Only the patched TLS ALPN guard emits this marker. A negotiated H2
-        // stream can also fail with CURLE_HTTP2 before any response version.
-        if (self.requires_h2 and result == c.CURLE_HTTP2 and
-            std.mem.startsWith(u8, &self.error_buffer, "RUI_ALPN_H2_REQUIRED:"))
-            return .{ .disposition = .unsupported_http_version };
-        const disposition: TransportDisposition = if (self.header_context.invalid)
-            .invalid_headers
-        else if (result != c.CURLE_OK)
-            curlFailureDisposition(result, self.timeout_context.expired)
-        else
-            .success;
-        if (result == c.CURLE_OK) {
-            if (version != (if (!self.requires_h2)
-                c.CURL_HTTP_VERSION_1_1
-            else
-                c.CURL_HTTP_VERSION_2_0))
-            {
-                return .{ .disposition = .unsupported_http_version };
-            }
-        }
-        if (disposition != .success) return .{
-            .disposition = disposition,
-            .retry_after_ms = self.header_context.retry_after_ms,
-            .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
-        };
         var response_code: c_long = 0;
-        if (c.curl_easy_getinfo(self.easy, c.CURLINFO_RESPONSE_CODE, &response_code) != c.CURLE_OK or
-            response_code < 100 or response_code > 599)
-        {
-            return error.InvalidHttpEvidence;
-        }
-        const status: u16 = @intCast(response_code);
-        const http_disposition: TransportDisposition = if (status >= 200 and status < 300)
-            .success
-        else if (status == 408 or status == 429 or status >= 500)
-            .temporary_http
-        else
-            .permanent_http;
-        return .{
-            .disposition = http_disposition,
-            .http_status = status,
+        const response_code_result = c.curl_easy_getinfo(self.easy, c.CURLINFO_RESPONSE_CODE, &response_code);
+        return transport_policy.classify(.{
+            .result = curlResult(result),
+            .error_message = std.mem.sliceTo(&self.error_buffer, 0),
+            .requires_h2 = self.requires_h2,
+            .headers_invalid = self.header_context.invalid,
+            .inactivity_expired = self.inactivity.expired,
+            .version = switch (version) {
+                c.CURL_HTTP_VERSION_1_1 => .http1_1,
+                c.CURL_HTTP_VERSION_2_0 => .http2,
+                else => .other,
+            },
+            .response_code = if (response_code_result == c.CURLE_OK) response_code else null,
             .retry_after_ms = self.header_context.retry_after_ms,
             .retry_after_deadline_ms = self.header_context.retry_after_deadline_ms,
-        };
+        });
     }
 
-    fn armTimeout(self: *Transfer) void {
-        self.timeout_context.last_progress = std.Io.Clock.Timestamp.now(self.timeout_context.io, .awake);
-        self.timeout_context.paused_at = null;
-        self.timeout_context.armed = true;
-        self.timeout_context.expired = false;
-    }
-
-    // curl does not invoke progress callbacks for an easy waiting in the
-    // multi connection queue. The reactor owner checks the same clock so
-    // waiting consumes this Attempt's inactivity interval too.
-    fn queueDeadlineExpired(self: *Transfer) bool {
-        const timeout = &self.timeout_context;
-        return timeout.expiredAt(std.Io.Clock.Timestamp.now(timeout.io, .awake));
+    fn now(self: *const Transfer) std.Io.Clock.Timestamp {
+        return std.Io.Clock.Timestamp.now(self.request.io, .awake);
     }
 
     pub fn deinit(self: *Transfer) void {
@@ -911,43 +814,27 @@ fn xferInfoCallback(
     _: c.curl_off_t,
     _: c.curl_off_t,
 ) callconv(.c) c_int {
-    const context: *TimeoutContext = @ptrCast(@alignCast(context_pointer orelse return 1));
-    if (!context.armed or context.isPaused()) return 0;
-    const now = std.Io.Clock.Timestamp.now(context.io, .awake);
-    context.noteDownload(now, download_now);
-    return @intFromBool(context.expiredAt(now));
+    const transfer: *Transfer = @ptrCast(@alignCast(context_pointer orelse return 1));
+    return @intFromBool(transfer.inactivity.progress(transfer.now(), download_now));
 }
 
-fn curlFailureDisposition(result: c.CURLcode, inactivity_expired: bool) TransportDisposition {
-    if (inactivity_expired and result == c.CURLE_ABORTED_BY_CALLBACK) return .temporary_connection;
-    return switch (result) {
-        c.CURLE_COULDNT_RESOLVE_PROXY,
-        c.CURLE_COULDNT_RESOLVE_HOST,
-        c.CURLE_COULDNT_CONNECT,
-        c.CURLE_SEND_ERROR,
-        c.CURLE_RECV_ERROR,
-        c.CURLE_GOT_NOTHING,
-        c.CURLE_PARTIAL_FILE,
-        c.CURLE_OPERATION_TIMEDOUT,
-        c.CURLE_HTTP2,
-        c.CURLE_HTTP2_STREAM,
-        c.CURLE_HTTP3,
-        c.CURLE_QUIC_CONNECT_ERROR,
-        c.CURLE_SSL_CONNECT_ERROR,
-        => .temporary_connection,
-        c.CURLE_LOGIN_DENIED => .authentication_failure,
-        c.CURLE_PEER_FAILED_VERIFICATION => .tls_verification_failure,
-        else => .permanent_transport,
-    };
+fn curlResult(code: c.CURLcode) transport_policy.CurlResult {
+    inline for (comptime std.enums.values(transport_policy.CurlResult)) |result| {
+        if (result == .other) continue;
+        const name = comptime blk: {
+            var upper: [@tagName(result).len]u8 = undefined;
+            break :blk "CURLE_" ++ std.ascii.upperString(&upper, @tagName(result));
+        };
+        if (code == @field(c, name)) return result;
+    }
+    return .other;
 }
 
 fn writeCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?*anyopaque) callconv(.c) usize {
     const transfer: *Transfer = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
     const accepted = transfer.writer.offer(&transfer.response, pointer[0..bytes]);
-    if (accepted == c.CURL_WRITEFUNC_PAUSE and !transfer.timeout_context.isPaused()) {
-        transfer.timeout_context.pause(std.Io.Clock.Timestamp.now(transfer.timeout_context.io, .awake));
-    }
+    if (accepted == c.CURL_WRITEFUNC_PAUSE) transfer.inactivity.pause(transfer.now());
     return accepted;
 }
 
@@ -1135,73 +1022,34 @@ test "sealed POST source rewinds only within its complete length" {
     try std.testing.expectEqual(@as(u64, 129), context.offset);
 }
 
-test "curl disposition retries only temporary connection and explicit inactivity failures" {
-    try std.testing.expectEqual(
-        TransportDisposition.temporary_connection,
-        curlFailureDisposition(c.CURLE_COULDNT_CONNECT, false),
-    );
-    try std.testing.expectEqual(
-        TransportDisposition.temporary_connection,
-        curlFailureDisposition(c.CURLE_ABORTED_BY_CALLBACK, true),
-    );
-    try std.testing.expectEqual(
-        TransportDisposition.permanent_transport,
-        curlFailureDisposition(c.CURLE_ABORTED_BY_CALLBACK, false),
-    );
-    try std.testing.expectEqual(
-        TransportDisposition.authentication_failure,
-        curlFailureDisposition(c.CURLE_LOGIN_DENIED, false),
-    );
-    try std.testing.expectEqual(
-        TransportDisposition.tls_verification_failure,
-        curlFailureDisposition(c.CURLE_PEER_FAILED_VERIFICATION, false),
-    );
+test "curl results reach transport policy by name" {
+    const cases = [_]struct { code: c.CURLcode, expected: transport_policy.CurlResult }{
+        .{ .code = c.CURLE_OK, .expected = .ok },
+        .{ .code = c.CURLE_COULDNT_CONNECT, .expected = .couldnt_connect },
+        .{ .code = c.CURLE_ABORTED_BY_CALLBACK, .expected = .aborted_by_callback },
+        .{ .code = c.CURLE_PEER_FAILED_VERIFICATION, .expected = .peer_failed_verification },
+        .{ .code = c.CURLE_WRITE_ERROR, .expected = .other },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.expected, curlResult(case.code));
 }
 
-test "local capture pause excludes only its own duration from inactivity" {
-    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
-    var timeout = TimeoutContext{
-        .io = std.testing.io,
-        .inactivity_ns = std.time.ns_per_s,
-        .last_progress = now.subDuration(.{ .raw = .fromMilliseconds(250), .clock = .awake }),
-        .armed = true,
-    };
-    timeout.pause(now);
-    var transfer: Transfer = undefined;
-    transfer.timeout_context = timeout;
-    try std.testing.expect(!transfer.queueDeadlineExpired());
-    try std.testing.expectEqual(@as(c_int, 0), xferInfoCallback(&transfer.timeout_context, 0, 0, 0, 0));
-    try std.testing.expect(!transfer.timeout_context.expired);
-    const resume_at = now.addDuration(.{ .raw = .fromSeconds(5), .clock = .awake });
-    transfer.timeout_context.resumeAfterPause(resume_at);
-    try std.testing.expectEqual(@as(i96, 250 * std.time.ns_per_ms), transfer.timeout_context.last_progress.durationTo(resume_at).raw.nanoseconds);
-    var boundary = transfer.timeout_context;
-    try std.testing.expect(!boundary.expiredAt(resume_at.addDuration(.{ .raw = .fromMilliseconds(749), .clock = .awake })));
-    try std.testing.expect(boundary.expiredAt(resume_at.addDuration(.{ .raw = .fromMilliseconds(750), .clock = .awake })));
-    const second_pause = resume_at.addDuration(.{ .raw = .fromMilliseconds(100), .clock = .awake });
-    transfer.timeout_context.pause(second_pause);
-    try std.testing.expect(!transfer.timeout_context.expiredAt(second_pause.addDuration(.{ .raw = .fromSeconds(2), .clock = .awake })));
-    const second_resume = second_pause.addDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
-    transfer.timeout_context.resumeAfterPause(second_resume);
-    boundary = transfer.timeout_context;
-    try std.testing.expect(!boundary.expiredAt(second_resume.addDuration(.{ .raw = .fromMilliseconds(649), .clock = .awake })));
-    try std.testing.expect(boundary.expiredAt(second_resume.addDuration(.{ .raw = .fromMilliseconds(650), .clock = .awake })));
-    transfer.timeout_context.noteDownload(second_resume, 12);
-    try std.testing.expect(!transfer.timeout_context.expiredAt(second_resume.addDuration(.{ .raw = .fromMilliseconds(999), .clock = .awake })));
-    try std.testing.expect(transfer.timeout_context.expiredAt(second_resume.addDuration(.{ .raw = .fromSeconds(1), .clock = .awake })));
-    transfer.timeout_context.last_progress = now.subDuration(.{ .raw = .fromSeconds(2), .clock = .awake });
-    try std.testing.expect(transfer.queueDeadlineExpired());
-
-    // A synchronous callback during curl_easy_pause can pause again. The
-    // cleared timestamp is the only pause state it needs to update.
+test "a full capture queue pauses the inactivity interval and curl progress cannot expire it" {
     var writer = CaptureWriter{ .io = std.testing.io, .count = CaptureWriter.capacity };
+    var transfer: Transfer = undefined;
+    transfer.request.io = std.testing.io;
     transfer.writer = &writer;
     transfer.response.failure = null;
-    transfer.timeout_context.paused_at = null;
+    transfer.inactivity = .{ .limit_ns = std.time.ns_per_s };
+    transfer.inactivity.arm(transfer.now().subDuration(.{ .raw = .fromSeconds(2), .clock = .awake }));
     var byte = [_]u8{'x'};
     try std.testing.expectEqual(@as(usize, c.CURL_WRITEFUNC_PAUSE), writeCallback(&byte, 1, 1, &transfer));
-    try std.testing.expect(transfer.timeout_context.isPaused());
-    try std.testing.expect(!transfer.timeout_context.expiredAt(now.addDuration(.{ .raw = .fromSeconds(10), .clock = .awake })));
+    try std.testing.expect(transfer.inactivity.isPaused());
+    try std.testing.expectEqual(@as(c_int, 0), xferInfoCallback(&transfer, 0, 0, 0, 0));
+    try std.testing.expect(!transfer.inactivity.expired);
+    // Resuming restores the interval that had already elapsed before the pause.
+    transfer.inactivity.resumeAfterPause(transfer.now());
+    try std.testing.expectEqual(@as(c_int, 1), xferInfoCallback(&transfer, 0, 0, 0, 0));
+    try std.testing.expect(transfer.inactivity.expired);
 }
 
 test "Transfer finalization waits for real writer drainage and seals once" {
@@ -1256,18 +1104,15 @@ test "receive scans without resume capacity still settle capture failure and que
         transfer.local = .receiving;
         transfer.in_reactor = false;
         transfer.response.failure = if (capture_failed) .write_failed else null;
-        transfer.timeout_context = .{
-            .io = std.testing.io,
-            .inactivity_ns = std.time.ns_per_s,
-            .last_progress = std.Io.Clock.Timestamp.now(std.testing.io, .awake).subDuration(.{ .raw = .fromSeconds(2), .clock = .awake }),
-            .armed = true,
-        };
+        transfer.request.io = std.testing.io;
+        transfer.inactivity = .{ .limit_ns = std.time.ns_per_s };
+        transfer.inactivity.arm(transfer.now().subDuration(.{ .raw = .fromSeconds(2), .clock = .awake }));
         try std.testing.expectEqual(Reactor.Advance.progressed, try reactor.advance(&transfer, false, &inject_resume_failure));
         const outcome = transfer.local.finished.completion.outcome;
         if (capture_failed) {
             try std.testing.expectEqual(CaptureFailure.write_failed, outcome.response_capture_failed);
         } else {
-            try std.testing.expectEqual(TransportDisposition.temporary_connection, outcome.transport_finished.disposition);
+            try std.testing.expectEqual(transport_policy.Disposition.temporary_connection, outcome.transport_finished.disposition);
         }
     }
 }
