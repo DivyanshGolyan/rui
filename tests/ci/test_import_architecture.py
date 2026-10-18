@@ -79,6 +79,24 @@ const c = @import("c.zig");'''
                     check(root, baseline, ("a.zig",))
                     (root / "b.zig").write_text('const a = @import("a.zig");')
                     baseline.write_text(json.dumps({"cyclic_edges": [["a.zig", "b.zig"], ["b.zig", "a.zig"]]}))
+                    subprocess.run(git + ["add", "."], check=True)
+                    subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                          "commit", "-qm", "candidate grows allowance"], check=True)
+                    candidate = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+                    # CI sees a committed candidate, not edits on the trusted HEAD.
+                    # Main advances independently: neither tip is the review base.
+                    subprocess.run(git + ["checkout", "-q", "--detach", trusted], check=True)
+                    (root / "main.txt").write_text("independent main change\n")
+                    subprocess.run(git + ["add", "."], check=True)
+                    subprocess.run(git + ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                          "commit", "-qm", "main advances independently"], check=True)
+                    main = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
+                    subprocess.run(git + ["update-ref", "refs/remotes/origin/main", main], check=True)
+                    subprocess.run(git + ["checkout", "-q", "--detach", candidate], check=True)
+                    review_base = subprocess.check_output(
+                        git + ["merge-base", "HEAD", "origin/main"], text=True).strip()
+                    self.assertEqual(review_base, trusted)
+                    self.assertEqual(len({candidate, main, review_base}), 3)
                     with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
                         check(root, baseline, ("a.zig",))
 
