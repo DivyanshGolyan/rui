@@ -23,17 +23,20 @@ def check_failure_retention(root_owner, read_status):
     with tempfile.TemporaryDirectory(prefix="rui-launch-retention-test-") as directory:
         base = Path(directory)
         command = base / "rui"
-        for status_code, cleanup_fails, nested in ((0, False, False), (7, False, False), (0, True, False), (0, False, True)):
+        cases = ((0, False, False, False), (7, False, False, False),
+                 (0, True, False, False), (0, False, True, False), (0, False, True, True))
+        for status_code, cleanup_fails, nested, before_lock in cases:
             command.write_text(f"#!{sys.executable}\nimport sys\nprint('Host: owned but unavailable')\nprint('status diagnostic', file=sys.stderr)\nsys.exit({status_code})\n")
             command.chmod(0o700)
-            destination = base / f"{status_code}-{cleanup_fails}-{nested}"
+            destination = base / f"{status_code}-{cleanup_fails}-{nested}-{before_lock}"
             child = None
             root = None
             failure = AssertionError("ready observation failed")
             output = io.StringIO()
-            def cleanup(selected):
-                if selected != store:
+            def cleanup(selected, *, descendants=False):
+                if selected != store and not (descendants and store.is_relative_to(selected)):
                     return
+                assert not destination.exists(), "failure copied before Host disposal"
                 if child.poll() is None:
                     child.kill()
                 child.wait(timeout=5)
@@ -48,7 +51,8 @@ def check_failure_retention(root_owner, read_status):
                             root = Path(value)
                             store = root / ("bare-home/.local/share/rui/store" if nested else "store")
                             (store / "diagnostics").mkdir(parents=True)
-                            (store / "host.lock").touch()
+                            if not before_lock:
+                                (store / "host.lock").touch()
                             (store / "rui.sqlite3").write_bytes(b"private saved work")
                             (store / "diagnostics/host-1.jsonl").write_text('{"phase":"ready","detail":"serving"}\n')
                             child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -96,17 +100,21 @@ def check_process_discovery(cleanup):
     with tempfile.TemporaryDirectory(prefix="rui-proc-discovery-") as directory:
         store = Path(directory).resolve() / "store"
         proc = Path("/proc")
-        vanished, selected, unrelated, other_store = (proc / str(pid) for pid in (41001, 41002, 41003, 41004))
+        vanished, selected, unrelated, other_store, nested, other_executable = (proc / str(pid) for pid in range(41001, 41007))
         command = [str(owner.RUI), "serve", "--store", str(store)]
         arguments = {
             selected: command,
             unrelated: [sys.executable, "-c", "pass"],
-            other_store: [*command[:-1], str(store.with_name("other-store"))],
+            other_store: [*command[:-1], str(store.with_name("store-lookalike"))],
+            nested: [*command[:-1], str(store / "not-created/nested-store")],
+            other_executable: [str(owner.RUI.with_name("other-rui")), *command[1:]],
         }
-        for failure in (FileNotFoundError(errno.ENOENT, "vanished"),
-                        ProcessLookupError(errno.ESRCH, "vanished"),
-                        OSError(errno.EIO, "discovery read failed")):
+        for descendants, failure in ((mode, error) for mode in (False, True) for error in (
+                FileNotFoundError(errno.ENOENT, "vanished"),
+                ProcessLookupError(errno.ESRCH, "vanished"),
+                OSError(errno.EIO, "discovery read failed"))):
             killed = set()
+            expected = {int(selected.name), int(nested.name)} if descendants else {int(selected.name)}
 
             def read(path):
                 if path.parent == vanished:
@@ -116,27 +124,27 @@ def check_process_discovery(cleanup):
                 return b"\0".join(part.encode() for part in arguments[path.parent]) + b"\0"
 
             def kill(pid, sig):
-                assert pid == int(selected.name) and sig == owner.signal.SIGKILL, (pid, sig)
+                assert pid in expected and sig == owner.signal.SIGKILL, (pid, sig)
                 killed.add(pid)
 
             # Model an enumerated process exiting before its cmdline read.
             # Keep a live match after it, plus unrelated process/Store controls.
             with patch.object(Path, "is_dir", return_value=True), \
-                    patch.object(Path, "iterdir", return_value=[vanished, selected, unrelated, other_store]), \
+                    patch.object(Path, "iterdir", return_value=[vanished, *arguments]), \
                     patch.object(Path, "read_bytes", read), patch.object(owner.os, "kill", kill):
                 if failure.errno == errno.EIO:
                     try:
-                        cleanup(store)
+                        cleanup(store, descendants=descendants)
                     except OSError as error:
                         assert error is failure, error
                     else:
                         raise AssertionError("real process-discovery read failure was suppressed")
                     assert not killed, "cleanup acted on an incomplete process census"
                 else:
-                    cleanup(store)
-                    assert killed == {int(selected.name)}, killed
-                    assert owner.matching_processes(store) == [], "retired process still discovered"
-    print("Host process discovery: ENOENT/ESRCH retirement, exact Store selection and real read failures passed")
+                    cleanup(store, descendants=descendants)
+                    assert killed == expected, killed
+                    assert owner.matching_processes(store, descendants=descendants) == [], "retired process still discovered"
+    print("Host process discovery: ENOENT/ESRCH retirement, exact/subtree Store selection, lookalike/executable exclusion and real read failures passed")
 
 
 @contextmanager

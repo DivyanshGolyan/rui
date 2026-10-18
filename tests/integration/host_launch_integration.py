@@ -193,7 +193,7 @@ def instance(output, capacity):
     return match.group(1)
 
 
-def matching_processes(store):
+def matching_processes(store, *, descendants=False):
     """Test-cleanup discovery only; PIDs are never treated as Host authority."""
     expected = str(pathlib.Path(store).resolve())
     matches = []
@@ -223,7 +223,7 @@ def matching_processes(store):
                 selected = str(pathlib.Path(text[3]).resolve())
             except OSError:
                 continue
-            if selected == expected:
+            if selected == expected or (descendants and pathlib.Path(selected).is_relative_to(expected)):
                 matches.append(pid)
     return matches
 
@@ -239,18 +239,18 @@ def wait_for_processes(store, count, timeout=5):
         time.sleep(0.02)
 
 
-def forced_crash_cleanup(store):
+def forced_crash_cleanup(store, *, descendants=False):
     # #329 is intentionally not part of this fixture. SIGKILL is a forced
     # crash used only to avoid leaking detached test processes.
-    for pid in matching_processes(store):
+    for pid in matching_processes(store, descendants=descendants):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     deadline = time.monotonic() + 5
-    while matching_processes(store) and time.monotonic() < deadline:
+    while matching_processes(store, descendants=descendants) and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert not matching_processes(store), "forced-crash cleanup did not reap detached Host"
+    assert not matching_processes(store, descendants=descendants), "forced-crash cleanup did not reap detached Host"
 
 
 def assert_diagnostics(store, credential, reported):
@@ -517,14 +517,6 @@ def launch_fixture_root():
         yield root
     except BaseException:
         failure_name = type(sys.exception()).__name__
-        def cleanup():
-            # Bare entry owns its Store below the fixture HOME, not directly
-            # below root. Include every actual lease as well as early starts.
-            stores = {path.parent for path in root.rglob("host.lock")}
-            stores.update(store for store in root.iterdir() if store.is_dir() and not store.is_symlink()
-                          and store.name not in ("home", "credentials"))
-            dispose_all(*(lambda store=store: forced_crash_cleanup(store)
-                          for store in sorted(stores)))
 
         def retain():
             def metadata():
@@ -552,7 +544,9 @@ def launch_fixture_root():
                 sys.path.remove(ci)
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
 
-        dispose_all(cleanup, retain,
+        # Select only this executable's Hosts beneath the private root, even
+        # before a nested default Store or its ownership lock exists.
+        dispose_all(lambda: forced_crash_cleanup(root, descendants=True), retain,
                     lambda: print(f"retained native observation failure state: {root}", file=sys.stderr, flush=True))
         raise
     else:
