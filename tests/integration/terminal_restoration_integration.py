@@ -2061,6 +2061,26 @@ def startup_reporting_cases(state, library):
             )
 
 
+def await_written(master, marker, timeout=15):
+    """`marker` reached the terminal. The probe holds every later write, so
+    the frame carrying it may never close: a PTY that accepts a frame in
+    partial writes (macOS) leaves its end held."""
+    capture = human.terminal_capture(master)
+    seen = []  # Only output after this call: the current frame may already show it.
+    capture.listener = lambda screen, x, y: seen.append(marker in screen)
+    try:
+        deadline = time.monotonic() + timeout
+        while not any(seen) and marker not in capture.frame:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], (
+                marker, capture.completed, capture.frame[-2000:])
+            chunk = os.read(master, 65536)
+            assert chunk, ("terminal closed before marker", marker)
+            capture.feed(chunk)
+    finally:
+        capture.listener = None
+
+
 def visible_stream_handoff_cases(state, library):
     """A command during held visible output waits, then runs once."""
     marker = "VISIBLE-CANCEL-PREFIX"
@@ -2104,7 +2124,7 @@ def visible_stream_handoff_cases(state, library):
                 human.read_terminal(master, ready, composer=True)
                 arm.touch()
                 os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
-            human.read_terminal(master, marker)
+            await_written(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
                 arm.unlink()
