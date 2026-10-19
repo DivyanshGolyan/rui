@@ -65,7 +65,7 @@ raise SystemExit(code)
 
 
 class ProducerTests(unittest.TestCase):
-    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0, custody=""):
+    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0, custody="", evidence=""):
         source = root / ("source" if custody == "same_root" else "supplied")
         (source / "src").mkdir(parents=True)
         (source / "src/SessionFrontend.zig").write_text(FRONTEND)
@@ -98,16 +98,30 @@ class ProducerTests(unittest.TestCase):
                 destination.symlink_to(original)
             else:
                 os.link(original, destination)
+        output = root / "output"
+        if evidence == "input":
+            output = source / "src"
+            (output / "overlay-manifest.json").write_text("original supplied manifest")
+        elif evidence == "alias":
+            output.symlink_to(source / "src", target_is_directory=True)
+        elif evidence == "amp":
+            output = source / ".amp/evidence"
+        elif evidence:
+            name, kind = evidence.split(":")
+            output.mkdir()
+            if kind == "link":
+                (output / name).symlink_to(source / "src/owner.zig")
+            else:
+                os.link(source / "src/owner.zig", output / name)
         before = {str(path.relative_to(source)): (path.read_bytes() if path.is_file() else None,
                                                   path.stat().st_mode)
-                  for path in source.rglob("*")}
+                  for path in source.rglob("*") if path.relative_to(source).parts[0] != ".amp"}
         tools = root / "tools"
         tools.mkdir()
         zig = tools / "zig"
         zig.write_text("#!" + sys.executable + "\n" + COMMAND)
         zig.chmod(0o755)
         marker = root / "direct-ran"
-        output = root / "output"
         environment = {
             **os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
             "TD1_BINARY": str(root / "artifact/test"), "TD1_COMMAND": COMMAND,
@@ -122,12 +136,27 @@ class ProducerTests(unittest.TestCase):
              "--cache", str(cache), "--selector", "pages"],
             env=environment, capture_output=True, text=True, timeout=10,
         )
-        receipt = json.loads((output / "receipt.json").read_text())
+        receipt = json.loads((output / "receipt.json").read_text()) if evidence in ("", "amp") else None
         after = {str(path.relative_to(source)): (path.read_bytes() if path.is_file() else None,
                                                  path.stat().st_mode)
-                 for path in source.rglob("*")}
+                 for path in source.rglob("*") if path.relative_to(source).parts[0] != ".amp"}
         self.assertEqual(before, after, result.stdout + result.stderr)
         return result, receipt, marker.exists()
+
+    def test_evidence_output_cannot_write_supplied_inputs(self):
+        cases = ["input", "alias"] + [f"{name}:{kind}" for name in
+                 ("overlay-manifest.json", "receipt.json", "test.log", "terminal-report.log")
+                 for kind in ("link", "hard")]
+        for evidence in cases:
+            with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, _, replayed = self.invoke(root, evidence=evidence)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(replayed or (root / "command-ran").exists())
+        with tempfile.TemporaryDirectory() as directory:
+            result, receipt, replayed = self.invoke(Path(directory), evidence="amp")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(replayed and receipt["source_unchanged"] and receipt["overlay_unchanged"])
 
     def test_reused_cache_cannot_alias_supplied_inputs(self):
         for custody in ("cache_alias", "root_link", "parent_link", "nested_link", "leaf_link",
