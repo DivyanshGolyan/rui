@@ -20,6 +20,7 @@ import shutil
 import signal
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -29,7 +30,12 @@ class Check:
     target: str
     name: str
 
-    def command(self):
+    def command(self, root, output, environment):
+        if self.target == "sequence-model":
+            return [sys.executable, str(root / "tests/integration/session_sequence_model.py"),
+                    "--source", str(root), "--output", str(output),
+                    "--cache", str(Path(environment["ZIG_LOCAL_CACHE_DIR"]) / "sequence-model"),
+                    "--selector", self.name.removeprefix("TD1 sequence model ")]
         return ["zig", "build", self.target, "-j2", "-Dtest-filter=" + self.name,
                 "--summary", "all", "--verbose"]
 
@@ -51,6 +57,10 @@ def logic(name):
 
 def native(name):
     return Check("test", name)
+
+
+def model(selector):
+    return Check("sequence-model", "TD1 sequence model " + selector)
 
 
 # Exact anchors intentionally fail closed when the protection changes. Add or
@@ -100,6 +110,58 @@ MUTATIONS = (
              "src/session_consent.zig", "service != .empty or decoder_pending or stopped",
              "service != .empty or (decoder_pending and false) or stopped",
              logic("consent requires real emptiness after completed prompt")),
+    Mutation("incomplete-classification", "only a bare ESC or ESC ESC may expire as Escape", "359567e6",
+             "src/TerminalInput.zig", ".escape else .incomplete;", ".escape else .escape;",
+             logic("TD2 incomplete prefixes expire fatally without modifying or submitting drafts")),
+    Mutation("mouse-framing", "X10 payload never becomes composer text", "10e07b17",
+             "src/TerminalInput.zig", 'if (!self.paste and std.mem.startsWith(u8, bytes, "\\x1b[M")) {',
+             'if (false and !self.paste and std.mem.startsWith(u8, bytes, "\\x1b[M")) {',
+             logic("fragmented X10 mouse reports are consumed whole, never as typed text")),
+    Mutation("stale-details", "a delayed details page cannot cover a later Message", "67f80e38",
+             "src/SessionFrontend.zig", "self.details_sent == self.sent", "true",
+             model("pages")),
+    Mutation("stale-transcript", "a delayed history page belongs to its transcript generation", "4d5cf8ba",
+             "src/SessionFrontend.zig", "self.job.transcript == self.transcript", "true",
+             model("pages")),
+    Mutation("send-generation", "sending invalidates already running details work", "67f80e38",
+             "src/SessionFrontend.zig", "self.sent += 1;", "self.sent += 0;",
+             model("pages")),
+    Mutation("send-queued-history", "sending discards a queued older-page request", "5bb24efe",
+             "src/SessionFrontend.zig",
+             "self.status_requested = false;\n    self.history_requested = null;\n    try self.terminal.screen.latest();",
+             "self.status_requested = false;\n    try self.terminal.screen.latest();",
+             model("pages")),
+    Mutation("send-queued-status", "sending discards a queued status-page request", "67f80e38",
+             "src/SessionFrontend.zig",
+             "self.status_requested = false;\n    self.history_requested = null;\n    try self.terminal.screen.latest();",
+             "self.history_requested = null;\n    try self.terminal.screen.latest();",
+             model("pages")),
+    Mutation("send-latest-view", "sending leaves a frozen inspection for latest conversation", "67f80e38",
+             "src/SessionFrontend.zig",
+             "self.history_requested = null;\n    try self.terminal.screen.latest();",
+             "self.history_requested = null;",
+             model("pages")),
+    Mutation("ack-frontier", "older captures cannot decrease delivered admission frontier", "3c690817",
+             "src/SessionFrontend.zig", "@max(self.delivered, result.delivered)", "result.delivered",
+             model("acknowledgement")),
+    Mutation("late-ack-echo", "late acceptance cannot resurrect Sent after delivery", "3c690817",
+             "src/SessionFrontend.zig", "if (admission > self.delivered) admission else null", "admission",
+             model("acknowledgement")),
+    Mutation("echo-retirement-edge", "delivery at the exact admission clears Sent", "41984558",
+             "src/SessionFrontend.zig", "if (admission <= self.delivered)", "if (admission < self.delivered)",
+             model("acknowledgement")),
+    Mutation("paused-draft-submission", "paused approval cannot submit the retained draft", "52e9055d",
+             "src/SessionFrontend.zig", "!self.consent.active() and !self.commandActive()",
+             "!self.commandActive()",
+             model("focus")),
+    Mutation("unread-action-decision", "choice submission requires a completely delivered Action", "4d5cf8ba",
+             "src/SessionFrontend.zig", "if (self.approvalReady()) self.consent.submit(text) else null",
+             "self.consent.submit(text)",
+             model("focus")),
+    Mutation("frame-publication", "failed frame output cannot advance inspected rows or approval", "4d5cf8ba",
+             "src/SessionScreen.zig", "    try out.writeAll(frame.written());",
+             "    self.action_seen = layout.action_seen;\n    self.approval_ready = layout.approval_ready;\n    try out.writeAll(frame.written());",
+             model("publication")),
 )
 
 
@@ -165,9 +227,32 @@ def execute(command, root, log, timeout, environment):
 
 def run_check(check, root, log, timeout, environment):
     deadline = time.monotonic() + timeout
-    result = execute(check.command(), root, log, timeout, environment)
+    model_output = log.with_suffix(".model")
+    result = execute(check.command(root, model_output, environment), root, log, timeout, environment)
     output = log.read_text(errors="replace")
     if result["timeout"] or result["returncode"] not in (0, 1):
+        result["outcome"] = classify(result, output, check)
+        return result
+    if check.target == "sequence-model":
+        # The maintained runner already executed its exact binary directly.
+        # Consume that evidence rather than performing a third model execution.
+        receipt_path = model_output / "receipt.json"
+        try:
+            receipt = json.loads(receipt_path.read_text())
+            binary = Path(receipt["binary"])
+            valid = (receipt["source"] == str(root) and
+                     receipt["selector"] == check.name.removeprefix("TD1 sequence model ") and
+                     receipt["source_unchanged"] is True and
+                     receipt["exit"] == receipt["direct_exit"] == result["returncode"] and
+                     sha(binary) == receipt["binary_sha256"])
+        except (OSError, ValueError, KeyError, TypeError):
+            valid = False
+        if not valid:
+            result["outcome"] = "invalid-model-receipt"
+            return result
+        result["receipt_sha256"] = sha(receipt_path)
+        result["binary_sha256"] = receipt["binary_sha256"]
+        result["assertion"] = {"returncode": receipt["direct_exit"]}
         result["outcome"] = classify(result, output, check)
         return result
     # Zig 0.17's build protocol can say "failed without output", omitting the
@@ -207,7 +292,16 @@ def classify(result, output, check):
         named_pass = re.search(re.escape(check.name) + r"\.\.\.OK", output)
         return "passed" if named_pass and result.get("assertion", {}).get("returncode") == 0 else "no-tests"
     named_failure = re.search(r"error: '(?:[^\n]*\.)?" + re.escape(check.name) + r"' failed", output)
-    assertion = re.search(re.escape(check.name) + r"\.\.\.FAIL \((TestExpected\w*|TestUnexpectedResult)\)", output)
+    assertion = False
+    records = list(re.finditer(r"(?m)^\d+/\d+ ([^\n]+?)\.\.\.", output))
+    for index, record in enumerate(records):
+        if record[1] != check.name and not record[1].endswith("." + check.name):
+            continue
+        end = records[index + 1].start() if index + 1 < len(records) else len(output)
+        # Assertions print expected/found diagnostics before their FAIL record.
+        # Never borrow a failure from the next test's record.
+        errors = re.findall(r"(?:^|\n)FAIL \(([^)\n]+)\)(?=\n|$)", output[record.end():end])
+        assertion = bool(errors and re.fullmatch(r"TestExpected\w*|TestUnexpectedResult", errors[-1]))
     if named_failure and assertion and result.get("assertion", {}).get("returncode") == 1:
         return "behavioral-kill"
     return "unclassified-failure"

@@ -21,6 +21,8 @@ class MutationGateTests(unittest.TestCase):
     def test_only_the_named_behavioral_failure_is_a_kill(self):
         failed = {"returncode": 1, "timeout": False, "assertion": {"returncode": 1}}
         self.assertEqual(gate.classify(failed, self.assertion, self.check), "behavioral-kill")
+        diagnostics = self.assertion.replace("...FAIL", "...expected 8, found 7\nFAIL")
+        self.assertEqual(gate.classify(failed, diagnostics, self.check), "behavioral-kill")
         for output in (
             "error: 'Module.another test' failed: error.TestExpectedEqual",
             self.assertion.replace("TestExpectedEqual", "FileNotFound"),
@@ -28,6 +30,7 @@ class MutationGateTests(unittest.TestCase):
             self.assertion + "compilation errors",
             self.assertion + "terminated by signal 6",
             "a named renderer boundary\nerror.TestExpectedEqual",
+            diagnostics.replace("found 7\nFAIL", "found 7\n3/3 Module.another test...FAIL"),
         ):
             with self.subTest(output=output):
                 self.assertNotEqual(gate.classify(failed, output, self.check), "behavioral-kill")
@@ -70,6 +73,35 @@ class MutationGateTests(unittest.TestCase):
                 result = gate.run_check(self.check, root, root / "native.log", 5, dict(os.environ))
             self.assertEqual(result["outcome"], "passed")
             self.assertEqual(result["binary_sha256"], gate.sha(binary))
+
+    def test_model_receipt_must_bind_source_selector_exits_and_actual_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "already-executed-test"
+            binary.write_text("retained model binary")
+            check = gate.model("pages")
+            for status in (0, 1):
+                receipt = {"source": str(root), "selector": "pages", "source_unchanged": True,
+                           "exit": status, "direct_exit": status,
+                           "binary": str(binary), "binary_sha256": gate.sha(binary)}
+                for index, alteration in enumerate(({}, {"source": "/wrong-source"}, {"selector": "focus"},
+                                                     {"source_unchanged": False}, {"direct_exit": -9},
+                                                     {"exit": 1 - status}, {"binary_sha256": "wrong"})):
+                    with self.subTest(status=status, alteration=alteration):
+                        log = root / f"model-{status}-{index}.log"
+                        output = log.with_suffix(".model")
+                        output.mkdir()
+                        gate.write_json(output / "receipt.json", {**receipt, **alteration})
+                        transcript = ("2/2 Module.TD1 sequence model pages...OK\n" if status == 0 else
+                                      "error: 'Module.TD1 sequence model pages' failed without output\n"
+                                      "2/2 Module.TD1 sequence model pages...FAIL (TestExpectedEqual)\n")
+                        command = [sys.executable, "-c", f"print({transcript!r}); raise SystemExit({status})"]
+                        with patch.object(gate.Check, "command", return_value=command):
+                            result = gate.run_check(check, root, log, 5, dict(os.environ))
+                        expected = "invalid-model-receipt" if alteration else "passed" if status == 0 else "behavioral-kill"
+                        self.assertEqual(result["outcome"], expected)
+                        if not alteration:
+                            self.assertEqual(result["receipt_sha256"], gate.sha(output / "receipt.json"))
 
     def test_source_drift_during_baseline_or_mutant_execution_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -79,6 +79,9 @@ jobs:
       - name: TD4 direct PTY and short tmux smoke
         if: ${{ !cancelled() }}
         run: python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/pty --jobs 4
+      - name: Ghostty primary input contracts (mandatory, separate from smoke)
+        if: ${{ !cancelled() }}
+        run: python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
       - name: TD2 original-recovery encoding contracts
         if: ${{ !cancelled() }}
         run: python3 tests/integration/input_equivalence.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/recovery
