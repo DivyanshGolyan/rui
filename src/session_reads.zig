@@ -166,8 +166,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             }
         };
         job.result.mark = .{ .cursor = mark };
-    } else if (page.facts.count != 0) {
-        job.result.mark = .{ .cursor = beginningBefore(page.facts.items[0], page.facts.end) };
     }
     try job.inspection_file.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
@@ -177,6 +175,13 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
     job.result.output_length = output.offset;
+    // A later read's boundary sits where its first shown item begins. Rows
+    // before it showed elsewhere (a Message's own Admission) or not at all, so
+    // older pages must include them. A read that shows nothing marks nothing:
+    // the next read that shows something starts at this same offset.
+    if (!job.opening) {
+        if (output.first) |first| job.result.mark = .{ .cursor = beginningBefore(first, page.facts.end) };
+    }
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
     } else {
@@ -223,11 +228,19 @@ const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
+    current: ?protocol.ActivityItem = null,
+    /// The first item whose rendering wrote bytes.
+    first: ?protocol.ActivityItem = null,
+
+    pub fn item(self: *@This(), value: protocol.ActivityItem) void {
+        self.current = value;
+    }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         try self.file.writePositionalAll(self.task.io, bytes, self.offset);
         self.offset += bytes.len;
+        if (self.first == null and bytes.len != 0) self.first = self.current;
     }
 };
 
