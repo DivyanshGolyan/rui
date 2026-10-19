@@ -194,8 +194,8 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 'h-msg-'||i,2,'queue/template',randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
-INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id)
- SELECT 100+i,'queue/template','h-msg-'||i,(SELECT v FROM q),100+i FROM n;
+INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
+ SELECT 100+i,'queue/template','h-msg-'||i,(SELECT v FROM q),100+i,unixepoch() FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[1]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[1]d)
 INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id)
  SELECT 100+i,'queue/template',100+i,100+i,100+i,'provider_http_422',NULL FROM n;
@@ -216,8 +216,8 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 's-msg-'||i,2,'queue/stopped',randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[2]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[2]d)
-INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id)
- SELECT 1000100+i,'queue/stopped','s-msg-'||i,(SELECT v FROM q),NULL FROM n;
+INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
+ SELECT 1000100+i,'queue/stopped','s-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 's-stop',3,'queue/stopped',randomblob(32),NULL,NULL,1,'accepted',1,0 WHERE %[2]d>0;
 INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff)
@@ -235,8 +235,8 @@ WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created)
  SELECT 'e-msg-'||i,2,'queue/eligible/'||printf('%%06d',i),randomblob(32),(SELECT v FROM q),NULL,1,'accepted',1,0 FROM n;
 WITH RECURSIVE n(i) AS (SELECT 1 WHERE %[3]d>0 UNION ALL SELECT i+1 FROM n WHERE i<%[3]d)
-INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id)
- SELECT 2000100+i,'queue/eligible/'||printf('%%06d',i),'e-msg-'||i,(SELECT v FROM q),NULL FROM n;
+INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at)
+ SELECT 2000100+i,'queue/eligible/'||printf('%%06d',i),'e-msg-'||i,(SELECT v FROM q),NULL,unixepoch() FROM n;
 DROP TABLE q; COMMIT;`, p.History, p.Ineligible, p.Eligible)
 	if _, err := sql(deadline, sqliteBinary, store, query); err != nil {
 		return err

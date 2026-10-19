@@ -13,7 +13,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 27;
+pub const schema_version: u32 = 28;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -6676,7 +6676,7 @@ pub const Store = struct {
             break :blk @intCast(prior + 1);
         } else return error.MessageAdmissionReadFailed;
         const position = try self.claimSessionPosition(session_ref);
-        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position) VALUES(?1,?2,?3,?4,?5)");
+        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,?2,?3,?4,?5,unixepoch())");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, admission_id);
         try bindText(statement, 2, session_ref);
@@ -6969,7 +6969,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ command_key TEXT NOT NULL UNIQUE REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ admission_position INTEGER CHECK(admission_position>0),
-        \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED
+        \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED,
+        \\ admitted_at INTEGER NOT NULL CHECK(admitted_at>0)
         \\) STRICT;
         \\CREATE TABLE turn(
         \\ turn_id INTEGER PRIMARY KEY CHECK(turn_id>0),
@@ -10369,10 +10370,10 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         try exec(storage.database, "DELETE FROM message_admission; DELETE FROM session_stop");
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                "SELECT value,'direct/pending-cost',printf('excluded-%d',value),1,NULL FROM sequence; " ++
-                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                "VALUES({0}+1,'direct/pending-cost','eligible',1,NULL); " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                "SELECT value,'direct/pending-cost',printf('excluded-%d',value),1,NULL,1 FROM sequence; " ++
+                "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                "VALUES({0}+1,'direct/pending-cost','eligible',1,NULL,1); " ++
                 "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
                 "VALUES('history-stop','direct/pending-cost',NULL,{0})",
             .{history},
@@ -10421,8 +10422,8 @@ test "Full Message projection work does not multiply Messages by stops" {
 
             for (1..message_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                        "VALUES({0},'direct/full-scale','message-{0}',1,NULL)",
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                        "VALUES({0},'direct/full-scale','message-{0}',1,NULL,1)",
                     .{index},
                     0,
                 );
@@ -12057,6 +12058,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try first_file.sync(std.testing.io);
     var first = try completeMessage("message-1", "direct/messages", first_file, first_text);
     defer first.removeTemporaryContent(std.testing.io) catch unreachable;
+    const before = try pragmaInt(storage.database, "SELECT unixepoch()");
     const first_reply = storage.submitMessage(&first, .{});
     try std.testing.expect(first_reply == .accepted);
     try std.testing.expect(!first_reply.accepted.replayed);
@@ -12071,6 +12073,12 @@ test "message admissions remain queued in order and retain bounded canonical con
     const second_reply = storage.submitMessage(&second, .{});
     try std.testing.expect(second_reply == .accepted);
     try std.testing.expect(first_reply.accepted.admission_id < second_reply.accepted.admission_id);
+    // The Host stamps each admission with its wall clock, to the second.
+    const after = try pragmaInt(storage.database, "SELECT unixepoch()");
+    const stamped = try pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1");
+    try std.testing.expect(before <= stamped and stamped <= after);
+    // A replayed or restarted admission keeps the time it was admitted at.
+    try exec(storage.database, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1");
 
     const replay = storage.submitMessage(&first, .{});
     try std.testing.expect(replay == .accepted);
@@ -12105,6 +12113,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     const restarted = try storage.observeCommand("message-1");
     try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession("direct/messages")).pending_messages);
+    try std.testing.expectEqual(@as(u32, 1000), try pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
 }
 
 test "message rejections replay before current Session checks without retained input" {
@@ -14534,8 +14543,8 @@ test "runnable discovery measures eligible ineligible and history populations in
                 );
                 const insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                        "SELECT value,'stopped',printf('stopped-%d',value),1,NULL FROM sequence; " ++
+                        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                        "SELECT value,'stopped',printf('stopped-%d',value),1,NULL,1 FROM sequence; " ++
                         "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff) " ++
                         "VALUES('stop','stopped',NULL,{0})",
                     .{ineligible},
@@ -14550,8 +14559,8 @@ test "runnable discovery measures eligible ineligible and history populations in
                     "output_schema_content_id,revision,next_position) " ++
                     "SELECT printf('eligible-%06d',value),'/','codex','model-a',1,0,0,NULL,1,1 FROM sequence; " ++
                     "WITH RECURSIVE sequence(value) AS (VALUES(0) UNION ALL SELECT value+1 FROM sequence WHERE value+1<{0}) " ++
-                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                    "SELECT {1}+value,printf('eligible-%06d',value),printf('eligible-%d',value),1,NULL FROM sequence",
+                    "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                    "SELECT {1}+value,printf('eligible-%06d',value),printf('eligible-%d',value),1,NULL,1 FROM sequence",
                 .{ eligible, ineligible + 1 },
                 0,
             );
@@ -14560,8 +14569,8 @@ test "runnable discovery measures eligible ineligible and history populations in
             if (history != 0) {
                 const history_insert = try std.testing.allocator.printSentinel(
                     "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
-                        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id) " ++
-                        "SELECT {1}+value,'history',printf('history-%d',value),1,value FROM sequence",
+                        "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,turn_id,admitted_at) " ++
+                        "SELECT {1}+value,'history',printf('history-%d',value),1,value,1 FROM sequence",
                     .{ history, ineligible + eligible },
                     0,
                 );

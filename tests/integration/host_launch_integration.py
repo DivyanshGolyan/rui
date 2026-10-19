@@ -33,6 +33,9 @@ from product_defaults import DEFAULTS
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
 COMMAND_TIMEOUT = 16
+# The format this build supports; older formats are refused, never migrated.
+SCHEMA = int(re.search(r"pub const schema_version: u32 = (\d+);",
+    (pathlib.Path(__file__).resolve().parents[2] / "src/store.zig").read_text())[1])
 # Every unflagged start path (bare rui, host start, host serve) must resolve
 # the module's capacity; the fixture budgets below follow the same values.
 DEFAULT_ACTIVE_CAPACITY = DEFAULTS.active_capacity
@@ -522,13 +525,13 @@ def startup_limits(root, env):
     failed = run_start(store, env)
     assert failed.returncode != 0 and time.monotonic() - before < 5, failed
     assert str(store.resolve()) in failed.stderr, failed.stderr
-    assert "found schema 21" in failed.stderr and "supports schema 27" in failed.stderr, failed.stderr
+    assert "found schema 21" in failed.stderr and f"supports schema {SCHEMA}" in failed.stderr, failed.stderr
     assert "back up" in failed.stderr and "exit status 1" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
     for wire in (None, "future"):
         with sqlite3.connect(database) as connection:
-            connection.execute("PRAGMA user_version=27")
+            connection.execute(f"PRAGMA user_version={SCHEMA}")
             connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
             if wire is not None:
                 connection.execute("INSERT INTO store_meta(key,value) VALUES('wire_version',?)", (wire,))
@@ -560,7 +563,7 @@ def startup_limits(root, env):
     with sqlite3.connect(database) as source, sqlite3.connect(hostile_database) as destination:
         source.backup(destination)
     hostile_database.chmod(0o600)
-    for schema, wire in ((21, "1"), (27, None), (27, "future")):
+    for schema, wire in ((21, "1"), (SCHEMA, None), (SCHEMA, "future")):
         with sqlite3.connect(hostile_database) as connection:
             connection.execute(f"PRAGMA user_version={schema}")
             connection.execute("DELETE FROM store_meta WHERE key='wire_version'")
