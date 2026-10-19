@@ -28,7 +28,12 @@ SUITES = {
 ALIASES = {"AnswerRenderer": "src/AnswerRenderer.zig"}
 FOREIGN = {"std", "builtin", "posix", "sqlite", "curl", "transport_options",
            "vaxis", "terminal_width", "terminal_unicode"}
-DYNAMIC_EMBEDS = {"src/logic_tests.zig", "src/socket_fixture.zig"}
+# Only these reviewed lint loops expand literal file lists. Changing a loop
+# requires reviewing its expansion, even after the new source reaches main.
+DYNAMIC_EMBEDS = {
+    "src/logic_tests.zig": "c40eaf0047dade839fc0af1c0a812b62b538a83509fb0954a9fd3b5b13f9b597",
+    "src/socket_fixture.zig": "02be8f3f2defeefdca57d5aeabc992c2f8d1654f048bfc1276fd737628ab5837",
+}
 POLICY = ("tests/ci/suite_inputs.py", "tests/ci/import_architecture.py",
           "tests/ci/evidence.py", "tests/ci/run_selected.py", "tests/ci/build_artifact.py",
           "build.zig", "build.zig.zon", ".github/workflows/check.yml",
@@ -110,10 +115,11 @@ def source_inputs(targets, part, revision="HEAD", trusted_revision=None):
                 # Two existing lint loops embed their declared literal file sets.
                 # Their source must itself match the reviewed trusted version;
                 # any change or other computed dependency forces fresh execution.
-                if token != "@embedFile" or path not in DYNAMIC_EMBEDS or source.read(path) != trusted.read(path):
+                if (token != "@embedFile" or hashlib.sha256(source.read(path)).hexdigest() != DYNAMIC_EMBEDS.get(path)
+                        or source.read(path) != trusted.read(path)):
                     raise ValueError(f"Incomplete computed dependency closure: {path}")
                 for literal in tokens:
-                    if literal.startswith('"') and literal.endswith('.zig"'):
+                    if literal.startswith('"') and literal.endswith('.zig"') and literal != '".zig"':
                         dependency = str(PurePosixPath(path).parent / json.loads(literal))
                         source.read(dependency)
                         files.add(dependency)
