@@ -113,6 +113,7 @@ jobs:
           set -euo pipefail
           # Users' default soft limit; the hard limit stays the system's.
           ulimit -S -n 256
+          test "$(ulimit -Sn)" = 256
           { ulimit -Sn; ulimit -Hn; } | tee -a "$RUNNER_TEMP/vr-environment.txt"
           unset TMUX TMUX_PANE
           # shellcheck disable=SC2086
@@ -124,6 +125,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/vr-evidence"
           cp "$RUNNER_TEMP/vr-environment.txt" "$RUNNER_TEMP/vr-evidence/" 2>/dev/null || true
           # Synthetic scratch (HOME, Store, sockets) is removed by the helper's cleanup.
+          # matrix.py copies row evidence out of the hidden layout roots; the roots
+          # themselves (pinned bits, cache/venv symlinks) are not evidence.
           find "$RUNNER_TEMP/vr-evidence" -name 'codex.json' -delete
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}

@@ -132,6 +132,23 @@ def launch(rows, out, serial):
     return results
 
 
+def retain(out):
+    """Copy row evidence out of the hidden layout trees so the artifact keeps it.
+
+    Regular files only: the layout's builds/venv symlinks and the helper's
+    terminal FIFOs stay behind (opening a FIFO would block).
+    """
+    for root in sorted(out.glob("root-*")):
+        for tree in (root / CACHE / "qualify", *sorted((root / PROBES).glob("*/"))):
+            if not tree.is_dir() or tree.is_symlink():
+                continue
+            for path in tree.rglob("*"):
+                if path.is_file() and not path.is_symlink():
+                    target = out / "evidence" / root.name / tree.name / path.relative_to(tree)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, target)
+
+
 def last_json(path):
     for line in reversed(path.read_text(errors="replace").splitlines()):
         if line.startswith("{"):
@@ -164,6 +181,7 @@ def terminal(args):
         results = launch(rows, out, args.serial)
     finally:
         load.close()
+        retain(out)
     issues = []
     for surface, (passes, unavailable) in QUALIFY.items():
         name = f"qualify-{surface}"
