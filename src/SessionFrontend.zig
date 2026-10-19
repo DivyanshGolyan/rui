@@ -114,6 +114,12 @@ const Marks = struct {
     count: usize = 0,
 
     fn record(self: *Marks, offset: u64, cursor: ?client.ConversationCursor) void {
+        // Nothing showed since the last boundary, so the newer read's start
+        // names everything before this offset at least as completely.
+        if (self.count != 0 and self.items[self.count - 1].offset == offset) {
+            self.items[self.count - 1].cursor = cursor;
+            return;
+        }
         if (self.count == self.items.len) {
             // Dropping the oldest boundary is safe: a transcript that starts
             // before the first retained one reloads from it.
@@ -141,6 +147,10 @@ test "transcript boundaries survive live eviction and bounded recording" {
     // Live output lost its first 10 bytes: continue from the next boundary.
     try std.testing.expectEqual(@as(u64, 7), marks.from(10).?.cursor.?.before_position);
     try std.testing.expect(marks.from(41) == null);
+    // A read that starts where the last one did replaces its boundary.
+    marks.record(40, .{ .end = 9, .before_position = 8 });
+    try std.testing.expectEqual(@as(usize, 2), marks.count);
+    try std.testing.expectEqual(@as(u64, 8), marks.from(10).?.cursor.?.before_position);
     for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
     try std.testing.expectEqual(@as(usize, 64), marks.count);
     try std.testing.expectEqual(@as(u64, 136), marks.from(0).?.offset);
@@ -992,7 +1002,8 @@ fn settleReader(self: *Self) !void {
 /// Appends a joined read's staged live output; none of it showed before.
 fn showStaged(self: *Self) !void {
     const length = self.job.result.output_length;
-    // An empty opening still marks where the conversation begins.
+    // An empty opening still marks where the conversation begins; a later
+    // read marks only when it shows something.
     if (self.job.result.mark) |mark| self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
     if (length == 0) return;
     var buffer: [4096]u8 = undefined;

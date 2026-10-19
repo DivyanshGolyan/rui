@@ -3985,6 +3985,89 @@ def renderer_cases():
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: an empty Session scrolls to its start, and tmux composing names Alt-J", flush=True)
+
+        # A page asked for just before a Message never opens over it: queued
+        # behind a held scan, or (/details) already reading when it is sent.
+        session = "renderer/stale-pages"
+        configure(session)
+        holding, release, held = threading.Event(), threading.Event(), threading.Event()
+        def hold_page(_):
+            if holding.is_set():
+                held.set()
+                release.wait(10)
+            return True
+        with terminal(session) as tty:
+            tty.send("before pages\n", answer("stale before"))
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        # The first three queue behind a held scan; the last /details is
+        # itself held reading the Conversation.
+        for command, route in (("/status", "/v1/activity-page"), ("/details", "/v1/activity-page"),
+                               ("/history", "/v1/activity-page"), ("/details", "/v1/conversation-page")):
+            holding.clear()
+            release.clear()
+            held.clear()
+            proxy = canonical.ReplyProxy(host, route, lambda response: response, before_forward=hold_page)
+            with terminal(session) as tty:
+                holding.set()
+                if route == "/v1/activity-page":
+                    assert held.wait(5), "no scan reached the held page"
+                tty.send(command, predicate=lambda: tty.capture.draft(command, 2 + len(command)))
+                tty.send("\r", predicate=lambda: tty.capture.draft("", 2))
+                assert held.wait(5), (command, route, "the page was not held")
+                marker = answer(f"stale {command} {route}")
+                tty.send("after page\n", predicate=lambda: "Sending…" in tty.capture.completed or "Sent" in tty.capture.completed)
+                release.set()
+                tty.wait(marker, timeout=20)
+                shown = tty.capture.completed
+                assert marker in shown and "Browsing · Esc returns" not in shown and "Session: " not in shown, (command, route, shown)
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+            proxy.close()
+            proxy = None
+        print("renderer: a page asked for before a Message never opens over it", flush=True)
+
+        # A Message's conversation row shows nothing live (its Admission did),
+        # so a later read cannot begin a transcript before it. Once eviction
+        # cuts the Admission, older pages still hold the Message, whether its
+        # row arrives alone (held reply) or with the reply.
+        reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(3700))
+        for variant in ("alone", "with-reply"):
+            session = f"renderer/evicted-message-{variant}"
+            configure(session)
+            provider_release = threading.Event()
+            response = fixture.sse_answer(f"evicted-{variant}", "reason", "message", reply)[0]
+            endpoint.responses.append((response, provider_release) if variant == "alone" else response)
+            holding, release, held = threading.Event(), threading.Event(), threading.Event()
+            proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+            with terminal(session) as tty:
+                requests = len(endpoint.requests)
+                tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+                if variant == "alone":
+                    fixture.wait_for(lambda: len(endpoint.requests) > requests, "model request", timeout=20)
+                    time.sleep(1)  # Scans see the conversation row before the reply.
+                    provider_release.set()
+                else:
+                    holding.set()
+                    fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "evicted Message answered", timeout=20)
+                    release.set()
+                tty.wait("REPLY-03699", timeout=30)
+                tty.send("\x1b[A", "Browsing · Esc returns")
+                # Each /history jumps to the transcript's top, where the
+                # preceding page then loads.
+                for _ in range(10):
+                    tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+                    if "Start of conversation" in tty.capture.completed:
+                        break
+                shown = tty.capture.completed
+                assert "Start of conversation" in shown, shown
+                assert "Historical item omitted: position" in shown and "59199 raw bytes" in shown, (variant, shown)
+                assert shown.index("59199 raw bytes") < shown.index("REPLY-00000"), (variant, shown)
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+            proxy.close()
+            proxy = None
+        print("renderer: an evicted Message stays in the transcript, alone or with its reply", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
