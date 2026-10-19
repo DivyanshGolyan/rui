@@ -15,7 +15,7 @@ Load applicable guidance before acting; routes combine:
 - **Implement or review performance changes:** [Performance](CODING_STANDARDS.md#performance), including build-latency exceptions.
 - **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance).
 - **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
-- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). Use the maintained subsystem mapping as the minimum, with reviewer-accepted reasons for reductions.
+- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). `select_tests.py` decides; no reviewer acceptance.
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
@@ -45,17 +45,16 @@ Ask before publishing to a different destination, expanding scope, force-pushing
 
 ## Landing
 
-Standing grant: an item ready for main lands under the landing rule below without further approval. Passing the rule's gates is the authority; there is no separate human approval or qualification stage.
+Standing grant: an item ready for main lands under these rules without further approval. Passing their gates is the authority; there is no separate human approval or qualification stage.
 
-LANDING RULE from now on:
-- Stack ready items on wip/land-N and gate ONLY the tip.
-- If the stack touches the (4) strict paths, the tip must pass Linux and Mac Selected plus the upgrade check BEFORE the push. Otherwise, Linux Selected green on the tip is enough.
+- Stack ready items on `wip/land-N` and gate only the tip.
+- If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
 - Push as a non-force fast-forward.
-- If main goes red after the push in Store/recovery/upgrade: automatic non-force git revert, then freeze landing.
+- If main goes red after the push in Store/recovery/upgrade: automatic non-force `git revert`, then freeze landing.
 - Any other red: file an issue and fix forward.
 - After ready, at most one rerun per item, and no commits except fixes for red CI.
-- Add a 'stable' ref that advances only when main's post-push CI is green.
+- `stable` is the last main commit whose post-push CI passed; install from `stable`.
 
-The (4) strict paths are `src/store*`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list; the [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on exactly these paths. A `wip/land-N` push runs [Selected checks](.github/workflows/check.yml) on the tip, and the upgrade check when the tip touches a strict path.
+The strict paths are `src/store*`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list; the [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on exactly these paths. A `wip/land-N` push runs [Selected checks](.github/workflows/check.yml) on the tip, and the upgrade check when the tip touches a strict path.
 
 [Main health](.github/workflows/main-health.yml) applies the post-push rules. It advances `stable`, or reverts the commits since `stable` and opens a `landing-freeze` issue, or files a fix-forward issue. Landing stays frozen while a `landing-freeze` issue is open; close it after the fix lands.

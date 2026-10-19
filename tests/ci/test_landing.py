@@ -40,10 +40,13 @@ class LandingTest(unittest.TestCase):
         self.assertEqual(decide({selected: run(), upgrade: run('in_progress', None)}, ['src/store.zig']), 'pending')
         self.assertEqual(decide({selected: run()}, ['src/cli.zig']), 'green')
         self.assertEqual(decide({selected: run(), upgrade: run()}, ['src/store.zig']), 'green')
+        # A strict change waits for its upgrade check before stable can move.
+        self.assertEqual(decide({selected: run()}, ['src/store.zig']), 'pending')
         self.assertEqual(decide({selected: run(conclusion='failure')}, ['src/cli.zig']), 'issue')
-        self.assertEqual(decide({selected: run(conclusion='failure')}, ['src/cli.zig', 'src/store.zig']), 'revert')
+        self.assertEqual(decide({selected: run(conclusion='failure'), upgrade: run()},
+                                ['src/cli.zig', 'src/store.zig']), 'revert')
         self.assertEqual(decide({selected: run(), upgrade: run(conclusion='failure')}, ['install.sh']), 'revert')
-        self.assertEqual(decide({selected: run(conclusion='cancelled')}, ['src/server.zig']), 'revert')
+        self.assertEqual(decide({selected: run(conclusion='cancelled'), upgrade: run()}, ['src/server.zig']), 'revert')
 
     def test_selected_runs_only_on_pull_requests_landing_tips_and_main(self):
         text = workflow('check.yml')

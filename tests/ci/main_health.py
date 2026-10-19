@@ -27,15 +27,23 @@ def gh(*args):
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
 
 
-def runs(sha):
+def runs(sha, commits):
+    """Selected for this commit; the upgrade check's newest run since stable.
+
+    A push that misses the upgrade path filter has no upgrade run of its own,
+    so an earlier strict commit's run since stable still decides.
+    """
     repository = os.environ["GITHUB_REPOSITORY"]
     result = {}
-    for workflow in WORKFLOWS:
+    for workflow, query in (("check.yml", f"head_sha={sha}&"), (UPGRADE, "")):
         rows = json.loads(gh("api", f"repos/{repository}/actions/workflows/{workflow}/runs"
-                                    f"?head_sha={sha}&event=push&branch=main&per_page=20"))["workflow_runs"]
-        if rows:
-            # Reruns keep the run; its latest attempt is the result.
-            result[workflow] = max(rows, key=lambda row: row["id"])
+                                    f"?{query}event=push&branch=main&per_page=100"))["workflow_runs"]
+        for commit in commits:
+            matching = [row for row in rows if row["head_sha"] == commit]
+            if matching:
+                # Reruns keep the run; its latest attempt is the result.
+                result[workflow] = max(matching, key=lambda row: row["id"])
+                break
     return result
 
 
@@ -63,7 +71,8 @@ def report(title, body, label=None):
 
 def decide(results, changed):
     """Return 'pending', 'green', 'revert' or 'issue' for one main commit."""
-    if "check.yml" not in results or any(run["status"] != "completed" for run in results.values()):
+    required = {"check.yml"} | ({UPGRADE} if strict(changed) else set())
+    if required - results.keys() or any(run["status"] != "completed" for run in results.values()):
         return "pending"
     red = {name for name, run in results.items() if run["conclusion"] != "success"}
     if not red:
@@ -95,7 +104,7 @@ def main():
     # Everything since the last green commit is suspect, not only this push.
     base = stable or f"{sha}~1"
     changed = git("diff", "--no-renames", "--name-only", base, sha).splitlines()
-    results = runs(sha)
+    results = runs(sha, git("rev-list", f"{base}..{sha}").split())
     verdict = decide(results, changed)
     links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
                       for name, run in sorted(results.items()))
@@ -110,6 +119,8 @@ def main():
     elif verdict == "revert" and not open_issue(f"Landing frozen: main red after push {sha[:12]}"):
         commits = git("rev-list", "--reverse", f"{base}..{sha}").split()
         try:
+            # Revert on top of current main, which may have moved since checkout.
+            git("checkout", "--quiet", "--detach", "origin/main")
             git("-c", "user.name=github-actions[bot]",
                 "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
                 "revert", "--no-edit", *reversed(commits))

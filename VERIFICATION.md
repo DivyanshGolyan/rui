@@ -14,7 +14,7 @@ Integration fixtures require Python 3.11 or newer on PATH. They use `sys.excepti
 | Resource-owner changes | Comparable measurements and lifecycle evidence | Applicable runners |
 | Evaluator integration | `zig build workflow-check` for child/process cases, `zig build evaluator-host-integration` for the private lifecycle owner, plus complete evaluator/Workflow native qualification before a public integration claim | Private owner-boundary gates available on Linux; Host invocation belongs to Workflow creation, and full cross-platform cases remain planned |
 
-The executable minimum is [select_tests.py](tests/ci/select_tests.py), using existing targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the relevant candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their affected-path mappings, not an unconditional per-PR gate. Reviewers can require additional checks, or accept a reduction with a reason tied to unchanged behavior.
+The executable minimum is [select_tests.py](tests/ci/select_tests.py), using existing targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the relevant candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their affected-path mappings, not an unconditional per-PR gate.
 
 | Subsystem | Review-ready minimum | Why other suites are excluded |
 | --- | --- | --- |

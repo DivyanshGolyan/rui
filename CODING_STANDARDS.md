@@ -44,7 +44,7 @@ Before changing the build graph or enabling experimental incremental compilation
 
 ## Review
 
-Review correctness and simplicity using the [product-tenet gate](VERIFICATION.md#product-tenets-at-stage-completion), including local and Codex reviews.
+Review correctness and simplicity using the [product-tenet gate](VERIFICATION.md#product-tenets-at-stage-completion), with one independent review.
 
 Trace beyond changed lines to owning state/control flow and existing causes of workarounds. Identify duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; connect findings to the change. Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost.
 
@@ -56,7 +56,7 @@ Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, fo
 
 Test meaningful failures and recovery against independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority.
 
-For each new owner-boundary regression, demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup. Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
+For each new owner-boundary regression on a [strict path](AGENTS.md#landing), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup. Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
 
 For documentation, check contract preservation, references and `git diff --check`. Report passed checks, material limits, pre-existing failures and interrupted/unrun checks; state whether delivery is local, committed, published or deployed. Implementation claims require inspected source. Keep accepted decisions, source inspection, prototypes, compilation and native process-crash evidence distinct. OS-crash and power-loss recovery are outside the supported contract.
 
