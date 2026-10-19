@@ -2868,6 +2868,16 @@ def opaque_session_commands_case():
             print(json.dumps({"printed": printed, "decision": decision, "exact_session": True}), flush=True)
         fixture.wait_for(lambda: (state / "allowed-once").exists(), "printed Allow executed its exact Action")
         assert (state / "allowed-once").exists() and not (state / "must-not-run").exists()
+        # Type only once the decided choice has left the screen; a line begun
+        # at a choice withdrawn meanwhile is the separate defect #540.
+        capture = terminal_capture(master)
+        deadline = time.monotonic() + 15
+        while "Opaque decisions complete." not in capture.completed or "Type a + Enter" in capture.completed:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and select.select([master], [], [], remaining)[0], capture.completed
+            chunk = os.read(master, 65536)
+            assert chunk, capture.completed
+            capture.feed(chunk)
         terminal_step(master, "/exit", "Resume: ")
         assert entered.wait(timeout=5) == 0
         before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
