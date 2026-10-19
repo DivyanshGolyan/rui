@@ -145,9 +145,6 @@ jobs:
         with:
           targets: ${{ needs.plan.outputs.targets }}
           check-part: compiled
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
-        run: python3 -B tests/ci/cache_execution.py
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
@@ -160,6 +157,24 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+  linux_cache_policy:
+    # The warm-cache proof restores the producer's cache state in parallel. In
+    # the producer it serialized 3-6 minutes before compilation and, on a cold
+    # cache, exhausted the producer's 15-minute budget before artifacts existed.
+    needs: plan
+    if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.targets }}
+          check-part: compiled
+          # Restore the producer's cache key; never publish proof-only contents under it.
+          save-cache: 'false'
+      - name: Prove warm compilation does not cache test acceptance
+        run: python3 -B tests/ci/cache_execution.py
   macos_build:
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
@@ -173,9 +188,6 @@ jobs:
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
           check-part: compiled
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
-        run: python3 -B tests/ci/cache_execution.py
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
@@ -188,6 +200,21 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+  macos_cache_policy:
+    # Same proof on Apple Silicon, beside the producer instead of before its compile.
+    needs: plan
+    if: ${{ needs.plan.outputs.native == 'true' && needs.plan.outputs.cache_execution == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: ${{ needs.plan.outputs.native_targets }}
+          check-part: compiled
+          save-cache: 'false'
+      - name: Prove warm compilation does not cache test acceptance
+        run: python3 -B tests/ci/cache_execution.py
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build]
@@ -249,7 +276,7 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     # Policy is required even for documentation and suppressed duplicate pushes.
-    needs: [plan, policy, linux_build, linux_suites]
+    needs: [plan, policy, linux_build, linux_suites, linux_cache_policy]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -261,9 +288,16 @@ jobs:
           POLICY_RESULT: ${{ needs.policy.result }}
           BUILD_RESULT: ${{ needs.linux_build.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
+          CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
+          CACHE_RESULT: ${{ needs.linux_cache_policy.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$POLICY_RESULT" = success
+          if [ "$CACHE_SELECTED" = true ]; then
+            test "$CACHE_RESULT" = success
+          else
+            test "$CACHE_RESULT" = skipped
+          fi
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
             test "$NATIVE_RESULT" = success
@@ -325,7 +359,7 @@ jobs:
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.
-    needs: [plan, macos_build, macos_suites]
+    needs: [plan, macos_build, macos_suites, macos_cache_policy]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -335,7 +369,14 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           BUILD_RESULT: ${{ needs.macos_build.result }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
+          CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
+          CACHE_RESULT: ${{ needs.macos_cache_policy.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
+          if [ "$CACHE_SELECTED" = true ]; then
+            test "$CACHE_RESULT" = success
+          else
+            test "$CACHE_RESULT" = skipped
+          fi
