@@ -17,7 +17,7 @@ jobs:
           cat /etc/hosts
           for py in python3 /usr/bin/python3; do
             "$py" --version
-            timeout 60 "$py" - <<'PY' || echo "exit $?"
+            "$py" - <<'PY' || echo "exit $?"
           import socket, time, http.server
           def t(label, fn):
               s = time.monotonic()
