@@ -255,7 +255,9 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
     return self.screen.append(bytes);
 }
 
-pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, prompt: []const u8, live: *const View.Live) !void {
+/// Writes the screen's selected frame. The receipt exists only after every
+/// byte and the final flush succeeded; a failure returns no receipt.
+pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8, live: *const View.Live) !Screen.Delivered {
     const Output = struct {
         terminal: *Self,
         writer: std.Io.Writer,
@@ -284,6 +286,7 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, status: []const u8,
     var buffer: [4096]u8 = undefined;
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
     const size = self.geometry();
-    self.screen.render(&output.writer, size, bytes, cursor, status, prompt, live) catch |err| return output.failure orelse err;
+    const delivered = self.screen.render(&output.writer, size, bytes, cursor, status, live) catch |err| return output.failure orelse err;
     self.size = size;
+    return delivered;
 }

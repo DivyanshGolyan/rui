@@ -56,6 +56,41 @@ pub const Consent = struct {
     }
 };
 
+/// Which editor a frame encodes and its events edit. Selection is not
+/// permission: Enter probes current facts separately.
+pub const Editor = enum { draft, choice };
+pub const Approval = enum { absent, paused, preview, reading, draining, ready };
+pub const Projection = struct { editor: Editor = .draft, approval: Approval = .absent };
+
+/// What the presentation owner shows of the adopted Action, sampled at
+/// selection. `read` means delivered rows reached the end in this layout.
+pub const Shown = struct { action_page: bool, whole: bool, read: bool };
+
+/// Closed selection: callers never assemble an editor and approval pair.
+pub fn project(consent: Consent, shown: Shown, command_blocked: bool) Projection {
+    if (consent.action == null) return .{};
+    if (consent.presentation == .preview) return .{ .approval = .preview };
+    if (!shown.action_page) return .{ .approval = .paused };
+    if (!shown.whole) return .{ .approval = .preview };
+    if (!shown.read) return .{ .editor = .choice, .approval = .reading };
+    if (command_blocked or !consent.ready) return .{ .editor = .choice, .approval = .draining };
+    return .{ .editor = .choice, .approval = .ready };
+}
+
+/// Owner facts that can block a Message at the moment Enter would seal it.
+pub const Blockers = struct {
+    opening: bool = false,
+    permission_preparing: bool = false,
+    command: bool = false,
+    original: enum { none, message, decision } = .none,
+};
+
+/// A live probe, never cached from frame selection. Any adopted Action, even
+/// hidden or previewed, holds Messages until it is decided or withdrawn.
+pub fn messageAllowed(consent: Consent, blockers: Blockers) bool {
+    return consent.action == null and !blockers.opening and !blockers.permission_preparing and !blockers.command and blockers.original != .decision;
+}
+
 pub fn classify(text: []const u8) Choice {
     if (std.mem.eql(u8, text, "a")) return .allow_once;
     if (std.mem.eql(u8, text, "d")) return .deny;
@@ -179,5 +214,43 @@ test "an oversized preview cannot authorize even after completed output and empt
         try std.testing.expect(consent.submit("a") == null);
         try std.testing.expect(consent.submit("d") == null);
         try std.testing.expectEqual(@as(?u64, 918), consent.action);
+    }
+}
+
+test "projection selects the choice editor only beside a whole visible Action" {
+    const Case = struct { adopted: bool = true, preview: bool = false, page: bool = true, whole: bool = true, read: bool = true, command: bool = false, fresh: bool = false, expected: Projection };
+    for ([_]Case{
+        .{ .adopted = false, .expected = .{} },
+        // A hidden Action keeps the draft; Enter explains the pending decision.
+        .{ .page = false, .read = false, .expected = .{ .approval = .paused } },
+        .{ .page = false, .fresh = true, .expected = .{ .approval = .paused } },
+        // An oversized proposal is decided only in the shell, visible or not.
+        .{ .preview = true, .expected = .{ .approval = .preview } },
+        .{ .preview = true, .page = false, .expected = .{ .approval = .preview } },
+        .{ .whole = false, .read = false, .expected = .{ .approval = .preview } },
+        .{ .read = false, .fresh = true, .expected = .{ .editor = .choice, .approval = .reading } },
+        .{ .expected = .{ .editor = .choice, .approval = .draining } },
+        .{ .command = true, .fresh = true, .expected = .{ .editor = .choice, .approval = .draining } },
+        .{ .fresh = true, .expected = .{ .editor = .choice, .approval = .ready } },
+    }) |case| {
+        var consent: Consent = .{};
+        if (case.adopted) consent.adopt(7, if (case.preview) .preview else .complete);
+        consent.ready = case.adopted and case.fresh and !case.preview;
+        const shown: Shown = .{ .action_page = case.page, .whole = case.whole, .read = case.read };
+        try std.testing.expectEqual(case.expected, project(consent, shown, case.command));
+    }
+}
+
+test "a Message probe blocks on every live owner fact independently" {
+    var consent: Consent = .{};
+    try std.testing.expect(messageAllowed(consent, .{}));
+    try std.testing.expect(messageAllowed(consent, .{ .original = .message }));
+    for ([_]Blockers{ .{ .opening = true }, .{ .permission_preparing = true }, .{ .command = true }, .{ .original = .decision } }) |blockers|
+        try std.testing.expect(!messageAllowed(consent, blockers));
+    // Hidden, previewed or ready, an adopted Action holds Messages.
+    for ([_]Presentation{ .complete, .preview }) |presentation| {
+        consent = .{};
+        consent.adopt(9, presentation);
+        try std.testing.expect(!messageAllowed(consent, .{}));
     }
 }

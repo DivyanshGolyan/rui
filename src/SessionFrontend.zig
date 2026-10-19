@@ -95,7 +95,6 @@ prepared_action: ?u64 = null,
 prepared_summary: View.ActionSummary = .{},
 action_summary: View.ActionSummary = .{},
 reader_output_started: bool = false,
-consent: ConsentPolicy.Consent = .{},
 choice_buffer: [64]u8 = undefined,
 choice: Editor = undefined,
 opening: bool = true,
@@ -462,7 +461,8 @@ fn driveActive(self: *Self) !void {
             @memcpy(job.command_text[0..text.len], text);
             job.command_text_length = text.len;
             job.inspection_submission = self.submission.view();
-            job.inspection_action = if (self.consent.presentation == .preview) self.consent.action else null;
+            const consent = self.terminal.screen.consent;
+            job.inspection_action = if (consent.presentation == .preview) consent.action else null;
             // The newer inspection replaces a /status not yet shown.
             self.status_requested = false;
             try self.launch(job, if (kind == .command) reads.runCommand else reads.inspectPage);
@@ -495,22 +495,23 @@ fn driveActive(self: *Self) !void {
                 try self.launch(self.freeze(.history), reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
-            } else if (!self.consent.active() and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
+            } else if (!self.terminal.screen.consent.active() and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
                 try self.launch(self.freeze(.permission), reads.permission);
             }
         }
+        // Input routes by the latest frame's editor. Once a transition revokes
+        // that frame, draw its replacement before reading further input.
+        const scope = self.terminal.screen.scope;
         for (0..1024) |_| {
             if (try self.step(0) != .byte) break;
-            if (self.detached) break;
+            if (self.detached or self.terminal.screen.scope != scope) break;
         }
         if (self.detached) break;
         // Finish chat paste/UTF-8 under its original decoder before consent.
         if (self.reader.thread == null and self.prepared_action != null and self.input.pending() == .none) {
-            try self.terminal.screen.prepareAction(self.init.io, self.action_file);
             // Preparation is complete and the file remains immutable through
             // this choice. A bounded preview is export-only, never consent.
-            const presentation: ConsentPolicy.Presentation = if ((try self.action_file.stat(self.init.io)).size <= @import("ConversationViewport.zig").capacity) .complete else .preview;
-            self.consent.adopt(self.prepared_action.?, presentation);
+            try self.terminal.screen.adopt(self.init.io, self.action_file, self.prepared_action.?);
             self.action_summary = self.prepared_summary;
             self.prepared_action = null;
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
@@ -520,37 +521,42 @@ fn driveActive(self: *Self) !void {
         self.withdrawDecided();
         if (self.dirty) {
             const screen = self.terminal.screen;
-            if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
-            const action_visible = self.actionVisible();
-            const view: Input.View = if (self.consent.active() and action_visible) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
-            const approval_ready = self.approvalReady();
-            const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) Frame.approval_choice else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Esc returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
-                .not_started => "Not sent · Ctrl-R retries original",
-                .submitting => "Sending…",
-                .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
-                .rejected => "Rejected · /discard",
-            } else if (self.echo != null) "Sent" else workStatus(self.current.work.status.value);
+            const projection = screen.select(self.commandActive());
+            const choosing = projection.editor == .choice;
+            const view: Input.View = if (choosing) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
+            const base_status = if (self.opening) "Opening…" else switch (projection.approval) {
+                .preview => "Approval disabled · /help for exact shell commands",
+                .paused => "Approval paused · Esc returns to Action",
+                .reading => "PgDn reads the rest · then a/d + Enter",
+                .draining, .ready => Frame.approval_choice,
+                .absent => if (self.submission.view()) |submission| switch (submission.state) {
+                    .not_started => "Not sent · Ctrl-R retries original",
+                    .submitting => "Sending…",
+                    .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
+                    .rejected => "Rejected · /discard",
+                } else if (self.echo != null) "Sent" else workStatus(self.current.work.status.value),
+            };
             var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
             var context = std.Io.Writer.fixed(&context_buffer);
-            if (self.consent.active() and action_visible)
+            if (choosing)
                 try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
-            else if (self.tmux and !self.consent.active() and view.bytes.len != 0)
+            else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
                 try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
             var status_buffer: [Frame.status_capacity]u8 = undefined;
             const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.consent.active() and action_visible) "> " else "› ", &self.live);
-            if (!approval_ready and self.approvalReady()) {
+            const delivered = try self.terminal.redraw(view.bytes, view.cursor, status, &self.live);
+            if (screen.presented(delivered).read_completed) {
                 // Reading completes only after delivery. Old choice text must
                 // not become a decision, but fragmented decoder/paste custody
                 // must survive until the existing empty-input freshness gate.
                 self.choice.length = 0;
                 self.choice.cursor = 0;
                 self.choice.plain_ascii = true;
-                self.consent.invalidate();
+                screen.invalidateChoice();
                 self.dirty = true;
             }
-            if (self.consent.active() and action_visible and self.actionVisible() and !self.dirty and !self.consent.acceptsInput() and self.input.pending() == .none) {
+            if (!self.dirty and screen.decisionPromptDelivered() and !screen.consent.acceptsInput() and self.input.pending() == .none) {
                 // Every prompt byte was accepted by stdout. Discard input
                 // through its decoder, not tcflush: a paste prefix or Ctrl-C
                 // arriving during the final write must retain its meaning.
@@ -563,7 +569,7 @@ fn driveActive(self: *Self) !void {
                 }
                 if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
                 if (self.detached) break;
-                if (self.consent.promptCompleted(service, self.input.pending() != .none, self.commandActive() or !self.actionVisible() or self.dirty)) {
+                if (screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty)) {
                     try Editor.testChoiceReady(self.init.io);
                 }
             }
@@ -617,8 +623,8 @@ test "status lines keep the notice and instructions beside an oversized context"
 /// It leaves before more input is read, so no key reaches it; a fragmented
 /// sequence finishes under the choice decoder first, so none reaches the draft.
 fn withdrawDecided(self: *Self) void {
-    if (!self.consent.active() or self.current.first_action == self.consent.action or self.input.pending() != .none) return;
-    self.consent.interrupt();
+    const consent = self.terminal.screen.consent;
+    if (!consent.active() or self.current.first_action == consent.action or self.input.pending() != .none) return;
     self.terminal.screen.withdrawAction();
     self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
     self.dirty = true;
@@ -703,20 +709,16 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     try self.terminal.screen.latest();
 }
 
-fn actionVisible(self: *const Self) bool {
-    const screen = self.terminal.screen;
-    return self.consent.presentation == .complete and screen.actionVisible() and screen.preview_complete;
-}
-
 /// A queued or running command ends consent freshness until it completes.
 fn commandActive(self: *const Self) bool {
     return self.input.command_length != null or self.command_running;
 }
 
-fn approvalReady(self: *const Self) bool {
-    if (!self.actionVisible() or self.commandActive()) return false;
-    const size = self.terminal.geometry();
-    return size.row == self.terminal.size.row and size.col == self.terminal.size.col and self.terminal.screen.approvalReady();
+/// The choice shows decision instructions: its rows were all delivered and no
+/// command holds it. Freshness and Enter are probed separately.
+fn decisionShown(self: *const Self) bool {
+    const approval = self.terminal.screen.selected.approval;
+    return approval == .draining or approval == .ready;
 }
 
 fn navigation(self: *Self, event: Editor.Event) !void {
@@ -791,9 +793,9 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         // Kitty or modifyOtherKeys, but never from pasted text. Beside its
         // Action it is choice input; while approval is paused, recovery
         // waits for the Action and the paused draft stays as it is.
-        .event => |value| if (!value.pasted and isRecovery(value.event) and !(self.consent.active() and self.actionVisible())) {
-            if (self.consent.active()) {
-                self.consent.invalidate();
+        .event => |value| if (!value.pasted and isRecovery(value.event) and self.terminal.screen.selected.editor != .choice) {
+            if (self.terminal.screen.consent.active()) {
+                self.terminal.screen.invalidateChoice();
                 self.notice = self.decisionNotice();
             } else try self.submission.requestRecovery(null);
         } else try self.inputEvent(decoded),
@@ -811,27 +813,30 @@ fn isRecovery(event: vaxis.Event) bool {
 
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     switch (decoded) {
-        // The choice takes input only beside its Action. While approval is
-        // paused, typing goes to the draft shown in the composer; it never
-        // decides, and returning to the Action needs a fresh choice.
-        else => if (self.consent.active() and self.actionVisible()) try self.choiceEvent(decoded) else {
-            if (self.consent.active()) {
-                self.consent.invalidate();
+        // The editor the latest frame encodes takes the input; a transition
+        // changes it only at the next frame. While approval is paused, typing
+        // goes to the draft shown in the composer; it never decides, and
+        // returning to the Action needs a fresh choice.
+        else => if (self.terminal.screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
+            const screen = self.terminal.screen;
+            if (screen.consent.active()) {
+                screen.invalidateChoice();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             }
             try self.draftEvent(decoded);
-            if (self.detached) self.consent.interrupt();
+            if (self.detached) screen.interruptConsent();
         },
     }
 }
 
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
-    if (!self.consent.acceptsInput()) {
+    const screen = self.terminal.screen;
+    if (!screen.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
         const event = self.choice.apply(decoded);
         if (event == .interrupt or event == .eof) {
-            self.consent.interrupt();
+            screen.interruptConsent();
             self.detached = true;
         }
         try self.navigation(event);
@@ -851,23 +856,31 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     switch (event) {
         .submit => {
             const text = self.choice.buffer[0..self.choice.length];
-            const decision = if (self.approvalReady()) self.consent.submit(text) else null;
-            if (decision) |selected| {
-                self.terminal.screen.releaseAction();
-                try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
-            } else if (std.mem.startsWith(u8, text, "/")) {
-                self.choiceCommand(text);
-            } else self.notice = if (self.approvalReady()) "! Choose a or d. Nothing authorized." else "! Read the whole Action first; nothing authorized.";
-            self.consent.invalidate();
+            // Probe current geometry, command and selection; never the
+            // readiness of the frame that drew the prompt.
+            switch (screen.submitChoice(text, self.terminal.geometry(), self.commandActive())) {
+                .decision => |selected| {
+                    // Consumption precedes fallible submission.
+                    screen.releaseAction();
+                    try self.submission.begin(.{ .decision = .{ .action = selected.action, .decision = if (selected.choice == .allow_once) .allow_once else .deny } });
+                },
+                .blocked => |reason| if (std.mem.startsWith(u8, text, "/")) self.choiceCommand(text) else {
+                    self.notice = if (reason == .command) "! Command still running. Nothing authorized." else "! Read the whole Action first; nothing authorized.";
+                },
+                .other => if (std.mem.startsWith(u8, text, "/")) self.choiceCommand(text) else {
+                    self.notice = "! Choose a or d. Nothing authorized.";
+                },
+            }
+            screen.invalidateChoice();
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         },
         .invalid, .edit_rejected, .unbound, .overflow => {
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
-            self.consent.invalidate();
-            self.notice = choiceRejection(event, self.approvalReady());
+            screen.invalidateChoice();
+            self.notice = choiceRejection(event, self.decisionShown() and !self.commandActive());
         },
         .interrupt, .eof => {
-            self.consent.interrupt();
+            screen.interruptConsent();
             self.detached = true;
         },
         else => {},
@@ -876,7 +889,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 
 /// Why a draft waits for the Action: a previewed Action is decided only in the shell.
 fn decisionNotice(self: *const Self) []const u8 {
-    return if (self.consent.presentation == .preview) "! Approval disabled · /help for exact shell commands. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
+    return if (self.terminal.screen.consent.presentation == .preview) "! Approval disabled · /help for exact shell commands. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
 }
 
 /// Only a choice ready to decide can ask for a or d; until then the
@@ -889,7 +902,14 @@ fn choiceRejection(event: Editor.Event, ready: bool) []const u8 {
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const submission = self.submission.view();
     // A Message waits for a pending command, which may change its configuration.
-    switch (self.input.applySelected(decoded, !self.opening and self.read_phase != .permission and !self.consent.active() and !self.commandActive() and (submission == null or submission.?.kind == .message))) {
+    // A live probe immediately before sealing, with no effect between them.
+    const allowed = ConsentPolicy.messageAllowed(self.terminal.screen.consent, .{
+        .opening = self.opening,
+        .permission_preparing = self.read_phase == .permission,
+        .command = self.commandActive(),
+        .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
+    });
+    switch (self.input.applySelected(decoded, allowed)) {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
@@ -901,7 +921,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 self.requestHistory(text);
             } else self.admitCommand();
         },
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
@@ -951,7 +971,7 @@ fn settleReader(self: *Self) !void {
     if (end != .complete and self.command_running) {
         // Nothing to show: the command failed before writing output.
         self.command_running = false;
-        self.consent.invalidate();
+        self.terminal.screen.invalidateChoice();
     }
     if (end == .complete and self.read_phase == .history) {
         // The user may have left the transcript while this page loaded.
@@ -1209,9 +1229,9 @@ test "after three changed reads in a row the newest capture applies" {
 
 fn showInspection(self: *Self) !void {
     // Any completed inspection or command requires a fresh choice afterwards.
-    self.consent.invalidate();
+    self.terminal.screen.invalidateChoice();
     self.status_page = false;
-    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    if (self.terminal.screen.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
     const size = (try self.inspection_file.stat(self.init.io)).size;
     if (size == 0) {
         self.notice = "Command finished with no output.";
@@ -1245,8 +1265,8 @@ fn applyStatus(self: *Self) !void {
     const screen = self.terminal.screen;
     if (self.job.open_status and self.status_requested) {
         self.status_requested = false;
-        self.consent.invalidate();
-        if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        screen.invalidateChoice();
+        if (screen.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         try screen.showFile(self.init.io, self.status_file, false);
         self.notice = null;
     } else if (self.status_page and screen.view == .inspection) {
