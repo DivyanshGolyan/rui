@@ -12,7 +12,12 @@ import subprocess
 import sys
 import zipfile
 
-from suite_inputs import source_inputs
+
+def source_inputs(*args, **kwargs):
+    # Compile-only custody does not depend on the optional acceptance detector.
+    # Acceptance callers invoke this inside their fresh-execution fallback.
+    from suite_inputs import source_inputs as collect
+    return collect(*args, **kwargs)
 
 
 def digest(path):

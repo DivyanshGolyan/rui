@@ -19,7 +19,9 @@ import suite_inputs
 
 class SuiteInputsTest(unittest.TestCase):
     def setUp(self):
-        build_source = Path(__file__).resolve().parents[2].joinpath('build.zig').read_text()
+        owner = suite_inputs.Source('HEAD')
+        build_sources = {name: (owner.read(name), owner.entries[name])
+                         for name in suite_inputs.build_files(owner)}
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
@@ -28,7 +30,11 @@ class SuiteInputsTest(unittest.TestCase):
         self.git('init', '-b', 'main')
         for name in suite_inputs.POLICY:
             self.write(name, 'reviewed policy')
-        self.write('build.zig', build_source)
+        for name, (data, mode) in build_sources.items():
+            path = Path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(0o755 if mode == '100755' else 0o644)
         self.write('src/logic_tests.zig', 'test { _ = @import("core.zig"); }')
         self.write('src/core.zig', 'const leaf = @import("leaf.zig");')
         self.write('src/leaf.zig', 'pub const answer = 41;')
@@ -131,14 +137,39 @@ class SuiteInputsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'policy differs from trusted main'):
             suite_inputs.source_inputs(['test-logic'], 'all')
         self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
-        with self.assertRaisesRegex(ValueError, 'Build graph has no reviewed'):
+        with self.assertRaisesRegex(ValueError, 'no reviewed suite-input declaration'):
+            suite_inputs.source_inputs(['test-logic'], 'all')
+
+    def test_native_include_or_bootstrap_change_cannot_acquire_undeclared_inputs(self):
+        self.write('native-config.h', '#define NATIVE_VALUE 41\n')
+        self.commit()
+        self.git('checkout', '-b', 'candidate')
+        self.write('src/bash_platform.c', '#include "../native-config.h"\nint value = NATIVE_VALUE;\n')
+        self.commit()
+        # Reject this new consumer before it can publish a reusable origin.
+        with self.assertRaisesRegex(ValueError, 'no reviewed suite-input declaration'):
+            suite_inputs.source_inputs(['test-full'], 'all')
+        self.git('checkout', 'main')
+        self.write('native-config.h', '#define NATIVE_VALUE 99\n')
+        self.commit()
+        self.git('checkout', 'candidate')
+        self.git('rebase', 'main')
+        self.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+        with self.assertRaisesRegex(ValueError, 'no reviewed suite-input declaration'):
+            suite_inputs.source_inputs(['test-full'], 'all')
+        # The same owner covers scripts that could start reading new inputs.
+        self.git('checkout', self.trusted, '--', 'src/bash_platform.c')
+        self.write('src/prepare_vaxis.sh', 'cat ../undeclared-native-input\n')
+        self.commit()
+        with self.assertRaisesRegex(ValueError, 'no reviewed suite-input declaration'):
             suite_inputs.source_inputs(['test-logic'], 'all')
 
     def test_missing_undeclared_and_computed_dependencies_fail_closed(self):
         for text, message in [('const x = @import("missing.zig");', 'missing tracked input'),
                               ('const x = @import("undeclared");', 'Undeclared module'),
                               ('const x = @import(computed);', 'computed dependency'),
-                              ('const x = @embedFile(computed);', 'computed dependency')]:
+                              ('const x = @embedFile(computed);', 'computed dependency'),
+                              ('const x = @cImport({ @cInclude("../native.h"); });', 'Undeclared native dependency')]:
             with self.subTest(text=text):
                 self.write('src/leaf.zig', text)
                 self.commit()
@@ -204,8 +235,12 @@ class EvidenceTest(unittest.TestCase):
             executed.write_bytes(b'exact retained test executable')
             # Run the public CLI with a real child gate. Only the optional
             # evidence boundary is faulted; actual gate exits are never mocked.
-            setup = '''import evidence, run_selected, os
+            setup = '''import evidence, run_selected, os, builtins
 mode = os.environ['FAULT']
+original_import = builtins.__import__
+def optional_import(name, *args, **kwargs):
+    if mode == 'import' and name == 'evidence': raise ImportError('optional evidence unavailable')
+    return original_import(name, *args, **kwargs)
 def identify(*args):
     if mode == 'detector': raise RuntimeError('detector failed')
     return {'executables': [os.environ['EXECUTABLE']]}
@@ -216,9 +251,10 @@ def restore(*args):
 evidence.identity = identify
 evidence.restore = restore
 evidence.record = lambda inputs: None
+builtins.__import__ = optional_import
 run_selected.main()
 '''
-            for fault in ('detector', 'hash', 'truncated', 'missing', 'matching', 'unbound', 'different'):
+            for fault in ('import', 'detector', 'hash', 'truncated', 'missing', 'matching', 'unbound', 'different'):
                 for gate_exit in (0, 7):
                     with self.subTest(fault=fault, gate_exit=gate_exit):
                         invocations = root / 'invocations'
@@ -240,6 +276,21 @@ run_selected.main()
                             option = ' -D' + artifacts[0].removeprefix('--') if artifacts else ''
                             self.assertEqual(invocations.read_text().splitlines(),
                                              ['build test-logic' + option + ' --summary all'])
+
+    def test_compiled_handoff_loads_without_the_optional_detector(self):
+        code = '''import builtins
+original = builtins.__import__
+def unavailable(name, *args, **kwargs):
+    if name == 'suite_inputs': raise ImportError('detector unavailable')
+    return original(name, *args, **kwargs)
+builtins.__import__ = unavailable
+import build_artifact
+print('compiled handoff available')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', code], capture_output=True, text=True,
+                                env=dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parent)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'compiled handoff available')
 
     def test_acceptance_requires_the_complete_target_closure_not_the_entire_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
