@@ -85,10 +85,11 @@ const cases = [_]Case{
     .{ .name = "Backspace grapheme", .before = "aéZ", .caret = 3, .after = "aZ", .cursor = 1, .event = .redraw, .wires = .{ no_alt, bytes("\x1b[127u"), bytes("\x1b[27;1;127~"), bytes("\x7f") } },
     .{ .name = "Alt-Enter unbound", .event = .unbound, .wires = .{ bytes("\x1b\r"), bytes("\x1b[13;3u"), bytes("\x1b[27;3;13~"), no_raw } },
     .{ .name = "Alt-period unbound", .event = .unbound, .wires = .{ bytes("\x1b."), bytes("\x1b[46;3u"), bytes("\x1b[27;3;46~"), no_raw } },
-    .{ .name = "Super-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;9u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
+    // Ghostty's legacy modifier table names bit 8 Super, matching Kitty.
+    // Separate Hyper/Meta exist in Kitty, not in that case27 modifier table.
+    .{ .name = "Super-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;9u"), bytes("\x1b[27;9;46~"), no_raw } },
     .{ .name = "Hyper-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;17u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
-    // xterm Meta is bit 8 (parameter 9), kitty Meta is bit 32 (parameter 33).
-    .{ .name = "Meta-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;33u"), bytes("\x1b[27;9;46~"), no_raw } },
+    .{ .name = "Meta-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;33u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
 };
 
 const Outcome = struct {
@@ -262,11 +263,11 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
     }
 }
 
-test "TD2 Ghostty Ctrl-Enter cannot turn retained choice text into a submission" {
+test "TD2 Ghostty modified control chords cannot turn retained choice text into a submission" {
     // Ghostty's legacy function-key table emits case27 even without mode
-    // negotiation. Ctrl-Enter is not Rui's Enter binding: like other unbound
-    // Ctrl chords it rejects input, rather than submitting an existing 'a'.
-    for ([_][]const u8{ "\x1b[13;5u", "\x1b[27;5;13~" }) |encoded| {
+    // negotiation. Ctrl-Enter/Ctrl-Tab/Shift-Escape retain Kitty's existing
+    // draft-invalidating policy, rather than silently submitting an 'a'.
+    for ([_][]const u8{ "\x1b[13;5u", "\x1b[27;5;13~", "\x1b[9;5u", "\x1b[27;5;9~", "\x1b[27;2u", "\x1b[27;2;27~" }) |encoded| {
         for (0..encoded.len + 1) |split| for ([_]bool{ false, true }) |choice| {
             var storage: [128]u8 = undefined;
             var editor: Editor = .{ .buffer = &storage, .allow_paste = !choice };
@@ -283,6 +284,41 @@ test "TD2 Ghostty Ctrl-Enter cannot turn retained choice text into a submission"
             try std.testing.expectEqualStrings("a", storage[0..editor.length]);
         };
     }
+}
+
+test "TD2 Ghostty modifier nine is Super distinct from Kitty Hyper and Meta" {
+    // Exact Ghostty v1.2.3 legacy Tab vectors and Kitty modifier definitions:
+    // https://github.com/ghostty-org/ghostty/blob/6d2dd585a5d87fa745d48188dd096ca6e63014d0/src/input/function_keys.zig#L172-L190
+    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#modifiers
+    // Checking only .unbound would accept Super incorrectly decoded as Meta.
+    // Kitty Hyper/Meta are protocol vectors; Ghostty's input model does not
+    // emit those separate modifiers, so no case27 representation is invented.
+    const Vector = struct { data: []const u8, modifiers: u8 };
+    for ([_]Vector{
+        .{ .data = "\x1b[27;9;9~", .modifiers = 8 },
+        .{ .data = "\x1b[9;9u", .modifiers = 8 },
+        .{ .data = "\x1b[27;13;9~", .modifiers = 12 },
+        .{ .data = "\x1b[9;13u", .modifiers = 12 },
+        .{ .data = "\x1b[9;17u", .modifiers = 16 },
+        .{ .data = "\x1b[9;33u", .modifiers = 32 },
+    }) |vector| for (0..vector.data.len + 1) |split| {
+        var input: Input = .{};
+        var presses: usize = 0;
+        for ([_][]const u8{ vector.data[0..split], vector.data[split..] }) |chunk| for (chunk) |byte| {
+            var decoded = input.feed(byte);
+            while (decoded != .none) : (decoded = input.next()) {
+                try std.testing.expect(decoded == .event);
+                try std.testing.expect(!decoded.event.pasted);
+                try std.testing.expect(decoded.event.event == .key_press);
+                const key = decoded.event.event.key_press;
+                try std.testing.expectEqual(@as(u21, 9), key.codepoint);
+                try std.testing.expectEqual(vector.modifiers, @as(u8, @bitCast(key.mods)));
+                presses += 1;
+            }
+        };
+        try std.testing.expectEqual(@as(usize, 1), presses);
+        try std.testing.expectEqual(Input.Pending.none, input.pending());
+    };
 }
 
 test "TD2 kitty release is not a binding and repeat produces one submission" {

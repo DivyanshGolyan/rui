@@ -52,6 +52,34 @@ finally:
         screen.feed(b"\x1b[?2026h\r\x1b[2Kready\x1b[?2026l")
         self.assertTrue(screen.reached("ready"))
 
+    def test_restoration_excludes_only_darwin_write_history(self):
+        # Exercise finish's real restoration boundary. Model the Darwin-only
+        # write-history bit even on Linux, but never excuse NONBLOCK, access
+        # mode, APPEND or an unknown bit alongside it.
+        import fcntl
+        child = "import os; os.write(1, b'\\x1b[?1049l\\x1b[?2004l\\x1b[?25h')"
+        for platform, delta, accepted in (
+            ("darwin", 0x10000, True),
+            ("linux", 0x10000, False),
+            ("darwin", 0x10000 | os.O_NONBLOCK, False),
+            ("darwin", 0x10000 | os.O_RDWR, False),
+            ("darwin", 0x10000 | os.O_APPEND, False),
+            ("darwin", 0x10000 | 0x200000, False),
+        ):
+            with self.subTest(platform=platform, delta=hex(delta)), tempfile.TemporaryDirectory() as directory:
+                with DirectPty([sys.executable, "-c", child], env=os.environ,
+                               cwd=directory, output=directory) as tty:
+                    real_fcntl = fcntl.fcntl
+                    def flags(fd, command, *args):
+                        value = real_fcntl(fd, command, *args)
+                        return tty.flags ^ delta if fd == tty.slave and command == fcntl.F_GETFL else value
+                    with patch("driver.sys.platform", platform), patch("driver.fcntl.fcntl", flags):
+                        if accepted:
+                            tty.finish()
+                        else:
+                            with self.assertRaisesRegex(AssertionError, "file flags"):
+                                tty.finish()
+
     def test_primary_failure_survives_cleanup_and_child_retires(self):
         # Exercise the actual context-manager owner, not just dispose_all.
         child = "import time; time.sleep(30)"

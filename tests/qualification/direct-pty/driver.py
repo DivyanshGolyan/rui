@@ -26,6 +26,16 @@ from terminal_screen import ScreenCapture
 LIMIT = 1024 * 1024
 
 
+def assert_file_flags(actual, expected):
+    # Same policy as terminal_restoration_integration.assert_file_flags, which
+    # cannot be imported here without its CLI-binary argv/setup side effects.
+    # XNU exposes kernel-only FWASWRITTEN after a write; F_SETFL cannot clear
+    # it. Access mode, NONBLOCK and every other bit must still match exactly.
+    history = 0x00010000 if sys.platform == "darwin" else 0
+    assert actual & ~history == expected & ~history, (
+        f"file flags actual={actual:#x} expected={expected:#x} excluded={history:#x}")
+
+
 @contextmanager
 def defer_signals():
     """Deliver interruption after acquisition and registration, never between.
@@ -186,7 +196,7 @@ class DirectPty:
             actual[3] &= ~mask
             wanted[3] &= ~mask
         assert actual == wanted, ("termios restoration", wanted, actual)
-        assert fcntl.fcntl(self.slave, fcntl.F_GETFL) == self.flags, "slave flags not restored"
+        assert_file_flags(fcntl.fcntl(self.slave, fcntl.F_GETFL), self.flags)
         output = (self.output / "output.bin").read_bytes()
         for reset in (b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?25h"):
             assert reset in output, ("missing terminal cleanup", reset)

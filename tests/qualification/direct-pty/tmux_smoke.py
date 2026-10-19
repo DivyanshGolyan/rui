@@ -42,7 +42,8 @@ class Tmux:
             time.sleep(0.01)
         self.call("set-option", "-g", "remain-on-exit", "on")
         wrapper = fixture.root / "pane.py"
-        wrapper.write_text('''import fcntl, json, os, pathlib, subprocess, sys, termios
+        wrapper.write_text(f"import sys\nsys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})\n" + '''import fcntl, json, os, pathlib, subprocess, termios
+from driver import assert_file_flags
 root = pathlib.Path(sys.argv[1])
 before = termios.tcgetattr(0)
 flags = fcntl.fcntl(0, fcntl.F_GETFL)
@@ -54,8 +55,13 @@ if sys.platform == "darwin":
     mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
     before[3] &= ~mask
     after[3] &= ~mask
+flags_error = None
+try:
+    assert_file_flags(fcntl.fcntl(0, fcntl.F_GETFL), flags)
+except AssertionError as error:
+    flags_error = str(error)
 (root / "caller-exit.json").write_text(json.dumps({"status": status,
-    "restored": after == before and fcntl.fcntl(0, fcntl.F_GETFL) == flags}))
+    "restored": after == before and flags_error is None, "flags_error": flags_error}))
 ''')
         rui = shlex.join([sys.executable, str(wrapper), str(fixture.root), fixture.binary,
                          "session", "resume", "--store", str(fixture.store), "--", "td4"])
@@ -99,8 +105,8 @@ if sys.platform == "darwin":
                 raise TimeoutError("tmux caller exit")
             time.sleep(0.02)
         facts = json.loads((self.fixture.root / "caller-exit.json").read_text())
-        assert facts == {"status": 0, "restored": True}, ("tmux caller exit/restoration", facts)
         (self.fixture.output / "caller-exit.json").write_text(json.dumps(facts))
+        assert facts == {"status": 0, "restored": True, "flags_error": None}, ("tmux caller exit/restoration", facts)
 
     def close(self):
         failure = []
