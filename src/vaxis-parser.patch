@@ -368,3 +368,43 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
      const needs_render = self.refresh or
          cursor_vis_changed or
          cursor_shape_changed or
+diff --git a/src/Parser.zig b/src/Parser.zig
+--- a/src/Parser.zig
++++ b/src/Parser.zig
+@@ -513,6 +513,7 @@
+             var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
+             const number_buf = field_iter.next() orelse unreachable; // always will have one field
+             const number = parseParam(u16, number_buf, null) orelse return null_event;
++            if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
+ 
+             var key: Key = .{
+                 .codepoint = switch (number) {
+@@ -773,6 +774,28 @@
+     }
+ }
+
++/// xterm modifyOtherKeys, CSI 27 ; modifier ; code ~, which some terminals
++/// (Ghostty's legacy Enter table) send without being asked. The modifier is
++/// 1 + (Shift 1 | Alt 2 | Ctrl 4 | Super 8), the low bits of Kitty's mask, and
++/// the code is the key's codepoint, unchecked as in the Kitty form. It is a
++/// press with no associated text.
++fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
++    const null_event: Result = .{ .event = null, .n = n };
++    const modifier_buf = fields.next() orelse return null_event;
++    const code_buf = fields.next() orelse return null_event;
++    if (fields.next() != null) return null_event;
++    const modifier = parseParam(u8, modifier_buf, null) orelse return null_event;
++    if (modifier < 1 or modifier > 16) return null_event;
++    const code = parseParam(u21, code_buf, null) orelse return null_event;
++    return .{
++        .event = .{ .key_press = .{
++            .codepoint = code,
++            .mods = @bitCast(modifier - 1),
++        } },
++        .n = n,
++    };
++}
++
+ /// Parse a param buffer, returning a default value if the param was empty
+ inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
+     if (buf.len == 0) return default;

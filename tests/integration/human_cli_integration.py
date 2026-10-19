@@ -3371,33 +3371,40 @@ def renderer_cases():
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
         print("renderer: initial oversize and excessive resize give typed actionable guidance and restore exactly", flush=True)
 
-        configure("renderer/recovery")
-        marker = answer("recovery")
-        proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"" if len(proxy.exchanges) == 1 else response)
-        with terminal("renderer/recovery") as tty:
-            before = len(endpoint.requests)
-            tty.send("original é\n", "Not confirmed")
-            saved = proxy.exchanges[0][0]
-            tty.send("next café!\x1b[D\x1b[DX", predicate=lambda: tty.capture.draft("next cafXé!", 11))
-            generation = tty.capture.generation
-            tty.resize(40, 12)
-            tty.wait(predicate=lambda: tty.capture.draft("next cafXé!", 11), after=generation)
-            tty.send("\x12", "Original confirmed")
-            assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved
-            assert json.loads(saved)["text"]["value"] == "original é"
-            fixture.wait_for(lambda: len(endpoint.requests) == before + 1, "original renderer request")
-            submitted("original é")
-            assert tty.capture.draft("next cafXé!", 11), tty.capture.completed
-            marker = answer("retained")
-            tty.send("Y\n", marker)
-            submitted("next cafXYé!")
-            tty.resize(80)
-            joined(tty)
-            tty.caller.send_signal(signal.SIGTERM)
-            tty.finish()
-        proxy.close()
-        proxy = None
-        print("renderer: lost admission exact replay, retained draft/caret and SIGTERM restoration passed", flush=True)
+        # Ctrl-R recovers in each encoding a terminal sends it: raw, Kitty and
+        # xterm modifyOtherKeys.
+        for name, recover in (("raw", "\x12"), ("kitty", "\x1b[114;5u"), ("xterm", "\x1b[27;5;114~")):
+            session = f"renderer/recovery-{name}"
+            configure(session)
+            marker = answer(f"recovery {name}")
+            proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: b"" if len(proxy.exchanges) == 1 else response)
+            with terminal(session) as tty:
+                before = len(endpoint.requests)
+                tty.send("original é\n", "Not confirmed")
+                saved = proxy.exchanges[0][0]
+                # A pasted Ctrl-R byte is rejected text, never recovery.
+                tty.send("\x1b[200~\x12\x1b[201~\r", "Input rejected; nothing sent")
+                assert len(proxy.exchanges) == 1 and tty.capture.draft("", 2), tty.capture.completed
+                tty.send("next café!\x1b[D\x1b[DX", predicate=lambda: tty.capture.draft("next cafXé!", 11))
+                generation = tty.capture.generation
+                tty.resize(40, 12)
+                tty.wait(predicate=lambda: tty.capture.draft("next cafXé!", 11), after=generation)
+                tty.send(recover, "Original confirmed")
+                assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved
+                assert json.loads(saved)["text"]["value"] == "original é"
+                fixture.wait_for(lambda: len(endpoint.requests) == before + 1, "original renderer request")
+                submitted("original é")
+                assert tty.capture.draft("next cafXé!", 11), tty.capture.completed
+                marker = answer(f"retained {name}")
+                tty.send("Y\n", marker)
+                submitted("next cafXYé!")
+                tty.resize(80)
+                joined(tty)
+                tty.caller.send_signal(signal.SIGTERM)
+                tty.finish()
+            proxy.close()
+            proxy = None
+        print("renderer: lost admission exact replay on raw, Kitty and modifyOtherKeys Ctrl-R, retained draft/caret and SIGTERM restoration passed", flush=True)
 
         configure("renderer/invisible")
         invisible = "\u00ad\u200b\u2060\ufeff\n\u200b\u0301\njoined e\u0301"
@@ -3478,6 +3485,14 @@ def renderer_cases():
                 tty.ready(ready_read)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
                 assert not (workspace / "renderer-effect").exists(), "pasted consent authorized an Action"
+                # Beside a ready Action, Ctrl-R in any encoding is choice
+                # input: it rejects the choice, recovering and deciding nothing.
+                for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~"):
+                    tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
+                    tty.send(recover + "\n", "Decision input rejected")
+                    tty.ready(ready_read)
+                    assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
+                    assert not (workspace / "renderer-effect").exists(), "Ctrl-R at the choice authorized an Action"
                 # A complete non-pasted line, not its first byte, authorizes.
                 tty.send("a", "Type a + Enter to allow once · d + Enter to deny")
                 assert not (workspace / "renderer-effect").exists()
@@ -3907,12 +3922,26 @@ def renderer_cases():
             tty.send("\r", "! Action needs a decision; Esc returns to it. Draft retained.")
             assert tty.capture.draft("next draft", 12), tty.capture.completed
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
+            # Ctrl-R in any encoding waits for the Action: the draft stays
+            # whole, unrejected, and nothing is recovered or decided.
+            records = set((home / ".config/rui/requests").glob("*.json"))
+            draft = "next draft"
+            for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~"):
+                draft += "!"
+                tty.send("!", predicate=lambda: tty.capture.draft(draft, len(draft) + 2))
+                tty.send(recover, "! Action needs a decision; Esc returns to it. Draft retained.")
+                assert tty.capture.draft(draft, len(draft) + 2), tty.capture.completed
+            tty.send("?", predicate=lambda: tty.capture.draft(draft + "?", len(draft) + 3))
+            tty.send("\r", "! Action needs a decision; Esc returns to it. Draft retained.")
+            assert tty.capture.draft(draft + "?", len(draft) + 3), tty.capture.completed
+            assert set((home / ".config/rui/requests").glob("*.json")) == records
+            assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("\x1b", "Type a + Enter to allow once · d + Enter to deny")
             # Alt-Enter at the choice decides nothing and says so.
             tty.send("\x1b\r", "! Key combination not recognized; nothing authorized. Type a or d.")
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("a\r", marker)
-            tty.wait(predicate=lambda: tty.capture.draft("next draft", 12), timeout=10)
+            tty.wait(predicate=lambda: tty.capture.draft(draft + "?", len(draft) + 3), timeout=10)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a draft typed while approval is paused stays and cannot decide", flush=True)

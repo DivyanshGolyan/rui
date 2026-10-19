@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const vaxis = @import("vaxis");
 const client = @import("client.zig");
 const Input = @import("SessionInput.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -831,16 +832,6 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     }) orelse return if (pending == .none) .empty else .decoder_pending;
     self.notice = null;
     self.dirty = true;
-    if (!self.consent.active() and pending == .none and byte == 18) {
-        try self.submission.requestRecovery(null);
-        return .byte;
-    }
-    if (self.consent.active() and !self.actionVisible() and pending == .none and byte == 18) {
-        // Recovery waits for the Action; the paused draft stays as it is.
-        self.consent.invalidate();
-        self.notice = self.decisionNotice();
-        return .byte;
-    }
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
     var decoded = stream.feed(byte);
@@ -849,6 +840,30 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
         },
+        // Ctrl-R recovers in every encoding the terminal may send it, raw,
+        // Kitty or modifyOtherKeys, but never from pasted text. Beside its
+        // Action it is choice input; while approval is paused, recovery
+        // waits for the Action and the paused draft stays as it is.
+        .event => |value| if (!value.pasted and isRecovery(value.event) and !(self.consent.active() and self.actionVisible())) {
+            if (self.consent.active()) {
+                self.consent.invalidate();
+                self.notice = self.decisionNotice();
+            } else try self.submission.requestRecovery(null);
+        } else try self.inputEvent(decoded),
+        else => try self.inputEvent(decoded),
+    };
+    return .byte;
+}
+
+fn isRecovery(event: vaxis.Event) bool {
+    return switch (event) {
+        .key_press => |key| key.matches('r', .{ .ctrl = true }),
+        else => false,
+    };
+}
+
+fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+    switch (decoded) {
         // The choice takes input only beside its Action. While approval is
         // paused, typing goes to the draft shown in the composer; it never
         // decides, and returning to the Action needs a fresh choice.
@@ -860,8 +875,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
             try self.draftEvent(decoded);
             if (self.detached) self.consent.interrupt();
         },
-    };
-    return .byte;
+    }
 }
 
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
