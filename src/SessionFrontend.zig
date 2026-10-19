@@ -98,6 +98,9 @@ reader_output_started: bool = false,
 consent: ConsentPolicy.Consent = .{},
 choice_buffer: [64]u8 = undefined,
 choice: Editor = undefined,
+// A line typed at the choice keeps the keyboard through its Enter, even once
+// the Action leaves or a page hides it, so none of it reaches the draft.
+choice_line: bool = false,
 opening: bool = true,
 poll_at: i96 = 0,
 dirty: bool = true,
@@ -522,7 +525,8 @@ fn driveActive(self: *Self) !void {
             const screen = self.terminal.screen;
             if (screen.actionVisible() and !screen.preview_complete) self.consent.presentation = .preview;
             const action_visible = self.actionVisible();
-            const view: Input.View = if (self.consent.active() and action_visible) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
+            const choice_input = self.choiceInput();
+            const view: Input.View = if (choice_input) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
             const approval_ready = self.approvalReady();
             const base_status = if (self.opening) "Opening…" else if (self.consent.active()) (if (self.consent.presentation == .preview) "Approval disabled · /help for exact shell commands" else if (action_visible) (if (approval_ready) Frame.approval_choice else "PgDn reads the rest · then a/d + Enter") else "Approval paused · Esc returns to Action") else if (self.submission.view()) |submission| switch (submission.state) {
                 .not_started => "Not sent · Ctrl-R retries original",
@@ -534,12 +538,12 @@ fn driveActive(self: *Self) !void {
             var context = std.Io.Writer.fixed(&context_buffer);
             if (self.consent.active() and action_visible)
                 try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
-            else if (self.tmux and !self.consent.active() and view.bytes.len != 0)
+            else if (self.tmux and !self.consent.active() and !choice_input and view.bytes.len != 0)
                 try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
             var status_buffer: [Frame.status_capacity]u8 = undefined;
             const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
             self.dirty = false;
-            try self.terminal.redraw(view.bytes, view.cursor, status, if (self.consent.active() and action_visible) "> " else "› ", &self.live);
+            try self.terminal.redraw(view.bytes, view.cursor, status, if (choice_input) "> " else "› ", &self.live);
             if (!approval_ready and self.approvalReady()) {
                 // Reading completes only after delivery. Old choice text must
                 // not become a decision, but fragmented decoder/paste custody
@@ -614,14 +618,23 @@ test "status lines keep the notice and instructions beside an oversized context"
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
-/// It leaves before more input is read, so no key reaches it; a fragmented
-/// sequence finishes under the choice decoder first, so none reaches the draft.
+/// It leaves before more input is read, so no key decides; a fragmented
+/// sequence finishes under the choice decoder first, and a line begun there
+/// ends there, so none of either reaches the draft.
 fn withdrawDecided(self: *Self) void {
     if (!self.consent.active() or self.current.first_action == self.consent.action or self.input.pending() != .none) return;
     self.consent.interrupt();
     self.terminal.screen.withdrawAction();
-    self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    self.retainChoiceCommand();
     self.dirty = true;
+}
+
+/// A change the choice did not see keeps only a slash command, which can
+/// never decide; other text could become a stale decision. Either way the
+/// line stays the choice's until its Enter.
+fn retainChoiceCommand(self: *Self) void {
+    if (std.mem.startsWith(u8, self.choice.buffer[0..self.choice.length], "/")) return;
+    self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
 }
 
 /// The choice keeps the Action's heading lines beside it once paging hides
@@ -791,7 +804,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
         // Kitty or modifyOtherKeys, but never from pasted text. Beside its
         // Action it is choice input; while approval is paused, recovery
         // waits for the Action and the paused draft stays as it is.
-        .event => |value| if (!value.pasted and isRecovery(value.event) and !(self.consent.active() and self.actionVisible())) {
+        .event => |value| if (!value.pasted and isRecovery(value.event) and !self.choiceInput()) {
             if (self.consent.active()) {
                 self.consent.invalidate();
                 self.notice = self.decisionNotice();
@@ -809,12 +822,18 @@ fn isRecovery(event: vaxis.Event) bool {
     };
 }
 
+/// The choice takes input beside its Action, and keeps a line begun there
+/// through its Enter.
+fn choiceInput(self: *const Self) bool {
+    return self.choice_line or (self.consent.active() and self.actionVisible());
+}
+
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     switch (decoded) {
-        // The choice takes input only beside its Action. While approval is
-        // paused, typing goes to the draft shown in the composer; it never
-        // decides, and returning to the Action needs a fresh choice.
-        else => if (self.consent.active() and self.actionVisible()) try self.choiceEvent(decoded) else {
+        // While approval is paused, typing goes to the draft shown in the
+        // composer; it never decides, and returning to the Action needs a
+        // fresh choice.
+        else => if (self.choiceInput()) try self.choiceEvent(decoded) else {
             if (self.consent.active()) {
                 self.consent.invalidate();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
@@ -827,9 +846,12 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
+    const event = self.choice.apply(decoded);
+    // Typed, rejected or dropped input begins a line; only Enter ends it.
+    const typed = self.choice.length != 0 or self.choice.rejected != null or event == .unbound or event == .edit_rejected;
+    self.choice_line = !Editor.endsLine(event) and (self.choice_line or typed);
     if (!self.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
-        const event = self.choice.apply(decoded);
         if (event == .interrupt or event == .eof) {
             self.consent.interrupt();
             self.detached = true;
@@ -843,10 +865,9 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         const text = self.choice.buffer[0..self.choice.length];
         const command = text.len != 0 and text[0] == '/';
         if (event == .submit and command) self.choiceCommand(text);
-        if (stream.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        if (stream.pending() == .none and (Editor.endsLine(event) or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         return;
     }
-    const event = self.choice.apply(decoded);
     try self.navigation(event);
     switch (event) {
         .submit => {
@@ -1211,7 +1232,7 @@ fn showInspection(self: *Self) !void {
     // Any completed inspection or command requires a fresh choice afterwards.
     self.consent.invalidate();
     self.status_page = false;
-    if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    if (self.consent.active()) self.retainChoiceCommand();
     const size = (try self.inspection_file.stat(self.init.io)).size;
     if (size == 0) {
         self.notice = "Command finished with no output.";
@@ -1246,7 +1267,7 @@ fn applyStatus(self: *Self) !void {
     if (self.job.open_status and self.status_requested) {
         self.status_requested = false;
         self.consent.invalidate();
-        if (self.consent.active()) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        if (self.consent.active()) self.retainChoiceCommand();
         try screen.showFile(self.init.io, self.status_file, false);
         self.notice = null;
     } else if (self.status_page and screen.view == .inspection) {
@@ -1254,6 +1275,77 @@ fn applyStatus(self: *Self) !void {
     } else return;
     self.status_page = true;
     self.status_digest = self.job.result.status_digest;
+}
+
+test "a line begun at the choice ends there when the Action leaves or a page opens without a key" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var directory = std.testing.tmpDir(.{});
+    defer directory.cleanup();
+    const page = try directory.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    // Longer than a notice, so it opens as a page and hides the Action.
+    const rows: [512]u8 = @splat('\n');
+    try page.writePositionalAll(std.testing.io, &rows, 0);
+    const Change = enum { decided_elsewhere, command_page, status_page };
+    for (std.enums.values(Change)) |change| for ([_][2][]const u8{ .{ "/", "status" }, .{ "a", "" } }) |line| {
+        errdefer std.debug.print("change={s} line={s}|{s}\n", .{ @tagName(change), line[0], line[1] });
+        var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .inspection_file = page, .status_file = page, .command = undefined, .terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen }, .colour = false, .opening = false };
+        self.init.io = std.testing.io;
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input };
+        const Keys = struct {
+            fn send(frontend: *Self, bytes: []const u8) !void {
+                for (bytes) |byte| {
+                    var decoded = frontend.input.stream.feed(byte);
+                    while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
+                }
+            }
+        };
+        try Keys.send(&self, "kept");
+        self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        self.current.first_action = 7;
+        self.consent.adopt(7, .complete);
+        screen.view = .action;
+        screen.preview_complete = true;
+        try std.testing.expect(self.consent.promptCompleted(.empty, false, false));
+        try Keys.send(&self, line[0]);
+        switch (change) {
+            .decided_elsewhere => {
+                self.current.first_action = null;
+                self.withdrawDecided();
+                try std.testing.expect(!self.consent.active());
+            },
+            .command_page => {
+                self.read_phase = .inspection;
+                self.inspection_kind = .command;
+                try self.showInspection();
+            },
+            .status_page => {
+                self.job.open_status = true;
+                self.status_requested = true;
+                try self.applyStatus();
+            },
+        }
+        try std.testing.expect(!self.actionVisible());
+        try Keys.send(&self, line[1]);
+        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        try Keys.send(&self, "\r");
+        // Nothing reached the draft or was sent, and nothing was decided.
+        try std.testing.expectEqualStrings("kept", self.input.composition().bytes);
+        try std.testing.expect(self.submission.view() == null);
+        if (change != .decided_elsewhere) try std.testing.expectEqual(@as(?u64, 7), self.consent.action);
+        // A slash command still runs as typed.
+        const command: ?[]const u8 = if (self.input.command_length) |length| self.input.command_buffer[0..length] else null;
+        if (line[0][0] == '/') try std.testing.expectEqualStrings("/status", command orelse "") else try std.testing.expect(command == null);
+        // The next line is the draft's again.
+        try Keys.send(&self, "!");
+        try std.testing.expectEqualStrings("kept!", self.input.composition().bytes);
+    };
 }
 
 test "a transcript begun before grown live output is drawn shows the gap, not a lost join" {

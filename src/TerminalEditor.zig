@@ -26,6 +26,15 @@ pasting: bool = false,
 /// also deliver mouse wheel and trackpad scrolling as these arrow keys.
 pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, unbound, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view };
 
+/// Enter ends a line as `submit`, or as the rejection that withheld it;
+/// end of input and interrupt end it too.
+pub fn endsLine(event: Event) bool {
+    return switch (event) {
+        .submit, .invalid, .overflow, .eof, .interrupt => true,
+        else => false,
+    };
+}
+
 pub const Pending = Input.Pending;
 const paste_end = "\x1b[201~";
 

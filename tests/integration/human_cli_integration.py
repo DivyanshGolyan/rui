@@ -3555,19 +3555,28 @@ def renderer_cases():
             with terminal(session) as tty:
                 tty.send("propose an Action decided elsewhere\n", "Type a + Enter to allow once · d + Enter to deny")
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
+                # A line begun at the choice ends there (#540): `/` typed
+                # before the decision and `status` + Enter after it open
+                # /status, and never send `status` as a Message.
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
                 shown = tty.wait(marker, after=generation)
                 for pending in ("Type a + Enter", "PgDn reads", "? Run Bash"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
+                requests = len(endpoint.requests)
+                shown = tty.send("status\r", predicate=lambda: "Session: " in tty.capture.completed or "› status" in tty.capture.completed)
+                assert "Session: " in shown and "› status" not in shown, (decision, shown)
+                assert len(endpoint.requests) == requests, endpoint.requests
+                tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 # Paging and a /status round trip cannot bring the choice back.
                 tty.send("\x1b[6~/status\n", "Session: ")
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert "Type a + Enter" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
-        print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key", flush=True)
+        print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a line begun there stays there", flush=True)
 
         # Delivered history and the live footer describe one capture: no
         # committed frame shows a call twice, or both pending and finished.
