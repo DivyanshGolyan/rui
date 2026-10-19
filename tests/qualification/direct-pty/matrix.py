@@ -84,21 +84,26 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
-    for name, enter, leave in (
-        ("key-pgup", b"\x1b[5~", b"\x07"),
-        ("key-pgdn", b"\x1b[5~", b"\x1b[6~" * 12),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07"),
-        ("key-up-csi", b"\x1b[A", b"\x07"),
-        ("key-up-ss3", b"\x1bOA", b"\x07"),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F"),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF"),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~"),
-        ("key-esc", b"\x1b[5~", b"\x1b"),
-        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B" * 3),
-        ("status", b"/status\r", b"\x1b"),
+    for name, enter, leave, first in (
+        ("key-pgup", b"\x1b[5~", b"\x07", 57),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 35),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 57),
+        ("key-up-csi", b"\x1b[A", b"\x07", 78),
+        ("key-up-ss3", b"\x1bOA", b"\x07", 78),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 57),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 57),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 57),
+        ("key-esc", b"\x1b[5~", b"\x1b", 57),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 76),
+        ("status", b"/status\r", b"\x1b", None),
     ):
-        rows.append({"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
-                     "return_chunks": [chunk(leave)], "status": name == "status"})
+        vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
+                  "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
+        if name == "key-pgdn":
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 57}]
+        elif name == "wheel-alt-scroll":
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (77, 78)]
+        rows.append(vector)
     for name, data, expected in (
         ("typing", b"tmux typing\r", "tmux typing"),
         ("paste", b"one\ntwo", "one\ntwo"),

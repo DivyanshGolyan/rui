@@ -36,6 +36,8 @@ PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
 alternate-scroll wheel Up/Down encodings, and `/status`. Unsolicited SGR/X10
 wheel and split-X10 reports must leave submitted text unchanged. The tmux smoke
 set covers typing, paste, resize, Alt-J newline, and `/status`.
+Navigation checks exact seeded-history ranges after entry, intermediate
+Down/PgDn steps and return, distinguishing one-line movement from page movement.
 
 **A green default run is not complete Ghostty conformance.** `ghostty.json` is a
 separate mandatory conformance workload with no expected-failure conversion.
@@ -89,6 +91,7 @@ requires a visible refusal with no capture or request, then successful fresh
 Each row retains `input.bin`, `output.bin`, `stderr.bin`, timestamped
 `events.jsonl`, its input JSON, result, and cleanup receipt. Direct output is
 saved before the shared `ScreenCapture` observer parses committed frames.
+Observed events include the committed screen and caret, not just a mode label.
 Recovery also retains exact Message exchanges. Provider requests are synthetic.
 HOME, Store, credentials, and scratch are never copied into evidence.
 
@@ -99,6 +102,8 @@ assertion 1, setup 2, timeout 3, and other error 4. The controller exits nonzero
 for any failed row. INT, HUP, and TERM retain exits 130, 129, and 143 after cleanup.
 Controls require an intentionally wrong exact-byte expectation to fail at the
 Message assertion and prove owned Host and caller retirement after each signal.
+Wrong arrow/wheel/page distances and wheel direction must fail at the exact
+history-anchor assertion, rather than merely entering and leaving Browsing.
 They also inject setup interruption before/after provider start, after Host
 start, PTY acquisition and caller launch, plus tmux interruption and failed
 server teardown paired with a body assertion. Failed disposal retains the

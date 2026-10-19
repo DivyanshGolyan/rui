@@ -108,6 +108,31 @@ def main():
     assert "exact submitted Message bytes" in result["error"], result
     assert (root / "negative/wrong-exact-bytes/cleanup.json").exists(), "negative assertion leaked owners"
     print("wrong exact bytes: expected RED at submitted-Message assertion", flush=True)
+    navigation = []
+    for name, source in (("wrong-arrow-distance", "key-up-csi"), ("wrong-wheel-distance", "wheel-alt-scroll"),
+                         ("wrong-wheel-direction", "wheel-alt-scroll"), ("wrong-pgdn-distance", "key-pgdn")):
+        vector = next(row for row in inventory() if row["name"] == source)
+        vector["name"] = name
+        if name == "wrong-arrow-distance":
+            vector["chunks"] = [{"hex": b"\x1b[5~".hex()}]
+        elif name == "wrong-wheel-distance":
+            vector["chunks"] = [{"hex": (b"\x1b[5~" * 3).hex()}]
+            vector["return_chunks"] = [{"hex": (b"\x1b[6~" * 3).hex()}]
+        else:
+            vector["middle"][0]["chunks"] = [{"hex": (b"\x1b[A" if source == "wheel-alt-scroll" else b"\x1b[B").hex()}]
+        navigation.append(vector)
+    vectors = root / "navigation-negative.json"
+    vectors.write_text(json.dumps(navigation))
+    with open(root / "navigation-negative.log", "wb") as log:
+        wrong = subprocess.run([*command, "--jobs", "4", "--output", str(root / "navigation-negative"), "--vectors", str(vectors)],
+                               stdout=log, stderr=subprocess.STDOUT, timeout=30)
+    assert wrong.returncode == 1, "wrong navigation movement accepted"
+    for vector in navigation:
+        output = root / "navigation-negative" / vector["name"]
+        result = json.loads((output / "result.json").read_text())
+        assert result["status"] == "assertion" and "navigation history anchor/distance" in result["error"], result
+        assert all(json.loads((output / "cleanup.json").read_text()).values()), "navigation control leaked owners"
+        print(f"{vector['name']}: expected RED at exact history anchor/distance", flush=True)
     for number in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
         name = signal.Signals(number).name
         vector = {"name": "held-input", "scenario": "editor", "expected": "late",

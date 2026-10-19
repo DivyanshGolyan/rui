@@ -128,7 +128,8 @@ class DirectPty:
                 raise AssertionError(f"{label}: caller exited {self.process.returncode}; "
                                      f"screen={self.screen.completed!r}")
         self.event("observed", label=label, generation=self.screen.generation,
-                   cursor=[self.screen.screen.cursor.x, self.screen.screen.cursor.y])
+                   cursor=[self.screen.screen.cursor.x, self.screen.screen.cursor.y],
+                   screen=self.screen.completed)
 
     def marker(self, text, **kwargs):
         self.wait(lambda: self.screen.reached(text), label=text, **kwargs)

@@ -210,6 +210,21 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     tty.draft("", 2)
     captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
+    def history(first):
+        # 24 terminal rows minus heading and composer leaves 22 history rows.
+        # These literal fixture anchors are independent of Rui's viewport.
+        expected = [f"History line {number:03d}" for number in range(first, first + 22)]
+        def actual():
+            return [line.strip() for line in tty.screen.completed.splitlines()
+                    if line.strip().startswith("History line ")]
+        try:
+            # A batch of repeated keys can commit intermediate frames. Wait for
+            # the required content, rather than rejecting a valid earlier step.
+            tty.wait(lambda: actual() == expected, label=f"history anchor {first}")
+        except TimeoutError:
+            assert actual() == expected, ("navigation history anchor/distance", actual(), expected)
+            raise
+    history(78)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
@@ -217,10 +232,20 @@ def navigation(fixture, row):
         tty.marker("Session: td4")
         tty.marker("Work:")
         tty.marker("Permission:")
+    else:
+        history(row["first_history"])
+        for step in row.get("middle", []):
+            generation = tty.screen.generation
+            chunks(tty, step["chunks"])
+            tty.wait(lambda: tty.screen.completed.startswith("Browsing"),
+                     label="navigation intermediate movement", after=generation)
+            history(step["first_history"])
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
+    history(78)
+    tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
     tty.send(b"/exit\r")
