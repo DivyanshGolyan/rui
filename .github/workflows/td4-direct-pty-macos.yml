@@ -8,7 +8,7 @@ permissions:
   contents: read
 cache-mode: read
 env:
-  TD4_SHA: d2b76bfd29dc20a98a63609cc5487809a93d6f29
+  TD4_SHA: be2a7c002ea29d1c908c03e8b69c1ad0a17b7e2e
 jobs:
   direct-pty:
     runs-on: macos-15
