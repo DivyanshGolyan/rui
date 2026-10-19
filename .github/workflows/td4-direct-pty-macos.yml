@@ -8,7 +8,7 @@ permissions:
   contents: read
 cache-mode: read
 env:
-  TD4_SHA: 5c65bcd3a459b8f552813f608217755d5d5a07e1
+  TD4_SHA: d2b76bfd29dc20a98a63609cc5487809a93d6f29
 jobs:
   direct-pty:
     runs-on: macos-15
@@ -36,7 +36,7 @@ jobs:
           command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install tmux
           mkdir -p "$RUNNER_TEMP/evidence"
           { sw_vers; sysctl hw.model hw.ncpu hw.memsize; tmux -V; "$RUNNER_TEMP/venv/bin/python" --version; } | tee "$RUNNER_TEMP/evidence/environment.txt"
-      - name: Driver tests, controls and full matrix under the default soft open-file limit
+      - name: Baseline - driver tests, controls and default matrix (default soft open-file limit)
         run: |
           set -euo pipefail
           ulimit -S -n 256
@@ -53,6 +53,21 @@ jobs:
           started=$SECONDS; "$py" -B tests/qualification/direct-pty/matrix.py "$rui" --output "$RUNNER_TEMP/evidence/matrix" --jobs 4 > "$RUNNER_TEMP/evidence/matrix.log" 2>&1 || status=1
           echo "matrix: $((SECONDS - started))s status=$status"
           tail -5 "$RUNNER_TEMP/evidence/test_driver.log" "$RUNNER_TEMP/evidence/controls.log" "$RUNNER_TEMP/evidence/matrix.log"
+          exit "$status"
+      - name: Mandatory Ghostty vectors (separate outcome; known failures fail the job)
+        # Runs even when the baseline fails so both outcomes are recorded; no
+        # continue-on-error, so a failing Ghostty vector leaves the job red.
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          ulimit -S -n 256
+          unset TMUX TMUX_PANE
+          started=$SECONDS; status=0
+          "$RUNNER_TEMP/venv/bin/python" -B tests/qualification/direct-pty/matrix.py "$GITHUB_WORKSPACE/zig-out/bin/rui" \
+            --output "$RUNNER_TEMP/evidence/ghostty" --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json \
+            > "$RUNNER_TEMP/evidence/ghostty.log" 2>&1 || status=$?
+          echo "ghostty: $((SECONDS - started))s status=$status"
+          tail -20 "$RUNNER_TEMP/evidence/ghostty.log"
           exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
