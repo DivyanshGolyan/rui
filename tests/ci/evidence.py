@@ -1,4 +1,4 @@
-"""Verify same-tree Actions evidence; qualification always executes afresh."""
+"""Verify input-addressed Actions evidence; qualification always executes afresh."""
 import hashlib
 import importlib.metadata
 import io
@@ -6,9 +6,13 @@ import json
 import os
 from pathlib import Path
 import platform
+import resource
 import shutil
 import subprocess
+import sys
 import zipfile
+
+from suite_inputs import source_inputs
 
 
 def digest(path):
@@ -35,6 +39,45 @@ def target_executables(targets):
     return sorted(result)
 
 
+def directory_digest(root):
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Missing regular input directory")
+    entries = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Symlink in toolchain/package inputs")
+        if path.is_file():
+            entries[path.relative_to(root).as_posix()] = [digest(path), path.stat().st_mode & 0o777]
+        elif not path.is_dir():
+            raise ValueError("Special file in toolchain/package inputs")
+    if not entries:
+        raise ValueError("Empty toolchain/package inputs")
+    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+
+
+def runtime_inputs():
+    compiler = Path(shutil.which("zig")).resolve()
+    # The compiler executable alone does not bind its standard library or C
+    # headers. A custom installation/layout must execute instead of guessing.
+    library = Path(os.environ.get("ZIG_LIB_DIR") or compiler.parent / "lib")
+    environment = {key: value for key, value in os.environ.items()
+                   if key in {"LANG", "LANGUAGE", "TZ", "TERM", "NO_COLOR", "TMPDIR", "HOME", "PATH",
+                              "CFLAGS", "CPPFLAGS", "LDFLAGS", "LIBRARY_PATH", "C_INCLUDE_PATH",
+                              "ZIG_LIBC", "CC", "PKG_CONFIG"}
+                   or key.startswith(("LC_", "LD_", "DYLD_"))}
+    # Arbitrary test-only switches cannot silently inherit a cached verdict.
+    if any(key.startswith("RUI_") and key != "RUI_FAILURE_ARTIFACTS" for key in os.environ):
+        raise ValueError("Undeclared Rui runtime environment")
+    return dict(toolchain_library=directory_digest(library),
+                packages=directory_digest(os.environ.get("ZIG_LOCAL_PKG_DIR", "zig-pkg")),
+                python_executable=digest(sys.executable),
+                commands={name: digest(shutil.which(name))
+                          for name in ("bash", "sh", "env", "python3", "cc", "make", "perl", "patch")},
+                kernel=[platform.release(), platform.version()], libc=platform.libc_ver(),
+                nofile=list(resource.getrlimit(resource.RLIMIT_NOFILE)), environment=environment)
+
+
 def identity(targets, part, *, compiled=False):
     # Go's test runner discards its executable. Unrelated restored Zig binaries
     # cannot establish that test artifact's identity, so run these cheap checks.
@@ -45,8 +88,6 @@ def identity(targets, part, *, compiled=False):
     # Only native unit gates retain their complete executable set today.
     if not compiled and set(targets) - {"test", "test-full", "test-logic"}:
         raise ValueError("Process/sanitizer gates require fresh execution: temporary native helpers are not retained")
-    # The complete tree covers fixtures, policy, pins and workflow inputs, not
-    # just production sources. Runner image and native tools cover SDK changes.
     if git("status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Evidence requires an unchanged tracked source tree")
     system, machine = platform.system(), platform.machine()
@@ -59,7 +100,7 @@ def identity(targets, part, *, compiled=False):
         if any(manifest.get(key) != value for key, value in cpu.items()):
             raise ValueError("CI CPU identity mismatch")
         cpu = manifest
-    return dict(format=2, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
+    inputs = dict(format=2, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
                 executables=target_executables(targets) if not compiled else None,
                 system=system, machine=machine, cpu=cpu,
                 image=[os.environ.get("ImageOS"), os.environ.get("ImageVersion")],
@@ -72,10 +113,23 @@ def identity(targets, part, *, compiled=False):
                 workflow=os.environ["GITHUB_WORKFLOW_REF"].split("@", 1)[0],
                 event=os.environ["GITHUB_EVENT_NAME"],
                 branch=os.environ.get("GITHUB_HEAD_REF") or os.environ["GITHUB_REF"])
+    if not compiled:
+        if not inputs["workflow"].endswith("/.github/workflows/check.yml") or inputs["event"] not in {"push", "pull_request"}:
+            raise ValueError("Final qualification always requires fresh execution")
+        if not all(inputs["image"]):
+            raise ValueError("Missing runner image identity")
+        inputs.pop("tree")
+        inputs.update(format=3, source=source_inputs(targets, part), runtime=runtime_inputs())
+        declared = {str(Path(".zig-cache/o/ci-compiled") / executable)
+                    for suite in inputs["source"]["declarations"].values()
+                    for executable in suite["executables"]}
+        if set(inputs["executables"]) != declared:
+            raise ValueError("Executable inventory differs from trusted suite declaration")
+    return inputs
 
 
 def name(inputs):
-    key = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return "rui-evidence-" + key
 
 
@@ -119,8 +173,10 @@ def verify(archive, artifact, run, inputs):
             with zipped.open("executables/" + path.name) as stream:
                 if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
                     raise ValueError("Test executable missing or changed")
+    if inputs["format"] != 3:
+        raise ValueError("Unsupported acceptance input format")
     commit = api(f"repos/{repository}/git/commits/{receipt['source_sha']}")
-    if commit["tree"]["sha"] != inputs["tree"]:
+    if commit["tree"]["sha"] != receipt["source_tree"]:
         raise ValueError("Origin source tree mismatch")
     if run["event"] == "push":
         if receipt["source_sha"] != run["head_sha"]:
@@ -139,10 +195,16 @@ def verify(archive, artifact, run, inputs):
         subprocess.run(["git", "fetch", "--quiet", "--no-tags", "origin", base, head],
                        check=True, capture_output=True, timeout=90)
         merged = git("merge-tree", "--write-tree", base, head).splitlines()[0]
-        if merged != inputs["tree"]:
+        if merged != receipt["source_tree"]:
             raise ValueError("Origin run merge tree mismatch")
     else:
         raise ValueError("Only selected push and PR checks support reuse")
+    # Independently reconstruct input bytes from the origin commit. Its own
+    # manifest cannot authorize a bypass or omit a newly imported dependency.
+    subprocess.run(["git", "fetch", "--quiet", "--no-tags", "origin", receipt["source_sha"]],
+                   check=True, capture_output=True, timeout=90)
+    if source_inputs(inputs["targets"], inputs["part"], receipt["source_sha"]) != inputs["source"]:
+        raise ValueError("Origin suite input closure mismatch")
     return receipt
 
 
@@ -161,9 +223,9 @@ def restore(inputs):
         except (ValueError, KeyError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
             print(f"Evidence not reusable: {error}", flush=True)
             continue
-        print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
+        print(f"Verified matching-input evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-            print(f"Verified same-tree evidence: {run['html_url']} (artifact {artifact['id']}). "
+            print(f"Verified matching-input evidence: {run['html_url']} (artifact {artifact['id']}). "
                   "Source and platform inputs match; the retained target executables match their exact passing hashes. "
                   "No new execution; this run's rebuilt executables are not accepted by this evidence.", file=summary)
         return True
@@ -186,7 +248,8 @@ def record(inputs):
     if not executables:
         raise ValueError("No target executable evidence")
     receipt = dict(inputs=inputs, executables=executables, verdict="passed",
-                   source_sha=git("rev-parse", "HEAD"), run_id=int(os.environ["GITHUB_RUN_ID"]),
+                   source_sha=git("rev-parse", "HEAD"), source_tree=git("rev-parse", "HEAD^{tree}"),
+                   run_id=int(os.environ["GITHUB_RUN_ID"]),
                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]))
     (destination / "evidence.json").write_text(json.dumps(receipt, sort_keys=True))
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
