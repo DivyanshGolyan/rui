@@ -210,7 +210,7 @@ test "TD2 binding outcomes across raw ESC-prefix and kitty at every fragmentatio
 }
 
 test "TD2 modifyOtherKeys case27 must have identical binding outcomes" {
-    // Mandatory regression, not xfail: the pinned parser currently drops 27~.
+    // Mandatory regression, not xfail: the pinned parser alone drops 27~.
     try matrix(true);
 }
 

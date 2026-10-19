@@ -741,7 +741,8 @@ fn navigation(self: *Self, event: Editor.Event) !void {
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
     self.transcript += 1;
-    switch (self.marks.start(screen.live.origin)) {
+    const front = try screen.liveStart();
+    switch (self.marks.start(front)) {
         .joined => |mark| {
             try screen.beginTranscript(mark.offset);
             self.transcript_older = mark.cursor;
@@ -751,7 +752,7 @@ fn beginTranscript(self: *Self) !void {
             // No read boundary remains in view (one read exceeded it). Show
             // the gap; older pages continue before the newest boundary that
             // left, so nothing before it is lost.
-            try screen.beginTranscript(screen.live.origin);
+            try screen.beginTranscript(front);
             try screen.markGap();
             self.transcript_older = if (before) |mark| mark.cursor else null;
             if (before) |mark| if (mark.cursor == null) try screen.markBeginning();

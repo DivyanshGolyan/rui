@@ -62,9 +62,16 @@ pub fn append(self: *Self, bytes: []const u8) !void {
 /// length of text not yet prepared, so the end is taken after preparing.
 /// Escaped text never changes again, and the next item begins a new
 /// cluster, so the offset names the same text until it leaves the view.
+/// Both ends are taken after preparing: escaping can also grow text and
+/// move the origin past offsets recorded earlier.
 pub fn liveEnd(self: *Self) !u64 {
     try self.live.prepare();
     return self.live.origin + self.live.length;
+}
+
+pub fn liveStart(self: *Self) !u64 {
+    try self.live.prepare();
+    return self.live.origin;
 }
 
 fn textLayout(self: *const Self) Viewport.Layout {
@@ -457,6 +464,26 @@ test "wide resize preserves a growing combining draft" {
             }
         }
     }
+}
+
+test "a transcript's front is taken after escaping, which can grow live text past the view" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    // 135 KiB of zero-width spaces fit unescaped; escaped they exceed the view.
+    try screen.append("GROWS-FIRST\n");
+    for (0..45000) |_| try screen.append("\u{200b}");
+    try screen.append("\nGROWS-END\n");
+    try std.testing.expectEqual(@as(u64, 0), screen.live.origin);
+    const front = try screen.liveStart();
+    try std.testing.expect(front > 0);
+    try screen.beginTranscript(front);
+    try std.testing.expectEqual(front, screen.browsing.origin);
+    try std.testing.expectEqualStrings(screen.live.text(), screen.browsing.text());
+    try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
 }
 
 test "compact conversation keeps the composer beside content without persistent chrome" {
