@@ -8,10 +8,9 @@ here. An unchanged renderer is expected to FAIL encoded recovery, not xfail it.
 
 import argparse
 import json
+import os
 from pathlib import Path
-import subprocess
 import sys
-import tempfile
 
 
 def vectors():
@@ -61,24 +60,26 @@ def main():
     # Each row owns isolated HOME/Store/processes through TD4. Its manifest
     # retains vectors and binary/source identity along with exact wire bodies.
     # Chunk boundaries request separate writes, not separate OS read promises.
-    with tempfile.TemporaryDirectory(prefix="rui-td2-vectors-") as temporary:
-        path = Path(temporary) / "vectors.json"
-        rows = list(vectors())
-        path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
-        print(
-            f"TD2: {len(rows)} direct-PTY recovery rows; "
-            "raw, kitty CSI-u and modifyOtherKeys case27 must replay the same "
-            "original and preserve the edited next draft/caret.",
-            flush=True,
-        )
-        return subprocess.run(
-            [
-                sys.executable, str(args.harness.resolve()), str(args.binary.resolve()),
-                "--vectors", str(path), "--output", str(args.output.resolve()),
-                "--jobs", str(args.jobs), "--surface", "direct",
-            ],
-            check=False,
-        ).returncode
+    path = args.output.with_name(args.output.name + ".vectors.json")
+    if path.exists():
+        parser.error(f"vector evidence must be fresh: {path}")
+    rows = list(vectors())
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
+    print(
+        f"TD2: {len(rows)} direct-PTY recovery rows; "
+        "raw, kitty CSI-u and modifyOtherKeys case27 must replay the same "
+        "original and preserve the edited next draft/caret.",
+        flush=True,
+    )
+    # Transfer process/signal ownership to the shared driver, rather than
+    # letting a wrapper die while its PTY workers continue. Keep vectors beside
+    # the row evidence, including on interruption or assertion failure.
+    os.execv(sys.executable, [
+        sys.executable, str(args.harness.resolve()), str(args.binary.resolve()),
+        "--vectors", str(path.resolve()), "--output", str(args.output.resolve()),
+        "--jobs", str(args.jobs), "--surface", "direct",
+    ])
 
 
 if __name__ == "__main__":
