@@ -15,7 +15,9 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -40,6 +42,19 @@ def unique_slice(text, start, stop):
     return text[text.index(start):text.index(stop)]
 
 
+@contextmanager
+def retention_root(log):
+    root = Path(tempfile.mkdtemp(prefix="td1-retention-"))
+    outcome = {"exit": None}
+    try:
+        yield root, outcome
+    finally:
+        if outcome["exit"] == 0 and sys.exception() is None:
+            shutil.rmtree(root)
+        else:
+            print(f"Retained TD1 fixture: {root}", file=log, flush=True)
+
+
 def execute(command, overlay, log, retention, cache):
     environment = {**os.environ, "RUI_TEST_EXACT_INACTIVITY": "0"}
     if not retention:
@@ -54,8 +69,7 @@ def execute(command, overlay, log, retention, cache):
                            cwd=overlay, stdout=log, stderr=subprocess.STDOUT)
     if build.returncode:
         return build.returncode
-    with tempfile.TemporaryDirectory(prefix="td1-retention-") as temporary:
-        root = Path(temporary)
+    with retention_root(log) as (root, outcome):
         store, workspace = root / "store", root / "workspace"
         workspace.mkdir()
         release = threading.Event()
@@ -87,14 +101,16 @@ def execute(command, overlay, log, retention, cache):
             deadline = time.monotonic() + 600  # Includes first native compilation.
             while not select.select([ready], [], [], 0.1)[0]:
                 if process.poll() is not None:
-                    return process.returncode
+                    outcome["exit"] = process.returncode
+                    return outcome["exit"]
                 assert time.monotonic() < deadline, "TD1 first-scan handshake deadline"
             assert os.read(ready, 1) == b"x"
             release.set()
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", "model")["work"]["status"] == "completed" and len(endpoint.requests) == 2,
                              "queued Message canonical completion", timeout=30)
             os.write(done, b"x")
-            return process.wait(timeout=60)
+            outcome["exit"] = process.wait(timeout=60)
+            return outcome["exit"]
         finally:
             def retire():
                 if process is not None and process.poll() is None:
@@ -106,7 +122,7 @@ def execute(command, overlay, log, retention, cache):
                         lambda: os.close(ready), lambda: os.close(done))
 
 
-def run(source, output, selector):
+def run(source, output, selector, cache):
     source = source.resolve()
     output.mkdir(parents=True, exist_ok=True)
     frontend = source / "src/SessionFrontend.zig"
@@ -131,18 +147,22 @@ test "TD1 sequence model {name}" {{
     }}, .{name});
 }}
 '''
+    source_inputs = sorted(path for path in (source / "src").rglob("*") if path.is_file())
+    source_inputs += [source / "build.zig", source / "build.zig.zon"]
     inputs = {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in sorted((source / "src").glob("*.zig"))}
+              for path in source_inputs}
     inputs["tests/integration/session_sequence_model.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     # Keep compilation scratch outside the review-artifact directory. The
     # shared cache contains compilation only; Zig's Run step executes afresh.
-    cache = source / ".zig-cache/td1-model"
+    cache = cache.resolve() if cache is not None else source / ".zig-cache/td1-model"
     cache.mkdir(parents=True, exist_ok=True)
     with source_overlay(cache) as overlay:
         for path in source.iterdir():
             if path.name in ("src", ".git", ".zig-cache", "zig-out", ".amp"):
                 continue
             link = overlay / path.name
+            if link.is_symlink() and link.readlink() != path:
+                link.unlink()
             if not link.exists():
                 link.symlink_to(path, target_is_directory=path.is_dir())
         # Preserve unchanged files' identity: Zig's native compilation cache
@@ -169,6 +189,7 @@ test "TD1 sequence model {name}" {{
             result = execute(command, overlay, log, selector in ("all", "retention"), cache)
         report = (output / "test.log").read_text()
         binaries = set(re.findall(r"(?m)^info\(verbose\): [^\n]*?(/[^\s\"]+/test) --cache-dir=", report))
+        binary = None
         binary_digest = None
         direct = None
         if len(binaries) == 1:
@@ -182,9 +203,11 @@ test "TD1 sequence model {name}" {{
             report += (output / "terminal-report.log").read_text()
         unchanged = all(hashlib.sha256((source / path).read_bytes()).hexdigest() == digest
                         for path, digest in inputs.items() if path != "tests/integration/session_sequence_model.py")
+        unchanged = unchanged and hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == inputs["tests/integration/session_sequence_model.py"]
         receipt = {"source": str(source), "selector": selector, "inputs": inputs,
                    "bridge_sha256": hashlib.sha256(bridge.encode()).hexdigest(),
                    "exit": result, "direct_exit": direct, "binary_sha256": binary_digest,
+                   "binary": str(binary) if binary is not None else None,
                    "assertions": re.findall(r"FAIL \(([^)]+)\)", report),
                    "source_unchanged": unchanged}
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
@@ -203,6 +226,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cache", type=Path, help="Compilation-only cache parent; serial overlay lock, never test acceptance reuse")
     parser.add_argument("--selector", choices=("all", *SELECTORS), default="all")
     args = parser.parse_args()
-    raise SystemExit(run(args.source, args.output.resolve(), args.selector))
+    raise SystemExit(run(args.source, args.output.resolve(), args.selector, args.cache))
