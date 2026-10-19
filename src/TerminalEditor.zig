@@ -803,9 +803,40 @@ test "a dropped chord reports itself as it arrives" {
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\r'));
     _ = editor.feed(&stream, 0x1b);
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\n'));
+    // ESC ESC waits for what follows; alone, it expires as one Esc.
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Event.close_view, editor.feed(&stream, 0x1b));
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Input.Pending.escape, stream.pending());
     try std.testing.expectEqualStrings("o", storage[0..editor.length]);
+}
+
+test "an ESC prefix decodes its key as typed alone, and ESC ESC keeps what follows whole" {
+    const cases = .{
+        // Alt-Backspace where Backspace sends ^H, like ESC DEL.
+        .{ "first second\x1b\x08Z", "first Z", Event.none },
+        // Option as Meta on a multibyte key is one dropped chord.
+        .{ "o\x1b\xc3\xa9k", "ok", Event.unbound },
+        // Esc just before a marked paste: Esc, then the whole paste.
+        .{ "\x1b\x1b[200~first\nsecond\x1b[201~", "first\nsecond", Event.close_view },
+        // Esc just before an arrow, or Meta-Up as ESC ESC [A: no "[A".
+        .{ "o\x1b\x1b[A", "o", Event.close_view },
+        .{ "o\x1b\x1b\x1b.", "o", Event.unbound },
+    };
+    inline for (cases) |case| {
+        var storage: [32]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Input = .{};
+        var seen = false;
+        for (case[0]) |byte| {
+            const event = editor.feed(&stream, byte);
+            try std.testing.expect(event != .submit and event != .invalid);
+            if (event == case[2]) seen = true;
+        }
+        try std.testing.expect(seen or case[2] == .none);
+        try std.testing.expectEqual(Input.Pending.none, stream.pending());
+        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqualStrings(case[1], storage[0..editor.length]);
+    }
 }
 
 test "meta-backspace deletes a word without swallowing the next character" {
