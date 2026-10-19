@@ -985,7 +985,8 @@ const HeldWriter = struct {
     writer: std.Io.Writer,
     screen: *Self,
     hook: ?*const fn (*Self) anyerror!void = null,
-    fail: bool = false,
+    failure: enum { none, first, flush } = .none,
+    drains: usize = 0,
     written: usize = 0,
 
     fn init(screen: *Self, buffer: []u8) HeldWriter {
@@ -998,14 +999,18 @@ const HeldWriter = struct {
             self.hook = null;
             hook(self.screen) catch return error.WriteFailed;
         }
-        if (self.fail) return error.WriteFailed;
+        const flush = parts.len == 1 and parts[0].len == 0;
+        if (self.failure == .first or (self.failure == .flush and flush)) return error.WriteFailed;
+        self.drains += 1;
         self.written += writer.end;
         writer.end = 0;
         var count: usize = 0;
         for (parts[0 .. parts.len - 1]) |part| count += part.len;
         count += parts[parts.len - 1].len * splat;
-        self.written += count;
-        return count;
+        // Leave a short tail to the final flush, as a congested writer does.
+        const kept = if (self.failure == .flush and count > 16) count - 16 else count;
+        self.written += kept;
+        return kept;
     }
 };
 
@@ -1055,14 +1060,19 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
         }
     };
     Hooks.file = fixture.file;
-    for ([_]enum { fails, width, replaced, left, stale, delivered }{ .fails, .width, .replaced, .left, .stale, .delivered }) |case| {
+    for ([_]enum { fails, fails_finally, width, replaced, left, stale, delivered }{ .fails, .fails_finally, .width, .replaced, .left, .stale, .delivered }) |case| {
         errdefer std.debug.print("receipt case={s}\n", .{@tagName(case)});
         screen.withdrawAction();
         screen.view = .live;
         try screen.adopt(io, fixture.file, 0xa);
         try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.select(false).approval);
         var held: HeldWriter = .init(screen, &buffer);
-        held.fail = case == .fails;
+        held.failure = switch (case) {
+            .fails => .first,
+            // Earlier frame bytes were accepted; only the final flush fails.
+            .fails_finally => .flush,
+            else => .none,
+        };
         held.hook = switch (case) {
             .width => Hooks.width,
             .replaced => Hooks.replace,
@@ -1073,8 +1083,9 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
         screen.vx.queueRefresh();
         // The whole proposal fits: one frame would complete reading.
         const result = screen.render(&held.writer, size, "", 0, "", &.{});
-        if (case == .fails) {
+        if (case == .fails or case == .fails_finally) {
             try std.testing.expectError(error.WriteFailed, result);
+            try std.testing.expectEqual(case == .fails, held.written == 0);
             try std.testing.expect(!screen.actionRead());
             continue;
         }
