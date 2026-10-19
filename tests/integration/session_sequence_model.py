@@ -58,6 +58,12 @@ def identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def overwrites_inputs(path, source):
+    path = path.resolve()
+    return path == source or (path.is_relative_to(source) and
+                              path.relative_to(source).parts[0] not in SCRATCH)
+
+
 def unsafe_cache(cache, source):
     overlay = cache / "source"
     # Default compilation scratch below .zig-cache is allowed. No cache write
@@ -65,8 +71,7 @@ def unsafe_cache(cache, source):
     if source.is_relative_to(overlay.resolve()):
         return f"cache overlaps supplied source: {overlay}"
     for path in (cache, overlay.resolve()):
-        if path == source or (path.is_relative_to(source) and
-                              path.relative_to(source).parts[0] not in SCRATCH):
+        if overwrites_inputs(path, source):
             return f"cache writes supplied inputs: {path}"
     for path in (cache, overlay, overlay / "src", cache / "build"):
         if path.is_symlink() or (path.exists() and not path.is_dir()):
@@ -186,6 +191,15 @@ def execute(command, overlay, log, retention, cache):
 
 def run(source, output, selector, cache):
     source = source.resolve()
+    output = output.resolve()
+    # Evidence is also a write owner. Refusal cannot write a receipt into an
+    # unsafe output location; stderr is the only report in that case.
+    assert not overwrites_inputs(output, source), "evidence output overlaps supplied inputs"
+    for name in ("overlay-manifest.json", "receipt.json", "test.log", "terminal-report.log"):
+        path = output / name
+        if path.exists() or path.is_symlink():
+            mode = path.lstat().st_mode
+            assert stat.S_ISREG(mode) and path.stat().st_nlink == 1, f"unsafe evidence destination: {path}"
     output.mkdir(parents=True, exist_ok=True)
     frontend = source / "src/SessionFrontend.zig"
     original = frontend.read_text()
