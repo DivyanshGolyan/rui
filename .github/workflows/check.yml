@@ -125,9 +125,9 @@ jobs:
         run: |
           set -euo pipefail
           for workflow in .github/workflows/*.yml; do
-            if [ "$workflow" = .github/workflows/qualify-macos.yml ] || [ "$workflow" = .github/workflows/previous-release-upgrade.yml ] \
-                || [ "$workflow" = .github/workflows/renderer-macos.yml ]; then
-              # 1.7.7 predates GitHub's server-enforced cache policy key.
+            if grep -qx 'cache-mode: read' "$workflow"; then
+              # 1.7.7 predates GitHub's server-enforced cache policy key; only the
+              # read-only policy is accepted, so any other value still fails here.
               actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
             else
               actionlint -shellcheck= "$workflow"

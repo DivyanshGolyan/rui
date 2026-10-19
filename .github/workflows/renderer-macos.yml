@@ -99,10 +99,31 @@ jobs:
           sysctl -n machdep.cpu.brand_string hw.cpufamily hw.cpusubfamily | diff "$build/cpu.txt" - \
             || { echo "Consumer CPU differs from the native-CPU producer; rows not run" >&2; exit 1; }
       - name: Private fixture interpreter and tmux
+        env:
+          GROUP: ${{ matrix.group }}
         run: |
           set -euo pipefail
+          # A fresh hosted VM stalls about 35 s on its first loopback reverse
+          # lookup, then answers from the system cache (diagnostic run
+          # 39202346704). The helper's provider fixture is a plain http.server,
+          # which resolves 127.0.0.1 after binding, inside the helper's 15 s
+          # fixture-start deadline. Warm the system resolver once, beside the
+          # install, so that deadline times the fixture rather than the VM's
+          # first lookup. Rui itself never resolves names here.
+          warm=
+          if [ "$GROUP" = terminal ]; then
+            python3 - <<'PY' &
+          import socket, time
+          for attempt in ("first", "cached"):
+              started = time.monotonic()
+              socket.gethostbyaddr("127.0.0.1")
+              print(f"loopback reverse lookup ({attempt}): {time.monotonic() - started:.1f}s", flush=True)
+          PY
+            warm=$!
+          fi
           python3 -m venv "$RUNNER_TEMP/vr-venv"
           "$RUNNER_TEMP/vr-venv/bin/pip" --disable-pip-version-check install --retries 1 -r tests/integration/terminal_requirements.txt
+          if [ -n "$warm" ]; then wait "$warm"; fi
           command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install tmux
           { sw_vers; sysctl hw.model hw.ncpu hw.memsize; tmux -V; "$RUNNER_TEMP/vr-venv/bin/python" --version; } | tee "$RUNNER_TEMP/vr-environment.txt"
       - name: Rows under the default soft open-file limit
