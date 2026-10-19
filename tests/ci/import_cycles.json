@@ -2,8 +2,6 @@
   "measured_at": "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff",
   "cyclic_edges": [
     ["src/model_capability.zig", "src/provider_selection.zig"],
-    ["src/provider_output.zig", "src/store.zig"],
-    ["src/provider_selection.zig", "src/model_capability.zig"],
-    ["src/store.zig", "src/provider_output.zig"]
+    ["src/provider_selection.zig", "src/model_capability.zig"]
   ]
 }
