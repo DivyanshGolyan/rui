@@ -238,6 +238,7 @@ class EvidenceTest(unittest.TestCase):
             setup = '''import evidence, run_selected, os, builtins
 mode = os.environ['FAULT']
 original_import = builtins.__import__
+original_restore = evidence.restore
 def optional_import(name, *args, **kwargs):
     if mode == 'import' and name == 'evidence': raise ImportError('optional evidence unavailable')
     return original_import(name, *args, **kwargs)
@@ -247,14 +248,28 @@ def identify(*args):
 def restore(*args):
     if mode == 'hash': raise OSError('hash failed')
     if mode == 'truncated': raise ValueError('invalid receipt')
+    if mode == 'same-run': return original_restore(*args)
     return mode in {'matching', 'unbound', 'different'}
+if mode == 'same-run':
+    os.environ.update(GITHUB_REPOSITORY='owner/repo', GITHUB_RUN_ID='124', GITHUB_RUN_ATTEMPT='2',
+                      GITHUB_STEP_SUMMARY=os.environ['INVOCATIONS'] + '.summary')
+    def historical_api(path, binary=False):
+        if '/actions/artifacts?' in path:
+            return {'artifacts': [dict(id=123, workflow_run=dict(id=123), expired=False, size_in_bytes=1,
+                                       created_at='2026-10-18T10:00:00Z'),
+                                  dict(id=124, workflow_run=dict(id=124), expired=True, size_in_bytes=1,
+                                       created_at='2026-10-19T10:00:00Z')]}
+        return dict(html_url='https://github.com/owner/repo/actions/runs/123')
+    evidence.api = historical_api
+    evidence.verify = lambda *args: None
 evidence.identity = identify
 evidence.restore = restore
 evidence.record = lambda inputs: None
 builtins.__import__ = optional_import
 run_selected.main()
 '''
-            for fault in ('import', 'detector', 'hash', 'truncated', 'missing', 'matching', 'unbound', 'different'):
+            for fault in ('import', 'detector', 'hash', 'truncated', 'missing', 'same-run',
+                          'matching', 'unbound', 'different'):
                 for gate_exit in (0, 7):
                     with self.subTest(fault=fault, gate_exit=gate_exit):
                         invocations = root / 'invocations'
@@ -490,7 +505,7 @@ print('compiled handoff available')
                         zipped.writestr('executables/native-test', payload)
                 archive = stream.getvalue()
                 artifact = dict(digest='sha256:' + hashlib.sha256(archive).hexdigest(),
-                                workflow_run=dict(id=123))
+                                workflow_run=dict(id=value['run_id']))
                 return archive, artifact
 
             archive, artifact = archive_for(receipt)
@@ -502,25 +517,33 @@ print('compiled handoff available')
                 old = dict(artifact, id=123, expired=False, size_in_bytes=len(archive),
                            created_at='2026-10-18T10:00:00Z')
                 for defect in ('failure', 'cancelled', 'expired', 'invalid', 'valid'):
-                    recent = dict(old, id=124, workflow_run=dict(id=124), expired=defect == 'expired',
+                    recent_archive, recent_metadata = archive_for(dict(receipt, run_id=124))
+                    recent = dict(recent_metadata, id=124, expired=defect == 'expired',
+                                  size_in_bytes=len(recent_archive),
                                   created_at='2026-10-19T10:00:00Z')
 
                     def historical_api(path, binary=False):
                         if '/actions/artifacts?' in path:
-                            return {'artifacts': [old] if defect == 'valid' else [old, recent]}
+                            return {'artifacts': [old, recent]}
                         if '/actions/runs/' in path:
                             if path.endswith('/124'):
-                                return dict(run, id=124, conclusion=defect if defect != 'invalid' else 'success')
+                                return dict(run, id=124,
+                                            conclusion=defect if defect in {'failure', 'cancelled'} else 'success',
+                                            html_url='https://github.com/owner/repo/actions/runs/124')
                             return dict(run, html_url='https://github.com/owner/repo/actions/runs/123')
                         if binary:
+                            if '/124/' in path:
+                                return b'corrupt archive' if defect == 'invalid' else recent_archive
                             return archive
                         return dict(tree=dict(sha=receipt['source_tree']))
 
-                    with self.subTest(latest=defect), \
-                            patch.dict(os.environ, GITHUB_RUN_ID='999', GITHUB_STEP_SUMMARY=str(Path(directory) / 'summary')), \
-                            patch.object(evidence, 'api', side_effect=historical_api):
-                        self.assertEqual(evidence.restore(inputs), defect == 'valid',
-                                         'Only the newest valid retained result can permit reuse')
+                    for current_run in ('999', '124'):
+                        with self.subTest(latest=defect, current_run=current_run), \
+                                patch.dict(os.environ, GITHUB_RUN_ID=current_run, GITHUB_RUN_ATTEMPT='2',
+                                           GITHUB_STEP_SUMMARY=str(Path(directory) / 'summary')), \
+                                patch.object(evidence, 'api', side_effect=historical_api):
+                            self.assertEqual(evidence.restore(inputs), defect == 'valid' and current_run != '124',
+                                             'The newest receipt must never revive an older pass, including reruns')
                 bootstrap.write_bytes(b'another worker-specific bootstrap')
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
                 data, metadata = archive_for(dict(receipt,

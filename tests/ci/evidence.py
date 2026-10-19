@@ -220,7 +220,9 @@ def restore(inputs):
     artifacts = api(f"repos/{repository}/actions/artifacts?name={name(inputs)}&per_page=20")["artifacts"]
     for artifact in sorted(artifacts, key=lambda row: (row["created_at"], row["id"]), reverse=True):
         if artifact["workflow_run"]["id"] == int(os.environ["GITHUB_RUN_ID"]):
-            continue
+            # Reruns keep their run ID. An earlier attempt cannot revive an
+            # older pass, even when its receipt is not eligible for reuse.
+            return False
         if artifact["expired"] or artifact["size_in_bytes"] > 256 * 1024 * 1024:
             return False
         try:
