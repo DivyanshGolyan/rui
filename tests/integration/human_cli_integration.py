@@ -5094,7 +5094,7 @@ def main(selected="all"):
         # The one-shot choice decodes keys as a Session does. Backspace edits
         # in every encoding; an unbound chord is reported and leaves the choice
         # as typed; a malformed key rejects the line instead of being skipped.
-        for keys, outcome, shown in (
+        for keys, outcome, notice in (
                 ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
                 ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
                 ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
@@ -5116,7 +5116,7 @@ def main(selected="all"):
             try:
                 provider_prompt(master, ready_read)
                 answered = terminal_step(master, keys, "No new Session created")
-                assert outcome in answered and (shown is None or shown in answered), (keys, answered)
+                assert outcome in answered and (notice is None or notice in answered), (keys, answered)
                 assert chooser.wait(timeout=5) == 0
                 restored, expected = termios.tcgetattr(slave), list(original)
                 if sys.platform == "darwin":
