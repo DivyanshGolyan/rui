@@ -166,21 +166,12 @@ pub fn build(b: *std.Build) void {
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/terminal_notice.zig"),
+            .root_source_file = b.path("src/terminal_notice_test.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
     });
-    const terminal_module = b.createModule(.{
-        .root_source_file = b.path("src/SessionTerminal.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    configurePosix(b, terminal_module);
-    configureVaxis(b, terminal_module);
-    terminal_notice.root_module.addImport("terminal", terminal_module);
-    terminal_notice.root_module.link_libc = true;
+    configureTerminalEditor(b, terminal_notice);
 
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
@@ -191,6 +182,44 @@ pub fn build(b: *std.Build) void {
     terminal_restoration.addPassthruArgs();
     const terminal_restoration_step = b.step("terminal-restoration-integration", "Run native terminal restoration with build-owned bindings");
     terminal_restoration_step.dependOn(&terminal_restoration.step);
+
+    // Nonblocking renderer contracts. No gate root imports these sources, and
+    // check, check-full, test and test-logic never depend on these steps.
+    // Each Python harness requires a fresh evidence directory: -- --output DIR.
+    const sequence_model = b.addSystemCommand(&.{"python3"});
+    sequence_model.addFileArg(b.path("tests/integration/session_sequence_model.py"));
+    sequence_model.addPassthruArgs();
+    sequence_model.has_side_effects = true;
+    b.step(
+        "sequence-model",
+        "Run TD1 sequence models through overlaid private frontend transitions (nonblocking)",
+    ).dependOn(&sequence_model.step);
+    const renderer_selftests = b.step(
+        "renderer-contracts-selftest",
+        "Run the direct-PTY, sequence-model and mutation harness self-tests (nonblocking)",
+    );
+    for ([_][]const u8{
+        "tests/qualification/direct-pty/test_driver.py",
+        "tests/integration/session_sequence_model_test.py",
+        "tests/ci/renderer_mutation_test.py",
+    }) |path| {
+        const selftest = b.addSystemCommand(&.{ "python3", "-B" });
+        selftest.addFileArg(b.path(path));
+        selftest.has_side_effects = true;
+        renderer_selftests.dependOn(&selftest.step);
+    }
+    b.step(
+        "direct-pty",
+        "Run the synthetic direct-PTY key matrix and tmux smoke (nonblocking)",
+    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
+    b.step(
+        "direct-pty-controls",
+        "Run direct-PTY driver and disposal controls (nonblocking)",
+    ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/controls.py", ci.path(release_safe)).step);
+    b.step(
+        "input-equivalence",
+        "Run TD2 original-recovery encodings through the direct-PTY matrix (nonblocking)",
+    ).dependOn(&addPtyHarness(b, "tests/integration/input_equivalence.py", ci.path(release_safe)).step);
 
     const session_list_client = b.addExecutable(.{
         .name = "rui-session-list-client-test",
@@ -812,6 +841,17 @@ const CiArtifacts = struct {
         return command;
     }
 };
+
+/// Runs a direct-PTY harness against the build-owned ReleaseSafe Rui; callers
+/// pass the harness's own options, including a fresh --output, after `--`.
+fn addPtyHarness(b: *std.Build, harness: []const u8, rui: std.Build.LazyPath) *std.Build.Step.Run {
+    const run = b.addSystemCommand(&.{"python3"});
+    run.addFileArg(b.path(harness));
+    run.addFileArg(rui);
+    run.addPassthruArgs();
+    run.has_side_effects = true;
+    return run;
+}
 
 fn sameTransportTarget(a: std.Build.ResolvedTarget, b: std.Build.ResolvedTarget) bool {
     return a.result.cpu.arch == b.result.cpu.arch and
