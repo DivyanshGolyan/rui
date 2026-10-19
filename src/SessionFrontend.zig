@@ -87,12 +87,9 @@ older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
-marks: Marks = .{},
-/// Admission ids: the newest Message shown live, and the newest whose
-/// conversation row a live read has held. Ids follow Session order, so a row
-/// for one answers every Message admitted before it.
-shown_admission: u64 = 0,
-answered_admission: u64 = 0,
+marks: reads.Marks = .{},
+// Messages shown live so far, which decide where a later read may mark.
+messages: reads.Messages = .{},
 read_phase: ReadPhase = .activity,
 prepared_action: ?u64 = null,
 prepared_summary: View.ActionSummary = .{},
@@ -111,64 +108,8 @@ pending_diagnostic: ?struct { failure: client.ReadFailure, phase: ReadPhase, rec
 notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
-/// Read boundaries in live output, oldest first. A boundary pairs the
-/// absolute live offset where a read's output began with the canonical cursor
-/// for everything before it (null: the conversation's start). A boundary is
-/// valid only if no conversation item at or after its cursor showed before its
-/// offset. A Message shows first as its Admission and gains its conversation
-/// row later, so no boundary is recorded while a shown Admission still awaits
-/// that row; once eviction passes such a stretch, the transcript says rows
-/// left the view instead of losing the Message.
-const Marks = struct {
-    const Mark = struct { offset: u64, cursor: ?client.ConversationCursor };
-    items: [64]Mark = undefined,
-    count: usize = 0,
-
-    fn record(self: *Marks, offset: u64, cursor: ?client.ConversationCursor) void {
-        // Nothing showed since the last boundary, so the newer read's start
-        // names everything before this offset at least as completely.
-        if (self.count != 0 and self.items[self.count - 1].offset == offset) {
-            self.items[self.count - 1].cursor = cursor;
-            return;
-        }
-        if (self.count == self.items.len) {
-            // Dropping the oldest boundary is safe: a transcript that starts
-            // before the first retained one reloads from it.
-            std.mem.copyForwards(Mark, self.items[0 .. self.count - 1], self.items[1..self.count]);
-            self.count -= 1;
-        }
-        self.items[self.count] = .{ .offset = offset, .cursor = cursor };
-        self.count += 1;
-    }
-
-    /// The first boundary still retained when live output starts at `front`.
-    fn from(self: *const Marks, front: u64) ?Mark {
-        for (self.items[0..self.count]) |mark| if (mark.offset >= front) return mark;
-        return null;
-    }
-};
-
-test "transcript boundaries survive live eviction and bounded recording" {
-    var marks: Marks = .{};
-    try std.testing.expect(marks.from(0) == null);
-    marks.record(0, null);
-    marks.record(40, .{ .end = 9, .before_position = 7 });
-    try std.testing.expectEqual(@as(u64, 0), marks.from(0).?.offset);
-    try std.testing.expect(marks.from(0).?.cursor == null);
-    // Live output lost its first 10 bytes: continue from the next boundary.
-    try std.testing.expectEqual(@as(u64, 7), marks.from(10).?.cursor.?.before_position);
-    try std.testing.expect(marks.from(41) == null);
-    // A read that starts where the last one did replaces its boundary.
-    marks.record(40, .{ .end = 9, .before_position = 8 });
-    try std.testing.expectEqual(@as(usize, 2), marks.count);
-    try std.testing.expectEqual(@as(u64, 8), marks.from(10).?.cursor.?.before_position);
-    for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
-    try std.testing.expectEqual(@as(usize, 64), marks.count);
-    try std.testing.expectEqual(@as(u64, 136), marks.from(0).?.offset);
-}
-
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .messages = self.messages, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
     if (phase == .activity or phase == .permission) {
         job.open_status = self.status_requested;
         job.watch_status = self.status_page and self.terminal.screen.view == .inspection;
@@ -800,16 +741,21 @@ fn navigation(self: *Self, event: Editor.Event) !void {
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
     self.transcript += 1;
-    if (self.marks.from(screen.live.origin)) |mark| {
-        try screen.beginTranscript(mark.offset);
-        self.transcript_older = mark.cursor;
-        if (mark.cursor == null) try screen.markBeginning();
-    } else {
-        // No read boundary remains in view (one read exceeded it). Show the
-        // gap instead of joining older pages to the wrong row.
-        try screen.beginTranscript(screen.live.origin);
-        self.transcript_older = null;
-        try screen.markGap();
+    switch (self.marks.start(screen.live.origin)) {
+        .joined => |mark| {
+            try screen.beginTranscript(mark.offset);
+            self.transcript_older = mark.cursor;
+            if (mark.cursor == null) try screen.markBeginning();
+        },
+        .gap => |before| {
+            // No read boundary remains in view (one read exceeded it). Show
+            // the gap; older pages continue before the newest boundary that
+            // left, so nothing before it is lost.
+            try screen.beginTranscript(screen.live.origin);
+            try screen.markGap();
+            self.transcript_older = if (before) |mark| mark.cursor else null;
+            if (before) |mark| if (mark.cursor == null) try screen.markBeginning();
+        },
     }
 }
 
@@ -1027,14 +973,14 @@ fn settleReader(self: *Self) !void {
 fn showStaged(self: *Self) !void {
     const length = self.job.result.output_length;
     const result = &self.job.result;
-    // An empty opening still marks where the conversation begins; a later
-    // read marks only when it shows something, and only once every Message
-    // shown before it has its conversation row before the boundary.
-    if (result.mark) |mark| if (self.job.opening or self.shown_admission <= @max(self.answered_admission, result.answered_before))
-        self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
-    self.shown_admission = @max(self.shown_admission, result.shown_admission);
-    self.answered_admission = @max(self.answered_admission, result.answered);
-    if (length == 0) return;
+    const start = self.terminal.screen.liveEnd();
+    self.messages = result.messages;
+    var boundary = result.boundary;
+    if (length == 0) {
+        // Only an opening marks without showing anything.
+        if (boundary) |mark| self.marks.record(start, mark.cursor);
+        return;
+    }
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < length) {
@@ -1043,7 +989,18 @@ fn showStaged(self: *Self) !void {
         // A notice can end the group while a read is still silent. Restore
         // its separator before the first compact heading.
         if (offset == 0 and !self.opening and !self.compact_tools and buffer[0] != '\n') try self.terminal.permanent("\n");
-        try self.terminal.permanent(buffer[0..count]);
+        var chunk = buffer[0..count];
+        if (boundary) |mark| if (mark.output < offset + count) {
+            // Live output keeps text, not the styling the scratch file also
+            // counts, so the boundary's live offset is where writing reaches
+            // it. A page's own start precedes its separator.
+            const split: usize = @intCast(mark.output - offset);
+            try self.terminal.permanent(chunk[0..split]);
+            self.marks.record(if (mark.output == 0) start else self.terminal.screen.liveEnd(), mark.cursor);
+            boundary = null;
+            chunk = chunk[split..];
+        };
+        try self.terminal.permanent(chunk);
         offset += count;
     }
     self.reader_output_started = true;

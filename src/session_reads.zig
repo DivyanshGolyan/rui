@@ -40,6 +40,8 @@ pub const Job = struct {
     cursor: client.ActivityCursor = .{},
     opening: bool = false,
     older: ?client.ConversationCursor = null,
+    // Messages shown in live output before this read.
+    messages: Messages = .{},
     transcript: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -65,16 +67,12 @@ pub const Job = struct {
         status_digest: u64 = 0,
         // The newest Message admission this page holds, for Sent.
         delivered: u64 = 0,
-        // Where this read's output begins in the conversation; null cursor at
-        // its start. A later read that shows nothing records no boundary.
-        mark: ?struct { cursor: ?client.ConversationCursor } = null,
-        // Admission ids, for whether a boundary is safe (see Marks): the
-        // newest Message this read showed as an Admission or queued preview,
-        // the newest conversation row it read, and the newest conversation
-        // row before the item its boundary names.
-        shown_admission: u64 = 0,
-        answered: u64 = 0,
-        answered_before: u64 = 0,
+        // The earliest place in this read's output where a transcript may
+        // begin (see Marks), as an offset into the output; none if no shown
+        // item qualifies.
+        boundary: ?Boundary = null,
+        // The job's Messages after this read.
+        messages: Messages = .{},
         live: View.Live = .{},
         cursor: client.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -172,35 +170,21 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
                 else => {},
             }
         };
-        job.result.mark = .{ .cursor = mark };
+        // Nothing showed before the opening, so its start is a boundary even
+        // when it shows nothing.
+        job.result.boundary = .{ .output = 0, .cursor = mark };
     }
     try job.inspection_file.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file, .messages = job.messages, .end = page.facts.end };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(requests, job.store, job.session, &output);
-        job.result.shown_admission = pending.newest;
+        output.messages.shown = @max(output.messages.shown, pending.newest);
     }
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
     job.result.output_length = output.offset;
-    job.result.shown_admission = @max(job.result.shown_admission, output.shown_admission);
-    // A later read's boundary sits where its first shown item begins. Rows
-    // before it showed elsewhere (a Message's own Admission) or not at all, so
-    // older pages must include them. A read that shows nothing marks nothing:
-    // the next read that shows something starts at this same offset.
-    var before_first = true;
-    for (page.facts.items[0..page.facts.count]) |item| {
-        if (output.first) |first| {
-            if (item.position == first.position and item.ordinal == first.ordinal) before_first = false;
-        }
-        if (item.value == .user) {
-            job.result.answered = @max(job.result.answered, item.value.user.admission);
-            if (before_first) job.result.answered_before = @max(job.result.answered_before, item.value.user.admission);
-        }
-    }
-    if (!job.opening) {
-        if (output.first) |first| job.result.mark = .{ .cursor = beginningBefore(first, page.facts.end) };
-    }
+    job.result.messages = output.finish();
+    if (!job.opening) job.result.boundary = output.boundary;
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
     } else {
@@ -247,27 +231,145 @@ const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
+    /// The page's end, for boundary cursors.
+    end: u64 = 0,
+    /// Messages shown before the current item.
+    messages: Messages = .{},
+    /// The earliest shown item where a transcript may begin.
+    boundary: ?Boundary = null,
     current: ?protocol.ActivityItem = null,
-    /// The first item whose rendering wrote bytes.
-    first: ?protocol.ActivityItem = null,
-    /// The newest Message shown as an Admission row.
-    shown_admission: u64 = 0,
+    current_start: u64 = 0,
+    current_shown: bool = false,
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
+        _ = self.finish();
         self.current = value;
+        self.current_start = self.offset;
     }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         try self.file.writePositionalAll(self.task.io, bytes, self.offset);
         self.offset += bytes.len;
-        if (bytes.len == 0) return;
-        if (self.first == null) self.first = self.current;
-        if (self.current) |current| if (current.value == .admission) {
-            self.shown_admission = @max(self.shown_admission, current.value.admission.admission);
-        };
+        if (bytes.len == 0 or self.current_shown) return;
+        const current = self.current orelse return;
+        self.current_shown = true;
+        if (self.boundary == null and self.messages.settled())
+            self.boundary = .{ .output = self.current_start, .cursor = beginningBefore(current, self.end) };
+    }
+
+    /// Accounts for the last item; returns the Messages after it.
+    fn finish(self: *@This()) Messages {
+        if (self.current) |current| self.messages.observe(current, self.current_shown);
+        self.current = null;
+        self.current_shown = false;
+        return self.messages;
     }
 };
+
+/// Messages shown in live output, by admission id. A Message shows first as
+/// its Admission (or a queued preview) and gains its conversation row later:
+/// at model-attempt admission, after a running tool's result when steered, or
+/// after the answer it queued behind. Admission ids follow Session positions,
+/// so the newest of each stands for every earlier one.
+pub const Messages = struct {
+    /// The newest Message shown as its Admission or a queued preview.
+    shown: u64 = 0,
+    /// The newest Message whose conversation row a read returned.
+    answered: u64 = 0,
+
+    /// Every shown Message has its conversation row before the next item, so
+    /// no conversation item after it showed earlier in live output.
+    pub fn settled(self: Messages) bool {
+        return self.shown <= self.answered;
+    }
+
+    fn observe(self: *Messages, item: protocol.ActivityItem, shown: bool) void {
+        switch (item.value) {
+            .admission => |message| if (shown) {
+                self.shown = @max(self.shown, message.admission);
+            },
+            .user => |message| self.answered = @max(self.answered, message.admission),
+            else => {},
+        }
+    }
+};
+
+/// Where a read's output may begin a transcript. `output` counts the read's
+/// staged bytes, styling included; live output keeps only text, so the UI
+/// records the live offset where writing reaches it, never this number.
+pub const Boundary = struct { output: u64, cursor: ?client.ConversationCursor };
+
+/// Read boundaries in live output, oldest first. A boundary pairs an absolute
+/// live offset with the canonical cursor for everything before it (null: the
+/// conversation's start). It is valid only if no conversation item at or after
+/// its cursor showed before its offset. Reads record only valid ones: the
+/// opening's start, and in a later read the first shown item that follows
+/// every shown Message's conversation row. A read that shows nothing records
+/// none.
+pub const Marks = struct {
+    pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor };
+    items: [64]Mark = undefined,
+    count: usize = 0,
+
+    /// Where a transcript of live output retained from some front begins.
+    pub const Start = union(enum) {
+        /// Output from the boundary's offset continues the older pages
+        /// before its cursor exactly.
+        joined: Mark,
+        /// No boundary is retained. Output before the front left the view;
+        /// older pages continue before the newest boundary that did, if any.
+        gap: ?Mark,
+    };
+
+    pub fn record(self: *Marks, offset: u64, cursor: ?client.ConversationCursor) void {
+        // Equal offsets: nothing showed between the two reads, so the later
+        // cursor is valid too and names at least as much before the offset.
+        if (self.count != 0 and self.items[self.count - 1].offset == offset) {
+            self.items[self.count - 1].cursor = cursor;
+            return;
+        }
+        std.debug.assert(self.count == 0 or self.items[self.count - 1].offset < offset);
+        if (self.count == self.items.len) {
+            // Dropping the oldest boundary keeps the newest before any front
+            // until every retained one is after it.
+            std.mem.copyForwards(Mark, self.items[0 .. self.count - 1], self.items[1..self.count]);
+            self.count -= 1;
+        }
+        self.items[self.count] = .{ .offset = offset, .cursor = cursor };
+        self.count += 1;
+    }
+
+    /// The first boundary retained from `front`; otherwise the newest before it.
+    pub fn start(self: *const Marks, front: u64) Start {
+        var before: ?Mark = null;
+        for (self.items[0..self.count]) |mark| {
+            if (mark.offset >= front) return .{ .joined = mark };
+            before = mark;
+        }
+        return .{ .gap = before };
+    }
+};
+
+test "a transcript joins at the first retained boundary or shows the gap after the newest evicted one" {
+    var marks: Marks = .{};
+    try std.testing.expectEqualDeep(Marks.Start{ .gap = null }, marks.start(0));
+    marks.record(0, null);
+    marks.record(40, .{ .end = 9, .before_position = 7 });
+    try std.testing.expectEqualDeep(Marks.Start{ .joined = .{ .offset = 0, .cursor = null } }, marks.start(0));
+    try std.testing.expectEqual(@as(u64, 7), marks.start(10).joined.cursor.?.before_position);
+    // Past every boundary, older pages continue before the newest one, not
+    // the oldest and not none: rows between it and the front are the gap.
+    try std.testing.expectEqual(@as(u64, 7), marks.start(41).gap.?.cursor.?.before_position);
+    // An equal offset replaces the cursor rather than adding a boundary.
+    marks.record(40, .{ .end = 9, .before_position = 8 });
+    try std.testing.expectEqual(@as(usize, 2), marks.count);
+    try std.testing.expectEqual(@as(u64, 8), marks.start(10).joined.cursor.?.before_position);
+    for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
+    try std.testing.expectEqual(@as(usize, 64), marks.count);
+    try std.testing.expectEqual(@as(u64, 136), marks.start(0).joined.offset);
+    try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
+}
 
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
