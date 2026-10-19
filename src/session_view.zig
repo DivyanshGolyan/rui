@@ -6,6 +6,7 @@ const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
+const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -26,6 +27,307 @@ pub const Style = enum {
         };
     }
 };
+
+/// Codes only the conversation view interprets, written whatever the colour
+/// setting: it draws them dim (user body, summary) or in the right margin
+/// (sidenote), and `reset` ends all three. Escaped content cannot form them.
+pub const Mark = struct {
+    pub const body = "\x1b[2m";
+    pub const summary = "\x1b[2;8m";
+    pub const sidenote = "\x1b[8m";
+    pub const reset = "\x1b[0m";
+};
+
+const Tm = extern struct { sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int, wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8 };
+extern "c" fn localtime_r(time: *const c_long, result: *Tm) ?*Tm;
+
+/// Local 24-hour `HH:MM` of a Host wall-clock second, or null when the C
+/// library cannot represent it.
+pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
+    const time = std.math.cast(c_long, second) orelse return null;
+    var local: Tm = undefined;
+    if (localtime_r(&time, &local) == null) return null;
+    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}", .{ @as(u8, @intCast(local.hour)), @as(u8, @intCast(local.min)) }) catch unreachable;
+}
+
+/// A user block's first row up to its body: `›` and the admission time.
+pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
+    try sink.feed("\n");
+    try sink.feed(Style.user.code(colour));
+    try sink.feed("›");
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(" ");
+    var buffer: [5]u8 = undefined;
+    const time = clock(admitted_at, &buffer) orelse return;
+    try sink.feed(Mark.sidenote);
+    try sink.feed(time);
+    try sink.feed(Mark.reset);
+}
+
+/// Size as a reader says it: thousands of bytes, one decimal below 9.95,
+/// both rounded half-up.
+pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
+    const tenths = (bytes + 50) / 100;
+    if (tenths < 100) return std.fmt.bufPrint(buffer, "{d}.{d} KB", .{ tenths / 10, tenths % 10 }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
+}
+
+/// A Message longer than any of these shows a preview and a summary row.
+pub const collapse_bytes = 1024;
+const collapse_nonblank = 4;
+const collapse_lines = 12;
+const preview_lines = 2;
+const preview_bytes = 200;
+
+fn blank(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\r';
+}
+
+/// A user Message's body, fed its exact bytes after `userPrefix`. The view
+/// draws it dim; a long one keeps its first two non-blank lines and a
+/// `┄ N more lines · X KB` row, and trailing blank lines never show. `whole`
+/// (/details) shows every byte. Initialize in final storage.
+pub fn UserBody(comptime Sink: type) type {
+    return struct {
+        const Self = @This();
+        out: Indented(Sink),
+        escaped: Escaped(*Indented(Sink)),
+        length: u64,
+        whole: bool,
+        received: u64 = 0,
+        small: [collapse_bytes]u8 = undefined,
+        // Collapsed: the current line's prefix and the lines shown and seen.
+        line: [256]u8 = undefined,
+        line_bytes: u64 = 0,
+        line_blank: bool = true,
+        shown: usize = 0,
+        nonblank: u64 = 0,
+
+        pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
+            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
+            self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
+            try self.out.feed(Mark.body);
+        }
+
+        pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
+            self.received += bytes.len;
+            if (self.received > self.length) return error.ContentLengthMismatch;
+            if (self.whole) return self.escaped.feed(bytes);
+            if (self.length <= collapse_bytes) {
+                @memcpy(self.small[self.received - bytes.len ..][0..bytes.len], bytes);
+                return;
+            }
+            try self.scan(bytes);
+        }
+
+        pub fn finish(self: *Self) anyerror!void {
+            if (self.received != self.length) return error.ContentLengthMismatch;
+            if (self.whole) {
+                try self.escaped.finish();
+            } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
+                try self.escaped.feed(self.small[0..drawn(self.small[0..self.length])]);
+                try self.escaped.finish();
+            } else {
+                if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
+                try self.endLine();
+                if (self.shown != 0) try self.out.feed("\n");
+                try self.out.feed(Mark.summary);
+                var count: [32]u8 = undefined;
+                var size: [24]u8 = undefined;
+                const hidden = self.nonblank - self.shown;
+                try self.out.feed(switch (hidden) {
+                    0 => "┄ ",
+                    1 => "┄ 1 more line · ",
+                    else => std.fmt.bufPrint(&count, "┄ {d} more lines · ", .{hidden}) catch unreachable,
+                });
+                try self.out.feed(kilobytes(self.length, &size));
+            }
+            try self.out.feed(Mark.reset);
+            try self.out.finish();
+        }
+
+        fn scan(self: *Self, bytes: []const u8) !void {
+            for (bytes) |byte| {
+                if (byte == '\n') {
+                    try self.endLine();
+                    continue;
+                }
+                if (!blank(byte)) self.line_blank = false;
+                if (self.line_bytes < self.line.len) self.line[@intCast(self.line_bytes)] = byte;
+                self.line_bytes += 1;
+            }
+        }
+
+        fn endLine(self: *Self) !void {
+            defer {
+                self.line_bytes = 0;
+                self.line_blank = true;
+            }
+            if (self.line_blank) return;
+            self.nonblank += 1;
+            if (self.shown == preview_lines) return;
+            if (self.shown != 0) try self.out.feed("\n");
+            self.shown += 1;
+            const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
+            const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
+            try self.escaped.feed(kept[0..cut]);
+            try self.escaped.finish();
+            if (cut != kept.len) try self.out.feed(Mark.reset ++ Mark.summary ++ "…" ++ Mark.reset ++ Mark.body);
+        }
+    };
+}
+
+/// Whether a Message of at most `collapse_bytes` collapses: more non-blank
+/// lines or lines from its first to last non-blank one than the view keeps.
+fn collapses(bytes: []const u8) bool {
+    var nonblank: usize = 0;
+    var first: ?usize = null;
+    var last: usize = 0;
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    var index: usize = 0;
+    while (lines.next()) |line| : (index += 1) {
+        for (line) |byte| {
+            if (blank(byte)) continue;
+            nonblank += 1;
+            if (first == null) first = index;
+            last = index;
+            break;
+        }
+    }
+    return nonblank > collapse_nonblank or (first != null and last - first.? + 1 > collapse_lines);
+}
+
+/// The bytes before trailing blank lines.
+fn drawn(bytes: []const u8) usize {
+    var end: usize = 0;
+    var start: usize = 0;
+    while (start <= bytes.len) {
+        const stop = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
+        for (bytes[start..stop]) |byte| if (!blank(byte)) {
+            end = stop;
+            break;
+        };
+        start = stop + 1;
+    }
+    return end;
+}
+
+/// The longest prefix of whole graphemes within `limit` bytes. `bytes` may
+/// end early inside a grapheme; a cluster reaching its end does not fit.
+fn graphemeCut(bytes: []const u8, limit: usize) usize {
+    var cut: usize = 0;
+    var clusters = unicode.graphemeIterator(bytes);
+    while (clusters.next()) |cluster| {
+        if (cluster.start + cluster.len > limit) break;
+        cut = cluster.start + cluster.len;
+    }
+    return cut;
+}
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn tzset() void;
+
+test "a Message's time is the local hour and minute of its Host second" {
+    var saved: [256:0]u8 = undefined;
+    const previous: ?[:0]const u8 = if (getenv("TZ")) |value| copy: {
+        const zone = std.mem.span(value);
+        if (zone.len > saved.len) return error.SkipZigTest;
+        @memcpy(saved[0..zone.len], zone);
+        saved[zone.len] = 0;
+        break :copy saved[0..zone.len :0];
+    } else null;
+    defer {
+        _ = if (previous) |value| setenv("TZ", value, 1) else unsetenv("TZ");
+        tzset();
+    }
+    // 1,800,000,000 is 2027-01-15 08:00:00 UTC.
+    var buffer: [5]u8 = undefined;
+    for ([_]struct { zone: [*:0]const u8, time: []const u8 }{
+        .{ .zone = "UTC0", .time = "08:00" },
+        .{ .zone = "IST-5:30", .time = "13:30" },
+        .{ .zone = "PST8", .time = "00:00" },
+    }) |case| {
+        try std.testing.expectEqual(@as(c_int, 0), setenv("TZ", case.zone, 1));
+        tzset();
+        try std.testing.expectEqualStrings(case.time, clock(1_800_000_000, &buffer).?);
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), clock(std.math.maxInt(u64), &buffer));
+}
+
+test "sizes are thousands of bytes with one decimal below 9.95" {
+    var buffer: [24]u8 = undefined;
+    for ([_]struct { u64, []const u8 }{ .{ 9, "0.0 KB" }, .{ 1_025, "1.0 KB" }, .{ 1_049, "1.0 KB" }, .{ 1_050, "1.1 KB" }, .{ 9_949, "9.9 KB" }, .{ 9_950, "10 KB" }, .{ 10_499, "10 KB" }, .{ 10_500, "11 KB" }, .{ 65_536, "66 KB" } }) |case| {
+        try std.testing.expectEqualStrings(case[1], kilobytes(case[0], &buffer));
+    }
+}
+
+fn repeat(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
+    comptime {
+        var result: [text.len * count]u8 = undefined;
+        for (0..count) |index| @memcpy(result[index * text.len ..][0..text.len], text);
+        const final = result;
+        return &final;
+    }
+}
+
+test "a long user Message shows two non-blank lines and what it hides" {
+    const Sink = struct {
+        bytes: [4096]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const B = Mark.body;
+    const S = Mark.summary;
+    const R = Mark.reset;
+    const cut = R ++ S ++ "…" ++ R ++ B;
+    const a = @as([255]u8, @splat('a'));
+    const x = @as([1100]u8, @splat('x'));
+    const lines = comptime repeat("line\n", 29) ++ "line";
+    const five = comptime repeat("\n", 5);
+    const six = comptime repeat("\n", 6);
+    const twenty = comptime repeat("\n", 20);
+    const more = comptime repeat("\n  line", 29);
+    const Case = struct { input: []const u8, whole: bool = false, output: []const u8 };
+    for ([_]Case{
+        // At every limit: 4 non-blank lines in exactly 1,024 bytes.
+        .{ .input = a ++ "\n" ++ a ++ "\n" ++ a ++ "\n" ++ a ++ "a", .output = B ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "a" ++ R },
+        .{ .input = "1\n2\n3\n4\n5", .output = B ++ "1\n  2\n  " ++ S ++ "┄ 3 more lines · 0.0 KB" ++ R },
+        // Twelve lines from the first non-blank to the last fit; thirteen do not.
+        .{ .input = "a" ++ six ++ "b" ++ five ++ "c", .output = B ++ "a" ++ six ++ "  b" ++ five ++ "  c" ++ R },
+        .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line · 0.0 KB" ++ R },
+        // Leading and trailing blank lines do not count; trailing ones never show.
+        .{ .input = twenty ++ "a\n \t\r\n", .output = B ++ twenty ++ "  a" ++ R },
+        .{ .input = "a\r\n", .output = B ++ "a\\x0d" ++ R },
+        // Long only by its bytes: a cut line counts as shown.
+        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄ 1.0 KB" ++ R },
+        // Cuts count source bytes and never split a grapheme.
+        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
+        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
+        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
+        // Preview lines skip blank ones; a large Message streams.
+        .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines · 1.1 KB" ++ R },
+        .{ .input = lines, .whole = true, .output = B ++ "line" ++ more ++ R },
+    }) |case| {
+        for ([_]usize{ 0, 1, case.input.len / 2, case.input.len }) |split| {
+            var sink: Sink = .{};
+            var body: UserBody(*Sink) = undefined;
+            try body.init(&sink, case.input.len, case.whole);
+            try body.feed(case.input[0..split]);
+            try body.feed(case.input[split..]);
+            try body.finish();
+            try std.testing.expectEqualStrings(case.output, sink.bytes[0..sink.length]);
+        }
+    }
+    var sink: Sink = .{};
+    var body: UserBody(*Sink) = undefined;
+    try body.init(&sink, 3, false);
+    try std.testing.expectError(error.ContentLengthMismatch, body.feed("abcd"));
+}
 
 fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
     return switch (code) {
@@ -384,28 +686,16 @@ pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state")) ?
 /// a transcript's listing alike.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, sink: anytype, colour: bool) !void {
     if (label) if (messageLabel(value.state)) |text| try print(sink, "\n! {s}", .{text});
+    try userPrefix(sink, colour, value.admitted_at);
+    var body: UserBody(@TypeOf(sink)) = undefined;
+    try body.init(sink, value.content.length, false);
+    try content(requests, store, session, item, value.content, &body);
+    try body.finish();
     try sink.feed("\n");
-    try sink.feed(Style.user.code(colour));
-    try sink.feed("›");
-    try sink.feed(Style.normal.code(colour));
-    try sink.feed(" ");
-    try content(requests, store, session, item, value.content, sink);
 }
 
-fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
-    if (item.value == .assistant) {
-        var answer: Answer(@TypeOf(&indented)) = undefined;
-        answer.init(&indented);
-        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &answer)) |failure| return requests.failRead(failure);
-        try answer.finish();
-    } else {
-        var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-        if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, &escaped)) |failure| return requests.failRead(failure);
-        try escaped.finish();
-    }
-    try indented.finish();
-    try sink.feed("\n");
+fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, target: anytype) !void {
+    if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, target)) |failure| return requests.failRead(failure);
 }
 
 /// Compact tool outcome shared by live Activity and the scrolled transcript.
@@ -672,8 +962,12 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
             .assistant => |reference| {
                 compact_tools.* = false;
-                try sink.feed("\n  ");
-                try content(requests, store, session, item, reference, sink);
+                try sink.feed("\n");
+                var answer: Answer(@TypeOf(sink)) = undefined;
+                answer.init(sink);
+                try content(requests, store, session, item, reference, &answer);
+                try answer.finish();
+                try sink.feed("\n");
             },
             .tool_result => |result| {
                 // Keep outcomes and warnings, not routine zero exit codes or

@@ -24,13 +24,25 @@ pub const Prepared = struct {
             const item = self.page.items[index];
             if (item.content.bytes > item_bytes) {
                 compact = false;
-                if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true);
                 var buffer: [192]u8 = undefined;
-                try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\nRaw export: rui session read-conversation --store-hex ", .{ item.position, item.ordinal, item.content.bytes }));
+                if (item.kind == .user) {
+                    // Its line count is unknown without reading it.
+                    var size: [24]u8 = undefined;
+                    try View.userPrefix(sink, colour, item.admitted_at.?);
+                    try sink.feed(View.Mark.summary ++ "┄ ");
+                    try sink.feed(View.kilobytes(item.content.bytes, &size));
+                    try sink.feed(View.Mark.reset ++ "\n  " ++ View.Mark.summary);
+                } else {
+                    if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true);
+                    try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\n", .{ item.position, item.ordinal, item.content.bytes }));
+                }
+                try sink.feed("Raw export: rui session read-conversation --store-hex ");
                 try writeHex(sink, store);
                 try sink.feed(" --session-hex ");
                 try writeHex(sink, session);
-                try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}\n", .{ item.position, item.ordinal }));
+                try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ item.position, item.ordinal }));
+                if (item.kind == .user) try sink.feed(View.Mark.reset);
+                try sink.feed("\n");
                 continue;
             }
             const Staged = struct {
@@ -55,28 +67,31 @@ pub const Prepared = struct {
                 continue;
             }
             compact = false;
-            if (item.kind == .tool_result) {
-                try View.toolHeading(item.presentation.?, sink, colour, true);
-                try sink.feed("  ");
-            } else if (item.kind == .user) {
-                try sink.feed("\n");
-                try sink.feed(View.Style.user.code(colour));
-                try sink.feed("›");
-                try sink.feed(View.Style.normal.code(colour));
-                try sink.feed(" ");
-            } else try sink.feed("\n  ");
-            var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink };
-            if (item.kind == .assistant) {
-                var answer: View.Answer(@TypeOf(&indented)) = undefined;
-                answer.init(&indented);
-                try staged.read(&answer);
-                try answer.finish();
-            } else {
-                var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-                try staged.read(&escaped);
-                try escaped.finish();
+            switch (item.kind) {
+                .tool_result => {
+                    try View.toolHeading(item.presentation.?, sink, colour, true);
+                    try sink.feed("  ");
+                    var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink };
+                    var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
+                    try staged.read(&escaped);
+                    try escaped.finish();
+                    try indented.finish();
+                },
+                .user => {
+                    try View.userPrefix(sink, colour, item.admitted_at.?);
+                    var body: View.UserBody(@TypeOf(sink)) = undefined;
+                    try body.init(sink, item.content.bytes, mode == .details);
+                    try staged.read(&body);
+                    try body.finish();
+                },
+                .assistant => {
+                    try sink.feed("\n");
+                    var answer: View.Answer(@TypeOf(sink)) = undefined;
+                    answer.init(sink);
+                    try staged.read(&answer);
+                    try answer.finish();
+                },
             }
-            try indented.finish();
             try sink.feed("\n");
         }
     }
@@ -159,12 +174,19 @@ test "historical export preserves opaque identities without terminal or shell in
             self.length += bytes.len;
         }
     };
-    var prepared: Prepared = .{ .page = .{ .end = 2, .count = 1, .more = false } };
-    prepared.page.items[0] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8193, .digest = @splat(0) } };
+    // A User item is a user block whose size is all that is known; others
+    // keep their notice.
+    var prepared: Prepared = .{ .page = .{ .end = 3, .count = 2, .more = false } };
+    prepared.page.items[0] = .{ .position = 3, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 8193, .digest = @splat(0) } };
+    prepared.page.items[1] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 9000, .digest = @splat(0) }, .admitted_at = 1_800_000_000 };
     var sink: Sink = .{};
     try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, .details, false);
     // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
-    try std.testing.expectEqualStrings("Rui: Historical item omitted: position 2, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae --position 2 --ordinal 0\n", sink.bytes[0..sink.length]);
+    const identity = " --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae";
+    var time: [5]u8 = undefined;
+    var expected: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄ 9.0 KB\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
+        "Rui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n", .{ View.clock(1_800_000_000, &time).?, identity, identity }), sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {
@@ -248,7 +270,7 @@ test "history preparation binds wire and staged bytes before exposure" {
         }
         fn exchange(fds: []const std.posix.fd_t) !void {
             // Independent Python hashlib oracle for domain-prefixed "first".
-            const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
+            const metadata = "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"2\",\"items\":[{\"position\":\"2\",\"ordinal\":\"0\",\"kind\":\"user\",\"admitted_at\":\"1\",\"content\":{\"bytes\":\"5\",\"sha256\":\"2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b\",\"display\":\"omitted\"}}],\"more\":false}";
             const bodies = [_][]const u8{ metadata, "first" };
             for (fds, 0..) |fd, index| {
                 const normal_body = bodies[index];

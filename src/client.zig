@@ -301,6 +301,7 @@ pub const ConversationPage = struct {
         kind: enum { user, assistant, tool_result },
         content: CommandObservation.ContentReference,
         presentation: ?protocol.ToolPresentation = null,
+        admitted_at: ?u64 = null, // Host wall-clock second; User items only.
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -319,6 +320,7 @@ pub const ConversationPage = struct {
             kind: JsonEnum(@FieldType(Item, "kind")),
             content: struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) },
             presentation: ?JsonToolPresentation = null,
+            admitted_at: ?JsonString(20) = null,
         };
         const Rows = struct {
             values: [protocol.public_conversation_page_items]Row = undefined,
@@ -356,7 +358,9 @@ pub const ConversationPage = struct {
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = try mutationId(row.content.bytes, true), .digest = undefined } };
             item.presentation = if (row.presentation) |p| p.value else null;
-            if ((item.kind == .tool_result) != (item.presentation != null)) return error.InvalidConversationPage;
+            item.admitted_at = if (row.admitted_at) |second| try mutationId(second, false) else null;
+            if ((item.kind == .tool_result) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
+                (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position) return error.InvalidConversationPage;
             if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
                 ((item.kind == .tool_result) != (item.ordinal != 0)) or !row.content.display.eql("omitted") or row.content.sha256.slice().len != 64 or
@@ -477,7 +481,7 @@ pub const ActivityPage = struct {
         if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), content: Ref };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
@@ -531,7 +535,7 @@ pub const ActivityPage = struct {
                 ((item.value == .tool_result) != (fact.ordinal != 0))) return error.InvalidActivityPage;
             switch (item.value) {
                 .admission, .user => |message| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content) };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false) };
                     if ((value.state == .applied) != (value.turn != null) or (item.value == .user and value.state != .applied)) return error.InvalidActivityPage;
                     fact.value = if (item.value == .user) .{ .user = value } else .{ .admission = value };
                 },

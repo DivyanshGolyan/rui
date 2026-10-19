@@ -360,7 +360,8 @@ pub const ActivityItem = struct {
             try out.print("{{\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ self.length, std.fmt.bytesToHex(self.digest, .lower) });
         }
     };
-    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content };
+    // `admitted_at` is the Host wall-clock second the Message was admitted.
+    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64 };
     pub const Call = ProposalMetadata;
     pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(96), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: enum { pending, completed } };
@@ -373,7 +374,7 @@ pub const ActivityItem = struct {
                 try std.json.Stringify.value(message.key.slice(), .{}, out);
                 try out.writeAll(",\"turn\":");
                 if (message.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
-                try out.print(",\"state\":\"{s}\",\"content\":", .{@tagName(message.state)});
+                try out.print(",\"state\":\"{s}\",\"admitted_at\":\"{d}\",\"content\":", .{ @tagName(message.state), message.admitted_at });
                 try message.content.writeJson(out);
                 try out.writeByte('}');
             },

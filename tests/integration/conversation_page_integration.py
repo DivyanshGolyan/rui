@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 
 from control_integration import (
     StreamingEndpoint,
@@ -106,6 +107,7 @@ def main():
 
         baseline = host_resources(process.pid)
         payload = "é中" + "x" * 10000
+        admitted_after = int(time.time())
         message(state, store, "page-message", "direct/page", payload)
         wait_for(lambda: endpoint.counts()[0] == 1, "held provider request")
         head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
@@ -116,6 +118,8 @@ def main():
         assert len(page["items"]) == 1, page
         item = page["items"][0]
         assert item["kind"] == "user" and item["ordinal"] == "0", item
+        # The Host stamps its own wall-clock second when it admits the row.
+        assert admitted_after <= int(item["admitted_at"]) <= int(time.time()), item
         # Invalid public identities must not turn a SQL bind error into a
         # canonical Store fence. A subsequent ordinary read still succeeds.
         for field in ("end", "before_position", "before_ordinal"):

@@ -321,6 +321,7 @@ pub const PublicConversationItem = struct {
     kind: enum { user, assistant, tool_result },
     content: ContentReference,
     presentation: ?protocol.ToolPresentation = null,
+    admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
 };
 
 pub const PublicConversationPage = struct {
@@ -2565,14 +2566,14 @@ pub const Store = struct {
             // Do not filter damaged rows out of SQL: validate ordinary
             // producers and the exposed content before publishing metadata.
             const resolved = try self.publicConversationContentLocked(request.session.slice(), @intCast(position), @intCast(ordinal));
-            if (resolved.id != content_id) return error.CorruptStore;
+            if (resolved.id != content_id or (kind == 1) != (resolved.admitted_at != null)) return error.CorruptStore;
             const metadata = resolved.metadata;
             page.items[page.count] = .{ .position = @intCast(position), .ordinal = @intCast(ordinal), .kind = switch (kind) {
                 1 => .user,
                 3 => .assistant,
                 4 => .tool_result,
                 else => unreachable,
-            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
         return page;
@@ -2596,15 +2597,15 @@ pub const Store = struct {
 
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
-    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64 } {
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64 } {
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
         const statement = try prepare(self.database, if (ordinal == 0)
             "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
                 "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
                 "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id " ++
-                "AND o.resolution_code IN ('answer','compacted','tool_proposals'))) THEN 1 ELSE 0 END " ++
-                "FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+                "AND o.resolution_code IN ('answer','compacted','tool_proposals'))) THEN 1 ELSE 0 END," ++
+                "CASE WHEN e.entry_kind=1 THEN m.admitted_at END FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
                 "LEFT JOIN content c ON c.content_id=e.content_id " ++
@@ -2642,7 +2643,8 @@ pub const Store = struct {
         if (content_id <= 0) return error.CorruptStore;
         const operation: ?u64 = if (ordinal == 0) null else @intCast(try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore);
         if (operation) |op| _ = try self.readToolOutcomeFacts(op, true, false);
-        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation };
+        const admitted_at: ?u64 = if (ordinal == 0) if (try readNullablePositiveI64(statement, 2)) |second| @intCast(second) else null else null;
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at };
     }
 
     const ContentSource = struct {
@@ -2852,7 +2854,7 @@ pub const Store = struct {
             "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2)," ++
             "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
             "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
-            "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))) FROM message_admission m " ++
+            "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))),m.admitted_at FROM message_admission m " ++
             "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
             "WHERE m.session_ref=?1 AND m.admission_id=?3");
         defer _ = c.sqlite3_finalize(statement);
@@ -2863,7 +2865,7 @@ pub const Store = struct {
         const applied = c.sqlite3_column_int(statement, 3) == 1;
         const content_id = try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore;
         const metadata = try self.readPublicContentMetadata(content_id);
-        var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest } };
+        var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = @intCast(try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore) };
         try readText(statement, 0, &message.key);
         if (applied) message.turn = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
         return .{ .message = message, .content_id = content_id };

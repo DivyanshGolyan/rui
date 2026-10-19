@@ -3925,6 +3925,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}", .{
                     item.position, item.ordinal, @tagName(item.kind), item.content.length, std.fmt.bytesToHex(item.content.digest, .lower),
                 });
+                if (item.admitted_at) |second| try response.appendFmt(",\"admitted_at\":\"{d}\"", .{second});
                 if (item.presentation) |presentation| {
                     var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
                     var writer = std.Io.Writer.fixed(&buffer);

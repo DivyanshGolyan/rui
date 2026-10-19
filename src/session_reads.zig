@@ -538,7 +538,7 @@ pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64
 test "a transcript lists each recorded Message once, whole, before the copy that follows it" {
     const Make = struct {
         fn echo(position: u64, output: u64) Echo {
-            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) } } };
+            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) }, .admitted_at = 1 } };
         }
     };
     const opening: Marks.Mark = .{ .offset = 0, .cursor = .{ .end = 20 }, .admitted = 5 };
@@ -778,7 +778,7 @@ fn beginningBefore(first: protocol.ActivityItem, end: u64) ?client.ConversationC
 
 test "a live page's beginning precedes its first item, without repeating or skipping one" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
-    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content };
+    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
     const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
     const Case = struct { item: protocol.ActivityItem, cursor: ?client.ConversationCursor };
     for ([_]Case{
