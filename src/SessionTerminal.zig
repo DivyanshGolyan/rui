@@ -13,6 +13,8 @@ flags: [2]c_int,
 /// A private duplicate of stdout: command output may be redirected while the
 /// Session screen keeps drawing.
 output: c_int = 1,
+/// The terminal's input descriptor; tests supply a pipe.
+input: c_int = 0,
 screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},
@@ -203,13 +205,13 @@ pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {
     if (self.pending_at == 0) self.pending_at = now;
     if (pending != .none and now - self.pending_at >= (if (pending == .escape) @as(i96, 80_000_000) else 2_000_000_000))
         return error.InputDeadline;
-    var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+    var fds = [_]std.posix.pollfd{.{ .fd = self.input, .events = std.posix.POLL.IN, .revents = 0 }};
     if (try std.posix.poll(&fds, wait) == 0) return null;
     var byte: [1]u8 = undefined;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    const enabled = self.active or std.c.fcntl(0, std.c.F.SETFL, self.flags[0] | nonblock) == 0;
-    const result = if (enabled) std.posix.read(0, &byte) else error.TerminalCleanupFailed;
-    if (!self.active and std.c.fcntl(0, std.c.F.SETFL, self.flags[0]) < 0) return error.TerminalCleanupFailed;
+    const enabled = self.active or std.c.fcntl(self.input, std.c.F.SETFL, self.flags[0] | nonblock) == 0;
+    const result = if (enabled) std.posix.read(self.input, &byte) else error.TerminalCleanupFailed;
+    if (!self.active and std.c.fcntl(self.input, std.c.F.SETFL, self.flags[0]) < 0) return error.TerminalCleanupFailed;
     const count = result catch |err| switch (err) {
         error.WouldBlock => return null,
         else => return err,

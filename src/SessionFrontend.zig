@@ -519,63 +519,69 @@ fn driveActive(self: *Self) !void {
             self.dirty = true;
         }
         self.withdrawDecided();
-        if (self.dirty) {
-            const screen = self.terminal.screen;
-            const projection = screen.select(self.commandActive());
-            const choosing = projection.editor == .choice;
-            const view: Input.View = if (choosing) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
-            const base_status = if (self.opening) "Opening…" else switch (projection.approval) {
-                .preview => "Approval disabled · /help for exact shell commands",
-                .paused => "Approval paused · Esc returns to Action",
-                .reading => "PgDn reads the rest · then a/d + Enter",
-                .draining, .ready => Frame.approval_choice,
-                .absent => if (self.submission.view()) |submission| switch (submission.state) {
-                    .not_started => "Not sent · Ctrl-R retries original",
-                    .submitting => "Sending…",
-                    .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
-                    .rejected => "Rejected · /discard",
-                } else if (self.echo != null) "Sent" else workStatus(self.current.work.status.value),
-            };
-            var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
-            var context = std.Io.Writer.fixed(&context_buffer);
-            if (choosing)
-                try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
-            else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
-                try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
-            var status_buffer: [Frame.status_capacity]u8 = undefined;
-            const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
-            self.dirty = false;
-            const delivered = try self.terminal.redraw(view.bytes, view.cursor, status, &self.live);
-            if (screen.presented(delivered).read_completed) {
-                // Reading completes only after delivery. Old choice text must
-                // not become a decision, but fragmented decoder/paste custody
-                // must survive until the existing empty-input freshness gate.
-                self.choice.length = 0;
-                self.choice.cursor = 0;
-                self.choice.plain_ascii = true;
-                screen.invalidateChoice();
-                self.dirty = true;
-            }
-            if (!self.dirty and screen.decisionPromptDelivered() and !screen.consent.acceptsInput() and self.input.pending() == .none) {
-                // Every prompt byte was accepted by stdout. Discard input
-                // through its decoder, not tcflush: a paste prefix or Ctrl-C
-                // arriving during the final write must retain its meaning.
-                var service: ConsentPolicy.Service = .budget_exhausted;
-                for (0..1024) |_| {
-                    service = try self.step(0);
-                    if (service != .byte) break;
-                    service = .budget_exhausted;
-                    if (self.detached) break;
-                }
-                if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-                if (self.detached) break;
-                if (screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty)) {
-                    try Editor.testChoiceReady(self.init.io);
-                }
-            }
-        }
+        if (self.dirty) if (try self.draw()) break;
         _ = try self.step(16);
     }
+}
+
+/// Draws the selected projection, applies its receipt and, after a delivered
+/// decision prompt, services input for the empty-input freshness gate.
+/// Returns true when that service detached the caller.
+fn draw(self: *Self) !bool {
+    const screen = self.terminal.screen;
+    const projection = screen.select(self.commandActive());
+    const choosing = projection.editor == .choice;
+    const view: Input.View = if (choosing) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
+    const base_status = if (self.opening) "Opening…" else switch (projection.approval) {
+        .preview => "Approval disabled · /help for exact shell commands",
+        .paused => "Approval paused · Esc returns to Action",
+        .reading => "PgDn reads the rest · then a/d + Enter",
+        .draining, .ready => Frame.approval_choice,
+        .absent => if (self.submission.view()) |submission| switch (submission.state) {
+            .not_started => "Not sent · Ctrl-R retries original",
+            .submitting => "Sending…",
+            .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
+            .rejected => "Rejected · /discard",
+        } else if (self.echo != null) "Sent" else workStatus(self.current.work.status.value),
+    };
+    var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
+    var context = std.Io.Writer.fixed(&context_buffer);
+    if (choosing)
+        try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
+    else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
+        try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
+    var status_buffer: [Frame.status_capacity]u8 = undefined;
+    const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
+    self.dirty = false;
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, status, &self.live);
+    if (screen.presented(delivered).read_completed) {
+        // Reading completes only after delivery. Old choice text must not
+        // become a decision, but fragmented decoder/paste custody must
+        // survive until the existing empty-input freshness gate.
+        self.choice.length = 0;
+        self.choice.cursor = 0;
+        self.choice.plain_ascii = true;
+        screen.invalidateChoice();
+        self.dirty = true;
+    }
+    if (!self.dirty and screen.decisionPromptDelivered() and !screen.consent.acceptsInput() and self.input.pending() == .none) {
+        // Every prompt byte was accepted by stdout. Discard input through
+        // its decoder, not tcflush: a paste prefix or Ctrl-C arriving
+        // during the final write must retain its meaning.
+        var service: ConsentPolicy.Service = .budget_exhausted;
+        for (0..1024) |_| {
+            service = try self.step(0);
+            if (service != .byte) break;
+            service = .budget_exhausted;
+            if (self.detached) break;
+        }
+        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (self.detached) return true;
+        if (screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty)) {
+            try Editor.testChoiceReady(self.init.io);
+        }
+    }
+    return false;
 }
 
 // Every notice and instruction line fits beside a shortened context line.
@@ -1293,4 +1299,163 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     try self.beginTranscript();
     try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
     try std.testing.expectEqual(@as(?u64, 3), if (self.transcript_older) |cursor| cursor.end else null);
+}
+
+/// A frontend whose terminal writes to a full nonblocking pipe, so every frame
+/// is held and pumps the real dispatch until the queued input is consumed.
+const HeldFrontend = struct {
+    self: Self,
+    screen: *Screen,
+    environ: std.process.Environ.Map,
+    tmp: std.testing.TmpDir,
+    directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
+    pipes: [2][2]std.posix.fd_t,
+    pumps: usize = 0,
+
+    fn create() !*HeldFrontend {
+        const held = try std.testing.allocator.create(HeldFrontend);
+        errdefer std.testing.allocator.destroy(held);
+        var pipes: [2][2]std.posix.fd_t = undefined;
+        for (&pipes) |*pipe| if (std.c.pipe(pipe) != 0) return error.TestUnexpectedResult;
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        for ([_]std.posix.fd_t{ pipes[0][0], pipes[1][0], pipes[1][1] }) |fd|
+            _ = std.c.fcntl(fd, std.c.F.SETFL, std.c.fcntl(fd, std.c.F.GETFL) | nonblock);
+        const screen = try std.testing.allocator.create(Screen);
+        held.* = .{ .self = undefined, .screen = screen, .environ = try std.testing.environ.createMap(std.testing.allocator), .tmp = std.testing.tmpDir(.{}), .pipes = pipes };
+        try screen.init(std.testing.io, &held.environ, false);
+        const directory = try held.tmp.dir.realPath(std.testing.io, &held.directory);
+        held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .scratch = undefined, .command = undefined, .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1] }, .colour = false, .opening = false };
+        held.self.init.io = std.testing.io;
+        held.self.current = std.mem.zeroes(client.Current);
+        held.self.input.init();
+        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input };
+        held.self.terminal.pump = .{ .context = held, .step = pumpHeld };
+        return held;
+    }
+
+    fn destroy(held: *HeldFrontend) void {
+        held.self.submission.cancel();
+        _ = held.self.submission.join();
+        held.self.submission.close();
+        for (held.pipes) |pipe| for (pipe) |fd| {
+            _ = std.c.close(fd);
+        };
+        held.screen.deinit();
+        std.testing.allocator.destroy(held.screen);
+        held.tmp.cleanup();
+        held.environ.deinit();
+        std.testing.allocator.destroy(held);
+    }
+
+    /// Queues terminal input and fills the output pipe so the next frame, a
+    /// whole-screen refresh, waits.
+    fn hold(held: *HeldFrontend, input: []const u8) !void {
+        held.screen.vx.queueRefresh();
+        held.self.dirty = true;
+        if (std.c.write(held.pipes[0][1], input.ptr, input.len) != @as(isize, @intCast(input.len))) return error.TestUnexpectedResult;
+        var block: [4096]u8 = @splat('x');
+        while (std.c.write(held.pipes[1][1], &block, block.len) > 0) {}
+    }
+
+    /// Output credit returns only after every queued input byte was serviced
+    /// through the frontend's own pump.
+    fn pumpHeld(raw: *anyopaque) !void {
+        const held: *HeldFrontend = @ptrCast(@alignCast(raw));
+        held.pumps += 1;
+        try pump(&held.self);
+        var fds = [_]std.posix.pollfd{.{ .fd = held.pipes[0][0], .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&fds, 0) != 0 or held.self.input.pending() != .none) return;
+        var sink: [65536]u8 = undefined;
+        while (std.c.read(held.pipes[1][0], &sink, sink.len) > 0) {}
+    }
+
+    /// Delivers frames until the draw loop settles, without held output.
+    fn settle(held: *HeldFrontend) !void {
+        for (0..8) |_| {
+            if (!held.self.dirty) return;
+            _ = try held.self.draw();
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn adopt(held: *HeldFrontend, rows: usize) !std.Io.File {
+        const file = try held.tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
+        var line: [16]u8 = undefined;
+        for (0..rows) |row| try file.writePositionalAll(std.testing.io, try std.fmt.bufPrint(&line, "row {d:0>3}\n", .{row}), row * 8);
+        held.self.action_file = file;
+        try held.screen.adopt(std.testing.io, file, 0xa);
+        held.self.current.first_action = 0xa;
+        held.self.choice = .{ .buffer = &held.self.choice_buffer, .allow_paste = false };
+        held.self.dirty = true;
+        return file;
+    }
+};
+
+test "a command queued during a held draft frame blocks the later Message Enter" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.dirty = true;
+    try held.settle();
+    try held.hold("/configure --permission-mode ask\rnext\xc3\xa9Z\x1b[D\r");
+    self.dirty = true;
+    _ = try self.draw();
+    try std.testing.expect(held.pumps != 0);
+    // The command waits for the reader; the Message Enter after it sealed nothing.
+    try std.testing.expectEqualStrings("/configure --permission-mode ask", self.input.command_buffer[0..self.input.command_length.?]);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(self.input.submitted == null);
+    try std.testing.expectEqualStrings("next\xc3\xa9Z", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
+    try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.notice.?);
+}
+
+test "a held ready choice decides nothing after a command queued in the same frame" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    // Read, prompted and fresh: the decision prompt's frame was delivered and
+    // input then drained empty.
+    try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
+    try std.testing.expect(held.screen.consent.acceptsInput());
+    try held.hold("/status\ra\r");
+    self.dirty = true;
+    _ = try self.draw();
+    try std.testing.expect(held.pumps != 0);
+    try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqualStrings("/status", self.input.command_buffer[0..self.input.command_length.?]);
+}
+
+test "a transition inside a held frame leaves its remaining input with the frame's editor" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    // Leave the Action for a page; approval pauses and the draft is shown.
+    const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Status\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    self.dirty = true;
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Approval.paused, held.screen.selected.approval);
+    // Ctrl-G returns to the Action mid-frame; "a" and Enter still edit the draft.
+    try held.hold("\x07a\r");
+    self.dirty = true;
+    _ = try self.draw();
+    try std.testing.expect(held.pumps != 0);
+    try std.testing.expect(held.screen.actionVisible());
+    try std.testing.expectEqualStrings("a", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
+    try std.testing.expect(self.submission.view() == null);
+    // The replacement frame selects the choice, which needs fresh input.
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
+    try std.testing.expectEqualStrings("a", self.input.composition().bytes);
 }
