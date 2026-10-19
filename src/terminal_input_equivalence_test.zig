@@ -7,6 +7,7 @@
 const std = @import("std");
 const Input = @import("TerminalInput.zig");
 const Editor = @import("TerminalEditor.zig");
+const vaxis = @import("vaxis");
 
 const Unavailable = enum {
     // Prefixing an unmodified/Ctrl key with ESC changes it to an Alt chord.
@@ -21,6 +22,8 @@ const Unavailable = enum {
 };
 const Wire = union(enum) { bytes: []const u8, unavailable: Unavailable };
 const Lane = enum { legacy, kitty, case27, raw };
+// Two public entry points, not two independent decoders: both use vaxis.
+const Route = enum { events, inline_editor };
 const Case = struct {
     name: []const u8,
     before: []const u8 = "one two!",
@@ -114,7 +117,17 @@ fn feed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcome) voi
     }
 }
 
-fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
+fn inlineFeed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcome) void {
+    for (data) |byte| {
+        const event = editor.feed(input, byte);
+        if (event != .none) outcome.event = event;
+        if (event == .submit) outcome.submits += 1;
+        if (event == .close_view) outcome.closes += 1;
+    }
+}
+
+fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
+    const deliver = if (route == .inline_editor) inlineFeed else feed;
     var storage: [128]u8 = undefined;
     @memcpy(storage[0..case.before.len], case.before);
     var ascii = true;
@@ -122,7 +135,7 @@ fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
     var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice, .plain_ascii = ascii };
     var input: Input = .{};
     var result: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
-    feed(&editor, &input, wire[0..split], &result);
+    deliver(&editor, &input, wire[0..split], &result);
     // A read ending at any byte boundary must not commit an incomplete chord.
     // Clock expiry itself is tested separately at the owning deadline seam.
     if (split != 0 and split < wire.len) {
@@ -130,7 +143,7 @@ fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
         try std.testing.expectEqualStrings(case.before, storage[0..editor.length]);
         try std.testing.expectEqual(case.caret, editor.cursor);
     }
-    feed(&editor, &input, wire[split..], &result);
+    deliver(&editor, &input, wire[split..], &result);
     const bare_escape = std.mem.eql(u8, wire, "\x1b") or std.mem.eql(u8, wire, "\x1b\x1b");
     try std.testing.expectEqual(if (bare_escape) Input.Pending.escape else Input.Pending.none, input.pending());
     if (bare_escape) {
@@ -151,7 +164,7 @@ fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
         expected[case.cursor] = 'Z';
         @memcpy(expected[case.cursor + 1 ..][0 .. case.after.len - case.cursor], case.after[case.cursor..]);
         var suffix: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
-        feed(&editor, &input, "Z\r", &suffix);
+        deliver(&editor, &input, "Z\r", &suffix);
         try std.testing.expectEqual(Editor.Event.submit, suffix.event);
         try std.testing.expectEqual(@as(usize, 1), suffix.submits);
         try std.testing.expectEqualStrings(expected[0 .. case.after.len + 1], storage[0..editor.length]);
@@ -159,9 +172,9 @@ fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
     return result;
 }
 
-fn check(case: Case, lane: Lane, wire: []const u8, split: usize, choice: bool) !void {
-    errdefer std.debug.print("TD2 {s} lane={s} split={d}/{d} choice={}\n", .{ case.name, @tagName(lane), split, wire.len, choice });
-    const actual = try run(case, wire, split, choice);
+fn check(comptime route: Route, case: Case, lane: Lane, wire: []const u8, split: usize, choice: bool) !void {
+    errdefer std.debug.print("TD2 {s} route={s} lane={s} split={d}/{d} choice={}\n", .{ case.name, @tagName(route), @tagName(lane), split, wire.len, choice });
+    const actual = try run(route, case, wire, split, choice);
     try std.testing.expectEqualStrings(case.after, actual.text[0..actual.length]);
     try std.testing.expectEqual(case.cursor, actual.cursor);
     try std.testing.expectEqual(case.event, actual.event);
@@ -179,9 +192,11 @@ fn matrix(case27: bool) !void {
                 .unavailable => {}, // Explicit protocol gap, never a passing vector.
                 .bytes => |data| for (0..data.len + 1) |split| {
                     for ([_]bool{ false, true }) |choice| {
-                        check(case, lane, data, split, choice) catch {
-                            failures += 1;
-                        };
+                        inline for (.{ Route.events, Route.inline_editor }) |route| {
+                            check(route, case, lane, data, split, choice) catch {
+                                failures += 1;
+                            };
+                        }
                     }
                 },
             }
@@ -321,13 +336,83 @@ test "TD2 Ghostty modifier nine is Super distinct from Kitty Hyper and Meta" {
     };
 }
 
+// Literal C0, CSI-u, case27, explicit Kitty press, and Kitty release. Raw
+// C0 is already normalized to the same typed Ctrl key by vaxis; there is no
+// separate legacyControl helper in this runtime. R has a frontend binding,
+// not an editor binding, but must use the same normalization as C/D/J.
+const Control = struct { point: u21, wires: [5][]const u8 };
+const controls = [_]Control{
+    .{ .point = 'c', .wires = .{ "\x03", "\x1b[99;5u", "\x1b[27;5;99~", "\x1b[99;5:1u", "\x1b[99;5:3u" } },
+    .{ .point = 'd', .wires = .{ "\x04", "\x1b[100;5u", "\x1b[27;5;100~", "\x1b[100;5:1u", "\x1b[100;5:3u" } },
+    .{ .point = 'j', .wires = .{ "\n", "\x1b[106;5u", "\x1b[27;5;106~", "\x1b[106;5:1u", "\x1b[106;5:3u" } },
+    .{ .point = 'r', .wires = .{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;5:1u", "\x1b[114;5:3u" } },
+};
+
+test "TD2 vaxis normalizes legacy and encoded Ctrl C D J R without a recovery special case" {
+    for (controls) |control| for (control.wires, 0..) |wire, index| {
+        errdefer std.debug.print("TD2 parser Ctrl codepoint={d} encoding={d}\n", .{ control.point, index });
+        var parser: vaxis.Parser = .{};
+        const result = try parser.parse(wire, null);
+        try std.testing.expectEqual(wire.len, result.n);
+        const event = result.event orelse return error.MissingControlEvent;
+        const key = if (index == 4) blk: {
+            try std.testing.expect(event == .key_release);
+            break :blk event.key_release;
+        } else blk: {
+            try std.testing.expect(event == .key_press);
+            break :blk event.key_press;
+        };
+        try std.testing.expectEqual(control.point, key.codepoint);
+        try std.testing.expectEqual(@as(u8, 4), @as(u8, @bitCast(key.mods)));
+        try std.testing.expectEqual(@as(?[]const u8, null), key.text);
+    };
+}
+
 test "TD2 kitty release is not a binding and repeat produces one submission" {
-    for ([_][]const u8{ "\x1b[13;1:3u", "\x1b[99;5:3u", "\x1b[127;1:3u", "\x1b[106;3:3u", "\x1b[1;2:3A" }) |release| {
+    for ([_][]const u8{ "\x1b[13;1:3u", "\x1b[99;5:3u", "\x1b[100;5:3u", "\x1b[106;5:3u", "\x1b[114;5:3u", "\x1b[127;1:3u", "\x1b[106;3:3u", "\x1b[1;2:3A" }) |release| {
         const case: Case = .{ .name = "key release", .event = .none, .wires = undefined };
-        for (0..release.len + 1) |split| try check(case, .kitty, release, split, false);
+        for (0..release.len + 1) |split| inline for (.{ Route.events, Route.inline_editor }) |route| {
+            try check(route, case, .kitty, release, split, false);
+        };
     }
     const repeat: Case = .{ .name = "Enter repeat", .event = .submit, .wires = undefined };
-    try check(repeat, .kitty, "\x1b[13;1:2u", 4, false);
+    inline for (.{ Route.events, Route.inline_editor }) |route| {
+        try check(route, repeat, .kitty, "\x1b[13;1:2u", 4, false);
+    }
+}
+
+test "TD2 explicit Kitty Ctrl press then release acts once through both editor entry points" {
+    for (controls[0..3]) |control| {
+        const case: Case = switch (control.point) {
+            'c' => .{ .name = "Ctrl-C press", .event = .interrupt, .wires = undefined },
+            'd' => .{ .name = "Ctrl-D press", .event = .redraw, .after = "one to!", .wires = undefined },
+            'j' => .{ .name = "Ctrl-J press", .event = .submit, .wires = undefined },
+            else => unreachable,
+        };
+        for ([_]bool{ false, true }) |choice| inline for (.{ Route.events, Route.inline_editor }) |route| {
+            const deliver = if (route == .inline_editor) inlineFeed else feed;
+            const release = control.wires[4];
+            for (0..release.len + 1) |split| {
+                var storage: [128]u8 = undefined;
+                @memcpy(storage[0..case.before.len], case.before);
+                var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice };
+                var input: Input = .{};
+                var pressed: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+                deliver(&editor, &input, control.wires[3], &pressed);
+                try std.testing.expectEqual(case.event, pressed.event);
+                try std.testing.expectEqual(@as(usize, if (case.event == .submit) 1 else 0), pressed.submits);
+                var released: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+                deliver(&editor, &input, release[0..split], &released);
+                deliver(&editor, &input, release[split..], &released);
+                try std.testing.expectEqual(Editor.Event.none, released.event);
+                try std.testing.expectEqual(@as(usize, 0), released.submits);
+                try std.testing.expectEqualStrings(case.after, storage[0..editor.length]);
+                try std.testing.expectEqual(case.cursor, editor.cursor);
+                try std.testing.expectEqual(@as(?Editor.Event, null), editor.rejected);
+                try std.testing.expectEqual(Input.Pending.none, input.pending());
+            }
+        };
+    }
 }
 
 test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain queued bytes" {
