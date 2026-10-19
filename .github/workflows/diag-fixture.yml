@@ -1,0 +1,36 @@
+name: perf diagnostic helper fixture start
+# Temporary diagnostic branch only: where does the pinned helper's provider fixture stall on hosted macOS?
+on:
+  push:
+    branches: ['perf/diag-fixture']
+permissions:
+  contents: read
+jobs:
+  fixture:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          path: diag
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 6da04df5e7bb9f2be72d341997f01f5b60a5ce8c
+          persist-credentials: false
+          path: perf
+      - name: Probe
+        run: |
+          set -x
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" -q --disable-pip-version-check install -r perf/tests/integration/terminal_requirements.txt
+          py="$RUNNER_TEMP/venv/bin/python"
+          helper="$GITHUB_WORKSPACE/perf/tests/qualification/renderer-macos/verify-rui"
+          probe="$GITHUB_WORKSPACE/diag/.github/diag/fixture_probe.py"
+          src="$GITHUB_WORKSPACE/perf"
+          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o1" cold
+          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o2" ttl
+          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o3" parallel
+          (time dscacheutil -q host -a ip_address 127.0.0.1) 2>&1
+          (time dig +time=2 +tries=1 -x 127.0.0.1) 2>&1 | tail -12
+          true
