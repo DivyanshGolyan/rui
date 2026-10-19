@@ -649,6 +649,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
     const historical = page.facts.direction == .backward;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        // The sink learns which item its next bytes belong to: some items
+        // render nothing, and a read boundary must name the first that does.
+        sink.item(item);
         switch (item.value) {
             .admission => |message| {
                 if (historical and message.state == .applied) continue;
