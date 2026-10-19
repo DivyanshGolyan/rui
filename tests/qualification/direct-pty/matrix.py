@@ -169,6 +169,10 @@ def run_one(binary, root, vector):
     result_file = output / "result.json"
     result = json.loads(result_file.read_text()) if result_file.exists() else {
         "row": vector["name"], "status": "worker-failed", "exit": code}
+    result["worker_exit"] = code
+    if result["row"] != vector["name"] or (result["status"] == "passed" and code != 0):
+        result = {"row": vector["name"], "status": "exit-receipt-mismatch", "worker_exit": code,
+                  "receipt": result}
     print(f"{vector['name']}: {result['status']}", flush=True)
     return result
 

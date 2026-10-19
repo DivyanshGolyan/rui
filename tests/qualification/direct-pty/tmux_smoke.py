@@ -1,65 +1,157 @@
 """Four short synthetic tmux integration rows. Full landing gates stay intact."""
 import json
+import os
 import shlex
+import signal
 import subprocess
+import sys
 import time
 
-from host_process import dispose_all
+from driver import defer_signals
+from host_process import dispose_all, stop_process
 from scenarios import assert_submitted
 
 
-def smoke(fixture, row):
-    socket = fixture.root / "tmux.sock"
-    command = ["tmux", "-S", str(socket), "-f", "/dev/null"]
+class Tmux:
+    """One foreground server and one pane wrapper that reaps the Rui caller."""
+    def __init__(self, fixture):
+        self.fixture = fixture
+        self.socket = fixture.root / "tmux.sock"
+        self.command = ["tmux", "-S", str(self.socket), "-f", "/dev/null"]
+        self.server = self.log = self.pid = self.caller_pid = None
+        self.clean = False
 
-    def tmux(*args, check=True):
-        result = subprocess.run([*command, *args], env=fixture.env,
+    def call(self, *args, check=True):
+        result = subprocess.run([*self.command, *args], env=self.fixture.env,
                                 capture_output=True, timeout=5)
         if check:
             assert result.returncode == 0, ("tmux setup/control", args, result.stderr)
         return result
 
-    def wait(predicate, label):
+    def start(self):
+        fixture = self.fixture
+        with defer_signals():
+            self.log = open(fixture.output / "server.log", "wb")
+            self.server = subprocess.Popen([*self.command, "-D"], env=fixture.env,
+                                           stdout=self.log, stderr=subprocess.STDOUT)
+        deadline = time.monotonic() + 5
+        while not self.socket.exists():
+            assert self.server.poll() is None, "tmux server exited before socket creation"
+            if time.monotonic() >= deadline:
+                raise TimeoutError("tmux server socket setup")
+            time.sleep(0.01)
+        self.call("set-option", "-g", "remain-on-exit", "on")
+        wrapper = fixture.root / "pane.py"
+        wrapper.write_text('''import fcntl, json, os, pathlib, subprocess, sys, termios
+root = pathlib.Path(sys.argv[1])
+before = termios.tcgetattr(0)
+flags = fcntl.fcntl(0, fcntl.F_GETFL)
+caller = subprocess.Popen(sys.argv[2:])
+(root / "caller.pid").write_text(str(caller.pid))
+status = caller.wait()
+after = termios.tcgetattr(0)
+if sys.platform == "darwin":
+    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+    before[3] &= ~mask
+    after[3] &= ~mask
+(root / "caller-exit.json").write_text(json.dumps({"status": status,
+    "restored": after == before and fcntl.fcntl(0, fcntl.F_GETFL) == flags}))
+''')
+        rui = shlex.join([sys.executable, str(wrapper), str(fixture.root), fixture.binary,
+                         "session", "resume", "--store", str(fixture.store), "--", "td4"])
+        launch = fixture.root / "launch"
+        shell = f"while [ ! -f {shlex.quote(str(launch))} ]; do sleep 0.01; done; exec {rui}"
+        with defer_signals():
+            result = self.call("new-session", "-d", "-s", "td4", "-x", "80", "-y", "24",
+                               "-c", str(fixture.root), "-P", "-F", "#{pane_pid} #{pane_tty}", shell)
+            self.pid = int(result.stdout.decode().strip().split()[0])
+            self.call("pipe-pane", "-o", "-t", "td4:0.0", "cat > " + shlex.quote(str(fixture.output / "output.bin")))
+            launch.touch()
+            deadline = time.monotonic() + 5
+            while not (fixture.root / "caller.pid").exists() or not (fixture.root / "caller.pid").read_text():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("tmux wrapper caller launch")
+                time.sleep(0.01)
+            self.caller_pid = int((fixture.root / "caller.pid").read_text())
+            (fixture.output / "tmux-ownership.json").write_text(json.dumps({
+                "server_pid": self.server.pid, "pane_pid": self.pid,
+                "caller_pid": self.caller_pid, "socket": str(self.socket)}))
+
+    def wait(self, predicate, label):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            result = tmux("capture-pane", "-p", "-t", "td4:0.0", check=False)
+            result = self.call("capture-pane", "-p", "-t", "td4:0.0", check=False)
             if result.returncode == 0:
-                (fixture.output / "pane.txt").write_bytes(result.stdout)
+                (self.fixture.output / "pane.txt").write_bytes(result.stdout)
                 if predicate(result.stdout.decode()):
                     return
             time.sleep(0.02)
         raise TimeoutError(f"tmux smoke {label}: no matching pane; see pane.txt")
 
-    fixture.answer("TD4 tmux answer")
-    rui = shlex.join([fixture.binary, "session", "resume", "--store", str(fixture.store), "--", "td4"])
-    shell = (f"stty -g > {shlex.quote(str(fixture.root / 'before'))}; {rui}; "
-             f"code=$?; stty -g > {shlex.quote(str(fixture.root / 'after'))}; "
-             f"printf '%s' \"$code\" > {shlex.quote(str(fixture.root / 'exit'))}")
-    try:
-        tmux("new-session", "-d", "-s", "td4", "-x", "80", "-y", "24", "-c", str(fixture.root), shell)
-        tmux("pipe-pane", "-o", "-t", "td4:0.0", "cat > " + shlex.quote(str(fixture.output / "output.bin")))
-        wait(lambda text: "›" in text and "Opening" not in text, "empty composer")
-        payload = bytes.fromhex(row["chunks"][0]["hex"])
-        (fixture.output / "input.bin").write_bytes(payload)
-        if row["name"] == "tmux-paste":
-            # -p asks tmux to retain marked-paste provenance for its pane.
-            tmux("set-buffer", "--", payload.decode())
-            tmux("paste-buffer", "-p", "-t", "td4:0.0")
-            tmux("send-keys", "-t", "td4:0.0", "Enter")
-        else:
-            if row["name"] == "tmux-resize":
-                tmux("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
-            tmux("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
-        wait(lambda text: "TD4 tmux answer" in text, "answer")
-        assert_submitted(fixture.endpoint.requests, [row["expected"]])
-        tmux("send-keys", "-t", "td4:0.0", "-l", "/exit")
-        tmux("send-keys", "-t", "td4:0.0", "Enter")
+    def caller_dead(self):
+        result = self.call("display-message", "-p", "-t", "td4:0.0", "#{pane_dead}", check=False)
+        return result.returncode == 0 and result.stdout.strip() == b"1"
+
+    def finish(self):
         deadline = time.monotonic() + 10
-        while not (fixture.root / "exit").exists() and time.monotonic() < deadline:
+        while not self.caller_dead():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("tmux caller exit")
             time.sleep(0.02)
-        assert (fixture.root / "exit").read_text() == "0", "tmux caller failed"
-        assert (fixture.root / "before").read_bytes() == (fixture.root / "after").read_bytes(), "tmux termios not restored"
-        (fixture.output / "tmux.json").write_text(json.dumps({
-            "version": tmux("-V").stdout.decode().strip(), "restored": True, "exit": 0}))
-    finally:
-        dispose_all(lambda: tmux("kill-server", check=False))
+        facts = json.loads((self.fixture.root / "caller-exit.json").read_text())
+        assert facts == {"status": 0, "restored": True}, ("tmux caller exit/restoration", facts)
+        (self.fixture.output / "caller-exit.json").write_text(json.dumps(facts))
+
+    def close(self):
+        failure = []
+        def attempt(action):
+            try:
+                action()
+            except BaseException as error:
+                failure.append(error)
+                raise
+        def caller():
+            if self.pid is None:
+                return
+            deadline = time.monotonic() + 5
+            if not self.caller_dead():
+                try:
+                    os.kill(self.caller_pid if self.caller_pid is not None else self.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            while not self.caller_dead():
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("tmux did not reap its owned caller")
+                time.sleep(0.02)
+        def server():
+            if self.server is not None and self.server.poll() is None:
+                self.call("kill-server")
+        dispose_all(lambda: attempt(caller), lambda: attempt(server),
+            lambda: attempt(lambda: stop_process(self.server, timeout=5)) if self.server is not None else None,
+            lambda: self.log.close() if self.log is not None else None)
+        self.clean = not failure
+        (self.fixture.output / "tmux-cleanup.json").write_text(json.dumps({
+            "clean": self.clean, "server_exit": self.server.returncode if self.server else None,
+            "errors": [repr(error) for error in failure]}))
+
+
+def smoke(fixture, row):
+    fixture.answer("TD4 tmux answer")
+    fixture.tmux = terminal = Tmux(fixture)
+    terminal.start()
+    terminal.wait(lambda text: "›" in text and "Opening" not in text, "empty composer")
+    payload = bytes.fromhex(row["chunks"][0]["hex"])
+    (fixture.output / "input.bin").write_bytes(payload)
+    if row["name"] == "tmux-paste":
+        terminal.call("set-buffer", "--", payload.decode())
+        terminal.call("paste-buffer", "-p", "-t", "td4:0.0")
+        terminal.call("send-keys", "-t", "td4:0.0", "Enter")
+    else:
+        if row["name"] == "tmux-resize":
+            terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
+        terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
+    terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
+    assert_submitted(fixture.endpoint.requests, [row["expected"]])
+    terminal.call("send-keys", "-t", "td4:0.0", "-l", "/exit")
+    terminal.call("send-keys", "-t", "td4:0.0", "Enter")
+    terminal.finish()

@@ -8,8 +8,8 @@ import tempfile
 import threading
 import time
 
-from driver import DirectPty
-from host_process import dispose_all
+from driver import DirectPty, defer_signals
+from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
 from canonical_failure_integration import ReplyProxy
@@ -24,23 +24,28 @@ def assert_submitted(requests, expected):
 class Fixture:
     def __init__(self, binary, output):
         self.binary, self.output = str(binary), pathlib.Path(output)
-        self.root = pathlib.Path(tempfile.mkdtemp(prefix="td4-"))
-        self.home, self.store = self.root / "h", self.root / "s"
-        self.home.mkdir(mode=0o700)
+        self.root = None
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("RUI_", "XDG_")) and key not in ("TMUX", "TMUX_PANE")}
-        self.env.update(HOME=str(self.home), TERM="xterm-256color")
-        # Host fixture uses inherited HOME; workers never share an interpreter.
-        os.environ.update(HOME=str(self.home))
         model.RUI = pathlib.Path(binary)
-        self.host = self.endpoint = self.thread = self.proxy = self.tty = None
+        self.host = self.endpoint = self.thread = self.proxy = self.tty = self.tmux = None
         self.gates = []
 
     def start(self):
-        self.endpoint = model.SuccessEndpoint([])
+        with defer_signals():
+            self.root = canonical_fixture_root(tempfile.mkdtemp(prefix="td4-"))
+            self.home, self.store = self.root / "h", self.root / "s"
+            self.home.mkdir(mode=0o700)
+            self.env.update(HOME=str(self.home), TERM="xterm-256color")
+            # Host fixture uses inherited HOME; one interpreter per row.
+            os.environ.update(HOME=str(self.home))
+        with defer_signals():
+            self.endpoint = model.SuccessEndpoint([])
         self.thread = threading.Thread(target=self.endpoint.serve_forever)
-        self.thread.start()
-        self.host = model.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
+        with defer_signals():
+            self.thread.start()
+        with defer_signals():
+            self.host = model.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
         (self.output / "ownership.json").write_text(json.dumps({"root": str(self.root), "host_pid": self.host.pid}))
         result = subprocess.run([self.binary, "session", "configure", "--store", str(self.store),
             "--session", "td4", "--workspace", str(self.root), "--provider", "codex", "--model", "model-a"],
@@ -58,8 +63,9 @@ class Fixture:
             self.gates.append(gate)
 
     def terminal(self):
-        self.tty = DirectPty([self.binary, "session", "resume", "--store", str(self.store), "--", "td4"],
-                             env=self.env, cwd=self.root, output=self.output)
+        with defer_signals():
+            self.tty = DirectPty([self.binary, "session", "resume", "--store", str(self.store), "--", "td4"],
+                                 env=self.env, cwd=self.root, output=self.output)
         self.tty.draft("", 2)
         return self.tty
 
@@ -80,19 +86,22 @@ class Fixture:
         # ReplyProxy's socket path. No caller can observe its old rename gap.
         dispose_all(*(gate.set for gate in self.gates),
             lambda: self.tty.close() if self.tty is not None else None,
+            lambda: self.tmux.close() if self.tmux is not None else None,
             self.save,
             lambda: self.proxy.close() if self.proxy is not None else None,
             lambda: model.stop_host(self.host) if self.host is not None else None,
-            lambda: self.endpoint.shutdown() if self.endpoint is not None else None,
+            lambda: self.endpoint.shutdown() if self.thread is not None and self.thread.ident is not None else None,
             lambda: self.endpoint.server_close() if self.endpoint is not None else None,
-            lambda: self.thread.join(timeout=5) if self.thread is not None else None,
-            lambda: shutil.rmtree(self.root), self.retired)
+            lambda: self.thread.join(timeout=5) if self.thread is not None and self.thread.ident is not None else None,
+            self.retired)
 
     def retired(self):
         assert self.host is None or self.host.poll() is not None, "owned Host survived disposal"
-        assert self.tty is None or self.tty.process.poll() is not None, "owned caller survived disposal"
+        assert self.tty is None or self.tty.process is None or self.tty.process.poll() is not None, "owned caller survived disposal"
+        assert self.tmux is None or self.tmux.clean, "tmux disposal unconfirmed; retained private root"
         assert self.thread is None or not self.thread.is_alive(), "provider thread survived disposal"
-        assert not self.root.exists(), "fixture HOME/Store survived disposal"
+        if self.root is not None:
+            shutil.rmtree(self.root)
         (self.output / "cleanup.json").write_text(json.dumps({"host_reaped": True,
             "caller_reaped": True, "provider_joined": True, "private_root_removed": True}))
 
@@ -162,8 +171,9 @@ def recovery(fixture, row):
     fixture.answer("TD4 original answer", release)
     fixture.answer("TD4 next answer")
     # Install before any caller starts; no concurrent frontend socket borrower.
-    fixture.proxy = ReplyProxy(fixture.host, "/v1/message",
-        lambda response: b"" if len(fixture.proxy.exchanges) == 1 else response)
+    with defer_signals():
+        fixture.proxy = ReplyProxy(fixture.host, "/v1/message",
+            lambda response: b"" if len(fixture.proxy.exchanges) == 1 else response)
     tty = fixture.terminal()
     tty.send("original éZ\r".encode())
     tty.marker("Not confirmed")
@@ -172,13 +182,13 @@ def recovery(fixture, row):
     assert json.loads(original)["text"]["value"] == "original éZ", "wrong original capture"
     tty.send("next café!\x1b[D\x1b[DX".encode())
     tty.draft("next cafXé!", 11)
+    release.set()
+    tty.marker("TD4 original answer")
     chunks(tty, row["chunks"])
     tty.marker("Original confirmed")
     assert len(fixture.proxy.exchanges) == 2, "recovery did not replay exactly once"
     assert fixture.proxy.exchanges[1][0] == original, "recovery changed original key or bytes"
     tty.draft("next cafXé!", 11)
-    release.set()
-    tty.marker("TD4 original answer")
     tty.send(b"Y\r")
     tty.marker("TD4 next answer")
     assert len(fixture.proxy.exchanges) == 3, "next Enter did not create exactly one new intent"

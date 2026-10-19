@@ -9,11 +9,13 @@ import json
 import os
 import pathlib
 import select
+import signal
 import struct
 import subprocess
 import sys
 import termios
 import time
+from contextlib import contextmanager
 
 INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
@@ -24,30 +26,58 @@ from terminal_screen import ScreenCapture
 LIMIT = 1024 * 1024
 
 
+@contextmanager
+def defer_signals():
+    """Deliver interruption after acquisition and registration, never between.
+
+    Caught handlers still reset normally on exec. No blocked signal mask or
+    ignored disposition leaks into a newly spawned Host/caller.
+    """
+    previous = {}
+    pending = []
+    try:
+        for number in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+            previous[number] = signal.getsignal(number)
+            signal.signal(number, lambda number, frame: pending.append((number, frame)))
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        if pending and sys.exception() is None:
+            number, frame = pending[0]
+            handler = previous[number]
+            if callable(handler):
+                handler(number, frame)
+            elif handler != signal.SIG_IGN:
+                raise SystemExit(128 + number)
+
+
 class DirectPty:
     def __init__(self, args, *, env, cwd, output, columns=80, rows=24):
         self.output = pathlib.Path(output)
         self.output.mkdir(parents=True, exist_ok=True)
-        self.master, self.slave = open_pty(columns, rows)
-        self.original = termios.tcgetattr(self.slave)
-        self.original[6][termios.VERASE] = b"\x08"
-        termios.tcsetattr(self.slave, termios.TCSANOW, self.original)
-        self.flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
-        self.screen = ScreenCapture(columns, rows)
+        self.master = self.slave = None
         self.process = None
         self.files = []
         self.total = 0
         self.eof = set()
         self.closed = False
         try:
-            self.input = self._open("input.bin", "wb")
-            self.raw = self._open("output.bin", "wb")
-            self.errors = self._open("stderr.bin", "wb")
-            self.events = self._open("events.jsonl", "w")
-            self.process = subprocess.Popen(args, env=env, cwd=cwd, stdin=self.slave,
-                                            stdout=self.slave, stderr=subprocess.PIPE)
-            os.set_blocking(self.master, False)
-            self.event("launch", pid=self.process.pid, columns=columns, rows=rows)
+            with defer_signals():
+                self.master, self.slave = open_pty(columns, rows)
+                self.original = termios.tcgetattr(self.slave)
+                self.original[6][termios.VERASE] = b"\x08"
+                termios.tcsetattr(self.slave, termios.TCSANOW, self.original)
+                self.flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
+                self.screen = ScreenCapture(columns, rows)
+                self.input = self._open("input.bin", "wb")
+                self.raw = self._open("output.bin", "wb")
+                self.errors = self._open("stderr.bin", "wb")
+                self.events = self._open("events.jsonl", "w")
+                self.process = subprocess.Popen(args, env=env, cwd=cwd, stdin=self.slave,
+                                                stdout=self.slave, stderr=subprocess.PIPE)
+                os.set_blocking(self.master, False)
+                self.event("launch", pid=self.process.pid, columns=columns, rows=rows)
         except BaseException:
             self.close()
             raise
@@ -168,7 +198,8 @@ class DirectPty:
         dispose_all(
             lambda: self.pump() if self.process is not None else None,
             lambda: stop_process(self.process, timeout=5) if self.process is not None else None,
-            lambda: os.close(self.master), lambda: os.close(self.slave),
+            lambda: os.close(self.master) if self.master is not None else None,
+            lambda: os.close(self.slave) if self.slave is not None else None,
             *(stream.close for stream in self.files))
 
     def __enter__(self):
