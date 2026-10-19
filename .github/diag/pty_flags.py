@@ -37,5 +37,15 @@ os.write(slave, b"y")
 show("after parent slave write", master, slave)
 fcntl.fcntl(slave, fcntl.F_SETFL, ORIG_S)
 show("after slave F_SETFL(original) again", master, slave)
-print("termios restored:", termios.tcgetattr(slave) == saved)
+now = termios.tcgetattr(slave)
+print("termios restored:", now == saved)
+for i, name in enumerate(("iflag", "oflag", "cflag", "lflag", "ispeed", "ospeed")):
+    if now[i] != saved[i]:
+        print(f"  {name}: saved=0x{saved[i]:x} now=0x{now[i]:x} xor=0x{saved[i] ^ now[i]:x}")
+for j, (a, b) in enumerate(zip(saved[6], now[6])):
+    if a != b:
+        print(f"  cc[{j}]: saved={a!r} now={b!r}")
+# Control: same raw+restore in the parent, no write.
+before = termios.tcgetattr(slave); tty.setraw(slave); termios.tcsetattr(slave, termios.TCSANOW, before)
+print("parent raw+restore round-trip equal:", termios.tcgetattr(slave) == before)
 os.close(slave); os.close(master)
