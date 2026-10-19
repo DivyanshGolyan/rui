@@ -1,5 +1,148 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
+const transport_policy = @import("transport_policy.zig");
+
+pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
+
+pub const TransferOutcome = union(enum) {
+    response_capture_failed: CaptureFailure,
+    request_source_failed,
+    transport_finished: transport_policy.Evidence,
+};
+
+pub const TransferFailure = struct {
+    code: union(enum) { named: []const u8, http: u16, temporary_http: u16 },
+    answered: bool = false,
+    kind: enum { permanent, temporary, context_overflow } = .permanent,
+    retry_after_ms: ?u64 = null,
+    retry_after_deadline_ms: ?i64 = null,
+
+    pub fn codeText(self: TransferFailure, buffer: *[96]u8) []const u8 {
+        return switch (self.code) {
+            .named => |code| code,
+            .http => |status| std.fmt.bufPrint(buffer, "provider_http_{d}", .{status}) catch unreachable,
+            .temporary_http => |status| std.fmt.bufPrint(buffer, "provider_temporary_http_{d}", .{status}) catch unreachable,
+        };
+    }
+};
+
+pub const TransferDecision = union(enum) {
+    interpret_output,
+    fence_request_source,
+    fail: TransferFailure,
+};
+
+pub const ErrorResponseKind = enum { ordinary, context_overflow, unreadable };
+
+/// Failure facts only: Store owns retry allowance, eligibility and Turn
+/// scheduling. No decision here delivers a result or releases resources.
+pub fn transferDecision(
+    outcome: TransferOutcome,
+    error_response: ErrorResponseKind,
+) TransferDecision {
+    const evidence = switch (outcome) {
+        .response_capture_failed => |failure| return .{ .fail = .{ .code = .{ .named = switch (failure) {
+            .scratch_exhausted => "response_scratch_exhausted",
+            .write_failed => "response_write_failed",
+            .seal_failed => "response_seal_failed",
+        } } } },
+        .request_source_failed => return .fence_request_source,
+        .transport_finished => |evidence| evidence,
+    };
+    if (evidence.disposition == .success) return .interpret_output;
+    const answered = evidence.disposition == .permanent_http or evidence.disposition == .temporary_http;
+    if (answered) switch (error_response) {
+        .context_overflow => return .{ .fail = .{
+            .code = .{ .named = "provider_context_overflow" },
+            .answered = true,
+            .kind = .context_overflow,
+        } },
+        .unreadable => return .{ .fail = .{
+            .code = .{ .named = "response_read_failed" },
+            .answered = true,
+        } },
+        .ordinary => {},
+    };
+    const temporary = evidence.disposition == .temporary_http or evidence.disposition == .temporary_connection;
+    return .{ .fail = .{
+        .code = switch (evidence.disposition) {
+            .success => unreachable,
+            .permanent_http => .{ .http = evidence.http_status },
+            .temporary_http => .{ .temporary_http = evidence.http_status },
+            .temporary_connection => .{ .named = "provider_transport_failure" },
+            .permanent_transport => .{ .named = "provider_transport_permanent" },
+            .unsupported_http_version => .{ .named = "provider_http2_required" },
+            .authentication_failure => .{ .named = "provider_authentication_failed" },
+            .tls_verification_failure => .{ .named = "provider_tls_verification_failed" },
+            .invalid_headers => .{ .named = "invalid_provider_headers" },
+        },
+        .answered = answered,
+        .kind = if (temporary) .temporary else .permanent,
+        .retry_after_ms = if (temporary) evidence.retry_after_ms else null,
+        .retry_after_deadline_ms = if (temporary) evidence.retry_after_deadline_ms else null,
+    } };
+}
+
+test "transfer decisions exhaust transport dispositions and error response precedence" {
+    const cases = [_]struct {
+        disposition: transport_policy.Disposition,
+        status: u16 = 0,
+        code: []const u8,
+        answered: bool = false,
+        temporary: bool = false,
+    }{
+        .{ .disposition = .permanent_http, .status = 418, .code = "provider_http_418", .answered = true },
+        .{ .disposition = .temporary_http, .status = 503, .code = "provider_temporary_http_503", .answered = true, .temporary = true },
+        .{ .disposition = .temporary_connection, .code = "provider_transport_failure", .temporary = true },
+        .{ .disposition = .permanent_transport, .code = "provider_transport_permanent" },
+        .{ .disposition = .authentication_failure, .code = "provider_authentication_failed" },
+        .{ .disposition = .tls_verification_failure, .code = "provider_tls_verification_failed" },
+        .{ .disposition = .invalid_headers, .code = "invalid_provider_headers" },
+        .{ .disposition = .unsupported_http_version, .code = "provider_http2_required" },
+    };
+    try std.testing.expectEqual(std.enums.values(transport_policy.Disposition).len - 1, cases.len);
+    for (std.enums.values(ErrorResponseKind)) |response| {
+        try std.testing.expect(transferDecision(.{ .transport_finished = .{ .disposition = .success } }, response) == .interpret_output);
+        for (cases) |case| {
+            const decision = transferDecision(.{ .transport_finished = .{
+                .disposition = case.disposition,
+                .http_status = case.status,
+                .retry_after_ms = 137,
+                .retry_after_deadline_ms = 901,
+            } }, response);
+            try std.testing.expect(decision == .fail);
+            const failure = decision.fail;
+            var buffer: [96]u8 = undefined;
+            const overflow = case.answered and response == .context_overflow;
+            const unreadable = case.answered and response == .unreadable;
+            const temporary = case.temporary and !overflow and !unreadable;
+            const expected_code = if (overflow) "provider_context_overflow" else if (unreadable) "response_read_failed" else case.code;
+            try std.testing.expectEqualStrings(expected_code, failure.codeText(&buffer));
+            try std.testing.expectEqual(case.answered, failure.answered);
+            try std.testing.expectEqual(overflow, failure.kind == .context_overflow);
+            try std.testing.expectEqual(temporary, failure.kind == .temporary);
+            try std.testing.expectEqual(!overflow and !temporary, failure.kind == .permanent);
+            try std.testing.expectEqual(if (temporary) @as(?u64, 137) else null, failure.retry_after_ms);
+            try std.testing.expectEqual(if (temporary) @as(?i64, 901) else null, failure.retry_after_deadline_ms);
+        }
+    }
+}
+
+test "transfer decisions never correlate capture failure or settle request source corruption" {
+    for (std.enums.values(ErrorResponseKind)) |response| {
+        try std.testing.expect(transferDecision(.request_source_failed, response) == .fence_request_source);
+        for (std.enums.values(CaptureFailure), [_][]const u8{ "response_scratch_exhausted", "response_write_failed", "response_seal_failed" }) |capture, expected| {
+            const decision = transferDecision(.{ .response_capture_failed = capture }, response);
+            try std.testing.expect(decision == .fail);
+            var buffer: [96]u8 = undefined;
+            try std.testing.expectEqualStrings(expected, decision.fail.codeText(&buffer));
+            try std.testing.expect(!decision.fail.answered);
+            try std.testing.expectEqual(.permanent, decision.fail.kind);
+            try std.testing.expect(decision.fail.retry_after_ms == null);
+            try std.testing.expect(decision.fail.retry_after_deadline_ms == null);
+        }
+    }
+}
 
 /// One model owner's next work, derived from native owner facts, never stored
 /// as a second lifecycle. Decisions grant neither Store settlement authority

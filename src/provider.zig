@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const TestObservation = @import("TestObservation.zig");
+const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const store = @import("store.zig");
@@ -65,19 +66,11 @@ pub const ProtocolObservation = struct {
     new_connections: c_long,
 };
 
-pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
-
 pub const TransferIdentity = *const opaque {};
 pub const TransportHandleIdentity = *const opaque {};
 
-pub const CompletionOutcome = union(enum) {
-    response_capture_failed: CaptureFailure,
-    request_source_failed,
-    transport_finished: transport_policy.Evidence,
-};
-
 pub const Completion = struct {
-    outcome: CompletionOutcome,
+    outcome: execution.TransferOutcome,
     queued_after: usize,
 };
 
@@ -436,7 +429,7 @@ pub const ResponseCapture = struct {
     charged: u64 = 0,
     sealed: bool = false,
     fail_write: bool = false,
-    failure: ?CaptureFailure = null,
+    failure: ?execution.CaptureFailure = null,
     pending_writes: usize = 0,
 
     pub fn init(
@@ -640,19 +633,19 @@ pub const Transfer = struct {
         }
     }
 
-    fn completionOutcome(self: *Transfer, result: c.CURLcode) !CompletionOutcome {
+    fn completionOutcome(self: *Transfer, result: c.CURLcode) !execution.TransferOutcome {
         if (self.captureFailure()) |failure| return .{ .response_capture_failed = failure };
         if (self.read_context.failed) return .request_source_failed;
         return .{ .transport_finished = try self.transportEvidence(result) };
     }
 
-    fn captureFailure(self: *Transfer) ?CaptureFailure {
+    fn captureFailure(self: *Transfer) ?execution.CaptureFailure {
         self.writer.mutex.lockUncancelable(self.writer.io);
         defer self.writer.mutex.unlock(self.writer.io);
         return self.response.failure;
     }
 
-    fn finish(self: *Transfer, outcome: CompletionOutcome, queued_after: usize) void {
+    fn finish(self: *Transfer, outcome: execution.TransferOutcome, queued_after: usize) void {
         std.debug.assert(self.local == .receiving);
         self.local = .{ .finished = .{ .completion = .{ .outcome = outcome, .queued_after = queued_after } } };
     }
@@ -1110,7 +1103,7 @@ test "receive scans without resume capacity still settle capture failure and que
         try std.testing.expectEqual(Reactor.Advance.progressed, try reactor.advance(&transfer, false, &inject_resume_failure));
         const outcome = transfer.local.finished.completion.outcome;
         if (capture_failed) {
-            try std.testing.expectEqual(CaptureFailure.write_failed, outcome.response_capture_failed);
+            try std.testing.expectEqual(execution.CaptureFailure.write_failed, outcome.response_capture_failed);
         } else {
             try std.testing.expectEqual(transport_policy.Disposition.temporary_connection, outcome.transport_finished.disposition);
         }
@@ -1192,7 +1185,7 @@ test "Transfer finalization records late capture failure and retains discarded w
         writer.mutex.lockUncancelable(writer.io);
         writer.processOne();
         if (scenario == .write_failure) {
-            try std.testing.expectEqual(CaptureFailure.write_failed, transfer.captureFailure().?);
+            try std.testing.expectEqual(execution.CaptureFailure.write_failed, transfer.captureFailure().?);
             try std.testing.expectEqual(@as(u64, 0), transfer.response.length);
         }
         if (scenario != .discard) {
