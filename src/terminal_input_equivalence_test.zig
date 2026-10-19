@@ -86,8 +86,9 @@ const cases = [_]Case{
     .{ .name = "Alt-Left", .event = .redraw, .cursor = 4, .wires = .{ bytes("\x1b[1;3D"), bytes("\x1b[1;3D"), no_case27, no_raw } },
     .{ .name = "Alt-Right", .before = "one two three", .after = "one two three", .event = .redraw, .cursor = 7, .wires = .{ bytes("\x1b[1;3C"), bytes("\x1b[1;3C"), no_case27, no_raw } },
     .{ .name = "Backspace grapheme", .before = "aéZ", .caret = 3, .after = "aZ", .cursor = 1, .event = .redraw, .wires = .{ no_alt, bytes("\x1b[127u"), bytes("\x1b[27;1;127~"), bytes("\x7f") } },
-    .{ .name = "Alt-Enter unbound", .event = .unbound, .wires = .{ bytes("\x1b\r"), bytes("\x1b[13;3u"), bytes("\x1b[27;3;13~"), no_raw } },
+    .{ .name = "Alt-Enter newline", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = .{ bytes("\x1b\r"), bytes("\x1b[13;3u"), bytes("\x1b[27;3;13~"), no_raw } },
     .{ .name = "Alt-period unbound", .event = .unbound, .wires = .{ bytes("\x1b."), bytes("\x1b[46;3u"), bytes("\x1b[27;3;46~"), no_raw } },
+    .{ .name = "Alt-Ctrl-R unbound", .event = .unbound, .wires = .{ bytes("\x1b\x12"), bytes("\x1b[114;7u"), bytes("\x1b[27;7;114~"), no_raw } },
     // Ghostty's legacy modifier table names bit 8 Super, matching Kitty.
     // Separate Hyper/Meta exist in Kitty, not in that case27 modifier table.
     .{ .name = "Super-period unbound", .event = .unbound, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[46;9u"), bytes("\x1b[27;9;46~"), no_raw } },
@@ -214,6 +215,19 @@ test "TD2 modifyOtherKeys case27 must have identical binding outcomes" {
     try matrix(true);
 }
 
+test "TD2 captured Ghostty ESC CR and terminal-translated ESC LF insert newline never submit" {
+    // #538 physical capture: ESC CR. ICRNL translates it to ESC LF in Rui's
+    // terminal mode. Neither gesture is an ordinary Enter submission.
+    const case: Case = .{ .name = "Ghostty captured newline", .event = .redraw, .after = "one t\nwo!", .cursor = 6, .wires = undefined };
+    for ([_][]const u8{ "\x1b\r", "\x1b\n" }) |wire| {
+        for (0..wire.len + 1) |split| for ([_]bool{ false, true }) |choice| {
+            inline for (.{ Route.events, Route.inline_editor }) |route| {
+                try check(route, case, .legacy, wire, split, choice);
+            }
+        };
+    }
+}
+
 test "TD2 incomplete prefixes expire fatally without modifying or submitting drafts" {
     for (cases) |case| for (case.wires) |wire| switch (wire) {
         .unavailable => {},
@@ -262,7 +276,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
     }
     // Encoded Enter/Ctrl-R are never keyboard gestures inside marked paste.
     // In particular they cannot submit or recover, even if framing splits.
-    for ([_][]const u8{ "\x1b[13u", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~" }) |encoded| {
+    for ([_][]const u8{ "\x1b\r", "\x1b\n", "\x1b[13u", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~" }) |encoded| {
         var storage: [128]u8 = undefined;
         var editor: Editor = .{ .buffer = &storage };
         var input: Input = .{};
@@ -369,10 +383,12 @@ test "TD2 vaxis normalizes legacy and encoded Ctrl C D J R without a recovery sp
 }
 
 test "TD2 kitty release is not a binding and repeat produces one submission" {
-    for ([_][]const u8{ "\x1b[13;1:3u", "\x1b[99;5:3u", "\x1b[100;5:3u", "\x1b[106;5:3u", "\x1b[114;5:3u", "\x1b[127;1:3u", "\x1b[106;3:3u", "\x1b[1;2:3A" }) |release| {
+    for ([_][]const u8{ "\x1b[13;1:3u", "\x1b[13;2:3u", "\x1b[13;3:3u", "\x1b[99;5:3u", "\x1b[100;5:3u", "\x1b[106;5:3u", "\x1b[114;5:3u", "\x1b[127;1:3u", "\x1b[106;3:3u", "\x1b[1;2:3A" }) |release| {
         const case: Case = .{ .name = "key release", .event = .none, .wires = undefined };
-        for (0..release.len + 1) |split| inline for (.{ Route.events, Route.inline_editor }) |route| {
-            try check(route, case, .kitty, release, split, false);
+        for (0..release.len + 1) |split| for ([_]bool{ false, true }) |choice| {
+            inline for (.{ Route.events, Route.inline_editor }) |route| {
+                try check(route, case, .kitty, release, split, choice);
+            }
         };
     }
     const repeat: Case = .{ .name = "Enter repeat", .event = .submit, .wires = undefined };
@@ -460,4 +476,44 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
             }
         }
     }
+    // Use the actual reader's deadline before feeding the next byte. Queued
+    // CR/LF joins ESC only before expiry; expiry leaves it for ordinary Enter.
+    for ([_]u8{ '\r', '\n' }) |enter| for ([_]i96{ 0, 1, -1 }) |offset| {
+        inline for (.{ Route.events, Route.inline_editor }) |route| {
+            const deliver = if (route == .inline_editor) inlineFeed else feed;
+            var pipe: [2]c_int = undefined;
+            if (std.c.pipe(&pipe) != 0) return error.TestPipeFailed;
+            defer _ = std.c.close(pipe[0]);
+            defer _ = std.c.close(pipe[1]);
+            if (std.c.dup2(pipe[0], 0) != 0) return error.TestDupFailed;
+            var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
+            clock.at = 1_000_000_000;
+            var storage: [128]u8 = undefined;
+            @memcpy(storage[0..8], "headTAIL");
+            var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
+            var input: Input = .{};
+            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "\x1b", 1));
+            const escape = (try terminal.next(io, .none, 0)).?;
+            deliver(&editor, &input, &.{escape}, &outcome);
+            try std.testing.expectEqual(Input.Pending.escape, input.pending());
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{enter}, 1));
+            clock.at += 80_000_000 + offset;
+            if (offset >= 0) {
+                try std.testing.expectError(error.InputDeadline, terminal.next(io, input.pending(), 0));
+                try std.testing.expect(try input.expire());
+                try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
+                try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+                try std.testing.expectEqual(@as(usize, 0), outcome.submits);
+            }
+            const byte = (try terminal.next(io, input.pending(), 0)).?;
+            try std.testing.expectEqual(enter, byte);
+            deliver(&editor, &input, &.{byte}, &outcome);
+            try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
+            try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
+            try std.testing.expectEqual(if (offset < 0) Editor.Event.redraw else Editor.Event.submit, outcome.event);
+            try std.testing.expectEqual(Input.Pending.none, input.pending());
+        }
+    };
 }
