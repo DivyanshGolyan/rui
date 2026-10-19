@@ -973,7 +973,7 @@ fn settleReader(self: *Self) !void {
 fn showStaged(self: *Self) !void {
     const length = self.job.result.output_length;
     const result = &self.job.result;
-    const start = self.terminal.screen.liveEnd();
+    const start = try self.terminal.screen.liveEnd();
     self.messages = result.messages;
     var boundary = result.boundary;
     if (length == 0) {
@@ -992,11 +992,12 @@ fn showStaged(self: *Self) !void {
         var chunk = buffer[0..count];
         if (boundary) |mark| if (mark.output < offset + count) {
             // Live output keeps text, not the styling the scratch file also
-            // counts, so the boundary's live offset is where writing reaches
-            // it. A page's own start precedes its separator.
+            // counts, and escapes clusters it cannot show, so the boundary's
+            // live offset is the settled end once writing reaches it. A
+            // page's own start precedes its separator.
             const split: usize = @intCast(mark.output - offset);
             try self.terminal.permanent(chunk[0..split]);
-            self.marks.record(if (mark.output == 0) start else self.terminal.screen.liveEnd(), mark.cursor);
+            self.marks.record(if (mark.output == 0) start else try self.terminal.screen.liveEnd(), mark.cursor);
             boundary = null;
             chunk = chunk[split..];
         };

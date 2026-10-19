@@ -58,7 +58,12 @@ pub fn append(self: *Self, bytes: []const u8) !void {
 }
 
 /// Absolute live offsets: bytes before `origin` left the retained view.
-pub fn liveEnd(self: *const Self) u64 {
+/// Preparing escapes oversized and invisible clusters, which changes the
+/// length of text not yet prepared, so the end is taken after preparing.
+/// Escaped text never changes again, and the next item begins a new
+/// cluster, so the offset names the same text until it leaves the view.
+pub fn liveEnd(self: *Self) !u64 {
+    try self.live.prepare();
     return self.live.origin + self.live.length;
 }
 

@@ -4188,46 +4188,41 @@ def renderer_cases():
         proxy = None
         print("renderer: a Message whose row and reply share a page with a long answer stays reachable after eviction", flush=True)
 
-        # The same page shape with a styled answer and a short reply: live
-        # output keeps the answer's text, not its styling, so the boundary
-        # at the reply must be where the reply's text begins live.
+        # The same page shape with an answer that live output shortens: its
+        # styling is not kept and its oversized cluster is escaped. Eviction
+        # cuts the opening, so the transcript must join at the reply's own
+        # boundary, which must name where the reply's text begins live.
         session = "renderer/styled-batched"
         configure(session)
         first_release = threading.Event()
-        styled = " ".join(f"**bold{index}**" for index in range(12))
+        styled = " ".join(f"**bold{index}**" for index in range(12)) + " e" + "\u0301" * 200 + " STYLED-END"
         endpoint.responses.append((fixture.sse_answer("styled-first", "reason", "message", styled)[0], first_release))
-        endpoint.responses.append(fixture.sse_answer("styled-second", "reason", "message", "OK-REPLY")[0])
+        endpoint.responses.append(fixture.sse_answer("styled-second", "reason", "message", reply)[0])
         holding, release, held = threading.Event(), threading.Event(), threading.Event()
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
         with terminal(session) as tty:
             requests = len(endpoint.requests)
             tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
-            tty.send("QUEUED-M\n", predicate=lambda: "QUEUED-M" in tty.capture.completed)
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
             holding.set()
             assert held.wait(5), "no scan reached the held page"
             first_release.set()
             fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
             holding.clear()
             release.set()
-            tty.wait("OK-REPLY", timeout=30)
-            # The next page's boundary follows the reply in live output.
-            tty.send("THIRD-QUESTION\n", answer("styled third"))
-            tty.send("\x1b[A", "Browsing · Esc returns")
-            for _ in range(10):
-                if "Start of conversation" in tty.capture.completed:
-                    break
-                tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
-            shown = tty.capture.completed
-            assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-            for text in ("› DRIVER-QUESTION", "bold11", "› QUEUED-M", "OK-REPLY", "› THIRD-QUESTION"):
-                assert shown.count(text) == 1, (text, shown)
-            assert shown.index("› QUEUED-M") < shown.index("OK-REPLY") < shown.index("› THIRD-QUESTION"), shown
+            tty.wait("REPLY-03699", timeout=30)
+            shown = traverse(tty)
+            assert "Earlier rows left this view." not in shown, shown
+            reachable(shown, "STYLED-END")
+            # The reply starts whole, once, where older pages end.
+            assert shown.count("REPLY-00000") == 1 and "\n  REPLY-00000 " in shown, shown
+            assert shown.count("STYLED-END") == 1 and shown.count("bold11") == 1, shown
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a boundary after styled text in a page starts where its item's text does", flush=True)
+        print("renderer: a boundary after text that live output shortens starts where its item's text does", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
