@@ -1255,3 +1255,22 @@ fn applyStatus(self: *Self) !void {
     self.status_page = true;
     self.status_digest = self.job.result.status_digest;
 }
+
+test "a transcript begun before grown live output is drawn shows the gap, not a lost join" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .opening = false };
+    self.terminal.screen = screen;
+    try screen.append("GROWS-FIRST\n");
+    self.marks.record(12, .{ .end = 3 });
+    // Unescaped, the rows after the mark fit; escaped, they evict it.
+    for (0..45000) |_| try screen.append("\u{200b}");
+    try screen.append("\nGROWS-END\n");
+    try self.beginTranscript();
+    try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
+    try std.testing.expectEqual(@as(?u64, 3), if (self.transcript_older) |cursor| cursor.end else null);
+}
