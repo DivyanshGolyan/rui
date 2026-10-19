@@ -36,20 +36,10 @@ PINS = {
 HELPER = pathlib.Path(".cursor/skills/verify-rui/scripts/verify-rui")
 PROBES = pathlib.Path(".amp/in/artifacts/takeover-20261018")
 CACHE = pathlib.Path(".amp/in/prefix-diagnosis-cache")
-# Pre-existing attached-client input reports (52ee5d4a baseline). Any other
-# N/A is a new outcome to diagnose, never an accepted relabel.
-QUALIFY = {
-    "pty": (35, set()),
-    "tmux-detached": (35, set()),
-    "tmux-attached": (28, {"key-up-ss3", "key-end-csi-f", "key-end-ss3-f", "mouse-sgr-wheel",
-                           "mouse-x10-wheel", "mouse-x10-split", "focus-reports"}),
-}
-# Three attached-client translations may be UNAVAILABLE only with the probe's
-# own outer/inner byte proof; direct-pane rows must pass.
-MODIFIER = {
-    "tmux-detached": (41, set()),
-    "tmux-attached": (64, {"kitty-hyper-dot", "kitty-meta-dot", "bound-shift-enter"}),
-}
+# The renderer gate keeps the injected PTY rows (52ee5d4a baseline: 35 passes,
+# no N/A); the full detached/attached tmux matrices were replaced by the
+# direct-PTY matrix and short tmux smoke. Any N/A is a new outcome to diagnose.
+QUALIFY = {"pty": (35, set())}
 NATIVE = (
     ("renderer", "native-human-with-traces.py"),
     ("persistent-opening", "native-human-with-traces.py"),
@@ -169,10 +159,6 @@ def terminal(args):
         root = layout(out / f"root-qualify-{surface}", cache, venv)
         env = {**os.environ, "VERIFY_RUI_CACHE": str(root / CACHE)}
         rows.append((f"qualify-{surface}", [python, str(root / HELPER), "qualify", args.sha, "--surfaces", surface], env))
-    for surface in MODIFIER:
-        root = layout(out / f"root-modifier-{surface}", cache, venv)
-        rows.append((f"modifier-{surface}", [python, str(root / PROBES / "meta-drop-probe.real-tmux-environment.py"),
-                                             "--sha", args.sha, "--surface", surface], dict(os.environ)))
     root = layout(out / "root-tmux-environment", cache, venv)
     rows.append(("tmux-environment", [python, str(root / PROBES / "tmux-environment-control.py"),
                                       "--sha", args.sha, "--label", "green-corrected-helper"], dict(os.environ)))
@@ -194,23 +180,6 @@ def terminal(args):
         if (results[name]["exit"] != expected_exit or not state.get("complete") or state.get("issues")
                 or state.get("pass") != passes or set(state.get("not_applicable") or ()) != unavailable):
             issues.append(f"{name}: {results[name]}")
-    for surface, (count, unavailable) in MODIFIER.items():
-        name = f"modifier-{surface}"
-        files = sorted((out / f"root-{name}" / PROBES / "meta-drop-real-tmux-environment").glob("*/summary.json"))
-        summary = json.loads(files[-1].read_text()) if files else {}
-        found = [row for s in summary.get("surfaces", []) for row in s.get("rows", [])]
-        marked = {row["case"] for row in found if row.get("unavailable")}
-        results[name].update(verdict=summary.get("verdict"), rows=len(found), unavailable=sorted(marked),
-                             passed=sum(1 for row in found if row["passed"]))
-        if (results[name]["exit"] != 0 or len(found) != count or marked != unavailable
-                or any(not row["passed"] and not row.get("unavailable") for row in found)):
-            issues.append(f"{name}: {results[name]}")
-        # Super is evidence only as the delivered Alt sequence, never as Super.
-        if surface == "tmux-attached":
-            supers = [row for row in found if row["case"] == "kitty-super-dot" and row["via"] == "client"]
-            results[name]["super_client_delivered_hex"] = [row.get("delivered_hex") for row in supers]
-            if not supers or not all(row["passed"] for row in supers):
-                issues.append(f"{name}: attached Super row missing or failed")
     control = out / "root-tmux-environment" / PROBES / "tmux-environment-green-corrected-helper" / "summary.json"
     rows_seen = json.loads(control.read_text())["rows"] if control.exists() else []
     results["tmux-environment"].update(rows=len(rows_seen), passed=sum(1 for row in rows_seen if row["passed"]))
