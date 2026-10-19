@@ -79,6 +79,10 @@ permission. Rui's value policy remains the authority.
 8. **One stream survives transitions.** Keep paste, UTF-8, Escape deadlines, and
    ordered decoded suffixes in `SessionInput.stream`. Replacing an editor never
    replaces the stream or converts a paste tail into typed permission input.
+9. **Pinned routing does not pin submission permission.** Before every Enter,
+   the same presentation owner checks current borrowed blockers. A command
+   queued during output blocks a later Message in that same frame. A frame's
+   old instructions never grant a submission permit.
 
 Here "displayed editor" means the editor selected for Rui's encoded frame and
 its input service, not proof of what a physical terminal has painted or what a
@@ -138,7 +142,6 @@ Facts {
 Projection {
 	editor: draft | choice { action },
 	approval: absent | paused | preview | reading | draining | ready,
-	enter: message | blocked { reason } | choice { action },
 	stamp: { frame, scope }
 }
 
@@ -146,6 +149,7 @@ SessionScreen.beginFrame(facts) -> Projection
 SessionScreen.projection() -> Projection
 SessionScreen.prepareAction(action, immutable_file) !void
 SessionScreen.presented(DeliveredFrame) -> PresentationChange
+SessionScreen.messageEligibility(stamp, current_facts) -> allowed | blocked { reason }
 SessionScreen.promptCompleted(stamp, input_observation, facts) -> bool
 SessionScreen.submitChoice(stamp, text, facts) -> ?Decision
 SessionScreen.invalidateChoice() / withdrawAction()
@@ -164,11 +168,19 @@ existing core-boundary check.
 `choice.buffer`. The frontend resolves that tag once for rendering and once for
 each event through the same selected projection, without preserving a borrowed
 editor slice across a call that can pump input. `Projection.approval` supplies
-the status variant. `Projection.enter` controls eligibility, but the input
-owner still checks its submitted bank before sealing a Message. An unresolved
-Message allows editing and retains the existing busy behavior on a second
-Enter. A pending Decision, command, opening, permission preparation, or adopted
-Action blocks Message submission for its existing reason.
+the status variant. Neither field grants an Enter permit.
+
+`messageEligibility` checks the current selected editor and stamp plus current
+borrowed Facts through the same pure policy. Call it immediately before
+`SessionInput.applySelected` can seal a Message, without a pump or other effect
+between the probe and sealing. `submitChoice` likewise checks current Facts,
+scope, coverage, freshness, and exact Action before consumption. Neither probe
+uses eligibility cached when the frame began. The input owner still checks
+its submitted bank before sealing. An unresolved Message allows editing and
+retains the existing busy behavior on a second Enter. A pending Decision,
+command, opening, permission preparation, or adopted Action blocks Message
+submission for its existing reason. Command recognition remains available
+through `applySelected` when Message eligibility is blocked.
 
 The Draft tag means the active composition role, not a loan of a particular
 bank. After Enter seals a Message, subsequent edits belong to the next draft.
@@ -178,7 +190,8 @@ redraw. The invariant concerns draft-versus-choice routing and permission
 authority, not instantaneous byte-for-byte screen equality.
 
 The meaningful combinations are closed policy outputs, not a Cartesian product
-callers may construct:
+callers may construct. Enter below describes a live probe, not a field cached
+in the projection:
 
 | Owner facts | Editor | Approval | Enter |
 | --- | --- | --- | --- |
@@ -222,11 +235,13 @@ policy needs only the owner's coverage-complete fact, not byte offsets or vaxis.
 No Position extraction, new layout abstraction, or second copy of coverage is
 required.
 
-The owner keeps one issued frame ticket and a monotonic scope revision. Issuing
-a frame changes its ticket, not consent freshness. Invalidating transitions
-advance the scope. `presented` consumes the outstanding ticket once and checks
-its scope and Action. A duplicate or superseded receipt makes no state change.
-This is local invocation state, not persisted identity or a receipt queue.
+The owner keeps one frame-ticket record, with issued or delivered phase, and a
+monotonic scope revision. Issuing a frame changes its ticket, not consent
+freshness. Invalidating transitions advance the scope. `presented` changes the
+outstanding ticket to delivered once and checks its scope and Action. Retain
+that delivered stamp for the following `promptCompleted` probe. A duplicate or
+superseded receipt makes no state change. This is local invocation state, not
+persisted identity or a receipt queue.
 
 For a matching Action frame, advance coverage only when the first measured row
 is at or before the existing frontier and its next row extends that frontier.
@@ -240,7 +255,9 @@ text, invalidates freshness, and requests a frame with decision instructions.
 It does not open readiness from a frame that only said "read the rest".
 `promptCompleted` accepts post-write input observations only for that delivered
 decision-prompt stamp, the unchanged Action and scope, no pending decoder state,
-actual empty input, no interruption, and no command blocker. A normal redraw
+actual empty input, no interruption, no command blocker, and no changed view
+or dirty state since that prompt frame. The supplied input observation includes
+those post-write facts, not a saved pre-write emptiness result. A normal redraw
 of the same ready choice preserves fresh typed text and freshness. Invalid
 choice, command handoff, departure, layout change, or view change revokes them.
 
@@ -257,6 +274,15 @@ predicate. Editing may make the next frame dirty. A transition that changes
 the view or editor revokes decision authority immediately, but its replacement
 projection takes effect at the next frame boundary. Until then, events remain
 with the pinned editor. An interrupt still cancels immediately.
+
+Only routing and frame evidence are pinned. Both submission probes read current
+Facts on every Enter, including from the pump. For example, an initially
+unblocked draft frame can pump `/configure --permission-mode ask` and Enter.
+The queued command immediately blocks a subsequent Message Enter, even though
+both events still route to the draft. The distinct next draft stays unsealed
+and editable until the command finishes. Its original Enter is not queued as
+future submission authority. Apply the same rule to live opening, permission,
+adopted-Action, interruption, and original-submission blockers.
 
 No raw-input queue is added. Existing command snapshots and navigation state
 record the user's requested work; changing view state makes the pending receipt
@@ -278,8 +304,17 @@ old frame cannot restore authority. It cannot redirect its remaining input to
 the next draft. If a width report arrives during output, invalidate scope
 immediately. Sample actual geometry again before every decision probe, including
 inside the pump, and invalidate changed layout before checking its stamp. No
-requirement for physical terminal
-acknowledgement or a blocking `tcdrain` is introduced.
+requirement for physical terminal acknowledgement or a blocking `tcdrain` is
+introduced.
+
+All added metadata has one invocation as its population multiplier: one
+projection, one frame-ticket record, and the scope counter. Reuse existing
+coverage positions and consent storage. Frame candidates are bounded values,
+not retained history. Draft banks, the choice buffer, immutable file loans,
+and the existing 32-MiB cell and frame allocator retain their owners and bounds.
+No byte payload, per-worker state, or per-Session allocation is added. Exact
+type sizes and allocation high-water must be measured on the implementation;
+this is an ownership estimate, not a memory result.
 
 ## Keep other lifecycles independent
 
@@ -335,6 +370,8 @@ claimed by this proposal.
 | Complete coverage with old `a` choice text or an incomplete marked paste | Clear old choice text; no decision until new instructions and real empty service | Treat final-row receipt, expiry, or budget exhaustion as freshness |
 | Fresh A, invalidate or consume once, deliver old ready frame, then adopt B | No second A decision, no B decision without new coverage and freshness | Receipt reopens consumed scope or identity is retargeted |
 | Block output and request view change within a decoded suffix | Every suffix event keeps the pinned editor; replacement gets no stale authority | Recompute editor selection while finishing the old frame |
+| Hold a real draft-frame writer, queue `/configure`, then type distinct Unicode text, move its caret left, and press Enter | Zero Message capture or admission; exact draft and non-tail caret remain unsealed until command completion and a new Enter | Replace the live Message eligibility probe with eligibility from frame start |
+| Hold a ready-choice frame, queue a command, then type `a` and Enter | No Decision capture or consumption; the same Action needs a new post-command fresh scope | Replace the live Decision probe with old frame readiness |
 | Unresolved Message X, edit distinct draft Y, deliver receipts, accept X or lose reply | X's bytes and original key stay exact; Y and caret survive; uncertainty cannot release X | Treat delivery, join alone, or editor switch as loan release |
 | Hold a details or older-history read, send, then complete that old read | Latest view stays selected and stale page cannot cover the new Message | Independently remove `details_sent == sent` or transcript identity applicability |
 | Permission A decided externally; B becomes first Action | Local typed approval remains bound to A and fails safely; B needs new adoption | Substitute `current.first_action` at submit time |
@@ -403,7 +440,8 @@ not something this branch ran or a request for a Mac runner now.
 The recommendation is to reuse `SessionScreen` plus the existing pure consent
 policy, consume delivery receipts there, and pin one editor selection while a
 frame is in flight. This keeps geometry resources and presentation authority
-local without moving draft or Submission ownership.
+local without moving draft or Submission ownership. Submission eligibility
+always comes from a live owner probe, even when routing is pinned.
 
 Before implementation, Divyansh must accept the proposed ownership and the
 explicit frame-boundary routing rule. In particular, navigation during held
@@ -411,6 +449,27 @@ output revokes authority immediately but does not redirect the remaining
 decoded suffix into a different editor. This is a proposed rule that needs its
 own red controls, not a claim that the current runtime already guarantees it.
 
-TD1 coordination, independent GPT-6.1 Sol read-only review, document checks, and
-publication evidence will be recorded here before handoff. There are no native,
-physical-terminal, hosted Mac, or runtime-correctness claims in this proposal.
+The [independent GPT-6.1 Sol read-only review](https://ampcode.com/threads/T-01a15288-29d4-71db-966e-05b0b7093900)
+found one design ambiguity: cached frame eligibility could let a Message pass a
+command queued by reentrant input. The direction was otherwise accepted by
+source inspection, including a bounded UX lens. The correction separates
+pinned routing from both live submission probes and adds the Message and
+Decision controls above. The review's Rich Hickey lens interpreted
+[Simple Made Easy](https://www.infoq.com/presentations/Simple-Made-Easy/), not an
+endorsement, as keeping independent concerns separate rather than minimizing
+method count.
+
+The finding's search scope covered `draftEvent` to `applySelected` to
+`beginMessage`, `choiceEvent` to consent consumption to Submission, and both
+`beginMessage` callers. Interactive Message and Decision paths need live probes.
+The initial command-line text path in `drive` is explicit prevalidated initial
+intent before interactive service, not a frame permit, and remains unchanged.
+Recovery retries an owned original through Submission, not a new editor Enter.
+The analogous command-before-choice case needs the Decision red control too.
+Prompt freshness independently retains its current post-write blocker checks.
+This accounts for the known submission paths without asserting a current
+runtime bug or expanding into worker scheduling.
+
+Corrected-artifact review and final document checks remain to be recorded before
+handoff. There are no native, physical-terminal, hosted Mac, rendered-UX, or
+runtime-correctness claims in this proposal.
