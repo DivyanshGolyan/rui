@@ -17,6 +17,12 @@ The archive is the original 562,460-byte preservation upload, unchanged. Its SHA
 
 The archive retains 55 text files and three directory entries. It includes original failed and mutation attempts, the pinned pstack source files, historical local and hosted logs, fresh post-L2 qualification logs, patch/range-diff equivalence, pre-push checks, push output, three independent remote observations and the exact published landing-record readback. The Python environment and build products are not included. Evidence remains as captured, including the initial `jq -r` readback's extra newline. The exact JSON-body comparison succeeded with `jq -j`.
 
+## Separate historical process audit
+
+`.amp/process-audit/` preserves an auditor-supplied bundle separately from L5 acceptance. It contains run metadata, 14 failed logs, source links and internal checksums. Its 20 entries contain 18 files. The outer SHA-256 is `01f3c1ce5c770e2e306baa656fe986ab1245cd293cd2c504691341cf70fe293a`; all 17 internal manifest entries verified. Bundled contents were read as data and never executed. No audit implementation, new test or qualification follows from preservation.
+
+The bundle and its supplied checksum were downloaded through authenticated `amp files get`. The source links point to this public repository's GitHub Actions runs. A credential/private-key shape scan found no matches. The original bytes, supplied checksum, verification report and separate README remain under `.amp/process-audit/`. Verify that directory's outer manifest with `sha256sum -c .amp/process-audit/SHA256SUMS`. This artifact does not alter any L5 result, review or accepted caveat.
+
 ## Acceptance and limits remain separate
 
 Fresh [Selected run 39197130026, attempt 1](https://github.com/DivyanshGolyan/rui/actions/runs/39197130026) passed all 13 jobs. [Installed-release run 39197130021, attempt 1](https://github.com/DivyanshGolyan/rui/actions/runs/39197130021) passed on Ubuntu and hosted macOS. Both bind exact landed head. Earlier evidence does not replace these outcomes.

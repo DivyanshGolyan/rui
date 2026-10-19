@@ -1,0 +1,12 @@
+{
+  "label": "Separate historical process-audit preservation, not L5 acceptance",
+  "bundle_sha256": "01f3c1ce5c770e2e306baa656fe986ab1245cd293cd2c504691341cf70fe293a",
+  "entries": 20,
+  "files": 18,
+  "failed_logs": 14,
+  "internal_checksums_verified": 17,
+  "internal_manifest_sha256": "af43d27b3541262c9b4e53c7b09c5f3e05cbccff6836d6902d99ecb910856b29",
+  "credential_shape_hits": [],
+  "bundled_contents_executed": false,
+  "verification_reader_note": "Initial reader rejected the manifest ./ prefix; canonical relative paths fixed the reader without changing bundled bytes."
+}
