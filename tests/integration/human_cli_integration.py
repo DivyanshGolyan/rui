@@ -1246,7 +1246,7 @@ def scroll_return_case():
             for fd in (master, slave):
                 os.close(fd)
 
-        latest = "  third row 23"
+        latest = "third row 23"
         for rows in (30, 16):
             saved = enter("scroll/long", rows, latest.strip())
             for count in (1, 8, 40):
@@ -1260,7 +1260,7 @@ def scroll_return_case():
             master = slave = caller = None
         # At the history boundary extra rows up move nothing, so the same
         # count down still reaches live output; every return key works.
-        latest = "  brief answer"
+        latest = "brief answer"
         for rows in (30, 16):
             saved = enter("scroll/brief", rows, latest.strip())
             for up, back in ((b"\x1b[A", b"\x1b[B" * 40), (b"\x1bOA", b"\x1b"),
@@ -1329,7 +1329,7 @@ def persistent_opening_case():
         output = current_screen(master)
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
-        assert "\n  Saved heading\n" in output and "# Saved heading" not in output, output
+        assert "\nSaved heading\n" in output and "# Saved heading" not in output, output
         assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
         assert output.count("Saved heading") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("saved bold é") == 1 and "**saved" not in output, output
@@ -2047,7 +2047,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             if timed_out:
                 # The warning starts its own line after the wrapped notice.
                 assert re.search(r"\[summary\s+shortened;\s+/details\]\n  Process-group signaling reported a failure\.\n", settled), settled
-        assert f"\n  {answer}" in settled, settled
+        assert f"\n{answer}" in settled, settled
         assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
         if not timed_out:
             # Only a failure keeps its last output lines in view; this one
@@ -2080,7 +2080,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         read_terminal(master, "Recent conversation — tool details", composer=True)
         details = current_screen(master)
         assert "Recent conversation — tool details" in details and description in details, details
-        assert "\n› requires permission" in details and f"\n  {answer}" in details, details
+        assert "\n› requires permission" in details and f"\n{answer}" in details, details
         assert all(noise not in details for noise in ("You:", "Assistant:", "Tool Result:")), details
         if exit_code:
             # The omitted saved result carries the exit status; export reads it.
@@ -5444,7 +5444,7 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in greeting and "\n  first answer" in greeting, greeting
+            assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
             assert "Provider: codex" in binding and "Model: model-a" in binding and "Permission: ask" in binding, binding
@@ -5869,7 +5869,7 @@ def main(selected="all"):
                 assert set(records.glob("*.json")) == before_choice, "no-op choice captured authorization"
                 assert current_screen(master).count("? Run Bash") == 1, "no-op repeated the command"
             completed_turn = terminal_step(master, "a", "interactive complete", composer=True)
-            assert "\n  interactive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
+            assert "\ninteractive complete" in completed_turn and "result:" not in completed_turn and "request:" not in completed_turn, completed_turn
             decision_record, = set(records.glob("*.json")) - before_choice
             saved_decision = json.loads(decision_record.read_bytes())
             assert saved_decision["action"] == action_id and saved_decision["decision"] == "allow_once" and saved_decision["session"] == interactive, saved_decision
@@ -5961,7 +5961,7 @@ def main(selected="all"):
             "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
-            assert "Session:" not in greeting and "\n  safe result" in greeting, greeting
+            assert "Session:" not in greeting and "\nsafe result" in greeting, greeting
             status = terminal_step(master, "/status", "Session: ", composer=True)
             assert "Session: human/unsafe-key" in status, status
             assert "message\\n\\x1b[2J\\u202e: completed" in status, status
@@ -6034,8 +6034,8 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in observed, observed
-                    assert "\n  edited 2" in observed, observed
+                    assert "\n› line1\n  line2" in "\n".join(map(untimed, observed.split("\n"))), observed
+                    assert "\nedited 2" in observed, observed
                 if "› " not in observed.split(f"edited {index}", 1)[1]:
                     await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
