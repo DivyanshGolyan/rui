@@ -87,6 +87,11 @@ history_requested: ?enum { older, latest } = null,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
 marks: Marks = .{},
+/// Admission ids: the newest Message shown live, and the newest whose
+/// conversation row a live read has held. Ids follow Session order, so a row
+/// for one answers every Message admitted before it.
+shown_admission: u64 = 0,
+answered_admission: u64 = 0,
 read_phase: ReadPhase = .activity,
 prepared_action: ?u64 = null,
 prepared_summary: View.ActionSummary = .{},
@@ -107,7 +112,12 @@ previous_signals: [2]std.posix.Sigaction = undefined,
 
 /// Read boundaries in live output, oldest first. A boundary pairs the
 /// absolute live offset where a read's output began with the canonical cursor
-/// for everything before it (null: the conversation's start).
+/// for everything before it (null: the conversation's start). A boundary is
+/// valid only if no conversation item at or after its cursor showed before its
+/// offset. A Message shows first as its Admission and gains its conversation
+/// row later, so no boundary is recorded while a shown Admission still awaits
+/// that row; once eviction passes such a stretch, the transcript says rows
+/// left the view instead of losing the Message.
 const Marks = struct {
     const Mark = struct { offset: u64, cursor: ?client.ConversationCursor };
     items: [64]Mark = undefined,
@@ -1002,9 +1012,14 @@ fn settleReader(self: *Self) !void {
 /// Appends a joined read's staged live output; none of it showed before.
 fn showStaged(self: *Self) !void {
     const length = self.job.result.output_length;
+    const result = &self.job.result;
     // An empty opening still marks where the conversation begins; a later
-    // read marks only when it shows something.
-    if (self.job.result.mark) |mark| self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
+    // read marks only when it shows something, and only once every Message
+    // shown before it has its conversation row before the boundary.
+    if (result.mark) |mark| if (self.job.opening or self.shown_admission <= @max(self.answered_admission, result.answered_before))
+        self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
+    self.shown_admission = @max(self.shown_admission, result.shown_admission);
+    self.answered_admission = @max(self.answered_admission, result.answered);
     if (length == 0) return;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;

@@ -66,8 +66,15 @@ pub const Job = struct {
         // The newest Message admission this page holds, for Sent.
         delivered: u64 = 0,
         // Where this read's output begins in the conversation; null cursor at
-        // its start. A page without items records no boundary.
+        // its start. A later read that shows nothing records no boundary.
         mark: ?struct { cursor: ?client.ConversationCursor } = null,
+        // Admission ids, for whether a boundary is safe (see Marks): the
+        // newest Message this read showed as an Admission or queued preview,
+        // the newest conversation row it read, and the newest conversation
+        // row before the item its boundary names.
+        shown_admission: u64 = 0,
+        answered: u64 = 0,
+        answered_before: u64 = 0,
         live: View.Live = .{},
         cursor: client.ActivityCursor = .{},
         compact_tools: bool = false,
@@ -172,13 +179,25 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
         try pending.render(requests, job.store, job.session, &output);
+        job.result.shown_admission = pending.newest;
     }
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
     job.result.output_length = output.offset;
+    job.result.shown_admission = @max(job.result.shown_admission, output.shown_admission);
     // A later read's boundary sits where its first shown item begins. Rows
     // before it showed elsewhere (a Message's own Admission) or not at all, so
     // older pages must include them. A read that shows nothing marks nothing:
     // the next read that shows something starts at this same offset.
+    var before_first = true;
+    for (page.facts.items[0..page.facts.count]) |item| {
+        if (output.first) |first| {
+            if (item.position == first.position and item.ordinal == first.ordinal) before_first = false;
+        }
+        if (item.value == .user) {
+            job.result.answered = @max(job.result.answered, item.value.user.admission);
+            if (before_first) job.result.answered_before = @max(job.result.answered_before, item.value.user.admission);
+        }
+    }
     if (!job.opening) {
         if (output.first) |first| job.result.mark = .{ .cursor = beginningBefore(first, page.facts.end) };
     }
@@ -231,6 +250,8 @@ const DisplayCapture = struct {
     current: ?protocol.ActivityItem = null,
     /// The first item whose rendering wrote bytes.
     first: ?protocol.ActivityItem = null,
+    /// The newest Message shown as an Admission row.
+    shown_admission: u64 = 0,
 
     pub fn item(self: *@This(), value: protocol.ActivityItem) void {
         self.current = value;
@@ -240,7 +261,11 @@ const DisplayCapture = struct {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         try self.file.writePositionalAll(self.task.io, bytes, self.offset);
         self.offset += bytes.len;
-        if (self.first == null and bytes.len != 0) self.first = self.current;
+        if (bytes.len == 0) return;
+        if (self.first == null) self.first = self.current;
+        if (self.current) |current| if (current.value == .admission) {
+            self.shown_admission = @max(self.shown_admission, current.value.admission.admission);
+        };
     }
 };
 

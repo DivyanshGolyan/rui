@@ -4068,6 +4068,71 @@ def renderer_cases():
             proxy.close()
             proxy = None
         print("renderer: an evicted Message stays in the transcript, alone or with its reply", flush=True)
+
+        # A Message sent while a tool runs shows as its Admission at once but
+        # gains its conversation row only after the tool's result shows. No
+        # transcript may start between them: after eviction it holds the
+        # Message, or says rows left the view, never a start without it.
+        session = "renderer/evicted-steer"
+        configure(session)
+        gate = workspace / "steer-gate"
+        endpoint.responses.append(fixture.sse_tool_calls("evicted-steer", [
+            ("bash", "steer-call", json.dumps({"cmd": f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.05; done",
+                                               "description": "Wait for steer", "timeout_ms": None}))]))
+        endpoint.responses.append(fixture.sse_answer("evicted-steer", "reason", "message", reply)[0])
+        with terminal(session) as tty:
+            tty.send("start steering\n", "Wait for steer")
+            tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
+            assert not gate.exists()
+            gate.touch()
+            tty.wait("REPLY-03699", timeout=30)
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            for _ in range(10):
+                if "Earlier rows left this view." in tty.capture.completed:
+                    break
+                tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+                if "Start of conversation" in tty.capture.completed:
+                    break
+            shown = tty.capture.completed
+            if "Start of conversation" in shown:
+                assert "59199 raw bytes" in shown, shown
+                assert shown.index("Wait for steer") < shown.index("59199 raw bytes") < shown.index("REPLY-00000"), shown
+            else:
+                assert "Earlier rows left this view." in shown, shown
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: a Message steered into a running tool stays in the transcript after eviction", flush=True)
+
+        # A Message queued behind a running answer shows as its Admission
+        # before that answer, but its conversation row follows it.
+        session = "renderer/evicted-queued"
+        configure(session)
+        first_release = threading.Event()
+        endpoint.responses.append((fixture.sse_answer("evicted-first", "reason", "message", "FIRST-ANSWER-DONE")[0], first_release))
+        endpoint.responses.append(fixture.sse_answer("evicted-second", "reason", "message", reply)[0])
+        with terminal(session) as tty:
+            requests = len(endpoint.requests)
+            tty.send("FIRST-SMALL-QUESTION\n", predicate=lambda: "› FIRST-SMALL-QUESTION" in tty.capture.completed)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
+            tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "q" * 40 in tty.capture.completed)
+            first_release.set()
+            tty.wait("REPLY-03699", timeout=30)
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            for _ in range(10):
+                if "Earlier rows left this view." in tty.capture.completed:
+                    break
+                tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+                if "Start of conversation" in tty.capture.completed:
+                    break
+            shown = tty.capture.completed
+            if "Start of conversation" in shown:
+                assert "59199 raw bytes" in shown, shown
+                assert shown.index("FIRST-ANSWER-DONE") < shown.index("59199 raw bytes") < shown.index("REPLY-00000"), shown
+            else:
+                assert "Earlier rows left this view." in shown, shown
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: a Message queued behind an answer stays in the transcript after eviction", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,

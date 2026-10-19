@@ -338,6 +338,8 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
 /// page. Retain only the oldest four identities; never retain history payloads.
 pub const Pending = struct {
     total: u64 = 0,
+    /// The newest queued Message's admission id.
+    newest: u64 = 0,
     count: usize = 0,
     items: [4]struct { position: u64, ordinal: u64, content: protocol.ActivityItem.Content } = undefined,
 
@@ -377,6 +379,7 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
         for (page.facts.items[0..page.facts.count]) |item| {
             if (item.value != .admission or item.value.admission.state != .queued) continue;
             summary.total += 1;
+            summary.newest = @max(summary.newest, item.value.admission.admission);
             if (summary.count == summary.items.len) continue;
             summary.items[summary.count] = .{ .position = item.position, .ordinal = item.ordinal, .content = item.value.admission.content };
             summary.count += 1;
