@@ -5,7 +5,7 @@ name: Renderer macOS matrix
 # and short tmux smoke (separate harness); physical checks stay post-landing.
 on:
   push:
-    branches: ['wip/**']
+    branches: ['wip/**', 'perf/diag-renderer-rows']
     paths:
       - 'src/**'
       - 'build.zig*'
