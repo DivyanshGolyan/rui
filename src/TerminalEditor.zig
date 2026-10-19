@@ -762,7 +762,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
     // Alt-Enter, as ESC CR or Kitty, neither sends the draft nor adds a line.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u" }) |chord| {
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;3;13~" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
@@ -774,21 +774,42 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
             try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
         }
     }
-    // Vaxis decodes no key from xterm modifyOtherKeys; nothing is inserted.
-    for ([_][]const u8{ "\x1b[27;3;46~", "\x1b[27;3;32~" }) |chord| {
-        var editor: Editor = .{ .buffer = &storage };
-        var stream: Input = .{};
-        for ("ok") |byte| _ = editor.feed(&stream, byte);
-        for (chord) |byte| _ = editor.feed(&stream, byte);
-        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
-        try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
-    }
     // Bound chords, plain text and marked paste keep their meaning.
     var editor: Editor = .{ .buffer = &storage };
     var stream: Input = .{};
     for ("a. b\x1bb\x1bj\x1b[200~c. d\x1b[201~") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqualStrings("a. \nc. db", storage[0..editor.length]);
     try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+}
+
+test "xterm modifyOtherKeys keys mean what the same Kitty keys mean" {
+    var storage: [64]u8 = undefined;
+    // Ghostty's legacy table sends Shift-Enter as CSI 27;2;13~ unasked. It
+    // adds a line like Kitty's CSI 13;2u; Ctrl-A still moves to the line start and Ctrl-J sends.
+    for ([_][]const u8{ "\x1b[27;2;13~", "\x1b[13;2u" }) |shift_enter| {
+        for ([_]bool{ true, false }) |allow_paste| {
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
+            var stream: Input = .{};
+            for ("one") |byte| _ = editor.feed(&stream, byte);
+            for (shift_enter) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
+            for ("two") |byte| _ = editor.feed(&stream, byte);
+            try std.testing.expectEqualStrings("one\ntwo", storage[0..editor.length]);
+            for ("\x1b[27;5;97~X") |byte| _ = editor.feed(&stream, byte);
+            try std.testing.expectEqualStrings("one\nXtwo", storage[0..editor.length]);
+            var sent = false;
+            for ("\x1b[27;5;106~") |byte| sent = editor.feed(&stream, byte) == .submit or sent;
+            try std.testing.expect(sent);
+        }
+    }
+    // Malformed or out-of-range forms decode nothing and leave the draft.
+    for ([_][]const u8{ "\x1b[27;2~", "\x1b[27;;13~", "\x1b[27;2;~", "\x1b[27;2;13;1~", "\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;2;55296~", "\x1b[27;2;1114112~", "\x1b[27;2:3;13~" }) |malformed| {
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Input = .{};
+        for ("ok") |byte| _ = editor.feed(&stream, byte);
+        for (malformed) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
+        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+        try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+    }
 }
 
 test "a dropped chord reports itself as it arrives" {
