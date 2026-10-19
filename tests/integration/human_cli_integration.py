@@ -21,6 +21,15 @@ import threading
 import time
 
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
+
+
+# From 60 columns a user Message's first row ends with its admission time.
+TIMED_ROW = re.compile(r"^(.*?) +(\d\d:\d\d)$")
+
+
+def untimed(row):
+    match = TIMED_ROW.match(row)
+    return match.group(1) if match else row
 from terminal_process import open_pty, terminal_process
 import terminal_process as terminal_process_module
 import model_fixture as fixture
@@ -3682,8 +3691,8 @@ def renderer_cases():
         ready_read, ready_write = os.pipe()
         try:
             with terminal(session, ready_write) as tty:
+                # An unread Action draws no decision prompt, so no readiness.
                 tty.send("propose a tall Action\n", "Action continues · PgDn")
-                tty.ready(ready_read)
                 tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
                 for _ in range(8):
                     tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
@@ -3754,14 +3763,20 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
             frames = tty.every_frame()
+            sent = time.time()
             tty.send("\n", marker)
+            # The time is the Host's admission second, in this local zone.
+            times = {time.strftime("%H:%M", time.localtime(second)) for second in range(int(sent), int(time.time()) + 1)}
             for frame in frames:
                 rows = frame.rstrip("\n").split("\n")
                 composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
                 history = rows[:composer]
                 assert "›" not in [row.strip() for row in history], frame
+                for row in history:
+                    if untimed(row) == "› x":
+                        assert len(row) == 80 and row[-5:] in times, (row, times)
                 if rows[composer].strip() == "›":
-                    assert "› x" in history or {"Sending…", "Sent"} & set(history), frame
+                    assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
@@ -3772,7 +3787,7 @@ def renderer_cases():
                 composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
                 history = rows[:composer]
                 if rows[composer].strip() == "›":
-                    assert f"› {text}" in history or {"Sending…", "Sent"} & set(history), (text, frame)
+                    assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, frame)
 
         def held_pages():
             """Once holding is set, Activity page requests reach the Host only
@@ -4218,7 +4233,19 @@ def renderer_cases():
         # so a later read cannot begin a transcript before it. Once eviction
         # cuts the Admission, older pages still hold the Message, whether its
         # row arrives alone (held reply) or with the reply.
-        reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(3700))
+        # A long Message shows collapsed live, so the reply alone outgrows
+        # the live view. Older pages show the Message by its size alone.
+        reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4400))
+        omitted = "› ┄ 59 KB"
+
+        def after_message(shown, reply="REPLY-00000"):
+            # What follows the Message: its reply live, the long reply's own
+            # omission on an older page, or the seam where live rows left.
+            markers = (reply, "Earlier rows left this view.") + (("Historical item omitted: position",) if reply == "REPLY-00000" else ())
+            found = [shown.index(marker) for marker in markers if marker in shown]
+            assert found, shown
+            return min(found)
+
         for variant in ("alone", "with-reply"):
             session = f"renderer/evicted-message-{variant}"
             configure(session)
@@ -4238,7 +4265,7 @@ def renderer_cases():
                     holding.set()
                     fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "evicted Message answered", timeout=20)
                     release.set()
-                tty.wait("REPLY-03699", timeout=30)
+                tty.wait("REPLY-04399", timeout=30)
                 tty.send("\x1b[A", "Browsing · Esc returns")
                 # Each /history jumps to the transcript's top, where the
                 # preceding page then loads.
@@ -4248,8 +4275,8 @@ def renderer_cases():
                         break
                 shown = tty.capture.completed
                 assert "Start of conversation" in shown, shown
-                assert "Historical item omitted: position" in shown and "59199 raw bytes" in shown, (variant, shown)
-                assert shown.index("59199 raw bytes") < shown.index("REPLY-00000"), (variant, shown)
+                assert omitted in shown, (variant, shown)
+                assert shown.index(omitted) < after_message(shown), (variant, shown)
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
             proxy.close()
@@ -4269,9 +4296,8 @@ def renderer_cases():
             # Older pages reach the Message exactly once, after what preceded
             # it and before its reply, or before the rows that left the view.
             assert "Start of conversation" in shown, shown
-            assert shown.count("59199 raw bytes") == 1, shown
-            after = shown.index(reply) if reply in shown else shown.index("Earlier rows left this view.")
-            assert shown.index(before) < shown.index("59199 raw bytes") < after, shown
+            assert shown.count(omitted) == 1, shown
+            assert shown.index(before) < shown.index(omitted) < after_message(shown, reply), shown
 
         # A Message sent while a tool runs shows as its Admission at once but
         # gains its conversation row only after the tool's result shows. No
@@ -4289,7 +4315,7 @@ def renderer_cases():
             tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
             assert not gate.exists()
             gate.touch()
-            tty.wait("REPLY-03699", timeout=30)
+            tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
             reachable(shown, "Wait for steer")
             tty.caller.send_signal(signal.SIGINT)
@@ -4309,7 +4335,7 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
             tty.send("\x1b[200~" + "q" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "q" * 40 in tty.capture.completed)
             first_release.set()
-            tty.wait("REPLY-03699", timeout=30)
+            tty.wait("REPLY-04399", timeout=30)
             shown = traverse(tty)
             reachable(shown, "FIRST-ANSWER-DONE")
             tty.caller.send_signal(signal.SIGINT)
@@ -4350,16 +4376,20 @@ def renderer_cases():
         # The same page shape with an answer that live output shortens: its
         # styling is not kept and its oversized cluster is escaped. Eviction
         # cuts the opening, so the transcript must join at the reply's own
-        # boundary, which must name where the reply's text begins live.
+        # boundary, which must name where the reply's text begins live. The
+        # reply fits the live view, and with the ~7 KB before it does not.
         session = "renderer/styled-batched"
         configure(session)
         first_release = threading.Event()
-        styled = " ".join(f"**bold{index}**" for index in range(12)) + " e" + "\u0301" * 200 + " STYLED-END"
+        filler = "\n".join(f"FILLER-{index:03d} " + "f" * 50 for index in range(100))
+        styled = " ".join(f"**bold{index}**" for index in range(12)) + "\n" + filler + "\ne" + "\u0301" * 200 + " STYLED-END"
+        fitting = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4100))
         endpoint.responses.append((fixture.sse_answer("styled-first", "reason", "message", styled)[0], first_release))
-        endpoint.responses.append(fixture.sse_answer("styled-second", "reason", "message", reply)[0])
+        endpoint.responses.append(fixture.sse_answer("styled-second", "reason", "message", fitting)[0])
         holding, release, held = threading.Event(), threading.Event(), threading.Event()
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
-        with terminal(session) as tty:
+        with terminal(session, rows=160) as tty:
+            tty.capture.resize(80, 160)
             requests = len(endpoint.requests)
             tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
             fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
@@ -4370,12 +4400,12 @@ def renderer_cases():
             fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
             holding.clear()
             release.set()
-            tty.wait("REPLY-03699", timeout=30)
+            tty.wait("REPLY-04099", timeout=30)
             shown = traverse(tty)
             assert "Earlier rows left this view." not in shown, shown
             reachable(shown, "STYLED-END")
             # The reply starts whole, once, where older pages end.
-            assert shown.count("REPLY-00000") == 1 and "\n  REPLY-00000 " in shown, shown
+            assert shown.count("REPLY-00000") == 1 and "\nREPLY-00000 " in shown, shown
             assert shown.count("STYLED-END") == 1 and shown.count("bold11") == 1, shown
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -4434,16 +4464,16 @@ def renderer_cases():
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
                 tty.send("\x1b[200~" + "m" * 59199 + "\x1b[201~\r", predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed)
                 first_release.set()
-                tty.wait("REPLY-03699", timeout=30)
+                tty.wait("REPLY-04399", timeout=30)
                 # The queued Message is now applied, and its own answer held.
                 fixture.wait_for(lambda: len(endpoint.requests) > requests + 1, "second model request", timeout=20)
                 time.sleep(1)  # Scans read its row; nothing more shows.
                 assert "SILENT-SECOND-DONE" not in tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count("59199 raw bytes") == 1, shown
+                assert shown.count(omitted) == 1, shown
                 # Its row, after the omitted reply's row, not the live preview before it.
-                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index("59199 raw bytes"), shown
+                assert shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
@@ -4474,8 +4504,8 @@ def renderer_cases():
                 tty.send("\n", "ASKED-DONE")
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
-                assert shown.count("59199 raw bytes") == 1 and shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index("59199 raw bytes"), shown
-                assert shown.count("✓ Rowed call") == 1 and shown.index("59199 raw bytes") < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
+                assert shown.count(omitted) == 1 and shown.index("DRIVER-QUESTION") < shown.index("raw bytes") < shown.index(omitted), shown
+                assert shown.count("✓ Rowed call") == 1 and shown.index(omitted) < shown.index("✓ Rowed call") < shown.index("ASKED-DONE"), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
@@ -4504,16 +4534,21 @@ def renderer_cases():
 
         def queue_three(tty):
             # Each admission shows before the next is sent.
-            for text, marker, count in (("EQUAL-CONTENT", "› EQUAL-CONTENT", 1), ("EQUAL-CONTENT", "› EQUAL-CONTENT", 2), (big, "BIG-END", 1)):
+            for text, marker, count in (("EQUAL-CONTENT", "› EQUAL-CONTENT", 1), ("EQUAL-CONTENT", "› EQUAL-CONTENT", 2), (big, big_size, 1)):
                 tty.send("\x1b[200~" + text + "\x1b[201~\r", predicate=lambda: tty.capture.completed.count(marker) == count and tty.capture.draft("", 2))
 
         long_reply = "\n".join(f"LONG-{index:05d} " + "y" * 50 for index in range(4400))
         big = "BIG-START " + "é ñ ü " * 300 + "BIG-END"
+        # 2,717 bytes: collapsed to its first 200 bytes, cut before a split é.
+        big_size = "┄ 2.7 KB"
 
         def big_whole(shown):
-            # Its whole body once, whatever wrapping and indentation add.
-            body = shown[shown.index("BIG-START") + len("BIG-START"):shown.index("BIG-END")]
-            return "".join(body.split()) == "éñü" * 300
+            # Its preview once, whatever wrapping, indentation and its time
+            # add, then its size and nothing more of it.
+            start = shown.index("BIG-START") + len("BIG-START")
+            cut = shown.index("…", start)
+            body = "\n".join(untimed(row) for row in shown[start:cut].split("\n"))
+            return "".join(body.split()) == "éñü" * 21 and shown.index(big_size, cut) - cut < 8 and "BIG-END" not in shown
         session = "renderer/listed-queued"
         configure(session)
         first_release = threading.Event()
@@ -4536,7 +4571,7 @@ def renderer_cases():
                 listed = shown.split("Earlier rows left this view.", 1)[1]
                 assert shown.index("DRIVER-QUESTION") < shown.index("Earlier rows left this view."), shown
                 assert listed.count("! Queued") == 3 and listed.count("EQUAL-CONTENT") == 2, shown
-                assert shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-START") == 1 and shown.count("BIG-END") == 1, shown
+                assert shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-START") == 1 and shown.count(big_size) == 1, shown
                 assert big_whole(shown), shown
                 assert "LONG-00000" not in shown, "the copy started before the front"
                 tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
@@ -4544,7 +4579,7 @@ def renderer_cases():
                 tty.wait("LISTED-DONE", timeout=30)
                 shown = traverse(tty)
                 # Now rows: each once, never also listed as queued.
-                assert "! Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count("BIG-END") == 1, shown
+                assert "! Queued" not in shown and shown.count("EQUAL-CONTENT") == 2 and shown.count(big_size) == 1, shown
                 assert shown.count("BIG-START") == 1 and big_whole(shown), shown
                 assert shown.index("DRIVER-QUESTION") < shown.index("EQUAL-CONTENT") < shown.index("BIG-START"), shown
                 tty.caller.send_signal(signal.SIGINT)
@@ -4614,7 +4649,7 @@ def renderer_cases():
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
                 stopped = "! Stopped before it ran · send it again to run it"
                 assert shown.count(stopped) == 3 and shown.count("EQUAL-CONTENT") == 2, shown
-                assert shown.count("BIG-START") == 1 and shown.count("BIG-END") == 1 and shown.count("AFTER-STOP") == 1, shown
+                assert shown.count("BIG-START") == 1 and shown.count(big_size) == 1 and shown.count("AFTER-STOP") == 1, shown
                 assert big_whole(shown), shown
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()

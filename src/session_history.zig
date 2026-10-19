@@ -33,7 +33,7 @@ pub const Prepared = struct {
                     try sink.feed(View.kilobytes(item.content.bytes, &size));
                     try sink.feed(View.Mark.reset ++ "\n  " ++ View.Mark.summary);
                 } else {
-                    if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true);
+                    if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true) else try sink.feed("\n");
                     try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\n", .{ item.position, item.ordinal, item.content.bytes }));
                 }
                 try sink.feed("Raw export: rui session read-conversation --store-hex ");
@@ -186,7 +186,7 @@ test "historical export preserves opaque identities without terminal or shell in
     var time: [5]u8 = undefined;
     var expected: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄ 9.0 KB\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
-        "Rui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n", .{ View.clock(1_800_000_000, &time).?, identity, identity }), sink.bytes[0..sink.length]);
+        "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n", .{ View.clock(1_800_000_000, &time).?, identity, identity }), sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {
