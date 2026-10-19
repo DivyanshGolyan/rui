@@ -499,6 +499,28 @@ print('compiled handoff available')
                     patch.object(evidence.subprocess, 'run'), \
                     patch.object(evidence, 'source_inputs', return_value=inputs['source']):
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
+                old = dict(artifact, id=123, expired=False, size_in_bytes=len(archive),
+                           created_at='2026-10-18T10:00:00Z')
+                for defect in ('failure', 'cancelled', 'expired', 'invalid', 'valid'):
+                    recent = dict(old, id=124, workflow_run=dict(id=124), expired=defect == 'expired',
+                                  created_at='2026-10-19T10:00:00Z')
+
+                    def historical_api(path, binary=False):
+                        if '/actions/artifacts?' in path:
+                            return {'artifacts': [old] if defect == 'valid' else [old, recent]}
+                        if '/actions/runs/' in path:
+                            if path.endswith('/124'):
+                                return dict(run, id=124, conclusion=defect if defect != 'invalid' else 'success')
+                            return dict(run, html_url='https://github.com/owner/repo/actions/runs/123')
+                        if binary:
+                            return archive
+                        return dict(tree=dict(sha=receipt['source_tree']))
+
+                    with self.subTest(latest=defect), \
+                            patch.dict(os.environ, GITHUB_RUN_ID='999', GITHUB_STEP_SUMMARY=str(Path(directory) / 'summary')), \
+                            patch.object(evidence, 'api', side_effect=historical_api):
+                        self.assertEqual(evidence.restore(inputs), defect == 'valid',
+                                         'Only the newest valid retained result can permit reuse')
                 bootstrap.write_bytes(b'another worker-specific bootstrap')
                 self.assertEqual(evidence.verify(archive, artifact, run, inputs), receipt)
                 data, metadata = archive_for(dict(receipt,
