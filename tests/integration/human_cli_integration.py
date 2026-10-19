@@ -3213,7 +3213,7 @@ def renderer_cases():
             return bytes(output), bytes(errors)
 
     @contextmanager
-    def terminal(session, ready_write=None, *, columns=80, rows=24, opening=True, initial_text=None):
+    def terminal(session, ready_write=None, *, columns=80, rows=24, opening=True, initial_text=None, tmux=False):
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
@@ -3225,6 +3225,9 @@ def renderer_cases():
         try:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color"}
+            env.pop("TMUX", None)
+            if tmux:
+                env["TMUX"] = "/tmp/tmux-renderer/default,1,0"
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
             arguments = (["session", "resume", "--store", str(store), "--", session] if initial_text is None else
@@ -3963,10 +3966,25 @@ def renderer_cases():
             tty.send("\x1b[A", "Browsing · Esc returns")
             tty.send("\r", marker)
             assert "Browsing · Esc returns" not in tty.capture.completed, tty.capture.completed
+            assert "In tmux" not in tty.capture.completed, tty.capture.completed
             submitted("ok")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
+
+        # With nothing said yet, scrolling up reaches the start, not a gap.
+        # In tmux, Shift-Enter arrives as Enter: composing says how to add a line.
+        session = "renderer/empty-tmux"
+        configure(session)
+        hint = "In tmux, Shift-Enter sends · Alt-J adds a line"
+        with terminal(session, tmux=True) as tty:
+            tty.send("\x1b[A", "Start of conversation")
+            assert "Earlier rows left this view." not in tty.capture.completed, tty.capture.completed
+            tty.send("x", predicate=lambda: hint in tty.capture.completed and tty.capture.draft("x", 3))
+            tty.send("\x7f", predicate=lambda: hint not in tty.capture.completed and tty.capture.draft("", 2))
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: an empty Session scrolls to its start, and tmux composing names Alt-J", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
