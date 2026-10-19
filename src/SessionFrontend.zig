@@ -79,6 +79,16 @@ cursor: client.ActivityCursor = .{},
 compact_tools: bool = false,
 // Continues the transcript above its oldest shown row; null at the start.
 transcript_older: ?client.ConversationCursor = null,
+// What the transcript shows above its copy before older pages (see
+// reads.Plan); its echoes are listed newest first, so `count` falls.
+transcript_plan: reads.Plan = .{ .start = 0 },
+// Older pages reach the conversation's start, so the transcript says so.
+transcript_beginning: bool = false,
+// The Messages live output shows since its newest mark.
+echoes: reads.Record = .{},
+// The lowest position of a Message seen unapplied, where a transcript's
+// search for them may stop; a stale value only costs reads.
+lowest: ?u64 = null,
 // Each transcript gets a new identity, so a page loaded for one is never
 // joined to another.
 transcript: u64 = 0,
@@ -112,7 +122,7 @@ notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .messages = self.messages, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .listing = if (phase == .history) self.transcript_plan.next() else null, .messages = self.messages, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
     if (phase == .activity or phase == .permission) {
         job.open_status = self.status_requested;
         job.watch_status = self.status_page and self.terminal.screen.view == .inspection;
@@ -754,31 +764,38 @@ fn navigation(self: *Self, event: Editor.Event) !void {
 }
 
 /// Freezes live output for scrolling. The copy starts at a recorded read
-/// boundary, so older canonical pages continue it without a gap.
+/// boundary, so older canonical pages continue it without a gap. With none
+/// retained, the gap's shown Messages and those at its seam are listed above
+/// the copy, and older pages continue before the newest boundary that left.
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
     self.transcript += 1;
     const front = try screen.liveStart();
-    switch (self.marks.start(front)) {
-        .joined => |mark| {
-            try screen.beginTranscript(mark.offset);
-            self.transcript_older = mark.cursor;
-            if (mark.cursor == null) try screen.markBeginning();
-        },
-        .gap => |before| {
-            // No read boundary remains in view (one read exceeded it). Show
-            // the gap; older pages continue before the newest boundary that
-            // left, so nothing before it is lost.
-            try screen.beginTranscript(front);
-            try screen.markGap();
-            self.transcript_older = if (before) |mark| mark.cursor else null;
-            if (before) |mark| if (mark.cursor == null) try screen.markBeginning();
-        },
+    self.transcript_plan = reads.plan(&self.marks, &self.echoes, front, self.lowest);
+    try screen.beginTranscript(self.transcript_plan.start);
+    self.transcript_older = self.transcript_plan.older;
+    // Without any boundary, where the conversation starts is unknown.
+    self.transcript_beginning = self.transcript_older == null and !(self.transcript_plan.gap and self.marks.count == 0);
+    try self.showOlderLabels();
+}
+
+/// Shows the gap's label once its Messages are listed, and the
+/// conversation's start once nothing older remains.
+fn showOlderLabels(self: *Self) !void {
+    const screen = self.terminal.screen;
+    const plan = &self.transcript_plan;
+    if (plan.gap and plan.echo_count == 0 and plan.dropped == null) {
+        try screen.markGap();
+        plan.gap = false;
+    }
+    if (self.transcript_beginning and self.transcript_plan.next() == null and self.transcript_older == null) {
+        try screen.markBeginning();
+        self.transcript_beginning = false;
     }
 }
 
 fn olderWanted(self: *const Self) bool {
-    return self.transcript_older != null and !self.older_failed and self.terminal.screen.transcriptAtTop() and !self.opening;
+    return (self.transcript_plan.next() != null or self.transcript_older != null) and !self.older_failed and self.terminal.screen.transcriptAtTop() and !self.opening;
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
@@ -983,8 +1000,11 @@ fn settleReader(self: *Self) !void {
         const screen = self.terminal.screen;
         if (screen.view == .transcript and self.job.transcript == self.transcript) {
             try screen.prependFile(self.init.io, self.inspection_file);
-            self.transcript_older = self.job.result.history_cursor;
-            if (self.transcript_older == null) try screen.markBeginning();
+            if (self.job.listing) |listed| self.transcript_plan.listed(listed, self.job.result.listing) else {
+                self.transcript_older = self.job.result.history_cursor;
+                self.transcript_beginning = self.transcript_older == null;
+            }
+            try self.showOlderLabels();
         }
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();
@@ -996,42 +1016,78 @@ fn settleReader(self: *Self) !void {
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
+/// Its boundaries and echoes take the live offsets where writing reaches
+/// them: live output keeps text, not the styling the scratch file also
+/// counts, and escapes clusters it cannot show, so each is the settled end
+/// once writing reaches it. A page's own start precedes its separator.
 fn showStaged(self: *Self) !void {
-    const length = self.job.result.output_length;
     const result = &self.job.result;
-    const start = try self.terminal.screen.liveEnd();
     self.messages = result.messages;
-    var boundary = result.boundary;
-    if (length == 0) {
-        // Only an opening marks without showing anything.
-        if (boundary) |mark| self.marks.record(start, mark.cursor);
-        return;
+    if (result.lowest) |lowest| self.lowest = if (self.lowest) |known| @min(known, lowest) else lowest;
+    var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd() };
+    // Every cut in output order; at one offset an echo ends before a
+    // boundary prunes it, and a boundary prunes before an echo begins.
+    const Cut = struct { output: u64, kind: enum { echo_end, boundary, echo_start }, index: usize };
+    var cuts: [@typeInfo(@FieldType(reads.Boundaries, "items")).array.len + 2 * @typeInfo(@FieldType(reads.Echoes, "items")).array.len]Cut = undefined;
+    var count: usize = 0;
+    for (result.boundaries.slice(), 0..) |mark, index| {
+        cuts[count] = .{ .output = mark.output, .kind = .boundary, .index = index };
+        count += 1;
     }
-    var buffer: [4096]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < length) {
-        const count = try self.inspection_file.readPositionalAll(self.init.io, buffer[0..@intCast(@min(buffer.len, length - offset))], offset);
-        if (count == 0) return error.TruncatedDisplayScratch;
-        // A notice can end the group while a read is still silent. Restore
-        // its separator before the first compact heading.
-        if (offset == 0 and !self.opening and !self.compact_tools and buffer[0] != '\n') try self.terminal.permanent("\n");
-        var chunk = buffer[0..count];
-        if (boundary) |mark| if (mark.output < offset + count) {
-            // Live output keeps text, not the styling the scratch file also
-            // counts, and escapes clusters it cannot show, so the boundary's
-            // live offset is the settled end once writing reaches it. A
-            // page's own start precedes its separator.
-            const split: usize = @intCast(mark.output - offset);
-            try self.terminal.permanent(chunk[0..split]);
-            self.marks.record(if (mark.output == 0) start else try self.terminal.screen.liveEnd(), mark.cursor);
-            boundary = null;
-            chunk = chunk[split..];
-        };
-        try self.terminal.permanent(chunk);
-        offset += count;
+    for (result.echoes.slice(), 0..) |echo, index| {
+        cuts[count] = .{ .output = echo.output, .kind = .echo_start, .index = index };
+        cuts[count + 1] = .{ .output = echo.end, .kind = .echo_end, .index = index };
+        count += 2;
     }
-    self.reader_output_started = true;
+    std.sort.insertion(Cut, cuts[0..count], {}, struct {
+        fn less(_: void, left: Cut, right: Cut) bool {
+            return left.output < right.output or (left.output == right.output and @backingInt(left.kind) < @backingInt(right.kind));
+        }
+    }.less);
+    var echoes = result.echoes;
+    for (cuts[0..count]) |cut| {
+        const offset = try staged.to(cut.output);
+        switch (cut.kind) {
+            .boundary => {
+                const mark = result.boundaries.items[cut.index];
+                self.marks.record(.{ .offset = offset, .cursor = mark.cursor, .admitted = mark.admitted });
+                self.echoes.prune(offset);
+            },
+            .echo_start => echoes.items[cut.index].output = offset,
+            .echo_end => {
+                var echo = echoes.items[cut.index];
+                echo.end = offset;
+                if (echo.message.state != .applied) self.lowest = if (self.lowest) |known| @min(known, echo.position) else echo.position;
+                self.echoes.add(echo, self.opening);
+            },
+        }
+    }
+    _ = try staged.to(staged.length);
+    if (staged.length != 0) self.reader_output_started = true;
 }
+
+/// Writes staged output to live output up to an output offset.
+const Staged = struct {
+    frontend: *Self,
+    length: u64,
+    start: u64,
+    written: u64 = 0,
+    buffer: [4096]u8 = undefined,
+
+    fn to(self: *Staged, output: u64) !u64 {
+        const frontend = self.frontend;
+        while (self.written < output) {
+            const count = try frontend.inspection_file.readPositionalAll(frontend.init.io, self.buffer[0..@intCast(@min(self.buffer.len, output - self.written))], self.written);
+            if (count == 0) return error.TruncatedDisplayScratch;
+            // A notice can end the group while a read is still silent. Restore
+            // its separator before the first compact heading.
+            if (self.written == 0 and !frontend.opening and !frontend.compact_tools and self.buffer[0] != '\n') try frontend.terminal.permanent("\n");
+            try frontend.terminal.permanent(self.buffer[0..count]);
+            self.written += count;
+        }
+        return if (output == 0) self.start else try frontend.terminal.screen.liveEnd();
+    }
+};
 
 fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
@@ -1362,7 +1418,7 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .opening = false };
     self.terminal.screen = screen;
     try screen.append("GROWS-FIRST\n");
-    self.marks.record(12, .{ .end = 3 });
+    self.marks.record(.{ .offset = 12, .cursor = .{ .end = 3 }, .admitted = 4 });
     // Unescaped, the rows after the mark fit; escaped, they evict it.
     for (0..45000) |_| try screen.append("\u{200b}");
     try screen.append("\nGROWS-END\n");

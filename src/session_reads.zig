@@ -40,6 +40,8 @@ pub const Job = struct {
     cursor: client.ActivityCursor = .{},
     opening: bool = false,
     older: ?client.ConversationCursor = null,
+    // A history read renders this part of a transcript's listing instead.
+    listing: ?Listing = null,
     // Messages shown in live output before this read.
     messages: Messages = .{},
     transcript: u64 = 0,
@@ -67,16 +69,21 @@ pub const Job = struct {
         status_digest: u64 = 0,
         // The newest Message admission this page holds, for Sent.
         delivered: u64 = 0,
-        // The earliest place in this read's output where a transcript may
-        // begin (see Marks), as an offset into the output; none if no shown
-        // item qualifies.
-        boundary: ?Boundary = null,
+        // Where a transcript may begin in this read's output (see Marks),
+        // oldest first, as offsets into the output.
+        boundaries: Boundaries = .{},
+        // Each Message this read's output shows, in order, as output offsets.
+        echoes: Echoes = .{},
+        // The opening's lowest unapplied position (see View.Pending).
+        lowest: ?u64 = null,
         // The job's Messages after this read.
         messages: Messages = .{},
         live: View.Live = .{},
         cursor: client.ActivityCursor = .{},
         compact_tools: bool = false,
         history_cursor: ?client.ConversationCursor = null,
+        // Where a listing range continues, or null when it is done.
+        listing: ?Listing = null,
         // Output custody began; a later failure is not a silent preparation one.
         rendering: bool = false,
         action: ?u64 = null,
@@ -171,20 +178,31 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             }
         };
         // Nothing showed before the opening, so its start is a boundary even
-        // when it shows nothing.
-        job.result.boundary = .{ .output = 0, .cursor = mark };
+        // when it shows nothing. Every Message it shows is at or after its
+        // page's lowest item, a row included; one admitted before that page
+        // and not applied is listed there.
+        const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
+        job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.inspection_file.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file, .messages = job.messages, .end = page.facts.end };
     if (job.opening) {
         const pending = try View.pending(requests, job.store, job.session, page.facts.end);
-        try pending.render(requests, job.store, job.session, &output);
+        try pending.render(&output);
+        job.result.lowest = pending.lowest;
+        // A queued Message older than the page shows only in a transcript's
+        // listing, at the opening's seam. No later boundary may precede its
+        // row, which shows nothing live.
         output.messages.shown = @max(output.messages.shown, pending.newest);
     }
     try View.render(requests, job.store, job.session, &page, &output, job.colour, &job.result.compact_tools);
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
-    if (!job.opening) job.result.boundary = output.boundary;
+    job.result.echoes = output.echoes;
+    if (!job.opening) {
+        job.result.boundaries = output.boundaries;
+        if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
+    }
     if (job.opening) {
         job.result.cursor = .{ .position = page.facts.end };
     } else {
@@ -217,6 +235,7 @@ fn writeSubmission(job: *const Job, out: *std.Io.Writer) !void {
 pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const latest = job.phase == .details;
+    if (!latest) if (job.listing) |step| return list(job, task, step);
     const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
@@ -227,6 +246,48 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
+/// Renders one listed Message, bound to its item's length and digest, and
+/// where the listing continues. Nothing shows until the UI prepends it.
+fn list(job: *Job, task: *Task, step: Listing) !void {
+    const requests = task.requests();
+    try job.inspection_file.setLength(task.io, 0);
+    var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    switch (step) {
+        .echo => |echo| {
+            const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .value = .{ .admission = echo.message } };
+            try View.message(requests, job.store, job.session, item, echo.message, true, &output, job.colour);
+            job.result.listing = null;
+        },
+        .range => |range| {
+            var cursor = range.cursor;
+            while (true) {
+                const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+                    .page => |page| page,
+                    .failure => |failure| return requests.failRead(failure),
+                };
+                for (page.facts.items[0..page.facts.count]) |item| {
+                    if (item.position < range.lowest) break;
+                    const value = switch (item.value) {
+                        .admission => |value| value,
+                        else => continue,
+                    };
+                    if (!range.all and value.state == .applied) continue;
+                    try View.message(requests, job.store, job.session, item, value, true, &output, job.colour);
+                    var next = range;
+                    next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
+                    job.result.listing = .{ .range = next };
+                    return;
+                } else if (page.continuation()) |next| {
+                    cursor = next;
+                    continue;
+                }
+                job.result.listing = null;
+                return;
+            }
+        },
+    }
+}
+
 const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
@@ -235,8 +296,10 @@ const DisplayCapture = struct {
     end: u64 = 0,
     /// Messages shown before the current item.
     messages: Messages = .{},
-    /// The earliest shown item where a transcript may begin.
-    boundary: ?Boundary = null,
+    /// Shown items where a transcript may begin.
+    boundaries: Boundaries = .{},
+    /// Shown Messages.
+    echoes: Echoes = .{},
     current: ?protocol.ActivityItem = null,
     current_start: u64 = 0,
     current_shown: bool = false,
@@ -254,13 +317,19 @@ const DisplayCapture = struct {
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
-        if (self.boundary == null and self.messages.settled())
-            self.boundary = .{ .output = self.current_start, .cursor = beginningBefore(current, self.end) };
+        if (self.messages.settled())
+            self.boundaries.add(.{ .output = self.current_start, .cursor = beginningBefore(current, self.end), .admitted = current.position });
     }
 
     /// Accounts for the last item; returns the Messages after it.
     fn finish(self: *@This()) Messages {
-        if (self.current) |current| self.messages.observe(current, self.current_shown);
+        if (self.current) |current| {
+            self.messages.observe(current, self.current_shown);
+            if (self.current_shown) switch (current.value) {
+                .admission, .user => |message| self.echoes.add(.{ .output = self.current_start, .end = self.offset, .position = current.position, .ordinal = current.ordinal, .message = message, .read_end = self.end }),
+                else => {},
+            };
+        }
         self.current = null;
         self.current_shown = false;
         return self.messages;
@@ -268,12 +337,13 @@ const DisplayCapture = struct {
 };
 
 /// Messages shown in live output, by admission id. A Message shows first as
-/// its Admission (or a queued preview) and gains its conversation row later:
+/// its Admission, or is listed at the opening's seam, and gains its
+/// conversation row later:
 /// at model-attempt admission, after a running tool's result when steered, or
 /// after the answer it queued behind. Admission ids follow Session positions,
 /// so the newest of each stands for every earlier one.
 pub const Messages = struct {
-    /// The newest Message shown as its Admission or a queued preview.
+    /// The newest Message shown as its Admission or listed at the opening's seam.
     shown: u64 = 0,
     /// The newest Message whose conversation row a read returned.
     answered: u64 = 0,
@@ -298,18 +368,316 @@ pub const Messages = struct {
 /// Where a read's output may begin a transcript. `output` counts the read's
 /// staged bytes, styling included; live output keeps only text, so the UI
 /// records the live offset where writing reaches it, never this number.
-pub const Boundary = struct { output: u64, cursor: ?client.ConversationCursor };
+pub const Boundary = struct {
+    output: u64,
+    cursor: ?client.ConversationCursor,
+    /// Every Message admitted before this position that showed did so before
+    /// the boundary; one admitted at or after it shows after it, if at all.
+    admitted: u64,
+};
+
+/// One Message as a read's output shows it: its Admission live, or in the
+/// opening its row or unapplied input. `output` and `end` are output offsets
+/// until the UI records live ones. The state is as of `read_end`.
+pub const Echo = struct {
+    output: u64,
+    end: u64,
+    position: u64,
+    ordinal: u64,
+    message: protocol.ActivityItem.Message,
+    read_end: u64,
+};
+
+/// The Messages one read shows, in order: a page holds at most one each.
+pub const Echoes = struct {
+    items: [@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len]Echo = undefined,
+    count: usize = 0,
+
+    fn add(self: *Echoes, echo: Echo) void {
+        self.items[self.count] = echo;
+        self.count += 1;
+    }
+
+    pub fn slice(self: *const Echoes) []const Echo {
+        return self.items[0..self.count];
+    }
+};
+
+/// One step of a transcript's listing: a Message in full where older pages
+/// and the retained copy cannot show it. Each step reads one Message.
+pub const Listing = union(enum) {
+    /// A shown Message whose output left the view, from its own item.
+    echo: Echo,
+    /// Admissions in `[lowest, before)` at `end`, newest first: every one, or
+    /// only those not applied at `end`. `cursor` is where the next one is
+    /// searched for, backward.
+    range: struct { end: u64, lowest: u64, all: bool, cursor: client.ActivityCursor },
+
+    pub fn within(end: u64, lowest: u64, before: u64, all: bool) ?Listing {
+        if (lowest >= before) return null;
+        // Position 0 searches back from the end itself.
+        return .{ .range = .{ .end = end, .lowest = lowest, .all = all, .cursor = .{ .end = end, .position = if (before > end) 0 else before, .direction = .backward } } };
+    }
+};
+
+/// The Messages live output shows after its newest mark, as live offsets.
+/// A mark prunes every echo before it: a transcript joined there reaches
+/// those through older pages or its listing. Opening echoes (one page) are
+/// never dropped; live ones beyond capacity are, keeping only their span.
+pub const Record = struct {
+    pub const capacity = 64;
+    opening: [@typeInfo(@FieldType(Echoes, "items")).array.len]Echo = undefined,
+    opening_count: usize = 0,
+    live: [capacity]Echo = undefined,
+    live_count: usize = 0,
+    /// Live echoes dropped beyond capacity: admissions echo live in position
+    /// order, so they are every admission in `[low, high]`.
+    dropped: ?struct { low: u64, high: u64, end: u64, read_end: u64 } = null,
+
+    pub fn add(self: *Record, echo: Echo, opening: bool) void {
+        if (opening) {
+            self.opening[self.opening_count] = echo;
+            self.opening_count += 1;
+            return;
+        }
+        if (self.live_count == self.live.len) {
+            const old = self.live[0];
+            self.dropped = if (self.dropped) |span| .{ .low = span.low, .high = old.position, .end = old.end, .read_end = @max(span.read_end, old.read_end) } else .{ .low = old.position, .high = old.position, .end = old.end, .read_end = old.read_end };
+            std.mem.copyForwards(Echo, self.live[0 .. self.live_count - 1], self.live[1..self.live_count]);
+            self.live_count -= 1;
+        }
+        self.live[self.live_count] = echo;
+        self.live_count += 1;
+    }
+
+    pub fn prune(self: *Record, offset: u64) void {
+        self.opening_count = keep(self.opening[0..self.opening_count], offset);
+        self.live_count = keep(self.live[0..self.live_count], offset);
+        if (self.dropped) |span| if (span.end <= offset) {
+            self.dropped = null;
+        };
+    }
+
+    fn keep(echoes: []Echo, offset: u64) usize {
+        var kept: usize = 0;
+        for (echoes) |echo| if (echo.output >= offset) {
+            echoes[kept] = echo;
+            kept += 1;
+        };
+        return kept;
+    }
+};
+
+/// How a transcript of live output retained from `front` begins: where its
+/// copy starts, then upward the listed Messages, the gap's label if any, the
+/// Messages listed at its seam, and older pages before `older`.
+pub const Plan = struct {
+    start: u64,
+    /// Shown Messages that left the view, oldest first; listed nearest the copy.
+    echoes: [@typeInfo(@FieldType(Record, "opening")).array.len + Record.capacity]Echo = undefined,
+    echo_count: usize = 0,
+    /// How many of `echoes`, the oldest, are the opening's: older than every
+    /// live one, the dropped span's included.
+    opening: usize = 0,
+    dropped: ?Listing = null,
+    gap: bool = false,
+    unapplied: ?Listing = null,
+    older: ?client.ConversationCursor = null,
+
+    /// The listed Message a transcript reads next, if any comes before older
+    /// pages. Each is prepended, so newest first: live echoes, the dropped
+    /// span, the opening's echoes, then after the gap's label the seam's.
+    pub fn next(self: *const Plan) ?Listing {
+        if (self.echo_count > self.opening) return .{ .echo = self.echoes[self.echo_count - 1] };
+        if (self.dropped) |range| return range;
+        if (self.echo_count != 0) return .{ .echo = self.echoes[self.echo_count - 1] };
+        if (!self.gap) if (self.unapplied) |range| return range;
+        return null;
+    }
+
+    /// Passes the step `next` returned once it shows; a range continues at
+    /// `rest`, or is done when null.
+    pub fn listed(self: *Plan, step: Listing, rest: ?Listing) void {
+        switch (step) {
+            .echo => self.echo_count -= 1,
+            .range => if (self.dropped != null) {
+                self.dropped = rest;
+            } else {
+                self.unapplied = rest;
+            },
+        }
+    }
+};
+
+pub fn plan(marks: *const Marks, record: *const Record, front: u64, lowest: ?u64) Plan {
+    const mark: ?Marks.Mark = switch (marks.start(front)) {
+        .joined => |mark| return .{ .start = mark.offset, .unapplied = seam(mark, lowest), .older = mark.cursor },
+        .gap => |before| before,
+    };
+    var result: Plan = .{ .start = front, .gap = true, .older = if (mark) |value| value.cursor else null };
+    if (mark) |value| result.unapplied = seam(value, lowest);
+    // Live echoes dropped beyond capacity may reach past the front: start
+    // after the newest so none shows twice, and list them all.
+    if (record.dropped) |span| {
+        result.start = @max(result.start, span.end);
+        result.dropped = Listing.within(span.read_end, span.low, span.high + 1, true);
+    }
+    // An echo that the front cuts is listed whole, and the copy starts after it.
+    const echoes = [_][]const Echo{ record.opening[0..record.opening_count], record.live[0..record.live_count] };
+    for (echoes) |kept| for (kept) |echo| if (echo.output < result.start and echo.end > result.start) {
+        result.start = echo.end;
+    };
+    for (echoes, 0..) |kept, index| for (kept) |echo| if (echo.end <= result.start) {
+        result.echoes[result.echo_count] = echo;
+        result.echo_count += 1;
+        if (index == 0) result.opening += 1;
+    };
+    return result;
+}
+
+test "a transcript lists each recorded Message once, whole, before the copy that follows it" {
+    const Make = struct {
+        fn echo(position: u64, output: u64) Echo {
+            return .{ .output = output, .end = output + 8, .position = position, .ordinal = 0, .read_end = 300, .message = .{ .admission = position, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 0, .digest = @splat(0) } } };
+        }
+    };
+    const opening: Marks.Mark = .{ .offset = 0, .cursor = .{ .end = 20 }, .admitted = 5 };
+    var marks: Marks = .{};
+    marks.record(opening);
+    const Span = @typeInfo(@FieldType(Record, "dropped")).optional.child;
+    var record: Record = .{};
+    for (0..16) |index| record.add(Make.echo(5 + index, index * 4), true);
+    // 64 live echoes fit; the 65th drops the oldest, keeping its span.
+    for (0..64) |index| record.add(Make.echo(30 + index, 100 + 10 * index), false);
+    try std.testing.expectEqual(@as(?Span, null), record.dropped);
+    record.add(Make.echo(94, 740), false);
+    try std.testing.expectEqual(@as(usize, 16), record.opening_count);
+    try std.testing.expectEqual(@as(usize, 64), record.live_count);
+    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 30, .end = 108, .read_end = 300 }, record.dropped);
+    // A second wrap widens the span to the next dropped echo and its end.
+    var wrapped = record;
+    wrapped.add(Make.echo(95, 750), false);
+    try std.testing.expectEqualDeep(Span{ .low = 30, .high = 31, .end = 118, .read_end = 300 }, wrapped.dropped);
+    try std.testing.expectEqualDeep(Listing.within(300, 30, 32, true), plan(&marks, &wrapped, 105, 3).dropped);
+    try std.testing.expectEqual(@as(u64, 118), plan(&marks, &wrapped, 105, 3).start);
+
+    // The newest dropped echo ends after the front: the copy starts at its
+    // end, so it shows only in the listing, and every opening echo is listed.
+    // Live echoes wrapped while no later mark recorded: the opening mark
+    // still names older pages and the seam.
+    var result = plan(&marks, &record, 105, 3);
+    try std.testing.expectEqual(@as(u64, 108), result.start);
+    try std.testing.expect(result.gap);
+    try std.testing.expectEqualDeep(Listing.within(300, 30, 31, true), result.dropped);
+    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, false), result.unapplied);
+    try std.testing.expectEqual(@as(u64, 20), result.older.?.end);
+    try std.testing.expectEqual(@as(usize, 16), result.echo_count);
+    // Before the front, it is listed as well; the copy starts at the front.
+    result = plan(&marks, &record, 109, 3);
+    try std.testing.expectEqual(@as(u64, 109), result.start);
+    try std.testing.expect(result.dropped != null);
+    // A front inside an echo lists that echo whole and starts after it.
+    result = plan(&marks, &record, 112, 3);
+    try std.testing.expectEqual(@as(u64, 118), result.start);
+    try std.testing.expectEqual(@as(usize, 17), result.echo_count);
+    try std.testing.expectEqual(@as(u64, 31), result.echoes[16].position);
+    // Listed newest first: the live echo, the dropped span, then the opening's
+    // older echoes; the gap's label precedes the seam.
+    try std.testing.expectEqual(@as(u64, 31), result.next().?.echo.position);
+    result.listed(result.next().?, null);
+    try std.testing.expectEqualDeep(Listing.within(300, 30, 31, true), result.next());
+    result.listed(result.next().?, null);
+    for (0..16) |index| {
+        try std.testing.expectEqual(@as(u64, 20 - index), result.next().?.echo.position);
+        result.listed(result.next().?, null);
+    }
+    try std.testing.expectEqual(@as(?Listing, null), result.next());
+    result.gap = false;
+    try std.testing.expectEqualDeep(Listing.within(20, 3, 5, false), result.next());
+    result.listed(result.next().?, null);
+    try std.testing.expectEqual(@as(?Listing, null), result.next());
+
+    // A mark prunes echoes strictly before it; one starting at it stays.
+    record.prune(107);
+    try std.testing.expect(record.dropped != null);
+    record.prune(120);
+    try std.testing.expectEqual(@as(?Span, null), record.dropped);
+    try std.testing.expectEqual(@as(usize, 0), record.opening_count);
+    try std.testing.expectEqual(@as(usize, 63), record.live_count);
+    try std.testing.expectEqual(@as(u64, 120), record.live[0].output);
+}
+
+test "the opening mark is retained through 64 marks and dropped by the 65th" {
+    var marks: Marks = .{};
+    marks.record(.{ .offset = 0, .cursor = null, .admitted = 1 });
+    for (1..64) |index| marks.record(.{ .offset = index, .cursor = .{ .end = index }, .admitted = index + 1 });
+    try std.testing.expectEqual(@as(u64, 0), marks.start(0).joined.offset);
+    marks.record(.{ .offset = 64, .cursor = .{ .end = 64 }, .admitted = 65 });
+    try std.testing.expectEqual(@as(u64, 1), marks.start(0).joined.offset);
+}
+
+/// Messages a transcript joined at `mark` lists there: admitted before its
+/// position and not applied at its end, so neither older pages nor the copy
+/// show them.
+fn seam(mark: Marks.Mark, lowest: ?u64) ?Listing {
+    const cursor = mark.cursor orelse return null;
+    return Listing.within(cursor.end, lowest orelse return null, mark.admitted, false);
+}
+
+/// A read's newest boundaries, oldest first. Any boundary at or after the
+/// view's front joins its transcript, so dropping the oldest loses nothing
+/// a newer one cannot replace.
+pub const Boundaries = struct {
+    items: [Marks.capacity]Boundary = undefined,
+    count: usize = 0,
+
+    pub fn add(self: *Boundaries, boundary: Boundary) void {
+        if (self.count == self.items.len) {
+            std.mem.copyForwards(Boundary, self.items[0 .. self.count - 1], self.items[1..self.count]);
+            self.count -= 1;
+        }
+        self.items[self.count] = boundary;
+        self.count += 1;
+    }
+
+    pub fn slice(self: *const Boundaries) []const Boundary {
+        return self.items[0..self.count];
+    }
+};
+
+/// A later read also marks the end of its output, even when it shows nothing,
+/// if it reached its snapshot's end with every shown Message rowed.
+/// Reads continue from the previous one, so every item through `end` was read
+/// and has shown before `output` or never shows live; every later item,
+/// a result included, takes a fresh position after `end`. A Message whose row
+/// a read returned silently is then reachable through older pages. A page
+/// with more to read ends before its snapshot's end, and an unrowed shown
+/// Message would be in neither, so neither marks.
+fn readEnd(messages: Messages, more: bool, end: u64, output: u64) ?Boundary {
+    if (more or !messages.settled()) return null;
+    // End 0 asks the Host for its current end; nothing precedes position 1.
+    return .{ .output = output, .cursor = if (end == 0) null else .{ .end = end }, .admitted = end + 1 };
+}
+
+test "a silent read marks its end only when complete and every shown Message is rowed" {
+    const rowed: Messages = .{ .shown = 4, .answered = 4 };
+    try std.testing.expectEqualDeep(Boundary{ .output = 9, .cursor = .{ .end = 30 }, .admitted = 31 }, readEnd(rowed, false, 30, 9).?);
+    try std.testing.expectEqual(@as(?Boundary, null), readEnd(rowed, true, 30, 9));
+    try std.testing.expectEqual(@as(?Boundary, null), readEnd(.{ .shown = 5, .answered = 4 }, false, 30, 9));
+    try std.testing.expectEqualDeep(Boundary{ .output = 0, .cursor = null, .admitted = 1 }, readEnd(.{}, false, 0, 0).?);
+}
 
 /// Read boundaries in live output, oldest first. A boundary pairs an absolute
 /// live offset with the canonical cursor for everything before it (null: the
 /// conversation's start). It is valid only if no conversation item at or after
 /// its cursor showed before its offset. Reads record only valid ones: the
-/// opening's start, and in a later read the first shown item that follows
-/// every shown Message's conversation row. A read that shows nothing records
-/// none.
+/// opening's start, and in a later read each shown item that follows every
+/// shown Message's conversation row, and its output's end (see `readEnd`).
+/// An unsettled or incomplete read that shows nothing records none.
 pub const Marks = struct {
-    pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor };
-    items: [64]Mark = undefined,
+    pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor, admitted: u64 };
+    pub const capacity = 64;
+    items: [capacity]Mark = undefined,
     count: usize = 0,
 
     /// Where a transcript of live output retained from some front begins.
@@ -322,21 +690,21 @@ pub const Marks = struct {
         gap: ?Mark,
     };
 
-    pub fn record(self: *Marks, offset: u64, cursor: ?client.ConversationCursor) void {
+    pub fn record(self: *Marks, mark: Mark) void {
         // Equal offsets: nothing showed between the two reads, so the later
         // cursor is valid too and names at least as much before the offset.
-        if (self.count != 0 and self.items[self.count - 1].offset == offset) {
-            self.items[self.count - 1].cursor = cursor;
+        if (self.count != 0 and self.items[self.count - 1].offset == mark.offset) {
+            self.items[self.count - 1] = mark;
             return;
         }
-        std.debug.assert(self.count == 0 or self.items[self.count - 1].offset < offset);
+        std.debug.assert(self.count == 0 or self.items[self.count - 1].offset < mark.offset);
         if (self.count == self.items.len) {
             // Dropping the oldest boundary keeps the newest before any front
             // until every retained one is after it.
             std.mem.copyForwards(Mark, self.items[0 .. self.count - 1], self.items[1..self.count]);
             self.count -= 1;
         }
-        self.items[self.count] = .{ .offset = offset, .cursor = cursor };
+        self.items[self.count] = mark;
         self.count += 1;
     }
 
@@ -354,18 +722,18 @@ pub const Marks = struct {
 test "a transcript joins at the first retained boundary or shows the gap after the newest evicted one" {
     var marks: Marks = .{};
     try std.testing.expectEqualDeep(Marks.Start{ .gap = null }, marks.start(0));
-    marks.record(0, null);
-    marks.record(40, .{ .end = 9, .before_position = 7 });
-    try std.testing.expectEqualDeep(Marks.Start{ .joined = .{ .offset = 0, .cursor = null } }, marks.start(0));
+    marks.record(.{ .offset = 0, .cursor = null, .admitted = 1 });
+    marks.record(.{ .offset = 40, .cursor = .{ .end = 9, .before_position = 7 }, .admitted = 7 });
+    try std.testing.expectEqualDeep(Marks.Start{ .joined = .{ .offset = 0, .cursor = null, .admitted = 1 } }, marks.start(0));
     try std.testing.expectEqual(@as(u64, 7), marks.start(10).joined.cursor.?.before_position);
     // Past every boundary, older pages continue before the newest one, not
     // the oldest and not none: rows between it and the front are the gap.
     try std.testing.expectEqual(@as(u64, 7), marks.start(41).gap.?.cursor.?.before_position);
     // An equal offset replaces the cursor rather than adding a boundary.
-    marks.record(40, .{ .end = 9, .before_position = 8 });
+    marks.record(.{ .offset = 40, .cursor = .{ .end = 9, .before_position = 8 }, .admitted = 8 });
     try std.testing.expectEqual(@as(usize, 2), marks.count);
     try std.testing.expectEqual(@as(u64, 8), marks.start(10).joined.cursor.?.before_position);
-    for (0..100) |index| marks.record(100 + index, .{ .end = 200, .before_position = 100 + index });
+    for (0..100) |index| marks.record(.{ .offset = 100 + index, .cursor = .{ .end = 200, .before_position = 100 + index }, .admitted = 100 + index });
     try std.testing.expectEqual(@as(usize, 64), marks.count);
     try std.testing.expectEqual(@as(u64, 136), marks.start(0).joined.offset);
     try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
