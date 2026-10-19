@@ -345,7 +345,9 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     // it still means Esc. Legacy ESC ESC already decodes as Esc.
     if (value.matches(Key.escape, .{}) or value.matches(Key.escape, .{ .alt = true })) return .close_view;
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
-    if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
+    // Alt-Enter adds a line in every form: Ghostty and other terminals send
+    // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
+    if (value.matches(Key.enter, .{ .shift = true }) or value.matches(Key.enter, .{ .alt = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
     if (value.matches(Key.page_up, .{}) or value.matches(Key.page_up, .{ .shift = true })) return .page_up;
     if (value.matches(Key.page_down, .{}) or value.matches(Key.page_down, .{ .shift = true })) return .page_down;
     if (value.matches(Key.up, .{ .shift = true })) return .scroll_up;
@@ -761,8 +763,8 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // modifyOtherKeys chords), Kitty with and without associated text, and
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
-    // Alt-Enter, as ESC CR or Kitty, neither sends the draft nor adds a line.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;3;13~" }) |chord| {
+    // Enter with Alt and another modifier is still a dropped chord.
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
@@ -829,9 +831,7 @@ test "a dropped chord reports itself as it arrives" {
     _ = editor.feed(&stream, 0x1b);
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '.'));
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\r'));
-    _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\n'));
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, 'x'));
     // ESC ESC waits for what follows; alone, it expires as one Esc.
     _ = editor.feed(&stream, 0x1b);
     _ = editor.feed(&stream, 0x1b);
@@ -1107,4 +1107,32 @@ test "word movement skips separators and stops at word edges" {
     try std.testing.expectEqualStrings(" two/三", storage[editor.cursor..editor.length]);
     try std.testing.expectEqual(Event.redraw, editor.moveWord(true));
     try std.testing.expectEqualStrings("/三", storage[editor.cursor..editor.length]);
+}
+
+test "Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter does" {
+    var storage: [64]u8 = undefined;
+    // ESC CR is Ghostty's Shift-Enter as captured (#538); ESC LF is the same
+    // key under ICRNL. Kitty and modifyOtherKeys Alt-Enter decode alike.
+    for ([_][]const u8{ "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[27;3;13~" }) |alt_enter| {
+        for ([_]bool{ true, false }) |allow_paste| {
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
+            var stream: Input = .{};
+            for ("onetwo\x1b[D\x1b[D\x1b[D") |byte| _ = editor.feed(&stream, byte);
+            for (alt_enter) |byte| {
+                const event = editor.feed(&stream, byte);
+                try std.testing.expect(event != .submit and event != .unbound);
+            }
+            try std.testing.expectEqual(Input.Pending.none, stream.pending());
+            try std.testing.expectEqualStrings("one\ntwo", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+            try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+        }
+    }
+    // A bare Esc that expires before Enter is Esc, then Enter: it sends.
+    var editor: Editor = .{ .buffer = &storage };
+    var stream: Input = .{};
+    for ("ok\x1b") |byte| _ = editor.feed(&stream, byte);
+    try std.testing.expect(try stream.expire());
+    try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
+    try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
 }

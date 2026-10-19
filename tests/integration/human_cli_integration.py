@@ -3937,8 +3937,9 @@ def renderer_cases():
             assert set((home / ".config/rui/requests").glob("*.json")) == records
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("\x1b", "Type a + Enter to allow once · d + Enter to deny")
-            # Alt-Enter at the choice decides nothing and says so.
-            tty.send("\x1b\r", "! Key combination not recognized; nothing authorized. Type a or d.")
+            # Shift-Enter as Ghostty sends it (ESC CR) adds a line to the
+            # choice, so a, then it, then Enter decides nothing.
+            tty.send("a\x1b\r\r", "! Choose a or d. Nothing authorized.")
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("a\r", marker)
             tty.wait(predicate=lambda: tty.capture.draft(draft + "?", len(draft) + 3), timeout=10)
@@ -3987,9 +3988,17 @@ def renderer_cases():
             requests = len(endpoint.requests)
             tty.send("o\x1b.\x1b ", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("o", 3))
             tty.send("k", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("ok", 4))
-            # Alt-Enter, as ESC CR, neither sends the draft nor swallows keys.
-            tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("ok", 4))
+            # Shift-Enter as Ghostty sends it (ESC CR), and ESC LF, add a line.
+            tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("", 2, prompt="  "))
+            tty.send("\x1b\n2", predicate=lambda: tty.capture.draft("2", 3, prompt="  "))
+            # A hand-typed Esc expires before Enter, which then sends.
+            marker = answer("esc then enter")
+            os.write(tty.master, b"\x1b")
+            time.sleep(0.3)
             assert len(endpoint.requests) == requests, endpoint.requests
+            tty.send("\r", marker)
+            submitted("ok\n\n2")
+            tty.send("ok", predicate=lambda: tty.capture.draft("ok", 4))
             marker = answer("alt chord")
             # Sent while browsing, the Message returns to the live view.
             tty.send("\x1b[A", "Browsing · Esc returns")
