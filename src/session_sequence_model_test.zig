@@ -538,7 +538,13 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         // A suffix is not a reachable Message: either every byte remains in
         // the frozen transcript or its exact canonical User identity is older.
         reachable[index] = std.mem.indexOf(u8, front.terminal.screen.browsing.text(), text) != null;
-        std.crypto.hash.sha2.Sha256.hash(text, &digests[index], .{});
+        // Independently encode the public content identity domain, not raw
+        // SHA-256 and not the production contentDigest implementation.
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(&.{ 0, 0, 0, 0, 0, 0, 0, 14 });
+        hash.update("rui/content/v1");
+        hash.update(text);
+        hash.final(&digests[index]);
     }
     var cursor = front.transcript_older;
     const requests: client.Requests = .{ .io = std.testing.io };
@@ -555,10 +561,12 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         }
         cursor = page.continuation();
     } else return error.HistoryDidNotDrain;
+    var all_reachable = true;
     for (reachable, 0..) |found, index| {
         if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript_older });
-        try std.testing.expect(found);
+        all_reachable = all_reachable and found;
     }
+    try std.testing.expect(all_reachable);
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {
