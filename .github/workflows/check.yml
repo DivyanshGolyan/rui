@@ -204,6 +204,9 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Verify origin source closure against trusted main, not its receipt.
+          fetch-depth: 0
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
@@ -214,7 +217,7 @@ jobs:
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
-      - name: Run selected targets or verify identical-tree evidence
+      - name: Run selected targets or verify matching-input evidence
         id: gates
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -287,6 +290,9 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Qualification and mixed process shards still execute on this head.
+          fetch-depth: 0
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}

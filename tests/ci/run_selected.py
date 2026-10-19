@@ -112,7 +112,7 @@ def main():
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
     parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
     parser.add_argument("--reuse-evidence", action="store_true",
-                        help="Verify identical-tree Actions evidence; never use for qualification")
+                        help="Verify matching-input Actions evidence; never use for qualification")
     args = parser.parse_args()
     targets = json.loads(args.targets)
     inputs = None
@@ -120,9 +120,13 @@ def main():
         import evidence
         try:
             inputs = evidence.identity(targets, args.check_part)
+            executed = {path: evidence.digest(path) for path in inputs["executables"]}
             if evidence.restore(inputs):
                 return
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        except Exception as error:
+            # Optional evidence crosses Git/API/archive/hash boundaries. Any
+            # failure runs the ordinary gates; never catch their failures here.
+            inputs = None
             print(f"Evidence unavailable; executing selected gates: {error}", flush=True)
     for batch in execution_batches(targets, args.check_part):
         print("Executing: " + " ".join(batch), flush=True)
@@ -160,8 +164,16 @@ def main():
                     print(f"Executed {' '.join(batch)}: failed (exit {result.returncode}). "
                           "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.", file=summary)
             raise SystemExit(result.returncode)
-    if inputs is not None and evidence.identity(targets, args.check_part) == inputs:
-        evidence.record(inputs)
+    if inputs is not None:
+        try:
+            unchanged = (evidence.identity(targets, args.check_part) == inputs and
+                         executed == {path: evidence.digest(path) for path in inputs["executables"]})
+            if unchanged:
+                evidence.record(inputs)
+            else:
+                print("Evidence not recorded: execution inputs or artifacts changed", flush=True)
+        except Exception as error:
+            print(f"Evidence not recorded after fresh execution: {error}", flush=True)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             print(f"Executed {', '.join(targets)} (partition {args.check_part}): passed. Fresh execution.", file=summary)
