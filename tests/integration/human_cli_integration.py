@@ -3462,6 +3462,8 @@ def renderer_cases():
                 shown = tty.wait("Type a + Enter to allow once · d + Enter to deny")
                 assert tty.capture.draft("", 2, prompt="> "), "unread choice text survived readiness"
                 tty.send("\n", "Type a + Enter to allow once · d + Enter to deny")
+                # The empty Enter rejects the choice, which becomes fresh again.
+                tty.ready(ready_read)
                 assert "printf approved > renderer-effect" in shown, shown
                 # Paging hid the Action's heading, so the choice keeps where it
                 # runs beside it; the opening frame showed that heading instead.
