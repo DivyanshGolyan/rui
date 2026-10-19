@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One Rui input stream after the renderer lands</title>
+<style>
+:root { color-scheme: light dark; --bg:#fff; --surface:#f6f7f9; --border:#e1e4ea; --line:#aeb6c4; --text:#1b1f27; --muted:#5d6675; --accent:#2f5fd0; --accent-soft:#eaf0fd; --ok:#1f7a4d; --bad:#b3261e; --warn:#8a5a00; }
+@media(prefers-color-scheme:dark) { :root { --bg:#14161a; --surface:#1c1f25; --border:#2c313a; --line:#566070; --text:#e7e9ee; --muted:#9ba3b1; --accent:#8fb0ff; --accent-soft:#1e2a47; --ok:#6fd3a0; --bad:#ff9d94; --warn:#f0c36a; } }
+* { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,sans-serif; } main { max-width:78rem; margin:auto; padding:2.5rem 1.25rem 7rem; } header,section { max-width:58rem; margin:0 auto 2.5rem; } h1,h2,h3 { line-height:1.25; text-wrap:balance; } h1 { font-size:2.2rem; } h2 { margin-top:2rem; font-size:1.5rem; } h3 { font-size:1.1rem; } p,ul,ol,figure,pre { margin:0 0 1rem; } a { color:var(--accent); } code,pre { font-family:ui-monospace,monospace; font-size:.9em; } code { overflow-wrap:anywhere; } pre { overflow:auto; padding:1rem; background:var(--surface); } .meta,.quiet,figcaption { color:var(--muted); font-size:.9rem; } .lede { font-size:1.2rem; } .facts { border:1px solid var(--border); border-radius:.6rem; overflow:hidden; } .facts p { margin:0; padding:.7rem 1rem; background:var(--surface); border-bottom:1px solid var(--border); } .facts p:first-child { background:var(--accent-soft); } .item { border:1px solid var(--border); border-radius:.6rem; padding:1rem; margin:1rem 0; } .tag { color:var(--accent); font-weight:700; margin-right:.4rem; } .chip { display:inline-block; border:1px solid var(--border); border-radius:1rem; padding:.1rem .6rem; font-size:.85rem; } .compare { display:grid; grid-template-columns:1fr 1fr; gap:1rem; } .viz { border:1px solid var(--border); border-radius:.6rem; padding:1rem; background:var(--surface); } .node { border:1px solid var(--line); padding:.7rem; text-align:center; background:var(--bg); } .node small { display:block; color:var(--muted); } .hot { border-color:var(--accent); background:var(--accent-soft); } .edge { text-align:center; color:var(--muted); padding:.3rem; } .table-wrap { overflow:auto; } table { border-collapse:collapse; width:100%; font-size:.93rem; } th,td { padding:.7rem; border:1px solid var(--border); text-align:left; vertical-align:top; } th { background:var(--surface); } td:first-child { min-width:8rem; } [id] { scroll-margin-top:1rem; } nav { display:flex; flex-wrap:wrap; gap:.5rem 1rem; margin:1rem 0; } details { margin:1rem 0; } summary { cursor:pointer; font-weight:600; } @media(max-width:42rem) { .compare { grid-template-columns:1fr; } h1 { font-size:1.8rem; } main { padding:1rem .8rem 6rem; } }
+</style>
+</head>
+<body>
+<main>
+<header id="top">
+<p class="meta">Design proposal · DivyanshGolyan/rui · 19 October 2026 · v1</p>
+<h1>One Rui input stream after the renderer lands</h1>
+<p class="lede">Keep vaxis as the terminal decoder. Consolidate Rui's framing, semantic normalization and input deadlines in <code>TerminalInput</code>, then bind recovery alongside other decoded keys.</p>
+<p><span class="chip">Proposed, not implemented</span> <span class="chip">Implementation only after renderer landing and authorization</span></p>
+<div class="facts">
+<p id="summary-ask"><strong>Needs from Divyansh:</strong> accept or redirect Q1, Q2 and Q3 before implementation. Recommendations below are design defaults, not permission to implement.</p>
+<p id="summary-base"><strong>Base:</strong> published <code>wip/sole-renderer-h</code> at <a href="https://github.com/DivyanshGolyan/rui/commit/f15c2b57dea17a92b60a0bfcefed6e77b7e1ea87">f15c2b57</a>. Design branch <code>design/input-stream-after-renderer</code>. This proposal does not alter the accepted Architecture or frozen qualification.</p>
+<p id="summary-done"><strong>Scope:</strong> one invocation-local stream adapter used by the full-screen frontend and one-shot terminal chooser. No libvaxis rewrite, Host change, persistent format, compatibility path or preservation of broken input behavior.</p>
+<p id="summary-size"><strong>Estimate:</strong> 2–3 engineer-days after decisions and renderer landing, medium confidence, including focused implementation and evidence. Native platform qualification scheduling is additional. No implementation or native campaign runs in this design task.</p>
+</div>
+<nav aria-label="Contents"><a href="#ownership">Ownership</a><a href="#semantics">Encoding contract</a><a href="#deadlines">Deadlines</a><a href="#recovery">Recovery</a><a href="#custody">Errors and custody</a><a href="#tests">Tests</a><a href="#decisions">Decisions</a><a href="#evidence">Evidence and review</a></nav>
+</header>
+
+<section id="ownership">
+<h2>One adapter owns the stream; consumers own actions</h2>
+<figure id="fig-ownership">
+<div class="compare">
+<div><h3>At the renderer base</h3><div class="viz">
+<div class="node">Terminal reads<small>Two independent timeout implementations</small></div>
+<div class="edge">↓ raw Ctrl-R shortcut in frontend</div>
+<div class="node">TerminalInput + vaxis<small>Framing, paste provenance, some aliases</small></div>
+<div class="edge">↓ vaxis events</div>
+<div class="node">Selected editor + frontend<small>Bindings, other aliases, raw one-shot Backspace shortcut</small></div>
+</div></div>
+<div><h3>Proposed after landing</h3><div class="viz">
+<div class="node">Terminal reads<small>Readiness, monotonic observations, mode custody</small></div>
+<div class="edge">↓ bytes or observed empty input</div>
+<div class="node hot">One TerminalInput adapter + vaxis<small>Framing, provenance, normalized units, deadline policy</small></div>
+<div class="edge">↓ ordered semantic units</div>
+<div class="node">Selected editor + frontend<small>Editing and exact-original recovery policy</small></div>
+</div></div>
+</div>
+<figcaption>The adapter surrounds vaxis where framing requires it. “After vaxis” means semantic normalization follows decoding, not a second generic escape parser.</figcaption>
+</figure>
+<div class="item" id="owner-stream"><h3><span class="tag">D1</span>Extend the existing owner</h3>
+<p><code>TerminalInput</code> owns the vaxis parser, undecoded bytes, consumed suffix, paste state and deadline state. It survives draft-bank switches and choice-editor replacement. One-shot <code>readLine</code> owns an instance for its terminal-custody interval; separate processes do not share state.</p>
+<p>The adapter frames complete UTF-8 scalars and X10 mouse reports, preserves double-ESC suffixes and the DECRPM set/reset facts vaxis loses, and honors vaxis's consumed count. A consumed unknown sequence never becomes typed suffix text. Existing bounded vaxis safety patches remain decoder maintenance, not a new Rui parser architecture.</p></div>
+<div class="item" id="owner-interface"><h3><span class="tag">D2</span>Keep the stream interface small</h3>
+<p>Evolve the existing <code>feed</code>, <code>next</code>, <code>pending</code> and <code>expire</code> interface rather than introduce another event loop. <code>feed(byte, observed_at)</code> advances byte custody. <code>next()</code> drains retained suffix units before another byte. A wait-state query returns the pending kind and absolute deadline. Expiry consumes an <em>observed-empty</em> fact and its monotonic time, not elapsed time alone.</p>
+<p>Returned units distinguish key press, key release, paste boundaries, literal paste text, terminal report, ignored complete input and invalid input. They carry typed-versus-pasted provenance. Keys retain identity, modifiers and associated text; they are not editor commands. Escape expiry produces an ordinary decoded Escape through this same interface, never a direct navigation callback.</p>
+<p><code>SessionTerminal</code> owns reads, polling, terminal modes and restoration, but no duration constants or pending-input clock. The one-shot reader uses the same policy. <code>TerminalEditor</code> owns edits and validation. <code>SessionFrontend</code> selects the displayed editor, applies contextual bindings and invokes <code>SessionSubmission</code>; it never recognizes recovery from a raw byte.</p></div>
+</section>
+
+<section id="semantics">
+<h2>Equivalent encodings produce equivalent editor outcomes</h2>
+<p id="semantic-contract">For a fixed initial draft, cursor, editor, consent state and submission state, supported encodings of the same semantic key produce the same edit, navigation, rejection or recovery request. Compare the draft bytes, cursor, emitted actions and exact submission identity, not only whether nearby text survives. Terminal-transformed keys with identical received bytes cannot be distinguished.</p>
+<div class="table-wrap"><table id="encoding-table">
+<thead><tr><th>Semantic unit</th><th>Supported byte encodings</th><th>Proposed outcome</th></tr></thead>
+<tbody>
+<tr id="encoding-recovery"><td>Ctrl-R</td><td><code>12</code> hex; <code>ESC[114;5u</code>; <code>ESC[27;5;114~</code>, with or without valid associated text where supported</td><td>One recovery binding in the full-screen context. Never insert associated text. Key release does nothing.</td></tr>
+<tr id="encoding-backspace"><td>Backspace / Alt-Backspace</td><td>Raw <code>08</code> or <code>7f</code>; CSI-u <code>127</code>; case27 code <code>127</code>. Prefix ESC or encode Alt modifier <code>3</code> for Alt.</td><td>Backspace deletes a grapheme. Alt-Backspace deletes the preceding word. <code>ask src/foo-bar</code> becomes <code>ask src/foo-</code>, unlike Ctrl-W's <code>ask </code>.</td></tr>
+<tr id="encoding-enter"><td>Enter / Ctrl-J</td><td>Raw CR or LF; CSI-u <code>13</code> or <code>106;5</code>; case27 code <code>13</code> or Ctrl-J</td><td>Enter submits. Deliberately normalize Ctrl-J to Enter across encodings because the current termios path retains ICRNL. Pasted newline is separate data.</td></tr>
+<tr id="encoding-alt-enter"><td>Alt-Enter / Shift-Enter</td><td><code>ESC CR</code>, <code>ESC LF</code>, CSI-u <code>13;3u</code>, case27 <code>27;3;13~</code>; Shift-Enter via modifier <code>2</code></td><td>Q1 recommends newline insertion in the composer for both chords. Neither submits. A one-letter chooser rejects multiline input.</td></tr>
+<tr id="encoding-utf8"><td>Printable Unicode / unbound Alt</td><td>UTF-8 <code>c3 a9</code>; CSI-u <code>233u</code> or valid associated text; Alt via <code>ESC</code> + full scalar or encoded modifiers</td><td>Plain é inserts é. Alt-é is one unbound chord, retaining the surrounding draft. Never insert a trailing UTF-8 byte or its bare text.</td></tr>
+<tr id="encoding-controls"><td>Other controls and modifiers</td><td>Raw C0, Tab and DEL; corresponding encoded control identities; navigation CSI/SS3 and CSI-u keys</td><td>Normalize ground-control aliases once, preserving additional modifiers. Ctrl-C interrupts; Ctrl-D keeps empty-draft exit versus forward-delete behavior. Unbound Ctrl rejects the attempt; unbound Alt/Super/Hyper/Meta drops the whole chord visibly.</td></tr>
+<tr id="encoding-paste"><td>Marked paste / terminal report</td><td><code>ESC[200~</code> … <code>ESC[201~</code>; DECRPM, OSC/APC, mouse reports</td><td>Paste is literal validated text, never keys or recovery. Reports never reach an editor. Unknown complete reports are consumed; valid trailing text remains available.</td></tr>
+</tbody></table></div>
+<div class="item" id="semantic-normalization"><h3><span class="tag">D3</span>Normalize identity without discarding intent</h3>
+<p>Raw C0 and encoded C0 aliases use the same ground-key mapping, including BS/DEL, CR, LF and Tab. Explicit Ctrl-I aliases Tab; explicit Ctrl-J aliases Enter, consuming only the Ctrl bit that defines that alias. Preserve additional Shift, Alt and other meaningful modifiers rather than stripping them to force equivalence. Case/layout metadata from CSI-u remains available for binding comparisons; do not lowercase ordinary inserted text.</p>
+<p>Unmodified printable CSI-u or case27 without associated text synthesizes the Unicode scalar's text, after scalar validation. If valid associated text is present, use it for ordinary insertion. Bound control and modified chords consume or reject that text with the key. Lock bits are metadata rather than command modifiers. Press and repeat apply the binding; release does not edit or recover. The current vaxis pin collapses repeat into press, so no repeat-specific recovery semantics are promised.</p>
+<p>Q2 recommends a narrow recognizer for complete <code>CSI 27;modifier;code~</code> inside the same adapter. Parse bounded decimal fields, valid scalar range and allowed modifier bits; map the result into the same key normalizer. It must precede vaxis's silent consumption of case27, not inspect a lost key afterward. Generic CSI-u, reports and other escape grammar stay with vaxis. This is support for a terminal encoding, not an old-Rui compatibility mode.</p></div>
+<div class="item" id="semantic-escape"><h3><span class="tag">D4</span>Preserve every ESC prefix</h3>
+<p>For ESC followed by a non-introducer key, wait for its complete scalar or ground control, decode it as if alone, then add Alt. Do not send vaxis's raw two-byte Alt fallback a partial UTF-8 scalar. <code>o ESC . k</code> leaves <code>ok</code>; <code>ESC CR</code> is one Alt-Enter, never an abandoned prefix plus a submission.</p>
+<p>On a second ESC, emit the first as Escape and retain the second as a fresh prefix. Thus <code>ESC ESC [200~</code> is Escape followed by paste start, and <code>ESC ESC [A</code> is Escape followed by Up. Two ESCs with no suffix eventually produce two Escapes, not the base's single expired Escape. Encoded Alt-Escape retains Alt identity; the frontend may bind it to the same close-view action without calling the encodings identical.</p></div>
+</section>
+
+<section id="deadlines">
+<h2>Expire input only after an actual empty read</h2>
+<div class="item" id="deadline-policy"><h3><span class="tag">D5</span>Use one 80 ms / 2 s inactivity policy</h3>
+<p>Keep the existing durations as proposed defaults: 80 ms for a bare ESC and 2 s for an incomplete sequence, UTF-8 scalar or open paste. Each successfully observed byte advances the adapter's inactivity clock. Completing input clears the deadline; changing from bare ESC to recognized incomplete input selects 2 s from that byte. Retained suffix bytes keep their original observation time, not the later time when <code>next()</code> processes them.</p>
+<p>First drain adapter output and retained bytes. Then attempt a nonblocking terminal read. A byte wins over an overdue timer. Only <code>EAGAIN</code> or a zero-ready poll followed by a nonblocking read that confirms no byte permits expiry at or beyond the deadline. EOF and I/O errors are separate outcomes. Spurious readiness, interrupted polls, redraws, editor changes and polling quanta never renew input inactivity.</p>
+<p>The reader waits for the lesser of its caller's service budget and the adapter's remaining deadline, rounding poll time up to milliseconds and rechecking monotonic time afterward. Exhausting a service budget means “not yet serviced”, never “input empty”. No deadline applies in the ground state. Empty open paste remains pending even when no scalar bytes are buffered.</p></div>
+<p id="deadline-io">Both terminal readers need nonblocking reads to make the empty observation truthful after spurious readiness. Full-screen already owns nonblocking descriptor flags. The one-shot owner must save and restore its input flags within its existing cleanup, independently of termios restoration and output drain. Changing the read discipline must not change its pre-choice flush or return success before cleanup succeeds.</p>
+<figure id="fig-deadline"><div class="viz">
+<div class="node">ESC observed at t = 0<small>Deadline t = 80 ms</small></div>
+<div class="edge">↓ rendering delays the next service until t = 150 ms</div>
+<div class="node hot">Try a nonblocking read first<small>Readable “[A”: finish Up · Empty: emit Escape</small></div>
+<div class="edge">↓ one shared policy in both readers</div>
+<div class="node">No invented arrival timestamp<small>Late-arriving but already queued bytes win too</small></div>
+</div><figcaption>Buffering time is time spent in an incomplete stream. Processing delay is time when the owner cannot service it. Wall-clock delay alone cannot distinguish them.</figcaption></figure>
+<p id="deadline-limit">Q3 makes this readiness rule explicit. Rui cannot know whether a queued byte arrived before or after the nominal deadline while rendering was blocked. It chooses available bytes over retrospective expiry. Therefore 80 ms and 2 s are inactivity decisions at service boundaries, not total invocation deadlines or scheduler-latency guarantees. Continuous input can keep a paste open, with bounded memory; external interruption still restores the terminal.</p>
+<p id="deadline-consent">Escape expiry only releases decoder custody and emits Escape. It does not make an Action fresh. After handling it, consent still needs the current complete prompt write, no pending stream state and an independently observed empty input boundary. A spent byte-service budget or redraw cannot grant readiness.</p>
+</section>
+
+<section id="recovery">
+<h2>Recovery binds a decoded Ctrl-R to the original request</h2>
+<div class="item" id="recovery-binding"><h3><span class="tag">D6</span>Keep command policy out of the adapter</h3>
+<p>The full-screen frontend handles a typed Ctrl-R press after normalization and before passing an unbound control to the editor. With no active consent it calls the existing original-bound <code>requestRecovery</code>. With consent active but its Action hidden, it preserves the draft, invalidates choice readiness and displays the existing return-to-Action notice. With the Action visible it follows the existing choice rejection policy, without a recovery request.</p>
+<p>The submission owner remains authoritative for idle no-op, deferred Admission recovery, acceptance/discard retirement, retained rejection and exact Store/Session/key/content identity. Key normalization cannot resend work, select another original or transfer a gesture to a successor. Pasted Ctrl-R and key-release reports cannot request recovery. One-shot provider choice has no recovery command; Ctrl-R remains an invalid choice through ordinary editor policy.</p></div>
+<p id="recovery-fastpath">The one-shot reader's raw BS/DEL fast path and raw-byte “may edit” classification move behind decoded editing outcomes. Repaint batching may combine equivalent deletions but cannot skip semantic handling. Keep its separate drain/flush prompt boundary and full-screen's decoder-aware readiness boundary. Sharing stream semantics does not merge those terminal-custody contracts.</p>
+</section>
+
+<section id="custody">
+<h2>Retain bounded custody until a safe end</h2>
+<div class="item" id="custody-resources"><h3><span class="tag">D7</span>No event queue or second draft copy</h3>
+<p>One adapter owns a 4,096-byte undecoded-frame buffer, its existing vaxis parser and a few timestamps per active terminal invocation. Completed paste text streams directly to the selected editor's existing storage; paste never accumulates as a whole in the adapter. The full-screen owner's two 65,536-byte draft banks and command snapshot remain separate. A choice retains its existing 64-byte capacity. No per-Session or dormant-population allocation appears.</p>
+<p>Returned text borrows adapter bytes or vaxis scratch only until the next <code>feed</code>, <code>next</code> or expiry mutation. Apply it synchronously before advancing. Any actual asynchronous consumer must copy into its already-owned bounded destination, not retain the borrowed slice. Terminal replies use no OSC-52 payload allocation. Measure parser size and stack footprint at implementation time rather than call these bounds measured RSS savings.</p></div>
+<div class="item" id="custody-errors"><h3><span class="tag">D8</span>Rejected input never becomes an accepted prefix</h3>
+<p>Complete malformed input, unsupported modifier values, invalid UTF-8 and semantic editor overflow reject the active attempt. Rejection remains sticky until its ordinary unpasted line end; then full-screen clears only active composition and one-shot returns its typed error. A sealed original and the other draft bank remain intact. Unknown complete sequences that vaxis intentionally consumes without an event are ignored, not reinterpreted as text.</p>
+<p>Incomplete expiry, undecoded-frame overflow, or a parser error with no trustworthy consumed count is fatal for the terminal-custody interval. Restore the terminal before returning the typed failure. This deliberately avoids guessing a frame boundary after arbitrary lost bytes. EOF with a partial scalar, sequence or paste is incomplete input, never a successful line. Empty ground-state EOF keeps the consumer's existing empty-versus-nonempty-line contract.</p>
+<p>Inside paste, retain custody through the exact end delimiter even after invalid content or draft overflow. Nested paste start and encoded keys/reports are invalid literal content, not terminal events. A replacement editor that did not observe this paste start rejects its remainder. No timeout, editor reset or newline can turn a paste tail into fresh consent.</p>
+<p>Outside paste, raw Ctrl-C or Ctrl-D can abort a partial frame and deliver the normalized cancellation key. An ordinary CR/LF interrupting an incomplete non-Alt frame rejects that attempt rather than submitting the old draft. A Ctrl-R embedded in an unfinished frame is not a recovery gesture. Encoded keys embedded inside a malformed outer frame are not promised the same meaning as clean ground-state keys. These interruption rules belong to framing, not a raw frontend shortcut.</p></div>
+</section>
+
+<section id="tests">
+<h2>Test the same bytes through the adapter and real consumers</h2>
+<div class="item" id="test-interface"><h3><span class="tag">T1</span>Share expectations, not implementation-derived answers</h3>
+<p>TD2 owns <code>src/terminal_input_equivalence_test.zig</code> and optional <code>tests/integration/input_equivalence.py</code> on <code>td2/input-equivalence</code>. TD4 owns <code>tests/qualification/direct-pty/</code> on <code>wip/td4-direct-pty</code>. Coordinate by stable case names and explicit contracts. Their current-base failures remain current-base findings, not obligations to implement this proposal before landing.</p>
+<p id="test-td2-current">TD2 reports a 44-row, four-lane <code>Wire{bytes|unavailable(reason)}</code> matrix with independent before/caret/after, expected cursor, editor Event and submission count, exercised at every byte split in ordinary and choice editors. Retain unavailable reasons. Kitty named navigation uses real CSI letter/tilde sequences; case27 has no navigation-keypad encoding. Legacy Shift-Enter transformed into CR is explicitly non-equivalent, not an available newline encoding. Matrix runtime results are pending at this design revision.</p>
+<p>A future case records <code>id, encoding, bytes_hex, chunks, observed_at, empty_observations, initial_draft, cursor, editor_kind, consent_state, submission_state, expected_units, expected_draft, expected_cursor, expected_actions</code>. Provenance and press/release belong in expected units. Timing observations use relative monotonic time. Encodings with different semantic meaning have different expected outcomes, even when they look alike.</p>
+<p>DirectPTY additionally records exact write chunks and send times, prompt/readiness witnesses, captured Message or Decision bytes and identity, terminal transcript bytes, interpreted cursor/screen assertions, exit outcome and restored attributes. Sender timestamps prove injection, not kernel arrival or owner-read time. A transcript alone cannot prove no capture; an unchanged final string cannot prove no transient recovery. Count captures, mutation exchanges and recovery actions independently.</p></div>
+<details id="test-td4-current"><summary>TD4's current interface, separately from the future observation contract</summary>
+<p>The owner reports <code>matrix.py BINARY --output fresh_dir --jobs 4 --vectors JSON --row NAME</code>. Each vector contains <code>name</code>, <code>scenario: editor|expiry|recovery</code>, <code>chunks: [{hex, delay_before}|{resize:[columns,rows]}]</code> and exact submitted <code>expected</code> text. Delays are seconds. <code>DirectPty.send</code> writes directly to the PTY master without tmux.</p>
+<p>It retains successful writes in <code>input.bin</code>, raw <code>output.bin</code> and <code>stderr.bin</code> before parsing, and monotonic launch/input/committed-observation/resize/retirement records in <code>events.jsonl</code>. <code>ScreenCapture</code> checks committed draft and caret. Its asymmetric recovery fixture checks exact original same-key/body replay and next draft <code>cafXYé!</code> with its non-tail cursor.</p>
+<p>Ordinary 20 ms fragments, 150 ms ESC and current 2 s incomplete cases exercise existing behavior. These send clocks do not establish kernel arrival, delayed renderer service or readiness-before-expiry precedence. T4 requires deterministic read/empty observations at the future owner interface, followed by a focused held-service integration if a suitable production seam exists. TD4's reported interface is not yet runtime-witnessed here, and no changes to its frozen qualification are requested.</p>
+</details>
+<div class="table-wrap"><table id="test-matrix"><thead><tr><th>Case family</th><th>Independent expected result</th><th>Counterexample to reject</th></tr></thead><tbody>
+<tr id="test-equivalence"><td>T2 · key encodings</td><td>For each encoding in the semantic table, assert events and outcomes from asymmetric drafts. Ctrl-R raw/CSI-u/case27 requests the same original; Alt-Backspace + Z gives <code>first Z</code>.</td><td>CSI-u recovery invalidates the draft; case27 disappears; associated text inserts <code>r</code> or approves <code>a</code>.</td></tr>
+<tr id="test-fragmentation"><td>T3 · all split points</td><td>Split each supported short frame at every boundary, including UTF-8 and paste markers. With no real empty expiry, concatenated versus fragmented input yields the same ordered units and editor outcome. Drain retained suffix after each unit.</td><td>Consume only the prefix; lose the next key; borrow text after scratch reuse; reset parser during editor switch.</td></tr>
+<tr id="test-timing"><td>T4 · deadline boundaries</td><td>Fake monotonic time just before, exactly at and after 80 ms / 2 s; distinguish byte-ready, EAGAIN, spurious readiness, interrupted poll, zero service budget and EOF. Buffered suffix keeps its observation time.</td><td>Check expiry before ready input; reset the clock on polling or decoding; give a fresh full timeout per wait; infer empty input from budget exhaustion.</td></tr>
+<tr id="test-double-escape"><td>T5 · ESC and paste</td><td>Double-ESC + arrow/paste preserves suffix; two isolated ESCs emit twice. Marked <code>a</code>, Ctrl-R, nested markers, invalid UTF-8 and mid-paste editor replacement never approve or recover.</td><td>Drop second ESC, release paste custody on invalid input, or call consent-ready directly on expiry.</td></tr>
+<tr id="test-limits"><td>T6 · bounds and disposal</td><td>4,095/4,096/4,097-byte frames distinguish complete versus still incomplete; 127/128/129-byte associated text probes vaxis scratch; 65,536 UTF-8 draft bytes accept and 65,537 reject. Fatal paths restore modes and flags; rejected attempt creates no capture and preserves the sealed original.</td><td>Silently truncate, retry malformed data as text, return an accepted line before cleanup, or reset the original loan.</td></tr>
+<tr id="test-contexts"><td>T7 · real contexts</td><td>Composer, visible fresh choice, not-yet-ready choice, hidden Action and one-shot chooser have explicit different policies. Test idle, held Admission, uncertain original, accepted original and successor recovery.</td><td>Apply global Ctrl-R in a chooser, recover on release/paste, transfer queued recovery to a later original, or accept pre-prompt input.</td></tr>
+</tbody></table></div>
+<p id="test-mutations">Before keeping a regression, demonstrate a plausible wrong transition going red at its semantic assertion. Canonical mutations include restoring the raw recovery shortcut, ignoring case27, expiring before the nonblocking read, renewing on poll, discarding double-ESC suffix, treating pasted Ctrl-R as typed and bypassing semantic Backspace in one-shot. Restore mutations before final checks.</p>
+<p id="test-gates">Future implementation runs <code>test-logic</code>, <code>check</code> and <code>admission-debug-integration</code> for the affected terminal/frontend owners on both supported platforms, as selected by <code>tests/ci/select_tests.py</code>. Include focused TD2 and directPTY cases without changing the frozen catalog here. Real emulator checks distinguish screen/cursor evidence from byte-only PTY evidence. No build, native, Mac-runner or hostedMac campaign is authorized or executed by this design task.</p>
+</section>
+
+<section id="decisions">
+<h2>Three product choices need acceptance before implementation</h2>
+<div class="item" id="q-alt-enter"><h3><span class="tag">Q1</span>Make Alt-Enter a newline chord?</h3>
+<p><strong>Recommend yes.</strong> Normalize raw ESC-CR/LF, CSI-u Alt-Enter and case27 Alt-Enter to one chord that inserts a composer newline, like Shift-Enter. The base drops Alt-Enter but inserts a newline for Alt-Ctrl-J; preserving that difference defeats equivalence. Alternative: drop all Alt-Enter variants as unbound, retaining Shift-Enter alone. Either choice must never submit a prefix. This is a proposed behavior change, not already accepted Architecture.</p></div>
+<div class="item" id="q-case27"><h3><span class="tag">Q2</span>Support modifyOtherKeys case27 now?</h3>
+<p><strong>Recommend the narrow adapter recognizer.</strong> It gives all three encodings the same key semantics without changing generic vaxis decoding. Alternative: explicitly classify case27 as unsupported and report it visibly; then exclude it from supported equivalence claims. Silently consuming it is not support. Do not add a negotiation mode or fallback parser for old Rui clients.</p></div>
+<div class="item" id="q-readiness"><h3><span class="tag">Q3</span>Prefer queued bytes over retrospective timeout?</h3>
+<p><strong>Recommend yes.</strong> Service readable input before expiring the pending frame, with 80 ms / 2 s as inactivity defaults. This tolerates renderer scheduling delay but may join a genuinely late suffix. Alternative: elapsed-time-first expiry splits queued chords after slow processing. Precise arrival-based expiry would require a different timestamped acquisition owner and queue, beyond this consolidation. No such machinery is proposed.</p></div>
+<p id="decisions-resolved">The design otherwise chooses one stream owner, post-decode contextual recovery, two events for two isolated ESCs, fatal unknown-boundary framing failure and no compatibility paths. These are reviewable recommendations in this proposal. They do not silently amend canonical contracts.</p>
+</section>
+
+<section id="risks">
+<h2>Keep the consolidation bounded</h2>
+<ul>
+<li id="risk-icrnl"><span class="tag">R1</span>ICRNL can erase physical Enter versus Ctrl-J distinctions before Rui reads input. The contract is received semantic input, not physical-key identity. A future termios change requires its own design and evidence.</li>
+<li id="risk-decoder"><span class="tag">R2</span>The pinned decoder can discard information, including repeat identity and DECRPM status. Retain only the narrow facts current consumers require; do not grow a parallel generic parser.</li>
+<li id="risk-platform"><span class="tag">R3</span>PTY injection cannot establish what a physical terminal or tmux emits. TD4 records route availability and exact bytes. Lossy terminal routes remain unavailable or distinct, not normalized into a false match.</li>
+</ul>
+<details id="alternatives"><summary>Alternatives rejected for this scope</summary><p>Replacing libvaxis would reimplement terminal protocols without fixing scattered action policy. Adding a second parser wrapper or deadline helper beside <code>TerminalInput</code> would leave two mutable owners. A global command normalizer would confuse one-shot choices with recovery and consent. A timestamped input thread and queue could improve arrival measurement but adds concurrency, copying and shutdown custody without a current requirement.</p></details>
+<p id="out-of-scope">Out of scope: displayed-view projection redesign, renderer layout, approval state-machine redesign, Store/Host changes, capability negotiation, key remapping settings, old-format readers, migrations, canonical Architecture edits and qualification-ledger changes. After renderer landing, rebase the design onto its actual landed successor and recheck changed contracts before requesting implementation authority.</p>
+</section>
+
+<section id="evidence">
+<h2>Source-grounded design, not runtime qualification</h2>
+<p id="source-audit">The <a href="https://ampcode.com/threads/T-01a15237-583d-7509-b948-d9a5b963f104">completed audit</a> inspected renderer <code>52ee5d4</code>, not this base. This proposal separately inspected <code>f15c2b57</code> and confirmed the same input ownership split. No historical audit result is claimed as a current-head runtime pass.</p>
+<details id="source-paths"><summary>Source references at the exact base</summary>
+<ul>
+<li><code>src/TerminalInput.zig</code>, <code>pending/expire/feed/alt/decode</code>: 4-KiB framing, borrowed text, paste provenance, double-ESC and report handling.</li>
+<li><code>src/SessionTerminal.zig:201–219</code>: checks elapsed time before read and resets <code>pending_at</code> on each byte. <code>src/TerminalEditor.zig:152–193</code> independently polls 80/2000 ms and fast-paths raw Backspace.</li>
+<li><code>src/SessionFrontend.zig</code>, <code>step</code>: two raw-byte Ctrl-R branches precede <code>stream.feed</code>. <code>TerminalEditor.key</code> otherwise treats Ctrl-R as unbound Ctrl.</li>
+<li><code>src/SessionInput.zig</code>: stream survives editor resets; invalid completed attempts clear only active composition. <code>src/SessionSubmission.zig</code> and <code>src/session_consent.zig</code> retain recovery and readiness authority.</li>
+<li><code>build.zig.zon:35–37</code>, <code>build.zig:1000–1042</code>, <code>src/vaxis-parser.patch</code>: pinned vaxis <code>d4c3b366</code> with Rui's bounded safety patches. <a href="https://github.com/rockorager/libvaxis/blob/d4c3b3666e0c090e2b5092ca09893c6db15e0b79/src/Parser.zig#L505-L538">Upstream case27 is absent</a>; <a href="https://github.com/rockorager/libvaxis/blob/d4c3b3666e0c090e2b5092ca09893c6db15e0b79/src/Parser.zig#L642-L728">CSI-u decoding</a> retains modifiers and associated text.</li>
+<li><code>ARCHITECTURE.md</code>, Staged persistent input and Human entry: current recovery, fatal incomplete input, separate one-shot flush, exact approval and custody contracts. <code>VERIFICATION.md</code>, Canonical gates and bounded-editor cases: minimum evidence and current limits.</li>
+</ul></details>
+<p id="partners">Contract partners: <a href="https://ampcode.com/threads/T-01a15281-fcf2-721d-836b-5b2cea706327">TD2 input equivalence</a> and <a href="https://ampcode.com/threads/T-01a15282-1091-72cf-aad2-f09b8b9e185a">TD4 directPTY</a>. Direct coordination requested on semantic units, fragmentation/expiry and byte/outcome/transcript records. Their source changes are not included in this branch.</p>
+<div class="item" id="review-record"><h3>Review record</h3><p>Pending bounded GPT-6.1 Sol read-only design review. Review scope includes ownership, counterexamples, equivalent outcomes, readiness and user journeys. Reviewer interpretation uses Rich Hickey's separation of independent concerns, not a claim of his endorsement. No external-agent/Claude, Mac or native execution is requested.</p></div>
+<p id="delivery-record">Design validation and final publication status will be recorded here before handoff. The proposal is the only intended tracked change. Publication is limited to the design branch, with no PR, merge, deployment or implementation authority.</p>
+</section>
+</main>
+</body>
+</html>
