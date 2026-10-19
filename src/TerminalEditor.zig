@@ -341,7 +341,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
     if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
-    // A quick double Esc arrives as Alt-Escape; it still means Esc.
+    // Kitty reports a quick double Esc as Alt-Escape; it still means Esc.
     if (value.matches(Key.escape, .{}) or value.matches(Key.escape, .{ .alt = true })) return .close_view;
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
     if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
@@ -368,20 +368,18 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
     if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
     // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
-    // on a character or a named key such as Enter, is dropped whole and
-    // reported. Its bare key (ESC . as ".", ESC CR as Enter) was never typed,
-    // and the draft around it was: an Esc pressed just before a key arrives
-    // as one chord.
+    // on a character, a control or a named key such as Enter, is dropped
+    // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
+    // never typed, and the draft around it was: an Esc pressed just before
+    // a key arrives as one chord.
+    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .unbound;
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
-    // those are not text, so they reject the input, with or without Alt.
-    // LF is Enter here: the terminal keeps ICRNL, so ESC CR (Alt-Enter)
-    // arrives as ESC LF, which vaxis reports as Alt on codepoint LF.
-    const control = value.codepoint < 0x20 and value.codepoint != Key.enter and value.codepoint != '\n' and value.codepoint != Key.tab and value.codepoint != Key.escape;
+    // those are not text, so an unbound one rejects the input.
+    const control = value.codepoint < 0x20 and value.codepoint != Key.enter and value.codepoint != Key.tab and value.codepoint != Key.escape;
     if (value.mods.ctrl or control) {
         self.reject(.invalid);
         return .none;
     }
-    if (value.mods.alt or value.mods.super or value.mods.hyper or value.mods.meta) return .unbound;
     if (!validScalar(value.codepoint, false)) {
         self.reject(.invalid);
         return .none;
@@ -763,7 +761,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
     // Alt-Enter, as ESC CR or Kitty, neither sends the draft nor adds a line.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A" }) |chord| {
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
@@ -947,8 +945,7 @@ test "unknown CSI retains following text; malformed input and marked choice reje
     }
     for ([_][]const u8{
         "invalid\x00x", "invalid\x12x", "invalid\x1cx",
-        "a\x1b[0u",     "a\x1b[28u",    "a\x1b[28;3u",
-        "a\x1b\x00",
+        "a\x1b[0u",     "a\x1b[28u",
     }) |input| for ([_]bool{ true, false }) |allow_paste| {
         editor = .{ .buffer = &storage, .allow_paste = allow_paste };
         for (input) |byte| _ = editor.feed(&stream, byte);
