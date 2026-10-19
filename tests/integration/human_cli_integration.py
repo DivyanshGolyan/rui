@@ -3502,7 +3502,7 @@ def renderer_cases():
                 # A malformed key (bad modifier, event type or code) is a key
                 # whose meaning was lost: it fails closed the same way rather
                 # than being skipped so that the a before it decides.
-                for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u"):
+                for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u", "\x1b[+27;1;13~"):
                     tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
                     tty.send(recover + "\n", "Decision input rejected")
                     tty.ready(ready_read)

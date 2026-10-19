@@ -1437,7 +1437,7 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
     }) |case| {
         var stream: TerminalInput = .{};
         var found: ?bool = null;
-        for (case.bytes) |byte| switch (stream.feed(byte)) {
+        for (case.bytes) |byte| switch (stream.feed(byte, 0)) {
             .event => |decoded| found = isRecovery(decoded.event),
             else => {},
         };

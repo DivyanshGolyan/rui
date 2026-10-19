@@ -373,6 +373,16 @@ test "modified kitty text cannot become an ordinary permission choice" {
             try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
         }
     }
+    // A malformed key fails closed even where its damaged number would name
+    // Enter or a function key: the choice is rejected at its line end, never
+    // submitted early or left standing as typed.
+    for ([_][]const u8{ "\x1b[+27;1;13~", "\x1b[1:999;1P", "\x1b[+11;1~", "\x1b[114;999u", "\x1b[13;0u" }) |malformed| {
+        var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
+        var stream: Input = .{};
+        _ = editor.feed(&stream, 'a');
+        for (malformed) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
+        try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
+    }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
         var sequence: [32]u8 = undefined;
         const input = try std.fmt.bufPrint(&sequence, "\x1b[97;{d};97u", .{modifier});
