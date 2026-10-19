@@ -218,16 +218,19 @@ def restore(inputs):
     # Scope to this exact workflow/event/branch and input hash. Missing/expired
     # evidence, unavailable API or cache identity means run, never accept.
     artifacts = api(f"repos/{repository}/actions/artifacts?name={name(inputs)}&per_page=20")["artifacts"]
-    for artifact in artifacts:
-        if artifact["expired"] or artifact["size_in_bytes"] > 256 * 1024 * 1024 or artifact["workflow_run"]["id"] == int(os.environ["GITHUB_RUN_ID"]):
+    for artifact in sorted(artifacts, key=lambda row: (row["created_at"], row["id"]), reverse=True):
+        if artifact["workflow_run"]["id"] == int(os.environ["GITHUB_RUN_ID"]):
             continue
+        if artifact["expired"] or artifact["size_in_bytes"] > 256 * 1024 * 1024:
+            return False
         try:
             run = api(f"repos/{repository}/actions/runs/{artifact['workflow_run']['id']}")
             archive = api(f"repos/{repository}/actions/artifacts/{artifact['id']}/zip", binary=True)
             verify(archive, artifact, run, inputs)
         except (ValueError, KeyError, OSError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
             print(f"Evidence not reusable: {error}", flush=True)
-            continue
+            # Never hide a newer failed/invalid receipt behind an older pass.
+            return False
         print(f"Verified matching-input evidence: {run['html_url']} (artifact {artifact['id']})", flush=True)
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             print(f"Verified matching-input evidence: {run['html_url']} (artifact {artifact['id']}). "
