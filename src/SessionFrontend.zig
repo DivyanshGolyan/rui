@@ -871,7 +871,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .invalid, .edit_rejected, .unbound, .overflow => {
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.consent.invalidate();
-            self.notice = choiceRejection(event, true);
+            self.notice = choiceRejection(event, self.approvalReady());
         },
         .interrupt, .eof => {
             self.consent.interrupt();
@@ -886,10 +886,10 @@ fn decisionNotice(self: *const Self) []const u8 {
     return if (self.consent.presentation == .preview) "! Approval disabled · /help for exact shell commands. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
 }
 
-/// Only a choice that accepts input can ask for a or d; until then the
-/// status line names what the Action needs first.
-fn choiceRejection(event: Editor.Event, accepting: bool) []const u8 {
-    if (!accepting) return if (event == .unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
+/// Only a choice ready to decide can ask for a or d; until then the
+/// status line names what the Action needs first, such as reading it.
+fn choiceRejection(event: Editor.Event, ready: bool) []const u8 {
+    if (!ready) return if (event == .unbound) "! Key combination not recognized; nothing authorized." else "! Decision input rejected; nothing authorized.";
     return if (event == .unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
 }
 
