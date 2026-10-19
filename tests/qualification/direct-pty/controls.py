@@ -110,7 +110,9 @@ def main():
     print("wrong exact bytes: expected RED at submitted-Message assertion", flush=True)
     navigation = []
     for name, source in (("wrong-arrow-distance", "key-up-csi"), ("wrong-wheel-distance", "wheel-alt-scroll"),
-                         ("wrong-wheel-direction", "wheel-alt-scroll"), ("wrong-pgdn-distance", "key-pgdn")):
+                         ("wrong-wheel-direction", "wheel-alt-scroll"), ("wrong-pgdn-distance", "key-pgdn"),
+                         ("wrong-arrow-overshoot", "key-up-csi"), ("wrong-wheel-overshoot", "wheel-alt-scroll"),
+                         ("wrong-page-overshoot", "key-pgup")):
         vector = next(row for row in inventory() if row["name"] == source)
         vector["name"] = name
         if name == "wrong-arrow-distance":
@@ -118,6 +120,13 @@ def main():
         elif name == "wrong-wheel-distance":
             vector["chunks"] = [{"hex": (b"\x1b[5~" * 3).hex()}]
             vector["return_chunks"] = [{"hex": (b"\x1b[6~" * 3).hex()}]
+        elif name == "wrong-arrow-overshoot":
+            vector["chunks"] = [{"hex": b"\x1b[A".hex()}, {"hex": b"\x1b[A".hex(), "delay_before": 0.05}]
+        elif name == "wrong-wheel-overshoot":
+            vector["chunks"] = [{"hex": (b"\x1b[A" * 3).hex()}, {"hex": (b"\x1b[A" * 3).hex(), "delay_before": 0.05}]
+            vector["return_chunks"] = [{"hex": (b"\x1b[B" * 6).hex()}]
+        elif name == "wrong-page-overshoot":
+            vector["chunks"] = [{"hex": b"\x1b[5~".hex()}, {"hex": b"\x1b[5~".hex(), "delay_before": 0.05}]
         else:
             vector["middle"][0]["chunks"] = [{"hex": (b"\x1b[A" if source == "wheel-alt-scroll" else b"\x1b[B").hex()}]
         navigation.append(vector)

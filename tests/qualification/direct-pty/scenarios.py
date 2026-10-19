@@ -210,21 +210,22 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     tty.draft("", 2)
     captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
-    def history(first):
+    def history(first, browsing):
+        # A later printable byte witnesses consumption of all preceding input,
+        # not just an intermediate frame from a repeated-key batch. This is an
+        # ordered editor observation, not a kernel-arrival timestamp.
+        tty.send(b"~")
+        tty.draft("~", 3)
+        assert tty.screen.completed.startswith("Browsing") == browsing, "navigation view changed before ordered marker"
         # 24 terminal rows minus heading and composer leaves 22 history rows.
         # These literal fixture anchors are independent of Rui's viewport.
         expected = [f"History line {number:03d}" for number in range(first, first + 22)]
-        def actual():
-            return [line.strip() for line in tty.screen.completed.splitlines()
-                    if line.strip().startswith("History line ")]
-        try:
-            # A batch of repeated keys can commit intermediate frames. Wait for
-            # the required content, rather than rejecting a valid earlier step.
-            tty.wait(lambda: actual() == expected, label=f"history anchor {first}")
-        except TimeoutError:
-            assert actual() == expected, ("navigation history anchor/distance", actual(), expected)
-            raise
-    history(78)
+        actual = [line.strip() for line in tty.screen.completed.splitlines()
+                  if line.strip().startswith("History line ")]
+        assert actual == expected, ("navigation history anchor/distance", actual, expected)
+        tty.send(b"\x15")
+        tty.draft("", 2)
+    history(78, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
@@ -233,18 +234,18 @@ def navigation(fixture, row):
         tty.marker("Work:")
         tty.marker("Permission:")
     else:
-        history(row["first_history"])
+        history(row["first_history"], True)
         for step in row.get("middle", []):
             generation = tty.screen.generation
             chunks(tty, step["chunks"])
             tty.wait(lambda: tty.screen.completed.startswith("Browsing"),
                      label="navigation intermediate movement", after=generation)
-            history(step["first_history"])
+            history(step["first_history"], True)
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(78)
+    history(78, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"

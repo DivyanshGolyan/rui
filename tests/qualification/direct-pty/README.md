@@ -38,6 +38,9 @@ wheel and split-X10 reports must leave submitted text unchanged. The tmux smoke
 set covers typing, paste, resize, Alt-J newline, and `/status`.
 Navigation checks exact seeded-history ranges after entry, intermediate
 Down/PgDn steps and return, distinguishing one-line movement from page movement.
+It observes a later printable composer marker before checking each range, then
+clears that marker with Ctrl-U. The ordered marker prevents an intermediate
+frame from crediting an overshooting key batch; it never submits a Message.
 
 **A green default run is not complete Ghostty conformance.** `ghostty.json` is a
 separate mandatory conformance workload with no expected-failure conversion.
