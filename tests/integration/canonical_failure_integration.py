@@ -143,24 +143,33 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     def __init__(self, host, route, rewrite=None, *, before_forward=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         self.backend = self.path.with_suffix(".canonical-backend")
-        self.path.rename(self.backend)
         self.route = route
         self.rewrite = rewrite
         self.before_forward = before_forward
         self.exchanges = []
         self.mutations = []
-        super().__init__(str(self.path), Exchange)
-        os.chmod(self.path, 0o600)
+        # A running client may connect at any moment, so the public path
+        # always names a listening socket: the Host's until the proxy is
+        # renamed over it, and the Host's again once it is renamed back.
+        staging = self.path.with_suffix(".canonical-proxy")
+        os.link(self.path, self.backend)
+        super().__init__(str(staging), Exchange)
+        os.chmod(staging, 0o600)
+        os.rename(staging, self.path)
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.start()
 
     def close(self):
+        # New connections reach the Host first; accepted ones still forward
+        # through the backend name until their handlers join.
+        restored = self.path.with_suffix(".canonical-restore")
+        os.link(self.backend, restored)
+        os.rename(restored, self.path)
         self.shutdown()
-        self.server_close()  # Joins the bounded handlers before restoring the socket.
+        self.server_close()  # Joins the bounded handlers.
         self.thread.join(timeout=5)
         assert not self.thread.is_alive(), "reply proxy did not join"
-        self.path.unlink()
-        self.backend.rename(self.path)
+        self.backend.unlink()
 
 
 class Exchange(socketserver.BaseRequestHandler):
@@ -822,14 +831,65 @@ def keyed_observation_cases(state, only="keyed"):
     print(f"{only}: five actual operation observations, accepted request vs failed work; typed keyed/handle inspection, handle read-result and diagnostics passed", flush=True)
 
 
+def proxy_swap_cases(state):
+    """A client connecting while a ReplyProxy installs or restores always
+    finds a listening socket: after every filesystem step the public path
+    names the Host's or the proxy's live listener, never nothing."""
+    import stat
+    from types import SimpleNamespace
+    from unittest import mock
+    path = state / "proxy-swap.sock"
+    host = socketserver.UnixStreamServer(str(path), socketserver.BaseRequestHandler)
+    live = {os.stat(path).st_ino}
+    missing = []
+    def probe(step):
+        try:
+            entry = os.stat(path)
+        except FileNotFoundError:
+            missing.append(step)
+            return
+        if not stat.S_ISSOCK(entry.st_mode) or entry.st_ino not in live:
+            missing.append(step)
+    def probed(name, real):
+        def call(*args, **kwargs):
+            result = real(*args, **kwargs)
+            probe(name)
+            return result
+        return call
+    activate, close_listener = ReplyProxy.server_activate, ReplyProxy.server_close
+    def server_activate(self):
+        activate(self)
+        self.listener_inode = os.stat(self.server_address).st_ino
+        live.add(self.listener_inode)
+    def server_close(self):
+        live.discard(self.listener_inode)
+        close_listener(self)
+        probe("server_close")
+    try:
+        with mock.patch.object(ReplyProxy, "server_activate", server_activate), \
+                mock.patch.object(ReplyProxy, "server_close", server_close), \
+                mock.patch("os.rename", probed("rename", os.rename)), mock.patch("os.link", probed("link", os.link)), \
+                mock.patch("os.unlink", probed("unlink", os.unlink)), mock.patch("os.chmod", probed("chmod", os.chmod)):
+            proxy = ReplyProxy(SimpleNamespace(rui_ready_fields={"socket": str(path)}), "/v1/none")
+            probe("installed")
+            proxy.close()
+            probe("restored")
+        assert not missing, ("public socket path named no listener", missing)
+        assert os.stat(path).st_ino in live and not proxy.backend.exists(), "the Host socket was not restored alone"
+    finally:
+        host.server_close()
+        path.unlink(missing_ok=True)
+    print("reply proxy swap: install and restore always leave a listener at the Host path", flush=True)
+
+
 def main(selected="all"):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-canonical-failure."))
     completed = False
     try:
-        assert selected in ("all", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output", "store-read"), selected
+        assert selected in ("all", "proxy-swap", "producers", "committed", "interactive", "permission-read", "bindings", "nulls", "binding-interactive", "null-interactive", "keyed", "keyed-bindings", "keyed-output", "store-read"), selected
         if selected in ("keyed-bindings", "keyed-output"):
             keyed_observation_cases(state, selected)
-        for name, case in (("producers", producer_cases), ("committed", committed_cases), ("store-read", store_read_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
+        for name, case in (("proxy-swap", proxy_swap_cases), ("producers", producer_cases), ("committed", committed_cases), ("store-read", store_read_cases), ("interactive", interactive_cases), ("permission-read", permission_read_cases), ("bindings", binding_cases), ("nulls", lambda path: binding_cases(path, null_code=True)), ("binding-interactive", lambda path: interactive_cases(path, binding=True)), ("null-interactive", lambda path: interactive_cases(path, null_code=True)), ("keyed", keyed_observation_cases)):
             if selected in ("all", name):
                 case(state)
         completed = True
