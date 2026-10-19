@@ -143,7 +143,10 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     """Forward the real request, drain its reply, replace only the selected route."""
     def __init__(self, host, route, rewrite=None, *, before_forward=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
-        self.backend = self.path.with_suffix(".canonical-backend")
+        # Exchanges connect to the backend name and the proxy binds its
+        # staging name, so both are exactly as long as the Host's: wherever
+        # the Host could bind (macOS allows 103 path bytes), they fit too.
+        self.backend = self.path.with_name("=" + self.path.name[1:])
         self.route = route
         self.rewrite = rewrite
         self.before_forward = before_forward
@@ -152,8 +155,6 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         # A running client may connect at any moment, so the public path
         # always names a listening socket: the Host's until the proxy is
         # renamed over it, and the Host's again once it is renamed back.
-        # The staging name is no longer than the Host's, so wherever the Host
-        # could bind (macOS allows 103 path bytes), the proxy can too.
         staging = self.path.with_name("~" + self.path.name[1:])
         os.link(self.path, self.backend)
         bound = False
@@ -889,7 +890,12 @@ def proxy_swap_cases(state):
                 mock.patch("os.unlink", probed("unlink", os.unlink)), mock.patch("os.chmod", probed("chmod", os.chmod)):
             proxy = ReplyProxy(SimpleNamespace(rui_ready_fields={"socket": str(path)}), "/v1/none")
             probe("installed")
-            proxy.close()
+            try:
+                # Exchanges forward through the backend name: it reaches the Host.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                    client.connect(str(proxy.backend))
+            finally:
+                proxy.close()
             probe("restored")
         assert not missing, ("public socket path named no listener", missing)
         assert os.stat(path).st_ino in live and not proxy.backend.exists(), "the Host socket was not restored alone"
