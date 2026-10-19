@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Canonical invocation failure at real producers and current caller boundaries."""
+import errno
 import json
 import os
 import pathlib
@@ -155,9 +156,22 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         # could bind (macOS allows 103 path bytes), the proxy can too.
         staging = self.path.with_name("~" + self.path.name[1:])
         os.link(self.path, self.backend)
-        super().__init__(str(staging), Exchange)
-        os.chmod(staging, 0o600)
-        os.rename(staging, self.path)
+        bound = False
+        try:
+            super().__init__(str(staging), Exchange)
+            bound = True
+            os.chmod(staging, 0o600)
+            os.rename(staging, self.path)
+        except BaseException:
+            # Before the rename the Host still owns the public path: remove
+            # only what this proxy added, keeping the original error primary.
+            for cleanup in ((self.server_close,) if bound else ()) + (
+                    lambda: staging.unlink(missing_ok=True), self.backend.unlink):
+                try:
+                    cleanup()
+                except OSError:
+                    pass
+            raise
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.start()
 
@@ -879,6 +893,20 @@ def proxy_swap_cases(state):
             probe("restored")
         assert not missing, ("public socket path named no listener", missing)
         assert os.stat(path).st_ino in live and not proxy.backend.exists(), "the Host socket was not restored alone"
+        # A proxy that cannot bind raises its own error and leaves the Host's
+        # socket alone, with no link or staging name of its own behind.
+        host_inode = os.stat(path).st_ino
+        before = sorted(path.parent.iterdir())
+        refused = OSError(errno.ENAMETOOLONG, "injected bind failure")
+        with mock.patch.object(socketserver.UnixStreamServer, "server_bind", side_effect=refused):
+            try:
+                ReplyProxy(SimpleNamespace(rui_ready_fields={"socket": str(path)}), "/v1/none")
+            except OSError as error:
+                assert error is refused, error
+            else:
+                raise AssertionError("an unbindable proxy installed")
+        assert os.stat(path).st_ino == host_inode, "a failed proxy moved the Host socket"
+        assert sorted(path.parent.iterdir()) == before, "a failed proxy left its names"
     finally:
         host.server_close()
         path.unlink(missing_ok=True)
