@@ -1459,3 +1459,40 @@ test "a transition inside a held frame leaves its remaining input with the frame
     try std.testing.expectEqual(ConsentPolicy.Editor.choice, held.screen.selected.editor);
     try std.testing.expectEqualStrings("a", self.input.composition().bytes);
 }
+
+test "a details page read before a Message was sent never covers it" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn read(_: *anyopaque, _: *Task) !void {
+            while (!release.load(.acquire)) std.Thread.yield() catch {};
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const page = try held.tmp.dir.createFile(std.testing.io, "details", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Saved tool output\n", 0);
+    self.inspection_file = page;
+    for ([_]bool{ true, false }) |send| {
+        Worker.release.store(false, .release);
+        try held.screen.latest();
+        // /details begins its read, as driveActive does.
+        self.details_sent = self.sent;
+        self.read_phase = .details;
+        try self.reader.start(std.testing.io, self, Worker.read);
+        if (send) {
+            try self.beginMessage(self.input.submitText("sent while the page loaded"));
+            self.submission.cancel();
+            _ = self.submission.join();
+            self.submission.close();
+            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input };
+            self.input.init();
+        }
+        Worker.release.store(true, .release);
+        while (!self.reader.completed()) std.Thread.yield() catch {};
+        try self.settleReader();
+        // The sent Message keeps the latest view; an unrelated page still opens.
+        try std.testing.expectEqual(if (send) Screen.ViewKind.live else .inspection, held.screen.view);
+    }
+}
