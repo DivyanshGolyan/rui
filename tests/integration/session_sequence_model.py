@@ -41,8 +41,9 @@ def unique_slice(text, start, stop):
 
 
 def execute(command, overlay, log, retention, cache):
+    environment = {**os.environ, "RUI_TEST_EXACT_INACTIVITY": "0"}
     if not retention:
-        return subprocess.run(command, cwd=overlay, stdout=log, stderr=subprocess.STDOUT).returncode
+        return subprocess.run(command, cwd=overlay, env=environment, stdout=log, stderr=subprocess.STDOUT).returncode
     # Use the existing real Host/provider fixture. The UI's first scan, not a
     # sleep, releases the held answer. No ReplyProxy/socket replacement is used.
     import model_fixture as fixture
@@ -81,7 +82,7 @@ def execute(command, overlay, log, retention, cache):
                 assert admitted["answer"]["status"] == "accepted", admitted
                 if key == "driver":
                     fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request")
-            environment = {**os.environ, "RUI_TD1_STORE": str(store), "RUI_TD1_GATE": str(root)}
+            environment.update(RUI_TD1_STORE=str(store), RUI_TD1_GATE=str(root))
             process = subprocess.Popen(command, cwd=overlay, env=environment, stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 600  # Includes first native compilation.
             while not select.select([ready], [], [], 0.1)[0]:
@@ -184,11 +185,13 @@ test "TD1 sequence model {name}" {{
         receipt = {"source": str(source), "selector": selector, "inputs": inputs,
                    "bridge_sha256": hashlib.sha256(bridge.encode()).hexdigest(),
                    "exit": result, "direct_exit": direct, "binary_sha256": binary_digest,
+                   "assertions": re.findall(r"FAIL \(([^)]+)\)", report),
                    "source_unchanged": unchanged}
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(report, end="")
         assert unchanged, "source changed during model execution; evidence invalid"
-        assert direct is not None and (result == 0) == (direct == 0), "build/direct outcomes disagree or named artifact unavailable"
+        assert direct is not None, "emitted narrow test executable missing from verbose build output"
+        assert (result == 0) == (direct == 0), "build/direct outcomes disagree"
         required = SELECTORS if selector == "all" else (selector,)
         if result == 0:
             for name in required:

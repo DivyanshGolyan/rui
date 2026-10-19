@@ -10,6 +10,17 @@ const Viewport = @import("ConversationViewport.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
+fn printPrefix(comptime Event: type, sequence: usize, count: usize) void {
+    const events = std.enums.values(Event);
+    var word = sequence;
+    std.debug.print("TD1 prefix:", .{});
+    for (0..count) |_| {
+        std.debug.print(" {s}", .{@tagName(events[word % events.len])});
+        word /= events.len;
+    }
+    std.debug.print("\n", .{});
+}
+
 // A plain string/caret oracle: no production editor, decoder, view or consent
 // policy is used to derive expected values.
 const Text = struct {
@@ -184,6 +195,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var fresh = false;
         var submitted: usize = 0;
         var decision = false;
+        var sealed: Text = .{};
         if (blocked) {
             front.input.command_buffer[0] = 'x';
             front.input.command_length = 1;
@@ -201,7 +213,10 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         for (0..3) |prefix| {
             const event = events[index % events.len];
             index /= events.len;
-            errdefer std.debug.print("TD1 focus seed={d} sequence={d} prefix={d} event={s}\n", .{ seed, sequence, prefix + 1, @tagName(event) });
+            errdefer {
+                std.debug.print("TD1 focus seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
+                printPrefix(Event, sequence, prefix + 1);
+            }
             const choosing = alive and visible and seed != 2;
             switch (event) {
                 .unicode => {
@@ -215,6 +230,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     // Marked paste cannot authorize even beside a fresh Action.
                     try fixture.bytes("\x1b[200~a\x1b[201~");
                     if (!choosing) draft.insert("a") else {
+                        // Rejection is reported at the unpasted line end,
+                        // not while the stream still owns paste custody.
+                        try fixture.byte(13);
                         choice = .{};
                         fresh = false;
                     }
@@ -228,6 +246,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     try fixture.byte(13);
                     if (send) {
                         submitted += 1;
+                        sealed = draft;
                         try std.testing.expectEqualStrings(draft.slice(), try front.input.message(front.submission.intent.?.message));
                         draft = .{};
                         visible = false;
@@ -267,6 +286,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                         draft.insert("a");
                         if (!blocked and !alive and !decision and submitted == 0) {
                             submitted += 1;
+                            sealed = draft;
                             draft = .{};
                         }
                     }
@@ -279,6 +299,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             }
             try std.testing.expectEqual(submitted, front.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
+            if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
             try std.testing.expectEqual(fresh, front.consent.acceptsInput());
             try fixture.checkText(&draft, &choice, alive and visible and seed != 2);
         }
@@ -319,7 +340,10 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         for (0..3) |prefix| {
             const event = events[index % events.len];
             index /= events.len;
-            errdefer std.debug.print("TD1 pages seed={d} sequence={d} prefix={d} event={s}\n", .{ seed, sequence, prefix + 1, @tagName(event) });
+            errdefer {
+                std.debug.print("TD1 pages seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
+                printPrefix(Event, sequence, prefix + 1);
+            }
             switch (event) {
                 .details, .history, .status => if (request == null and (event != .history or (selected == .transcript and older != null))) {
                     if (event == .history) try std.testing.expect(ops.olderWanted(front));
@@ -419,7 +443,10 @@ fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
         for (0..3) |prefix| {
             const event = events[index % events.len];
             index /= events.len;
-            errdefer std.debug.print("TD1 acknowledgement sequence={d} prefix={d} event={s}\n", .{ sequence, prefix + 1, @tagName(event) });
+            errdefer {
+                std.debug.print("TD1 acknowledgement sequence={d} prefix={d}\n", .{ sequence, prefix + 1 });
+                printPrefix(Event, sequence, prefix + 1);
+            }
             switch (event) {
                 .accept_old, .accept_new => {
                     const admission: u64 = if (event == .accept_old) 7 else 913;
