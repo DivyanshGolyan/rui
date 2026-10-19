@@ -2963,6 +2963,12 @@ def main(selected=None):
     host = None
     completed = False
     try:
+        if selected in (None, "input-replay"):
+            from terminal_input_replay import input_replay_cases
+            input_replay_cases()
+        if selected == "input-replay":
+            completed = True
+            return
         if selected in (None, "notice", "detach"):
             native_notice_cases(state)
         if selected == "notice":

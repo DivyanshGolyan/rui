@@ -166,21 +166,12 @@ pub fn build(b: *std.Build) void {
     const terminal_notice = b.addExecutable(.{
         .name = "rui-terminal-notice-test",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/terminal_notice.zig"),
+            .root_source_file = b.path("src/terminal_notice_test.zig"),
             .target = target,
             .optimize = .ReleaseSafe,
         }),
     });
-    const terminal_module = b.createModule(.{
-        .root_source_file = b.path("src/SessionTerminal.zig"),
-        .target = target,
-        .optimize = .ReleaseSafe,
-        .link_libc = true,
-    });
-    configurePosix(b, terminal_module);
-    configureVaxis(b, terminal_module);
-    terminal_notice.root_module.addImport("terminal", terminal_module);
-    terminal_notice.root_module.link_libc = true;
+    configureTerminalEditor(b, terminal_notice);
 
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
