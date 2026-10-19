@@ -34,16 +34,11 @@ pub fn pending(self: *const Self) Editor.Pending {
     return self.stream.pending();
 }
 
-/// A lone Escape completes only when no sequence follows it in time.
-pub fn expire(self: *Self) !Editor.Event {
-    return if (try self.stream.expire()) .close_view else .none;
-}
-
-/// One byte for the draft and every event it completes (tests). Returns the
-/// last event that is not an editor `.none`.
+/// One byte for the draft and every event it completes (tests, which keep
+/// clear of input deadlines). Returns the last event that is not an editor `.none`.
 pub fn feed(self: *Self, byte: u8) Event {
     var last: Event = .{ .editor = .none };
-    var decoded = self.stream.feed(byte);
+    var decoded = self.stream.feed(byte, 0);
     while (decoded != .none) : (decoded = self.stream.next()) {
         const event = self.applySelected(decoded, true);
         if (!(event == .editor and event.editor == .none)) last = event;
@@ -76,7 +71,6 @@ pub fn submitText(self: *Self, text: []const u8) Ticket {
     @memcpy(editor.buffer[0..text.len], text);
     editor.length = text.len;
     editor.cursor = text.len;
-    editor.plain_ascii = false;
     return self.seal(true);
 }
 

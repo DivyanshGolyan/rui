@@ -546,7 +546,6 @@ fn driveActive(self: *Self) !void {
                 // must survive until the existing empty-input freshness gate.
                 self.choice.length = 0;
                 self.choice.cursor = 0;
-                self.choice.plain_ascii = true;
                 self.consent.invalidate();
                 self.dirty = true;
             }
@@ -767,7 +766,7 @@ fn olderWanted(self: *const Self) bool {
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const stream = &self.input.stream;
     const pending = stream.pending();
-    const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
+    const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
             if (try stream.expire()) try self.navigation(.close_view);
             // Successful expiry releases decoder custody. Revisit redraw and
@@ -781,7 +780,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     self.dirty = true;
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
-    var decoded = stream.feed(byte);
+    var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
             .width => |method| self.terminal.screen.setWidth(method),

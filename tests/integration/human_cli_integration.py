@@ -3499,7 +3499,10 @@ def renderer_cases():
                 assert not (workspace / "renderer-effect").exists(), "pasted consent authorized an Action"
                 # Beside a ready Action, Ctrl-R in any encoding is choice
                 # input: it rejects the choice, recovering and deciding nothing.
-                for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~"):
+                # A malformed key (bad modifier, event type or code) is a key
+                # whose meaning was lost: it fails closed the same way rather
+                # than being skipped so that the a before it decides.
+                for recover in ("\x12", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[114;999u", "\x1b[13;0u", "\x1b[97;1:9u", "\x1b[27;2;13;1~", "\x1b[1114112u"):
                     tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
                     tty.send(recover + "\n", "Decision input rejected")
                     tty.ready(ready_read)
@@ -4021,6 +4024,23 @@ def renderer_cases():
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: an unbound Alt chord is dropped as it arrives and the draft stays", flush=True)
+
+        # An ESC inside a marked paste rejects the paste, and the end marker
+        # right after it still ends it: the keys typed next are the draft's,
+        # not more paste waiting for a fatal timeout.
+        session = "renderer/escaped-paste-end"
+        configure(session)
+        with terminal(session) as tty:
+            requests = len(endpoint.requests)
+            tty.send("\x1b[200~pasted\x1b\x1b[201~", predicate=lambda: tty.capture.draft("pasted", 8))
+            tty.send("typed\r", predicate=lambda: "! Input rejected; nothing sent." in tty.capture.completed and tty.capture.draft("", 2))
+            assert len(endpoint.requests) == requests, endpoint.requests
+            marker = answer("after escaped paste")
+            tty.send("after\r", marker)
+            submitted("after")
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: an ESC inside paste rejects it and its end marker still returns input to the draft", flush=True)
 
         # With nothing said yet, scrolling up reaches the start, not a gap.
         # In tmux, Shift-Enter arrives as Enter: composing says how to add a line.
@@ -4646,6 +4666,43 @@ def main(selected="all"):
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+        # The one-shot choice decodes keys as a Session does. Backspace edits
+        # in every encoding; an unbound chord is reported and leaves the choice
+        # as typed; a malformed key rejects the line instead of being skipped.
+        for keys, outcome, shown in (
+                ("cx\x7f\x08\x1b[127ud", "Rui: Login deferred.", None),
+                ("d\x1b.", "Rui: Login deferred.", "Rui: Key combination not recognized; choice unchanged."),
+                ("\u0301d", "Rui: Login deferred.", "Rui: Character not accepted; choice unchanged."),
+                ("d\x1b[114;999u", "Rui: Choose c or d. No login or preference change.", None),
+                ("d\x1b[27;2;13;1~", "Rui: Choose c or d. No login or preference change.", None)):
+            master, slave = open_pty()
+            original = termios.tcgetattr(slave)
+            ready_read, ready_write = os.pipe()
+            try:
+                chooser = subprocess.Popen([str(fixture.RUI)], cwd=workspace,
+                    env={**os.environ, "HOME": str(preferences_home),
+                        "RUI_TEST_ACTION_READY_FD": str(ready_write)},
+                    pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+            except BaseException:
+                dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+                raise
+            finally:
+                dispose_all(lambda: os.close(ready_write))
+            try:
+                provider_prompt(master, ready_read)
+                answered = terminal_step(master, keys, "No new Session created")
+                assert outcome in answered and (shown is None or shown in answered), (keys, answered)
+                assert chooser.wait(timeout=5) == 0
+                restored, expected = termios.tcgetattr(slave), list(original)
+                if sys.platform == "darwin":
+                    mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+                    restored[3] &= ~mask
+                    expected[3] &= ~mask
+                assert restored == expected, ("one-shot choice termios restoration", keys, expected, restored)
+                assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
+            finally:
+                dispose_all(lambda: stop_process(chooser, timeout=5),
+                            lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
