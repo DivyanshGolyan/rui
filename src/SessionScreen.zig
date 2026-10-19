@@ -11,9 +11,10 @@ const ConsentPolicy = @import("session_consent.zig");
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
-/// text that can grow older canonical pages at its top; inspection and Action
-/// documents come from files. Only an Action view can collect consent reads.
-pub const ViewKind = enum { live, transcript, inspection, action };
+/// text that can grow older canonical pages at its top; inspection, Action and
+/// Message documents come from files. Only an Action view can collect consent
+/// reads.
+pub const ViewKind = enum { live, transcript, inspection, action, message };
 
 /// What a frame encoded: its Action rows and whether it asked for a decision.
 pub const Ticket = struct {
@@ -67,6 +68,9 @@ selected: ConsentPolicy.Projection = .{},
 // The latest frame's ticket: one issued frame at a time, delivered at most once.
 ticket: ?Ticket = null,
 frames: u64 = 0,
+// The view a Message page returns to. A transcript keeps its rows and
+// position in `browsing` meanwhile: the page is shown from `staging`.
+message_return: ViewKind = .live,
 height: u16 = 1,
 colour: bool,
 
@@ -251,7 +255,7 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 /// which is the pending Action if there is one.
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
-    const document = &self.browsing;
+    const document = self.viewed();
     const end = document.atBottom(self.textLayout(), self.height);
     const moves: usize = if (page) self.height else 1;
     if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
@@ -309,6 +313,34 @@ fn boundary(self: *Self, text: []const u8) !void {
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
     if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+}
+
+/// Shows one Message's full text over the live view or the transcript.
+pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
+    std.debug.assert(self.view == .live or self.view == .transcript);
+    try self.load(&self.staging, io, file, true);
+    self.staging.top = .{};
+    self.message_return = self.view;
+    self.view = .message;
+    self.invalidateScope();
+}
+
+/// Returns from a Message page to the view it came from, at the same
+/// position. An Action that became pending meanwhile takes precedence.
+pub fn leaveMessage(self: *Self) !void {
+    std.debug.assert(self.view == .message);
+    self.staging.clear();
+    if (self.action_view != null) return self.latest();
+    self.view = self.message_return;
+    self.invalidateScope();
+}
+
+fn viewed(self: *Self) *Document {
+    return switch (self.view) {
+        .live => &self.live,
+        .message => &self.staging,
+        .transcript, .inspection, .action => &self.browsing,
+    };
 }
 
 pub fn latest(self: *Self) !void {
@@ -415,8 +447,10 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
         // Reflow keeps the first browsed line in view and the draft bytes and
         // caret unchanged. An Action restarts its reading from the top.
-        const anchor: Position = if (self.view == .transcript or self.view == .inspection) .{ .offset = self.browsing.first(self.textLayout(), self.height).offset } else .{};
+        const browsed = self.view == .transcript or self.view == .inspection or (self.view == .message and self.message_return == .transcript);
+        const anchor: Position = if (browsed) .{ .offset = self.browsing.first(self.textLayout(), self.height).offset } else .{};
         self.browsing.top = anchor;
+        if (self.view == .message) self.staging.top = .{ .offset = self.staging.first(self.textLayout(), self.height).offset };
         self.invalidateLayout();
         // A render failure retires this invocation; no old grid is needed for
         // rollback. Retire it before allocating replacements, rather than
@@ -441,7 +475,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (!selected) for (0..live.count) |index| {
         calls[index] = try live.line(index, &call_storage[index]);
     };
-    const document = if (selected) &self.browsing else &self.live;
+    const document = self.viewed();
     var layout: Frame = undefined;
     try layout.plan(document, .{
         .width = size.col,
@@ -946,6 +980,70 @@ test "an unchanged frame writes nothing" {
     try std.testing.expectEqual(before, out.written().len);
     _ = try screen.render(&out.writer, size, "a", 1, "Working…", &.{});
     try std.testing.expect(out.written().len > before);
+}
+
+test "a Message page returns to the view and position it came from" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..60) |index| {
+        var line: [32]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&line, "conversation row {d}\n", .{index}));
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(io, "message", .{ .read = true });
+    defer page.close(io);
+    try page.writePositionalAll(io, "Message · 2 lines\n\nfirst\nsecond\n", 0);
+    var action = try ActionFixture.init(4);
+    defer action.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const narrow: std.posix.winsize = .{ .row = 12, .col = 30, .xpixel = 0, .ypixel = 0 };
+    var expected: [12][64]u8 = undefined;
+    var lengths: [12]usize = undefined;
+    var storage: [64]u8 = undefined;
+    for ([_]ViewKind{ .live, .transcript }) |origin| {
+        try screen.latest();
+        if (origin == .transcript) {
+            _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+            try screen.beginTranscript(0);
+            for (0..2) |_| try std.testing.expect(!screen.browse(false, true));
+        }
+        for ([_]bool{ false, true }) |resized| {
+            _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+            for (0..12) |row| {
+                const text = rowText(screen, @intCast(row), &storage);
+                @memcpy(expected[row][0..text.len], text);
+                lengths[row] = text.len;
+            }
+            try screen.showMessage(io, page);
+            _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+            try std.testing.expectEqualStrings("Message · 2 lines", rowText(screen, 1, &storage));
+            try std.testing.expectEqualStrings("second", rowText(screen, 4, &storage));
+            // A resize on the page reflows the hidden view from its first row.
+            if (resized) {
+                _ = try screen.render(&out.writer, narrow, "", 0, "", &.{});
+                _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+            }
+            try screen.leaveMessage();
+            try std.testing.expectEqual(origin, screen.view);
+            _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+            for (0..12) |row| try std.testing.expectEqualStrings(expected[row][0..lengths[row]], rowText(screen, @intCast(row), &storage));
+        }
+    }
+    // An Action pending meanwhile is where the page returns.
+    try screen.latest();
+    try screen.showMessage(io, page);
+    try screen.adopt(io, action.file, 7);
+    try std.testing.expectEqual(ViewKind.message, screen.view);
+    try screen.leaveMessage();
+    try std.testing.expectEqual(ViewKind.action, screen.view);
 }
 
 test "browsing up then down by the same rows returns to the latest view" {
