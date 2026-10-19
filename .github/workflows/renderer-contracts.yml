@@ -2,7 +2,7 @@ name: Renderer contracts (Linux)
 on:
   workflow_dispatch:
   push:
-    branches: ['td3/**']
+    branches: ['td3/**', 'perf/diag-td3-*']
   pull_request:
     paths:
       - 'src/**'
@@ -24,6 +24,62 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  policy:
+    # Diagnostic pushes exclude Selected checks, including its policy job.
+    # These are fresh diagnostic checks, not acceptance of that omitted gate.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Record diagnostic policy inputs
+        run: |
+          mkdir -p .amp/td3/policy
+          git rev-parse HEAD > .amp/td3/policy/revision.txt
+          sha256sum .github/workflows/check.yml .github/workflows/renderer-contracts.yml > .amp/td3/policy/workflows.sha256
+      - name: Test CI policy on the diagnostic head
+        run: |
+          set -o pipefail
+          python3 -B -m unittest discover -s tests/ci -v 2>&1 | tee .amp/td3/policy/python.log
+      - name: Test cache policy on the diagnostic head
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          node --test tests/ci/*.test.cjs 2>&1 | tee .amp/td3/policy/node.log
+      - name: Install the pinned workflow linter
+        if: ${{ !cancelled() }}
+        id: linter
+        run: |
+          set -euo pipefail
+          curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Validate workflows with the read-only cache-mode exception
+        if: ${{ !cancelled() && steps.linter.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          for workflow in .github/workflows/*.yml; do
+            if grep -qx 'cache-mode: read' "$workflow"; then
+              actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"
+            else
+              actionlint -shellcheck= "$workflow"
+            fi
+          done 2>&1 | tee .amp/td3/policy/actionlint.log
+      - name: Retain diagnostic policy evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-policy-${{ github.sha }}-${{ github.run_attempt }}
+          path: .amp/td3/policy
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
   mutations:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
