@@ -430,20 +430,22 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
      const final = sequence[sequence.len - 1];
      if (final == 'R') report: {
-@@ -440,8 +445,10 @@
+@@ -440,8 +445,12 @@
              // Split first into fields delimited by ';'
              var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
  
 -            // skip the first field
 -            _ = field_iter.next(); //
-+            // The key number is 1 or absent. A cursor position report also
-+            // ends in R; one no request expects is ignored, not a key.
++            // A private marker begins some other report, not a key. The key
++            // number is 1 or absent. A cursor position report also ends in
++            // R; one no request expects is ignored, not a key.
 +            const number_buf = field_iter.next().?;
++            if (privateMarker(number_buf)) return null_event;
 +            if (number_buf.len != 0 and !std.mem.eql(u8, number_buf, "1")) return if (final == 'R') null_event else invalid_key;
  
              var is_release: bool = false;
              var key: Key = .{
-@@ -461,32 +468,17 @@
+@@ -461,32 +470,17 @@
                  },
              };
  
@@ -483,14 +485,14 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -512,8 +504,14 @@
+@@ -512,8 +506,14 @@
              // CSI number ; modifier:event_type ; text_as_codepoint ~
              var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
              const number_buf = field_iter.next() orelse unreachable; // always will have one field
 -            const number = parseParam(u16, number_buf, null) orelse return null_event;
 +            // A private marker begins some other report, not a key. Otherwise
 +            // the key number is decimal; a number no key has is unknown.
-+            if (number_buf.len != 0 and std.mem.indexOfScalar(u8, "<=>?", number_buf[0]) != null) return null_event;
++            if (privateMarker(number_buf)) return null_event;
 +            for (number_buf) |b| if (!std.ascii.isDigit(b)) return invalid_key;
 +            const number = parseDecimal(u16, number_buf) orelse return null_event;
              if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
@@ -499,7 +501,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              var key: Key = .{
                  .codepoint = switch (number) {
-@@ -543,32 +541,17 @@
+@@ -543,32 +543,17 @@
              };
  
              var is_release: bool = false;
@@ -539,7 +541,15 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -667,44 +650,30 @@
+@@ -655,6 +640,7 @@
+                 .event = .cap_kitty_keyboard,
+                 .n = sequence.len,
+             };
++            if (privateMarker(sequence[2 .. sequence.len - 1])) return null_event;
+ 
+             var key: Key = .{
+                 .codepoint = undefined,
+@@ -667,44 +653,30 @@
                  const field_buf = field_iter.next() orelse unreachable; // There will always be at least one field
                  var param_iter = std.mem.splitScalar(u8, field_buf, ':');
                  const codepoint_buf = param_iter.next() orelse unreachable;
@@ -595,7 +605,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              {
                  // We check if we have *only* shift, no text, and a printable character. This can
-@@ -780,13 +749,15 @@
+@@ -780,13 +752,15 @@
  /// the code is the key's codepoint, unchecked as in the Kitty form. It is a
  /// press with no associated text.
  fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
@@ -618,10 +628,16 @@ diff --git a/src/Parser.zig b/src/Parser.zig
      return .{
          .event = .{ .key_press = .{
              .codepoint = code,
-@@ -796,6 +767,52 @@
+@@ -796,6 +770,58 @@
      };
  }
  
++/// CSI parameters that begin with a private marker are some other report
++/// (or a request a terminal never sends), never a key.
++fn privateMarker(params: []const u8) bool {
++    return params.len != 0 and std.mem.indexOfScalar(u8, "<=>?", params[0]) != null;
++}
++
 +/// Kitty's modifiers[:event-type] field. The modifier is 1 plus an eight-bit
 +/// mask, 1 through 256, and empty means 1. The event type is 1 (press), 2
 +/// (repeat) or 3 (release), and empty means press. Any other value is null:
