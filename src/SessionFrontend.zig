@@ -61,6 +61,11 @@ unsettled: u8 = 0,
 command_running: bool = false,
 terminal: Terminal,
 colour: bool,
+/// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
+tmux: bool = false,
+/// Messages begun; a /details read begun before the latest one never covers it.
+sent: u64 = 0,
+details_sent: u64 = 0,
 input: Input = undefined,
 submission: Submission = undefined,
 reader: Task = .{},
@@ -181,7 +186,7 @@ pub fn run(init: std.process.Init, store: []const u8, session: []const u8, direc
     defer init.gpa.destroy(screen);
     try screen.init(init.io, init.environ_map, colour);
     defer screen.deinit();
-    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = files.scratch, .action_file = files.action, .inspection_file = files.inspection, .status_file = files.status, .command = command, .requests = requests, .status = status, .terminal = undefined, .colour = colour };
+    var self: Self = .{ .init = init, .store = store, .session = session, .directory = directory, .scratch = files.scratch, .action_file = files.action, .inspection_file = files.inspection, .status_file = files.status, .command = command, .requests = requests, .status = status, .terminal = undefined, .colour = colour, .tmux = init.environ_map.get("TMUX") != null };
     self.input.init();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input };
     interrupted.stopped.store(false, .release);
@@ -509,6 +514,7 @@ fn driveActive(self: *Self) !void {
                 self.history_requested = null;
                 if (requested == .latest) {
                     try self.terminal.screen.latest();
+                    self.details_sent = self.sent;
                     try self.launch(self.freeze(.details), reads.history);
                 } else {
                     // /history scrolls the transcript to its top; older pages
@@ -565,7 +571,9 @@ fn driveActive(self: *Self) !void {
             var context_buffer: [4 * std.Io.Dir.max_path_bytes + 32]u8 = undefined;
             var context = std.Io.Writer.fixed(&context_buffer);
             if (self.consent.active() and action_visible)
-                try approvalContext(&context, screen.actionTopHidden(), self.action_summary);
+                try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
+            else if (self.tmux and !self.consent.active() and view.bytes.len != 0)
+                try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
             var status_buffer: [Frame.status_capacity]u8 = undefined;
             const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
             self.dirty = false;
@@ -725,7 +733,11 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     };
     try self.submission.begin(.{ .message = ticket });
     // A sent Message continues the conversation: show it and its reply
-    // rather than the frozen transcript or page the reader was browsing.
+    // rather than the frozen transcript or page the reader was browsing,
+    // or a page asked for before it.
+    self.sent += 1;
+    self.status_requested = false;
+    self.history_requested = null;
     try self.terminal.screen.latest();
 }
 
@@ -971,7 +983,7 @@ fn settleReader(self: *Self) !void {
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
-        try self.showInspection();
+        if (self.read_phase != .details or self.details_sent == self.sent) try self.showInspection();
         self.command_running = false; // Shown; exit no longer prints it.
     }
     try self.applyReader(end);
@@ -980,8 +992,9 @@ fn settleReader(self: *Self) !void {
 /// Appends a joined read's staged live output; none of it showed before.
 fn showStaged(self: *Self) !void {
     const length = self.job.result.output_length;
-    if (length == 0) return;
+    // An empty opening still marks where the conversation begins.
     if (self.job.result.mark) |mark| self.marks.record(self.terminal.screen.liveEnd(), mark.cursor);
+    if (length == 0) return;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < length) {
