@@ -37,7 +37,9 @@ pub const PresentationChange = struct { read_completed: bool = false };
 
 vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
-live: Document = .{},
+// Live text and its transcript copy keep a right margin for user Messages'
+// times; pages loaded from files use the full width.
+live: Document = .{ .sidenotes = true },
 browsing: Document = .{},
 staging: Document = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
@@ -358,6 +360,7 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
     const length = (try file.stat(io)).size;
     const end = if (prefix) @min(Viewport.capacity, length) else length;
     document.clear();
+    document.sidenotes = false;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
     while (offset < end) {

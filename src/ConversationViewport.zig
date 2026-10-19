@@ -94,21 +94,30 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
 /// bits 3-5 a foreground index, bit 6 user text and bit 7 its dim summary.
+/// Bit 7 alone marks a sidenote, drawn in the right margin.
 const foregrounds = [_]u8{ 3, 8, 9, 12 };
 const foreground_mask: u8 = 0b111 << 3;
 const user_bit: u8 = 1 << 6;
 const summary_bit: u8 = 1 << 7;
+/// From this width a document with sidenotes keeps a right margin, and the
+/// first sidenote of a line shows at its first row; narrower, none shows.
+pub const sidenote_width = 60;
+const sidenote_margin = 7;
+const sidenote_cells = 5;
+
+fn isSidenote(value: u8) bool {
+    return value & (user_bit | summary_bit) == summary_bit;
+}
 pub const CellStyle = struct { bold: bool = false, dim: bool = false, italic: bool = false, underline: bool = false, foreground: ?u8 = null };
 /// User text is dim and italic only with colour; without it, position alone
-/// sets it apart. Its summary is dim but never italic.
+/// sets it apart. Its summary and sidenotes are dim but never italic.
 pub fn cellStyle(value: u8, colour: bool) CellStyle {
     const index = (value & foreground_mask) >> 3;
-    const user = colour and value & user_bit != 0;
-    const summary = value & summary_bit != 0;
+    const quiet = colour and value & (user_bit | summary_bit) != 0;
     return .{
         .bold = value & 1 != 0,
-        .dim = user,
-        .italic = value & 2 != 0 or (user and !summary),
+        .dim = quiet,
+        .italic = value & 2 != 0 or (quiet and value & summary_bit == 0),
         .underline = value & 4 != 0,
         .foreground = if (colour and index != 0) foregrounds[index - 1] else null,
     };
@@ -128,6 +137,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         top: ?Position = null,
         width_method: gwidth.Method = .wcwidth,
         dirty: bool = true,
+        /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
+        sidenotes: bool = false,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
@@ -142,7 +153,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     self.control_length += 1;
                     if (byte == 'm') {
                         const code = self.control[0..self.control_length];
-                        if (std.mem.eql(u8, code, "\x1b[0m")) self.style = 0 else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
+                        if (std.mem.eql(u8, code, "\x1b[0m")) self.style = 0 else if (std.mem.eql(u8, code, "\x1b[1m")) self.style |= 1 else if (std.mem.eql(u8, code, "\x1b[3m")) self.style |= 2 else if (std.mem.eql(u8, code, "\x1b[4m")) self.style |= 4 else if (std.mem.eql(u8, code, "\x1b[2m")) self.style |= user_bit else if (std.mem.eql(u8, code, "\x1b[2;8m")) self.style |= user_bit | summary_bit else if (std.mem.eql(u8, code, "\x1b[8m")) self.style = (self.style & ~user_bit) | summary_bit else if (std.mem.eql(u8, code, "\x1b[39m")) self.style &= ~foreground_mask else {
                             const colour_index: u8 = if (std.mem.eql(u8, code, "\x1b[33m")) 1 else if (std.mem.eql(u8, code, "\x1b[90m")) 2 else if (std.mem.eql(u8, code, "\x1b[91m")) 3 else if (std.mem.eql(u8, code, "\x1b[94m")) 4 else unreachable;
                             self.style = (self.style & ~foreground_mask) | (colour_index << 3);
                         }
@@ -279,16 +290,26 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// Measuring and drawing segment identically, so they wrap identically.
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
             const end = self.lineEnd(offset);
-            const user = styled and for (self.styles[offset..end]) |value| {
-                if (value & user_bit != 0) break true;
-            } else false;
-            const split = hanging(self.bytes[offset..end], window.width, user);
-            if (commit) _ = self.printRange(window.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, true, colour, plain);
-            return rowsUsed(self.printRange(window.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, commit, colour, plain));
+            var user = false;
+            var note: ?struct { start: usize, end: usize } = null;
+            if (styled) for (self.styles[offset..end], offset..) |value, index| {
+                if (value & user_bit != 0) user = true;
+                if (!isSidenote(value)) continue;
+                if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
+            };
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
+            const body = window.child(.{ .width = window.width - margin });
+            const split = hanging(self.bytes[offset..end], body.width, user);
+            if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
+            if (commit and margin != 0) if (note) |range| {
+                _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
+            };
+            return rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
         }
 
-        /// Prints bytes as style runs, a bounded batch of segments at a time.
-        fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), commit: bool, colour: bool, plain: vaxis.Style) vaxis.Window.PrintResult {
+        /// Prints bytes as style runs, a bounded batch of segments at a time:
+        /// sidenotes only, or the text's flow without them.
+        fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style) vaxis.Window.PrintResult {
             var segments: [32]vaxis.Segment = undefined;
             var count: usize = 0;
             var result: vaxis.Window.PrintResult = .{ .row = 0, .col = 0, .overflow = false };
@@ -299,10 +320,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     stop = start + 1;
                     while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
                 }
-                segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain) };
-                count += 1;
+                if (!styled or isSidenote(self.styles[start]) == notes) {
+                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain) };
+                    count += 1;
+                }
                 start = stop;
-                if (count == segments.len or start == end) {
+                if (count != 0 and (count == segments.len or start == end)) {
                     result = window.print(segments[0..count], .{ .wrap = wrap, .row_offset = result.row, .col_offset = result.col, .commit = commit });
                     count = 0;
                     if (result.overflow) break;
@@ -639,6 +662,35 @@ test "user text is dim italic with colour and keeps its body column without it" 
     try narrow.append("\x1b[2m   abc defg\x1b[0m\n   abc defg");
     const tiny: Layout = .{ .width = 3, .method = .unicode };
     try std.testing.expectEqual(narrow.lineRows(tiny, 12), narrow.lineRows(tiny, 0));
+}
+
+test "a sidenote shows in the right margin of its line's first row from 60 columns" {
+    const ys: [56]u8 = @splat('y');
+    const xs: [60]u8 = @splat('x');
+    var view: Sized(256, true) = .{ .sidenotes = true };
+    try view.append("\x1b[94m›\x1b[39m \x1b[8m14:05\x1b[0m\x1b[2m" ++ ys ++ "\x1b[0m\n" ++ xs);
+    var test_screen: TestScreen = undefined;
+    var storage: [96]u8 = undefined;
+    const Case = struct { width: u16, sidenotes: bool, rows: []const []const u8 };
+    for ([_]Case{
+        // Every row leaves the margin, not only rows with a sidenote.
+        .{ .width = 64, .sidenotes = true, .rows = &.{ "› " ++ ys[0..55] ++ "  14:05", "  y", xs[0..57], "xxx" } },
+        .{ .width = 60, .sidenotes = true, .rows = &.{ "› " ++ ys[0..51] ++ "  14:05", "  yyyyy", xs[0..53], "xxxxxxx" } },
+        .{ .width = 59, .sidenotes = true, .rows = &.{ "› " ++ ys, xs[0..59], "x" } },
+        .{ .width = 64, .sidenotes = false, .rows = &.{ "› " ++ ys, &xs } },
+    }) |case| {
+        view.sidenotes = case.sidenotes;
+        const drawn = view.draw(test_screen.window(case.width, 4), .{}, true, true, .{});
+        try std.testing.expectEqual(case.rows.len, drawn.rows);
+        try std.testing.expectEqual(case.rows.len, view.measure(.{ .width = case.width, .method = .unicode }, .{}, 99).rows);
+        for (case.rows, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
+    }
+    view.sidenotes = true;
+    _ = view.draw(test_screen.window(64, 4), .{}, true, true, .{});
+    const note = test_screen.screen.readCell(59, 0).?.style;
+    try std.testing.expect(note.dim and !note.italic);
+    _ = view.draw(test_screen.window(64, 4), .{}, true, false, .{});
+    try std.testing.expectEqual(vaxis.Style{}, test_screen.screen.readCell(59, 0).?.style);
 }
 
 test "retention never starts inside an extended grapheme across append windows" {
