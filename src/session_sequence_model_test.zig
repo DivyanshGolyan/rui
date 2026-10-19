@@ -528,6 +528,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
 }
 
 fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !void {
+    try ops.navigation(front, .latest);
     try ops.beginTranscript(front);
     const message: [59_199]u8 = @splat('m');
     const messages = [_][]const u8{ "driver", &message };
@@ -561,25 +562,55 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {
-    var fixture: Fixture(Frontend, ops) = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    try fixture.screen.prepareAction(std.testing.io, fixture.action);
-    fixture.front.consent.adopt(913, .complete);
-    // Output fails after layout/cell construction, before delivery. A complete
-    // short Action would otherwise certify all rows in this one frame.
-    const before = fixture.screen.action_seen;
-    var empty: [0]u8 = .{};
-    var output = std.Io.Writer.fixed(&empty);
-    try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, "", "> ", &.{}));
-    try std.testing.expectEqual(before, fixture.screen.action_seen);
-    try std.testing.expect(!fixture.screen.approvalReady());
-    try std.testing.expect(!fixture.front.consent.acceptsInput());
-    // A successful delivery is a separate positive control, still requiring
-    // the post-prompt empty-input observation before it grants consent input.
-    try ops.draw(fixture.front);
-    try std.testing.expect(fixture.screen.approvalReady());
-    try std.testing.expect(!fixture.front.consent.acceptsInput());
-    try std.testing.expect(fixture.front.consent.promptCompleted(try ops.step(fixture.front, 0), false, false));
-    try std.testing.expect(fixture.front.consent.acceptsInput());
+    const FlushFailure = struct {
+        writer: std.Io.Writer,
+        accepted: usize = 0,
+        flushed: bool = false,
+
+        fn drain(writer: *std.Io.Writer, parts: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", writer);
+            var count = parts[parts.len - 1].len * splat;
+            for (parts[0 .. parts.len - 1]) |part| count += part.len;
+            self.accepted += count;
+            return count;
+        }
+
+        fn flush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            const self: *@This() = @fieldParentPtr("writer", writer);
+            self.flushed = true;
+            return error.WriteFailed;
+        }
+    };
+    for (0..3) |mode| {
+        var fixture: Fixture(Frontend, ops) = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        try fixture.screen.prepareAction(std.testing.io, fixture.action);
+        fixture.front.consent.adopt(913, .complete);
+        if (mode == 2) {
+            // Success is distinct from both failed invocations and still
+            // requires a post-write empty-input observation.
+            try ops.draw(fixture.front);
+            try std.testing.expect(fixture.screen.approvalReady());
+            try std.testing.expect(!fixture.front.consent.acceptsInput());
+            try std.testing.expect(fixture.front.consent.promptCompleted(try ops.step(fixture.front, 0), false, false));
+            try std.testing.expect(fixture.front.consent.acceptsInput());
+            continue;
+        }
+        const before = fixture.screen.action_seen;
+        var empty: [0]u8 = .{};
+        if (mode == 0) {
+            var output = std.Io.Writer.fixed(&empty);
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, "", "> ", &.{}));
+        } else {
+            // Every frame byte is accepted before flush fails. Publishing
+            // between writeAll and flush must fail this independent control.
+            var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, "", "> ", &.{}));
+            try std.testing.expect(output.accepted > 0 and output.flushed);
+        }
+        try std.testing.expectEqual(before, fixture.screen.action_seen);
+        try std.testing.expect(!fixture.screen.approvalReady());
+        try std.testing.expect(!fixture.front.consent.acceptsInput());
+    }
 }
