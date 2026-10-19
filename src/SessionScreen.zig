@@ -1265,6 +1265,10 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     _ = screen.select(false);
     try expectBlocked(.command, screen.submitChoice("a", size, true));
     try std.testing.expectEqual(@as(?u64, 0xa), screen.consent.action);
+    // While the command holds the choice, its frames ask for no decision.
+    try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.select(true).approval);
+    _ = screen.presented(try screen.render(&held.writer, size, "", 0, "", &.{}));
+    try std.testing.expect(!screen.decisionPromptDelivered());
     // The same Action needs a new delivered prompt and empty service.
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     _ = screen.select(false);

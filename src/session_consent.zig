@@ -59,7 +59,8 @@ pub const Consent = struct {
 /// Which editor a frame encodes and its events edit. Selection is not
 /// permission: Enter probes current facts separately.
 pub const Editor = enum { draft, choice };
-pub const Approval = enum { absent, paused, preview, reading, draining, ready };
+/// `held`: a command holds a read Action; the frame shows no decision prompt.
+pub const Approval = enum { absent, paused, preview, reading, held, draining, ready };
 pub const Projection = struct { editor: Editor = .draft, approval: Approval = .absent };
 
 /// What the presentation owner shows of the adopted Action, sampled at
@@ -73,7 +74,8 @@ pub fn project(consent: Consent, shown: Shown, command_blocked: bool) Projection
     if (!shown.action_page) return .{ .approval = .paused };
     if (!shown.whole) return .{ .approval = .preview };
     if (!shown.read) return .{ .editor = .choice, .approval = .reading };
-    if (command_blocked or !consent.ready) return .{ .editor = .choice, .approval = .draining };
+    if (command_blocked) return .{ .editor = .choice, .approval = .held };
+    if (!consent.ready) return .{ .editor = .choice, .approval = .draining };
     return .{ .editor = .choice, .approval = .ready };
 }
 
@@ -230,7 +232,9 @@ test "projection selects the choice editor only beside a whole visible Action" {
         .{ .whole = false, .read = false, .expected = .{ .approval = .preview } },
         .{ .read = false, .fresh = true, .expected = .{ .editor = .choice, .approval = .reading } },
         .{ .expected = .{ .editor = .choice, .approval = .draining } },
-        .{ .command = true, .fresh = true, .expected = .{ .editor = .choice, .approval = .draining } },
+        .{ .command = true, .expected = .{ .editor = .choice, .approval = .held } },
+        .{ .command = true, .fresh = true, .expected = .{ .editor = .choice, .approval = .held } },
+        .{ .command = true, .read = false, .expected = .{ .editor = .choice, .approval = .reading } },
         .{ .fresh = true, .expected = .{ .editor = .choice, .approval = .ready } },
     }) |case| {
         var consent: Consent = .{};

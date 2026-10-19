@@ -536,6 +536,7 @@ fn draw(self: *Self) !bool {
         .preview => "Approval disabled · /help for exact shell commands",
         .paused => "Approval paused · Esc returns to Action",
         .reading => "PgDn reads the rest · then a/d + Enter",
+        .held => "Command running · then a/d + Enter",
         .draining, .ready => Frame.approval_choice,
         .absent => if (self.submission.view()) |submission| switch (submission.state) {
             .not_started => "Not sent · Ctrl-R retries original",
