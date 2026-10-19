@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Additive synthetic direct-key matrix, not physical-human qualification."""
+"""Synthetic primary key matrix and tmux smoke, not physical-human qualification."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -49,6 +49,9 @@ def inventory():
         row("alt-enter", b"ab\x1b\rQ\r", "abQ"),
         row("alt-unicode", "ab\x1béQ\r".encode(), "abQ"),
         row("kitty-alt", b"ab\x1b[122;3uQ\r", "abQ"),
+        row("kitty-shift-enter", b"one t\x1b[13;2uZwo!\r", "one t\nZwo!"),
+        row("kitty-ctrl-a-e", b"bc\x1b[97;5ua\x1b[101;5uZ\r", "abcZ"),
+        row("kitty-alt-j", b"one\x1b[106;3utwo\r", "one\ntwo"),
         row("double-esc-arrow", b"ac\x1b\x1b[Db\r", "abc"),
         row("double-esc-paste", b"a\x1b\x1b[200~b\x1b[201~\r", "ab"),
         row("paste", b"\x1b[200~line1\nline2\x1b[201~\r", "line1\nline2"),
@@ -56,6 +59,8 @@ def inventory():
         row("focus-reports", b"ab\x1b[I\x1b[OZ\r", "abZ"),
         row("terminal-string", b"ab\x1b]0;not text\x07Z\r", "abZ"),
         row("unknown-csi", b"ab\x1b[999~Z\r", "abZ"),
+        row("mouse-sgr-wheel", b"a\x1b[<64;10;10M\x1b[<65;10;10MZ\r", "aZ"),
+        row("mouse-x10-wheel", b"a\x1b[M`**\x1b[Ma**Z\r", "aZ"),
     ]
     rows += [
         {"name": "fragmented-csi", "scenario": "editor", "chunks":
@@ -65,6 +70,8 @@ def inventory():
         {"name": "fragmented-paste", "scenario": "editor", "chunks":
             [chunk(b"\x1b[20"), chunk(b"0~one\ntwo\x1b[20", 0.02), chunk(b"1~\r", 0.02)],
             "expected": "one\ntwo"},
+        {"name": "mouse-x10-split", "scenario": "editor", "chunks":
+            [chunk(b"a\x1b[M"), chunk(b" isZ\r", 0.02)], "expected": "aZ"},
         {"name": "bare-esc-expiry", "scenario": "editor", "chunks":
             [chunk(b"ab\x1b"), chunk(b"Z\r", 0.15)], "expected": "abZ"},
         {"name": "resize", "scenario": "editor", "chunks":
@@ -77,11 +84,27 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
+    for name, enter, leave in (
+        ("key-pgup", b"\x1b[5~", b"\x07"),
+        ("key-pgdn", b"\x1b[5~", b"\x1b[6~" * 12),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07"),
+        ("key-up-csi", b"\x1b[A", b"\x07"),
+        ("key-up-ss3", b"\x1bOA", b"\x07"),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F"),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF"),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~"),
+        ("key-esc", b"\x1b[5~", b"\x1b"),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B" * 3),
+        ("status", b"/status\r", b"\x1b"),
+    ):
+        rows.append({"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
+                     "return_chunks": [chunk(leave)], "status": name == "status"})
     for name, data, expected in (
         ("typing", b"tmux typing\r", "tmux typing"),
         ("paste", b"one\ntwo", "one\ntwo"),
         ("resize", "A中bc\x1b[DZ\r".encode(), "A中bZc"),
         ("alt-j", b"one\x1bjtwo\r", "one\ntwo"),
+        ("status", b"/status\r", None),
     ):
         rows.append({"name": "tmux-" + name, "scenario": "tmux", "chunks": [chunk(data)], "expected": expected})
     return rows
@@ -196,7 +219,9 @@ def main():
     assert len(names) == len(set(names)), "duplicate row names"
     assert all(name and all(c.isalnum() or c in "-_" for c in name) for name in names), "unsafe row name"
     if args.row:
-        assert set(args.row) <= set(names), ("unknown row", set(args.row) - set(names))
+        unknown = set(args.row) - set(names)
+        if unknown:
+            parser.error(f"unknown row {', '.join(sorted(unknown))}; use --list for stable selectors")
         rows = [item for item in rows if item["name"] in args.row]
     if args.surface != "all":
         rows = [item for item in rows if (item["scenario"] == "tmux") == (args.surface == "tmux")]
@@ -218,7 +243,7 @@ def main():
         results = list(executor.map(lambda vector: run_one(binary, output, vector), rows))
     (output / "results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
     passed = sum(result["status"] == "passed" for result in results)
-    print(f"{passed}/{len(results)} synthetic direct-PTY rows passed; existing gates unchanged")
+    print(f"{passed}/{len(results)} synthetic primary matrix/smoke rows passed; physical terminals unverified")
     if STOP_NUMBER:
         return 128 + STOP_NUMBER
     return 0 if passed == len(results) else 1

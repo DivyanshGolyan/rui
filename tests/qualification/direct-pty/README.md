@@ -1,8 +1,11 @@
 # Synthetic direct-PTY key matrix
 
-This is the proposed primary direct key matrix, with four short tmux smoke rows.
-It is additive. It does not replace, reduce, or qualify any existing landing gate.
-Injected bytes do not establish physical-human or terminal-emulator qualification.
+Divyansh approved this primary direct key/escape/paste/wheel/mouse matrix and
+five-row tmux smoke set in place of full attached/detached tmux key matrices.
+This area supplies that workload; workflow owners apply the gate wiring.
+Other qualification gates are unchanged. Physical checks are post-landing,
+Ghostty first. Injected bytes establish neither physical-human nor emulator
+qualification.
 
 ## Commands
 
@@ -19,16 +22,36 @@ zig build -Doptimize=ReleaseSafe
 .amp/td4/venv/bin/python tests/qualification/direct-pty/test_driver.py -v
 .amp/td4/venv/bin/python tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/matrix --jobs 4
 .amp/td4/venv/bin/python tests/qualification/direct-pty/controls.py "$PWD/zig-out/bin/rui" --output .amp/td4/controls
+.amp/td4/venv/bin/python tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td4/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
 ```
 
 Output directories must be fresh. `--row NAME` is repeatable. `--surface direct`
 selects only the direct PTY rows, `--surface tmux` selects the smoke set, and the
 default `--surface all` runs both. `--list` lists the selected stable row names.
 
-The default inventory has 36 direct rows and four tmux rows. It covers editing,
-graphemes, unbound modifiers, double ESC, marked paste, explicit fragmentation,
-bare ESC expiry, incomplete input, rejection, resize, and raw Ctrl-R recovery.
-The tmux smoke set covers typing, paste, resize, and Alt-J newline.
+The default inventory covers editing, graphemes, unbound modifiers, Kitty keys,
+double ESC, marked paste, explicit fragmentation, bare ESC expiry, incomplete
+input, rejection, resize, and raw Ctrl-R recovery. Seeded-history rows cover
+PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
+alternate-scroll wheel Up/Down encodings, and `/status`. Unsolicited SGR/X10
+wheel and split-X10 reports must leave submitted text unchanged. The tmux smoke
+set covers typing, paste, resize, Alt-J newline, and `/status`.
+
+**A green default run is not complete Ghostty conformance.** `ghostty.json` is a
+separate mandatory conformance workload with no expected-failure conversion.
+It checks Kitty and legacy case27 Shift-Enter, Ctrl-Enter rejection, and encoded
+Ctrl-R recovery. On the unchanged renderer base, the Kitty modified-Enter
+probes pass; legacy case27 modified Enter and both encoded recovery probes
+remain runtime failures until the renderer owner supplies a separately approved
+fix. Ghostty v1.2.3's default legacy modified Enter encodings
+are `ESC[27;2;13~` and `ESC[27;5;13~`; this runtime does not negotiate Kitty or
+modifyOtherKeys. TD2 owns the exhaustive split-vector and editor-policy matrix.
+
+The direct key workload does not replace the pinned renderer campaign's
+submitted-frame, tool-row, status-freshness, consent-context, external-decision,
+or restoration witnesses. Keep those owning checks; do not credit them from a
+key result. This harness does not prove rendering-delay precedence or physical
+terminal behavior.
 
 ## External byte sequences
 
@@ -52,6 +75,9 @@ of exactly the original key and wire bytes, a separately edited next draft
 The original is `original éZ`. Provider requests must show exactly these two
 Messages, with no duplicate provider execution. Encoded recovery probes can
 replace the raw `12` chunk without changing those assertions.
+The provider hold is released and the original answer observed before recovery
+input; a failing recovery wait therefore cannot expire that hold and trigger a
+confounding provider retry.
 
 The `expiry` scenario requires `IncompleteTerminalInput`, nonzero exit,
 restoration, no new capture, and no provider request. The `rejection` scenario
@@ -73,6 +99,12 @@ assertion 1, setup 2, timeout 3, and other error 4. The controller exits nonzero
 for any failed row. INT, HUP, and TERM retain exits 130, 129, and 143 after cleanup.
 Controls require an intentionally wrong exact-byte expectation to fail at the
 Message assertion and prove owned Host and caller retirement after each signal.
+They also inject setup interruption before/after provider start, after Host
+start, PTY acquisition and caller launch, plus tmux interruption and failed
+server teardown paired with a body assertion. Failed disposal retains the
+private control root and reports no successful cleanup receipt. The controller
+requires both a matching passed receipt and zero worker exit; a late crash or
+signal cannot turn green.
 
 Send timestamps record the test driver's calls, not kernel arrival or frontend
 processing times. Zero-delay chunks need not produce separate reads. The 20-ms

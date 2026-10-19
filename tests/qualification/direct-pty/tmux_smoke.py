@@ -1,4 +1,4 @@
-"""Four short synthetic tmux integration rows. Full landing gates stay intact."""
+"""Five short synthetic tmux rows accompanying the primary direct-key matrix."""
 import json
 import os
 import shlex
@@ -150,8 +150,16 @@ def smoke(fixture, row):
         if row["name"] == "tmux-resize":
             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
-    terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
-    assert_submitted(fixture.endpoint.requests, [row["expected"]])
+    if row["name"] == "tmux-status":
+        terminal.wait(lambda text: "Browsing" in text and "Session: td4" in text
+                      and "Permission:" in text and "Work:" in text, "status page")
+        terminal.call("send-keys", "-t", "td4:0.0", "Escape")
+        terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")
+        assert_submitted(fixture.endpoint.requests, [])
+        assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "status captured intent"
+    else:
+        terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
+        assert_submitted(fixture.endpoint.requests, [row["expected"]])
     terminal.call("send-keys", "-t", "td4:0.0", "-l", "/exit")
     terminal.call("send-keys", "-t", "td4:0.0", "Enter")
     terminal.finish()

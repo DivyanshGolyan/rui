@@ -56,8 +56,8 @@ class Fixture:
         # create another, rather than pretending fixture setup created none.
         self.capture_baseline = set((self.home / ".config/rui/requests").glob("*.json"))
 
-    def answer(self, marker, gate=None):
-        payload = model.sse_answer(marker, marker + "-reason", marker + "-message", marker)[0]
+    def answer(self, marker, gate=None, *, text=None):
+        payload = model.sse_answer(marker, marker + "-reason", marker + "-message", marker if text is None else text)[0]
         self.endpoint.responses.append(payload if gate is None else (payload, gate))
         if gate is not None:
             self.gates.append(gate)
@@ -200,4 +200,32 @@ def recovery(fixture, row):
     tty.finish()
 
 
-SCENARIOS = {"editor": editor, "expiry": expiry, "rejection": rejection, "recovery": recovery}
+def navigation(fixture, row):
+    # A real completed answer supplies enough history for page and wheel input
+    # to move the viewport; an empty Session cannot distinguish ignored keys.
+    fixture.answer("TD4 history end", text="\n".join(
+        [f"History line {number:03d}" for number in range(100)] + ["TD4 history end"]))
+    tty = fixture.terminal()
+    tty.send(b"seed history\r")
+    tty.marker("TD4 history end")
+    tty.draft("", 2)
+    captures = set((fixture.home / ".config/rui/requests").glob("*.json"))
+    generation = tty.screen.generation
+    chunks(tty, row["chunks"])
+    tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
+    if row.get("status"):
+        tty.marker("Session: td4")
+        tty.marker("Work:")
+        tty.marker("Permission:")
+    generation = tty.screen.generation
+    chunks(tty, row["return_chunks"])
+    tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
+             label="navigation returned to live empty composer", after=generation)
+    assert_submitted(fixture.endpoint.requests, ["seed history"])
+    assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
+    tty.send(b"/exit\r")
+    tty.finish()
+
+
+SCENARIOS = {"editor": editor, "expiry": expiry, "rejection": rejection, "recovery": recovery,
+             "navigation": navigation}

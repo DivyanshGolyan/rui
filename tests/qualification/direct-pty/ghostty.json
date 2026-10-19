@@ -1,0 +1,34 @@
+[
+  {
+    "name": "ghostty-kitty-shift-enter",
+    "scenario": "editor",
+    "chunks": [{"hex": "6f6e652074776f211b5b441b5b441b5b441b5b31333b32755a0d"}],
+    "expected": "one t\nZwo!"
+  },
+  {
+    "name": "ghostty-legacy-shift-enter",
+    "scenario": "editor",
+    "chunks": [{"hex": "6f6e652074776f211b5b441b5b441b5b441b5b32373b323b31337e5a0d"}],
+    "expected": "one t\nZwo!"
+  },
+  {
+    "name": "ghostty-kitty-ctrl-enter",
+    "scenario": "rejection",
+    "chunks": [{"hex": "611b5b31333b35750d"}]
+  },
+  {
+    "name": "ghostty-legacy-ctrl-enter",
+    "scenario": "rejection",
+    "chunks": [{"hex": "611b5b32373b353b31337e0d"}]
+  },
+  {
+    "name": "ghostty-kitty-recovery",
+    "scenario": "recovery",
+    "chunks": [{"hex": "1b5b3131343b3575"}]
+  },
+  {
+    "name": "ghostty-case27-recovery",
+    "scenario": "recovery",
+    "chunks": [{"hex": "1b5b32373b353b3131347e"}]
+  }
+]
