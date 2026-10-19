@@ -448,7 +448,9 @@ fn driveActive(self: *Self) !void {
             // unfinished work in raw mode.
             self.reader.cancel();
         }
-        if (self.reader.thread != null and self.reader.completed()) {
+        // A joined read may hide or withdraw the Action, so a sequence the
+        // choice is decoding finishes there first and none reaches the draft.
+        if (self.reader.thread != null and self.reader.completed() and !(self.choiceInput() and self.input.pending() != .none)) {
             try self.settleReader();
             self.withdrawDecided();
         }
@@ -498,7 +500,9 @@ fn driveActive(self: *Self) !void {
                 try self.launch(self.freeze(.history), reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
-            } else if (!self.consent.active() and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
+            } else if (!self.consent.active() and !self.choice_line and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
+                // A line begun at an earlier choice ends before the next
+                // Action is presented, so it never decides that one.
                 try self.launch(self.freeze(.permission), reads.permission);
             }
         }
@@ -548,9 +552,7 @@ fn driveActive(self: *Self) !void {
                 // Reading completes only after delivery. Old choice text must
                 // not become a decision, but fragmented decoder/paste custody
                 // must survive until the existing empty-input freshness gate.
-                self.choice.length = 0;
-                self.choice.cursor = 0;
-                self.choice.plain_ascii = true;
+                self.retainChoiceCommand();
                 self.consent.invalidate();
                 self.dirty = true;
             }
@@ -631,10 +633,12 @@ fn withdrawDecided(self: *Self) void {
 
 /// A change the choice did not see keeps only a slash command, which can
 /// never decide; other text could become a stale decision. Either way the
-/// line stays the choice's until its Enter.
+/// line, its rejection and its paste custody stay the choice's until Enter.
 fn retainChoiceCommand(self: *Self) void {
     if (std.mem.startsWith(u8, self.choice.buffer[0..self.choice.length], "/")) return;
-    self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+    self.choice.length = 0;
+    self.choice.cursor = 0;
+    self.choice.plain_ascii = true;
 }
 
 /// The choice keeps the Action's heading lines beside it once paging hides

@@ -3578,6 +3578,133 @@ def renderer_cases():
                 tty.finish()
         print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a line begun there stays there", flush=True)
 
+        # A line begun at one choice never decides the next (#540): `/` at the
+        # first of two Actions, decided elsewhere, then `a` + Enter is the
+        # command `/a`. The second Action waits for that Enter and is decided
+        # only by its own fresh line.
+        session = "renderer/elsewhere-successor"
+        configure(session, "ask")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-successor", [
+            ("bash", f"successor-{index}", json.dumps({"cmd": f"printf decided > renderer-successor-{index}", "description": f"Successor {index}", "timeout_ms": None}))
+            for index in (1, 2)]))
+        marker = answer("successor")
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal(session, ready_write) as tty:
+                tty.send("propose two Actions\n", "Type a + Enter to allow once · d + Enter to deny")
+                tty.ready(ready_read)
+                first, second = [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
+                generation = tty.capture.generation
+                run(home, "action", "deny", "--store", store, "--session", session, "--action", first)
+                tty.wait("Successor 1 — Denied", after=generation)
+                # The other client saved its own record in this HOME.
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                # Give the second Action the time it would take to be shown
+                # and ready; it must wait for the open line instead.
+                select.select([ready_read], [], [], 2)
+                tty.send("a\r", "! Unknown command /a · /help")
+                tty.ready(ready_read)
+                assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
+                assert set((home / ".config/rui/requests").glob("*.json")) == records
+                tty.send("d\r", marker)
+                decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
+                assert [(item["action"], item["decision"]) for item in decisions] == [(second, "deny")], decisions
+                assert not any((workspace / f"renderer-successor-{index}").exists() for index in (1, 2))
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
+        print("renderer: a line begun at one choice never decides the next Action", flush=True)
+
+        # A sequence the choice is decoding finishes there (#540): a /status
+        # page whose read joins between the two bytes of é waits for the
+        # second, so é stays the choice's line and is never sent.
+        session = "renderer/elsewhere-fragment"
+        configure(session, "ask")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-fragment", [
+            ("bash", "fragment-call", json.dumps({"cmd": "printf never > renderer-fragment-effect", "description": "Fragment action", "timeout_ms": None}))]))
+        marker = answer("fragment")
+        held, released, reads = (threading.Event(), threading.Event()), (threading.Event(), threading.Event()), []
+        def hold_two_reads(_):
+            if len(reads) < 2:
+                reads.append(len(reads))
+                held[len(reads) - 1].set()
+                assert released[len(reads) - 1].wait(10)
+            return True
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal(session, ready_write) as tty:
+                tty.send("propose a fragment Action\n", "Type a + Enter to allow once · d + Enter to deny")
+                tty.ready(ready_read)
+                action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
+                proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two_reads)
+                assert held[0].wait(5), "first held Activity page"
+                # The held read predates /status, so the next one opens it.
+                os.write(tty.master, b"/status\r")
+                time.sleep(0.1)
+                released[0].set()
+                assert held[1].wait(5), "/status Activity page"
+                os.write(tty.master, b"\xc3")
+                time.sleep(0.1)
+                released[1].set()
+                # Long enough for the /status read to join; the page waits.
+                time.sleep(0.5)
+                os.write(tty.master, b"\xa9")
+                tty.wait("Session: ")
+                generation = tty.capture.generation
+                run(home, "action", "deny", "--store", store, "--session", session, "--action", action)
+                tty.wait(predicate=lambda: "Work: completed" in tty.capture.completed, after=generation, timeout=20)
+                requests = len(endpoint.requests)
+                tty.send("\x07", marker)
+                assert tty.capture.draft("", 2, prompt="> "), tty.capture.completed
+                tty.send("\r", predicate=lambda: tty.capture.draft("", 2))
+                assert len(endpoint.requests) == requests, endpoint.requests
+                assert "› é" not in tty.capture.completed, tty.capture.completed
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(*(event.set for event in released), lambda: os.close(ready_read), lambda: os.close(ready_write))
+        proxy.close()
+        proxy = None
+        print("renderer: a page opening mid-sequence at the choice keeps that sequence there", flush=True)
+
+        # Reading a tall Action to its end clears earlier choice text, but a
+        # slash command begun while reading stays a command (#540): `/`, the
+        # final page, then `a` + Enter runs `/a` and authorizes nothing.
+        session = "renderer/reading-command"
+        configure(session, "ask")
+        command = "\n".join(f"# reading line {index}" for index in range(100)) + "\nprintf allowed > renderer-reading-effect"
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-reading", [
+            ("bash", "reading-call", json.dumps({"cmd": command, "description": "Reading command", "timeout_ms": None}))]))
+        marker = answer("reading")
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal(session, ready_write) as tty:
+                tty.send("propose a tall Action\n", "Action continues · PgDn")
+                tty.ready(ready_read)
+                tty.send("/", predicate=lambda: tty.capture.draft("/", 3, prompt="> "))
+                for _ in range(8):
+                    tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
+                    if "Action read" in tty.capture.completed:
+                        break
+                else:
+                    raise AssertionError("tall Action never became ready after paging")
+                tty.ready(ready_read)
+                tty.wait("Type a + Enter to allow once · d + Enter to deny")
+                assert tty.capture.draft("/", 3, prompt="> "), tty.capture.completed
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                tty.send("a\r", "! Unknown command /a · /help")
+                tty.ready(ready_read)
+                assert set((home / ".config/rui/requests").glob("*.json")) == records
+                tty.send("d\r", marker)
+                assert not (workspace / "renderer-reading-effect").exists()
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
+        print("renderer: a slash command begun while reading a tall Action stays a command", flush=True)
+
         # Delivered history and the live footer describe one capture: no
         # committed frame shows a call twice, or both pending and finished.
         session = "renderer/one-capture"
