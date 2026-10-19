@@ -331,47 +331,48 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
             self.reject(.invalid);
             return .none;
         }
-        if (value.matches('j', .{ .ctrl = true })) return self.insert('\n', true);
-        if (value.matches(Key.tab, .{})) return self.insert('\t', true);
+        if (value.matchExact('j', .{ .ctrl = true })) return self.insert('\n', true);
+        if (value.matchExact(Key.tab, .{})) return self.insert('\t', true);
         if (value.text) |text| return self.insertText(text, true);
         self.reject(.invalid);
         return .none;
     }
-    if (value.matches('c', .{ .ctrl = true })) return .interrupt;
-    if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
-    // Enter binds on exact modifiers: Kitty's associated text or shifted
-    // key for Enter is Enter again, which would hide Shift.
-    if (value.matchExact(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
+    // Every binding matches exact modifiers. Vaxis's looser match accepts a
+    // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
+    // with text j would send and Shift-Enter with text CR would too.
+    if (value.matchExact('c', .{ .ctrl = true })) return .interrupt;
+    if (value.matchExact('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
+    if (value.matchExact(Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
     // A CSI-u report (Kitty or tmux extended keys) can name Alt-Escape;
     // it still means Esc. Legacy ESC ESC already decodes as Esc.
-    if (value.matches(Key.escape, .{}) or value.matches(Key.escape, .{ .alt = true })) return .close_view;
-    if (value.matches(Key.tab, .{})) return self.insert('\t', false);
+    if (value.matchExact(Key.escape, .{}) or value.matchExact(Key.escape, .{ .alt = true })) return .close_view;
+    if (value.matchExact(Key.tab, .{})) return self.insert('\t', false);
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matchExact(Key.enter, .{ .shift = true }) or value.matchExact(Key.enter, .{ .alt = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
-    if (value.matches(Key.page_up, .{}) or value.matches(Key.page_up, .{ .shift = true })) return .page_up;
-    if (value.matches(Key.page_down, .{}) or value.matches(Key.page_down, .{ .shift = true })) return .page_down;
-    if (value.matches(Key.up, .{ .shift = true })) return .scroll_up;
-    if (value.matches(Key.down, .{ .shift = true })) return .scroll_down;
-    if (value.matches(Key.end, .{ .ctrl = true })) return .latest;
-    if (value.matches('g', .{ .ctrl = true })) return .close_view;
-    if (value.matches(Key.left, .{})) return self.move(self.previous(self.cursor));
-    if (value.matches(Key.right, .{})) return self.move(self.next(self.cursor));
-    if (value.matches(Key.up, .{})) return self.vertical(false) orelse .scroll_up;
-    if (value.matches(Key.down, .{})) return self.vertical(true) orelse .scroll_down;
-    if (value.matches(Key.home, .{}) or value.matches('a', .{ .ctrl = true })) return self.move(self.lineStart());
+    if (value.matchExact(Key.enter, .{ .shift = true }) or value.matchExact(Key.enter, .{ .alt = true }) or value.matchExact('j', .{ .alt = true })) return self.insert('\n', true);
+    if (value.matchExact(Key.page_up, .{}) or value.matchExact(Key.page_up, .{ .shift = true })) return .page_up;
+    if (value.matchExact(Key.page_down, .{}) or value.matchExact(Key.page_down, .{ .shift = true })) return .page_down;
+    if (value.matchExact(Key.up, .{ .shift = true })) return .scroll_up;
+    if (value.matchExact(Key.down, .{ .shift = true })) return .scroll_down;
+    if (value.matchExact(Key.end, .{ .ctrl = true })) return .latest;
+    if (value.matchExact('g', .{ .ctrl = true })) return .close_view;
+    if (value.matchExact(Key.left, .{})) return self.move(self.previous(self.cursor));
+    if (value.matchExact(Key.right, .{})) return self.move(self.next(self.cursor));
+    if (value.matchExact(Key.up, .{})) return self.vertical(false) orelse .scroll_up;
+    if (value.matchExact(Key.down, .{})) return self.vertical(true) orelse .scroll_down;
+    if (value.matchExact(Key.home, .{}) or value.matchExact('a', .{ .ctrl = true })) return self.move(self.lineStart());
     // With nothing to edit, End returns to the latest view like Ctrl-G.
-    if (value.matches(Key.end, .{}) and self.length == 0) return .close_view;
-    if (value.matches(Key.end, .{}) or value.matches('e', .{ .ctrl = true })) return self.move(self.lineEnd());
-    if (value.matches(Key.delete, .{})) return self.deleteNext();
-    if (value.matches(Key.backspace, .{})) return self.deletePrevious();
-    if (value.matches('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
-    if (value.matches('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
-    if (value.matches('w', .{ .ctrl = true })) return self.backwardWord(true);
-    if (value.matches(Key.backspace, .{ .alt = true }) or value.matches(127, .{ .alt = true })) return self.backwardWord(false);
-    if (value.matches('b', .{ .alt = true }) or value.matches(Key.left, .{ .alt = true })) return self.moveWord(false);
-    if (value.matches('f', .{ .alt = true }) or value.matches(Key.right, .{ .alt = true })) return self.moveWord(true);
+    if (value.matchExact(Key.end, .{}) and self.length == 0) return .close_view;
+    if (value.matchExact(Key.end, .{}) or value.matchExact('e', .{ .ctrl = true })) return self.move(self.lineEnd());
+    if (value.matchExact(Key.delete, .{})) return self.deleteNext();
+    if (value.matchExact(Key.backspace, .{})) return self.deletePrevious();
+    if (value.matchExact('u', .{ .ctrl = true })) return self.deleteTo(self.lineStart());
+    if (value.matchExact('k', .{ .ctrl = true })) return self.deleteTo(self.lineEnd());
+    if (value.matchExact('w', .{ .ctrl = true })) return self.backwardWord(true);
+    if (value.matchExact(Key.backspace, .{ .alt = true }) or value.matchExact(127, .{ .alt = true })) return self.backwardWord(false);
+    if (value.matchExact('b', .{ .alt = true }) or value.matchExact(Key.left, .{ .alt = true })) return self.moveWord(false);
+    if (value.matchExact('f', .{ .alt = true }) or value.matchExact(Key.right, .{ .alt = true })) return self.moveWord(true);
     // Any Alt, Super, Hyper or Meta chord the bindings above do not consume,
     // on a character, a control or a named key such as Enter, is dropped
     // whole and reported. Its bare key (ESC . as ".", ESC ^A as Ctrl-A) was
@@ -1137,4 +1138,23 @@ test "Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter do
     try std.testing.expect(try stream.expire());
     try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
     try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+}
+
+test "Shift held with a binding's key is never that binding, whatever text the key reports" {
+    var storage: [64]u8 = undefined;
+    // Kitty may report associated text or a shifted key equal to the base
+    // key; neither may hide Shift. Ctrl-Shift-J does not send, Alt-Shift-J
+    // and Alt-Shift-Enter add no line, Ctrl-Shift-C does not interrupt.
+    for ([_][]const u8{ "\x1b[106;6;106u", "\x1b[106:106;6u", "\x1b[106;4;106u", "\x1b[106:106;4u", "\x1b[13;4;13u", "\x1b[99;6;99u", "\x1b[99:99;6u", "\x1b[13;2;13u" }) |chord| {
+        var editor: Editor = .{ .buffer = &storage };
+        var stream: Input = .{};
+        for ("ok") |byte| _ = editor.feed(&stream, byte);
+        for (chord) |byte| {
+            const event = editor.feed(&stream, byte);
+            try std.testing.expect(event != .submit and event != .interrupt);
+        }
+        // Shift-Enter is the one bound Shift chord here: it adds a line.
+        const expected: []const u8 = if (std.mem.eql(u8, chord, "\x1b[13;2;13u")) "ok\n" else "ok";
+        try std.testing.expectEqualStrings(expected, storage[0..editor.length]);
+    }
 }

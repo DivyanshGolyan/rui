@@ -804,7 +804,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 
 fn isRecovery(event: vaxis.Event) bool {
     return switch (event) {
-        .key_press => |key| key.matches('r', .{ .ctrl = true }),
+        .key_press => |key| key.matchExact('r', .{ .ctrl = true }),
         else => false,
     };
 }
@@ -1273,4 +1273,23 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     try self.beginTranscript();
     try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
     try std.testing.expectEqual(@as(?u64, 3), if (self.transcript_older) |cursor| cursor.end else null);
+}
+
+test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported text" {
+    for ([_]struct { bytes: []const u8, recovery: bool }{
+        .{ .bytes = "\x12", .recovery = true },
+        .{ .bytes = "\x1b[114;5u", .recovery = true },
+        .{ .bytes = "\x1b[114;69u", .recovery = true },
+        .{ .bytes = "\x1b[27;5;114~", .recovery = true },
+        .{ .bytes = "\x1b[114;6;114u", .recovery = false },
+        .{ .bytes = "\x1b[114:114;6u", .recovery = false },
+    }) |case| {
+        var stream: TerminalInput = .{};
+        var found: ?bool = null;
+        for (case.bytes) |byte| switch (stream.feed(byte)) {
+            .event => |decoded| found = isRecovery(decoded.event),
+            else => {},
+        };
+        try std.testing.expectEqual(@as(?bool, case.recovery), found);
+    }
 }
