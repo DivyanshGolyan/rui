@@ -4223,6 +4223,41 @@ def renderer_cases():
         proxy.close()
         proxy = None
         print("renderer: a boundary after text that live output shortens starts where its item's text does", flush=True)
+
+        # Escaping shortens live output by more than a short reply and the
+        # next read add: a later boundary must still follow the reply's.
+        session = "renderer/styled-short"
+        configure(session)
+        first_release = threading.Event()
+        styled = "e" + "\u0301" * 2000 + " SHORT-STYLED-END"
+        endpoint.responses.append((fixture.sse_answer("short-first", "reason", "message", styled)[0], first_release))
+        endpoint.responses.append(fixture.sse_answer("short-second", "reason", "message", "OK-REPLY")[0])
+        holding, release, held = threading.Event(), threading.Event(), threading.Event()
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_page)
+        with terminal(session) as tty:
+            requests = len(endpoint.requests)
+            tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
+            fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
+            tty.send("QUEUED-M\n", predicate=lambda: "› QUEUED-M" in tty.capture.completed)
+            holding.set()
+            assert held.wait(5), "no scan reached the held page"
+            first_release.set()
+            fixture.wait_for(lambda: len(endpoint.requests) > requests + 1 and fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed", "both answers", timeout=8)
+            holding.clear()
+            release.set()
+            tty.wait("OK-REPLY", timeout=30)
+            tty.send("THIRD-QUESTION\n", answer("styled third"))
+            tty.send("\x1b[A", "Start of conversation")
+            shown = tty.capture.completed
+            assert "Browsing · Esc returns" in shown and "Earlier rows left this view." not in shown, shown
+            for text in ("› DRIVER-QUESTION", "SHORT-STYLED-END", "› QUEUED-M", "OK-REPLY", "› THIRD-QUESTION", "renderer answer styled third"):
+                assert shown.count(text) == 1, (text, shown)
+            assert shown.index("SHORT-STYLED-END") < shown.index("OK-REPLY") < shown.index("› THIRD-QUESTION"), shown
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        proxy.close()
+        proxy = None
+        print("renderer: a boundary after text escaping shortens by more than later output stays ordered", flush=True)
         completed = True
     finally:
         dispose_all(lambda: proxy.close() if proxy is not None else None,
