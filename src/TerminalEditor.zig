@@ -339,7 +339,9 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     }
     if (value.matches('c', .{ .ctrl = true })) return .interrupt;
     if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
-    if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
+    // Enter binds on exact modifiers: Kitty's associated text or shifted
+    // key for Enter is Enter again, which would hide Shift.
+    if (value.matchExact(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
     // A CSI-u report (Kitty or tmux extended keys) can name Alt-Escape;
     // it still means Esc. Legacy ESC ESC already decodes as Esc.
@@ -347,7 +349,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.
-    if (value.matches(Key.enter, .{ .shift = true }) or value.matches(Key.enter, .{ .alt = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
+    if (value.matchExact(Key.enter, .{ .shift = true }) or value.matchExact(Key.enter, .{ .alt = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
     if (value.matches(Key.page_up, .{}) or value.matches(Key.page_up, .{ .shift = true })) return .page_up;
     if (value.matches(Key.page_down, .{}) or value.matches(Key.page_down, .{ .shift = true })) return .page_down;
     if (value.matches(Key.up, .{ .shift = true })) return .scroll_up;
@@ -764,7 +766,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
     // Enter with Alt and another modifier is still a dropped chord.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b[13;4u", "\x1b[13;4;13u", "\x1b[13:13;4u", "\x1b[13;7u", "\x1b[13;9u", "\x1b[1;3A", "\x1b\x00", "\x1b\x01", "\x1b\x12", "\x1b[28;3u", "\x1b[97;7u", "\x1b[27;3;46~", "\x1b[27;3;32~", "\x1b[27;9;46~", "\x1b[27;4;13~" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
@@ -794,7 +796,7 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
     var storage: [64]u8 = undefined;
     // Ghostty's legacy table sends Shift-Enter as CSI 27;2;13~ unasked. It
     // adds a line like Kitty's CSI 13;2u; Ctrl-A still moves to the line start and Ctrl-J sends.
-    for ([_][]const u8{ "\x1b[27;2;13~", "\x1b[13;2u" }) |shift_enter| {
+    for ([_][]const u8{ "\x1b[27;2;13~", "\x1b[13;2u", "\x1b[13;2;13u", "\x1b[13:13;2u" }) |shift_enter| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
