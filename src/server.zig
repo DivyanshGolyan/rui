@@ -2627,90 +2627,60 @@ fn completeTransfer(
         }) catch unreachable;
         writeTestTrace(host, &trace, &publication);
     }
-    const evidence = switch (completion.outcome) {
-        .response_capture_failed => |failure| {
-            const code = switch (failure) {
-                .scratch_exhausted => "response_scratch_exhausted",
-                .write_failed => "response_write_failed",
-                .seal_failed => "response_seal_failed",
-            };
-            settleUnansweredFailure(host, owner.token, owner.binding, code, .ordinary);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        },
-        .request_source_failed => {
-            fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        },
-        .transport_finished => |evidence| evidence,
-    };
-    if (evidence.disposition == .success) {
-        switch (completeSuccessfulTransfer(host, active)) {
-            .cleanup => beginCleanup(host, slot, owner),
-            .named_scratch => |scratch| {
-                host.custody.detach(owner.token) catch unreachable;
-                slot.* = .{ .named_scratch = .{
-                    .token = owner.token,
-                    .owner = scratch,
-                } };
+    var error_response: model_adapter.ErrorResponse = .ordinary;
+    switch (completion.outcome) {
+        .transport_finished => |evidence| switch (evidence.disposition) {
+            .permanent_http, .temporary_http => {
+                // The transport has sealed this HTTP answer. Interpretation
+                // borrows it; this owner still disposes it before settlement.
+                var response = active.transfer.takeResponse();
+                defer response.deinit();
+                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+                if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
             },
-        }
-        return;
+            else => {},
+        },
+        else => {},
     }
-    // An HTTP status is the provider's answer; keep whatever correlation it sent.
-    const answered: ?AnsweredAttempt = if (evidence.disposition == .permanent_http or evidence.disposition == .temporary_http)
-        .init(host, owner, &active.transfer)
-    else
-        null;
-    if (answered) |attempt| {
-        const overflow_result = classify: {
-            var response = active.transfer.takeResponse();
-            defer response.deinit();
-            break :classify model_adapter.Output.contextOverflow(host.io, response.file, response.length, evidence.http_status);
-        };
-        const overflow = overflow_result catch |err| {
-            stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
-            attempt.fail("response_read_failed", .ordinary);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
+    switch (execution.transferDecision(completion.outcome, switch (error_response) {
+        .ordinary => .ordinary,
+        .context_overflow => .context_overflow,
+        .unreadable => .unreadable,
+    })) {
+        .interpret_output => {
+            switch (completeSuccessfulTransfer(host, active)) {
+                .cleanup => beginCleanup(host, slot, owner),
+                .named_scratch => |scratch| {
+                    host.custody.detach(owner.token) catch unreachable;
+                    slot.* = .{ .named_scratch = .{
+                        .token = owner.token,
+                        .owner = scratch,
+                    } };
+                },
+            }
             return;
-        };
-        if (overflow) {
-            attempt.fail("provider_context_overflow", .context_overflow);
-            active.transfer.deinit();
-            beginCleanup(host, slot, owner);
-            return;
-        }
+        },
+        .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
+        .fail => |failure| {
+            var code_buffer: [96]u8 = undefined;
+            const code = failure.codeText(&code_buffer);
+            const disposition: store_module.ModelFailureClass = switch (failure.kind) {
+                .permanent => .ordinary,
+                .context_overflow => .context_overflow,
+                .temporary => .{ .retryable = .{
+                    .waits_ms = host.faults.retry_waits_ms,
+                    .retry_after_ms = failure.retry_after_ms,
+                    .retry_after_deadline_ms = failure.retry_after_deadline_ms,
+                } },
+            };
+            if (failure.answered) {
+                const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
+                answered.fail(code, disposition);
+            } else {
+                settleUnansweredFailure(host, owner.token, owner.binding, code, disposition);
+            }
+        },
     }
-    var code_buffer: [96]u8 = undefined;
-    const code = switch (evidence.disposition) {
-        .success => unreachable,
-        .permanent_http => std.fmt.bufPrint(&code_buffer, "provider_http_{d}", .{evidence.http_status}) catch unreachable,
-        .temporary_http => std.fmt.bufPrint(&code_buffer, "provider_temporary_http_{d}", .{evidence.http_status}) catch unreachable,
-        .temporary_connection => "provider_transport_failure",
-        .permanent_transport => "provider_transport_permanent",
-        .unsupported_http_version => "provider_http2_required",
-        .authentication_failure => "provider_authentication_failed",
-        .tls_verification_failure => "provider_tls_verification_failed",
-        .invalid_headers => "invalid_provider_headers",
-    };
-    const failure_disposition: store_module.ModelFailureClass =
-        if (evidence.disposition == .temporary_http or
-        evidence.disposition == .temporary_connection)
-            .{ .retryable = .{
-                .waits_ms = host.faults.retry_waits_ms,
-                .retry_after_ms = evidence.retry_after_ms,
-                .retry_after_deadline_ms = evidence.retry_after_deadline_ms,
-            } }
-        else
-            .ordinary;
-    if (answered) |attempt|
-        attempt.fail(code, failure_disposition)
-    else
-        settleUnansweredFailure(host, owner.token, owner.binding, code, failure_disposition);
     active.transfer.deinit();
     beginCleanup(host, slot, owner);
 }
@@ -2731,10 +2701,9 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
-    if (structured_output) {
-        const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
+    if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
         var detail: [512]u8 = undefined;
-        answered.reject("unsupported_output_schema", rejection.format(error.UnsupportedOutputSchema, &detail), .ordinary);
+        answered.reject(rejection.code, rejection.format(&detail), .ordinary);
         return .cleanup;
     }
 
