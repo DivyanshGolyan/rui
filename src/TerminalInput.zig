@@ -355,7 +355,7 @@ test "fragmented APC and oversized associated text keep the following key" {
         for (0..3) |boundary| {
             var bytes: [256]u8 = undefined;
             var out = std.Io.Writer.fixed(&bytes);
-            try out.writeAll("\x1b[5;1;");
+            try out.writeAll("\x1b[1;1;");
             for (0..31) |_| try out.writeAll("128512:");
             try out.writeAll(if (boundary == 2) "97:97:97:233" else "128512");
             if (boundary == 1) try out.writeAll(":97");
@@ -386,8 +386,11 @@ test "malformed keyboard values fail closed on every supported route; unknown ke
              "\x1b[1;0A",          "\x1b[1;257A",
         "\x1b[1;2:4A",     "\x1b[1;1;1114112A",  "\x1b[1;1;97;1A",     "\x1b[5;0~",
         "\x1b[5;257~",     "\x1b[5;1:9~",        "\x1b[5;1;55296~",
+        // The key number field: signed, alternate or other than 1 on a letter key.
+           "\x1b[+11;1~",
+        "\x1b[1:999;1P",   "\x1b[2;5A",          "\x1b[+27;1;13~",
         // xterm modifyOtherKeys: modifier 1..16 and a Unicode scalar code.
-           "\x1b[27;0;97~",
+            "\x1b[27;0;97~",
         "\x1b[27;17;97~",  "\x1b[27;2~",         "\x1b[27;2;1114112~",
     }) |sequence| {
         errdefer std.debug.print("sequence {any}\n", .{sequence});
@@ -410,6 +413,8 @@ test "malformed keyboard values fail closed on every supported route; unknown ke
         .{ .bytes = "\x1b[97:65:97;2u", .key = 'a', .mods = .{ .shift = true } },
         .{ .bytes = "\x1b[97::97;5u", .key = 'a', .mods = .{ .ctrl = true } },
         .{ .bytes = "\x1b[1;256A", .key = vaxis.Key.up, .mods = all },
+        .{ .bytes = "\x1b[;5A", .key = vaxis.Key.up, .mods = .{ .ctrl = true } },
+        .{ .bytes = "\x1b[1;5R", .key = vaxis.Key.f3, .mods = .{ .ctrl = true } },
         .{ .bytes = "\x1b[5;256~", .key = vaxis.Key.page_up, .mods = all },
         .{ .bytes = "\x1b[27;1;97~", .key = 'a', .mods = .{} },
         .{ .bytes = "\x1b[27;16;97~", .key = 'a', .mods = @bitCast(@as(u8, 15)) },
@@ -424,8 +429,9 @@ test "malformed keyboard values fail closed on every supported route; unknown ke
         try std.testing.expectEqual(case.key, key.codepoint);
         try std.testing.expectEqual(case.mods, key.mods);
     }
-    // Keys this parser does not know are still ignored, keeping what follows.
-    for ([_][]const u8{ "\x1b[123;4~", "\x1b[27~", "\x1b[99999~" }) |sequence| {
+    // Keys this parser does not know, private reports and an unrequested
+    // cursor position report are still ignored, keeping what follows.
+    for ([_][]const u8{ "\x1b[123;4~", "\x1b[27~", "\x1b[99999~", "\x1b[?1~", "\x1b[5;10R", "\x1b[?5;10;1R" }) |sequence| {
         var input: Self = .{};
         for (sequence) |byte| try std.testing.expect(input.feed(byte, 0) == .none);
         try std.testing.expectEqualStrings("Q", testEvent(input.feed('Q', 0)).?.key_press.text.?);
