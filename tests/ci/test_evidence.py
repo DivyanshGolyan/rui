@@ -178,6 +178,21 @@ class SuiteInputsTest(unittest.TestCase):
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_repository_suite_closures_include_renderer_test_imports(self):
+        previous = Path.cwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(Path(__file__).resolve().parents[2])
+        revision = evidence.git('rev-parse', 'HEAD')
+        # Explicit local trust tests the detector, not hosted bypass authority.
+        for target in suite_inputs.SUITES:
+            with self.subTest(target=target):
+                inputs = suite_inputs.source_inputs([target], 'all', revision, revision)
+                self.assertIn('src/TerminalEditor.zig', inputs['files'])
+                self.assertIn('src/socket_fixture.zig', inputs['files'])
+        with patch.dict(suite_inputs.DYNAMIC_EMBEDS, {'src/logic_tests.zig': 'unreviewed'}), \
+                self.assertRaisesRegex(ValueError, 'Incomplete computed dependency'):
+            suite_inputs.source_inputs(['test-logic'], 'all', revision, revision)
+
     def test_optional_evidence_errors_execute_the_real_gate_and_preserve_its_exit(self):
         runner = Path(__file__).with_name('run_selected.py').resolve()
         with tempfile.TemporaryDirectory() as directory:
