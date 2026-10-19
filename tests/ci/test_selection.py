@@ -148,6 +148,20 @@ class SelectionTest(unittest.TestCase):
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
+    def test_macos_status_requires_the_selected_parallel_cache_proof(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        job = re.search(r'(?ms)^  macos:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
+        self.assertIn('macos_cache_policy', re.search(r'needs: \[(.*?)\]', job)[1])
+        script = dedent(job.split('run: |\n', 1)[1])
+        for selected, cache, expected in (('true', 'success', 0), ('true', 'failure', 1), ('true', 'cancelled', 1),
+                                          ('true', 'skipped', 1), ('false', 'skipped', 0), ('false', 'success', 1)):
+            with self.subTest(selected=selected, cache=cache):
+                result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                        env={**os.environ, 'PLAN_RESULT': 'success', 'BUILD_RESULT': 'success',
+                                             'NATIVE_RESULT': 'success', 'CACHE_SELECTED': selected,
+                                             'CACHE_RESULT': cache})
+                self.assertEqual(result.returncode != 0, bool(expected))
+
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/store.zig", "src/future_owner.zig", "tests/integration/future_case.py"):
             result = select([path], "review", AVAILABLE)
@@ -446,7 +460,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         # The server's scoped token, not requested-ref setup code, owns access.
-        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml'):
+        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'renderer-macos.yml'):
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
                 self.assertRegex(workflow, r'(?m)^cache-mode: read$')
@@ -587,7 +601,7 @@ class FullCheckPartitionTest(unittest.TestCase):
             time.sleep(min(.005, max(0, deadline - time.monotonic())))
 
     def run_part(self, part, fail="", overlap=False, hold="", timing=False, clock_error="",
-                 timeout=60, python_delay=0, fail_at=""):
+                 timeout=60, python_delay=0, fail_at="", pins=True):
         with ExitStack() as owner:
             root = Path(tempfile.mkdtemp())
             process = None
@@ -666,20 +680,29 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 (root / name).chmod(0o755)
             invocations = root / "invocations"
             invocations.touch()
+            # check.sh verifies the terminal fixtures' pinned distributions first;
+            # metadata-only stand-ins satisfy it without importing them.
+            site = root / "site"
+            site.mkdir()
+            if pins:
+                for line in Path("tests/integration/terminal_requirements.txt").read_text().splitlines():
+                    name, version = line.split("==")
+                    (site / f"{name}-{version}.dist-info").mkdir()
+                    (site / f"{name}-{version}.dist-info/METADATA").write_text(
+                        f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
             env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", FAIL_FIXTURE=fail,
                        CHECK_OVERLAP=str(int(overlap)), GATE_DIR=str(root), TEST_PYTHON=sys.executable,
-                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)))
+                       HOLD_FIXTURE=hold, TEST_PART=part, CHECK_TIMING=str(int(timing)),
+                       PYTHONPATH=f"{root}{os.pathsep}{site}")
             if python_delay:
                 (root / "sitecustomize.py").write_text(
                     f"import time\ntime.sleep({python_delay!r})\n")
-                env["PYTHONPATH"] = str(root)
             if clock_error:
                 (root / "sitecustomize.py").write_text(
                     "import sys, time\n"
                     "def fail_clock():\n    raise OSError('injected clock failure')\n"
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
-                env["PYTHONPATH"] = str(root)
             arguments = (["parallel", str(root / "native"), "status", "sessions", "proposal", "activity", "preferences", "notice"]
                          if part == "parallel" else
                          ["status", "sessions", "proposal", "activity", "preferences", part, "notice"])
@@ -693,7 +716,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                 (root / "sitecustomize.py").write_text(
                     "import os, time\nfrom pathlib import Path\n"
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
-                env.update(PYTHONPATH=str(root), TMPDIR=str(root))
+                env.update(TMPDIR=str(root))
                 fixtures = ("human_cli_integration.py", "preference_policy_integration.py")
             # The serial driver starts 43 real interpreters, including its
             # version check. This is a functional test, not a startup benchmark.
@@ -1046,6 +1069,17 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
         self.assertEqual(outputs["execution"] | outputs["callers"], expected)
         self.assertIn("dispatch_integration.py release", outputs["execution"])
         self.assertIn("human_cli_integration.py release", outputs["callers"])
+
+    def test_terminal_pins_fail_before_any_terminal_part_fixture(self):
+        for part in ("all", "callers", "parallel", "execution"):
+            with self.subTest(part=part):
+                result, lines = self.run_part(part, pins=False)
+                if part == "execution":
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    continue
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("Terminal fixtures require pyte==0.8.2 (found absent)", result.stderr)
+                self.assertEqual(lines, [])
 
     def test_callers_overlap_private_fixtures_then_drain_before_deadline_cases(self):
         for part in ("callers", "parallel"):

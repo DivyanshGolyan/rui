@@ -24,9 +24,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  upgrade:
+  # Two independent native checks: one runs the detached-startup gate, the
+  # other installs, upgrades and restarts. Serially one Mac took 13 minutes.
+  startup:
     if: ${{ !github.event.repository.private }}
-    name: upgrade (${{ matrix.os }})
+    name: startup (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -44,6 +46,30 @@ jobs:
         env:
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: zig build host-launch-integration -j2 --summary all
+      - name: Retain bounded failed-fixture diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: startup-failure-${{ matrix.os }}
+          path: ${{ runner.temp }}/rui-failure-artifacts
+          retention-days: 3
+          if-no-files-found: ignore
+  upgrade:
+    if: ${{ !github.event.repository.private }}
+    name: upgrade (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["host-launch-integration"]'
       - name: Check out the previous known installed build
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,14 +89,6 @@ jobs:
           python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .
         env:
           RUI_UPGRADE_FAILURES: ${{ runner.temp }}/rui-upgrade-data
-      - name: Retain bounded failed-fixture diagnostics
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: startup-failure-${{ matrix.os }}
-          path: ${{ runner.temp }}/rui-failure-artifacts
-          retention-days: 3
-          if-no-files-found: ignore
       - name: Retain failed synthetic Stores and Host diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

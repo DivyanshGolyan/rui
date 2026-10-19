@@ -1,0 +1,147 @@
+name: Renderer macOS matrix
+# The approved verify-rui rows (L1 PTY, L2 tmux send-keys, L3 attached tmux
+# client), the modifier boundary probe, the TMUX inheritance control and the
+# traced native renderer selectors, on hosted Apple Silicon instead of a
+# personal Mac. Physical keyboard, wheel and trackpad checks stay local.
+on:
+  push:
+    branches: ['wip/**']
+    paths:
+      - 'src/**'
+      - 'build.zig*'
+      - 'tests/integration/**'
+      - 'tests/qualification/renderer-macos/**'
+      - '.github/actions/setup/**'
+      - '.github/workflows/renderer-macos.yml'
+  workflow_dispatch:
+    inputs:
+      serial:
+        description: Run rows one at a time on each VM (load control)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+# Rows restore compilation inputs but never publish caches.
+cache-mode: read
+
+concurrency:
+  group: renderer-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          check-part: compiled
+      - name: Build the exact head once with the approved helper (ReleaseSafe)
+        env:
+          VERIFY_RUI_CACHE: ${{ runner.temp }}/vr-cache
+        run: |
+          set -euo pipefail
+          python3 -B tests/qualification/renderer-macos/matrix.py verify-bundle
+          started=$SECONDS
+          python3 -B tests/qualification/renderer-macos/verify-rui build "$GITHUB_SHA" --source "$GITHUB_WORKSPACE"
+          echo "verify-rui build: $((SECONDS - started))s" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Native-CPU build: every consumer must report the same CPU identity.
+          sysctl -n machdep.cpu.brand_string hw.cpufamily hw.cpusubfamily > "$VERIFY_RUI_CACHE/builds/$GITHUB_SHA/cpu.txt"
+          cat "$VERIFY_RUI_CACHE/builds/$GITHUB_SHA/manifest.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vr-cache/builds
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  rows:
+    needs: build
+    name: rows (${{ matrix.group }})
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [terminal, native]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: renderer-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vr-cache/builds
+      - name: Verify the producer's bits, source and CPU before any row
+        env:
+          CACHE: ${{ runner.temp }}/vr-cache
+        run: |
+          set -euo pipefail
+          build="$CACHE/builds/$GITHUB_SHA"
+          chmod +x "$build/bin/rui" "$build/bin/rui-evaluator"
+          python3 - "$build" <<'PY'
+          import hashlib, json, pathlib, subprocess, sys
+          build = pathlib.Path(sys.argv[1])
+          manifest = json.loads((build / "manifest.json").read_text())
+          for name, expected in manifest["files_sha256"].items():
+              actual = hashlib.sha256((build / "bin" / name).read_bytes()).hexdigest()
+              assert actual == expected, f"{name}: {actual} != {expected}"
+          tree = subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip()
+          assert manifest["tree"] == tree and manifest["source"] == str(pathlib.Path.cwd()), manifest
+          PY
+          sysctl -n machdep.cpu.brand_string hw.cpufamily hw.cpusubfamily | diff "$build/cpu.txt" - \
+            || { echo "Consumer CPU differs from the native-CPU producer; rows not run" >&2; exit 1; }
+      - name: Private fixture interpreter and tmux
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/vr-venv"
+          "$RUNNER_TEMP/vr-venv/bin/pip" --disable-pip-version-check install --retries 1 -r tests/integration/terminal_requirements.txt
+          command -v tmux >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install tmux
+          { sw_vers; sysctl hw.model hw.ncpu hw.memsize; tmux -V; "$RUNNER_TEMP/vr-venv/bin/python" --version; } | tee "$RUNNER_TEMP/vr-environment.txt"
+      - name: Rows under the default soft open-file limit
+        env:
+          SERIAL: ${{ inputs.serial && '--serial' || '' }}
+          GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          # Users' default soft limit; the hard limit stays the system's.
+          ulimit -S -n 256
+          { ulimit -Sn; ulimit -Hn; } | tee -a "$RUNNER_TEMP/vr-environment.txt"
+          unset TMUX TMUX_PANE
+          # shellcheck disable=SC2086
+          "$RUNNER_TEMP/vr-venv/bin/python" -B tests/qualification/renderer-macos/matrix.py "$GROUP" "$GITHUB_SHA" \
+            --out "$RUNNER_TEMP/vr-evidence/$GROUP" --cache "$RUNNER_TEMP/vr-cache" --venv "$RUNNER_TEMP/vr-venv" $SERIAL
+      - name: Retain row evidence, never synthetic Stores' credentials
+        if: ${{ always() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/vr-evidence"
+          cp "$RUNNER_TEMP/vr-environment.txt" "$RUNNER_TEMP/vr-evidence/" 2>/dev/null || true
+          # Synthetic scratch (HOME, Store, sockets) is removed by the helper's cleanup.
+          find "$RUNNER_TEMP/vr-evidence" -name 'codex.json' -delete
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: renderer-${{ matrix.group }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/vr-evidence
+          retention-days: 3
+          if-no-files-found: warn
+  renderer:
+    # One status for the whole matrix: every row group must pass.
+    needs: [build, rows]
+    if: ${{ always() && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          ROWS_RESULT: ${{ needs.rows.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$ROWS_RESULT" = success
