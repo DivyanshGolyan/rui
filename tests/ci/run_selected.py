@@ -119,6 +119,8 @@ def main():
     if args.reuse_evidence:
         import evidence
         try:
+            if args.ci_artifacts != ".zig-cache/o/ci-compiled":
+                raise ValueError("Acceptance requires execution of the inventoried compiled artifacts")
             inputs = evidence.identity(targets, args.check_part)
             executed = {path: evidence.digest(path) for path in inputs["executables"]}
             if evidence.restore(inputs):

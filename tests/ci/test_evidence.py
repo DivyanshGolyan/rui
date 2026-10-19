@@ -212,13 +212,13 @@ def identify(*args):
 def restore(*args):
     if mode == 'hash': raise OSError('hash failed')
     if mode == 'truncated': raise ValueError('invalid receipt')
-    return mode == 'matching'
+    return mode in {'matching', 'unbound', 'different'}
 evidence.identity = identify
 evidence.restore = restore
 evidence.record = lambda inputs: None
 run_selected.main()
 '''
-            for fault in ('detector', 'hash', 'truncated', 'missing', 'matching'):
+            for fault in ('detector', 'hash', 'truncated', 'missing', 'matching', 'unbound', 'different'):
                 for gate_exit in (0, 7):
                     with self.subTest(fault=fault, gate_exit=gate_exit):
                         invocations = root / 'invocations'
@@ -227,15 +227,19 @@ run_selected.main()
                                            PYTHONPATH=str(runner.parent), FAULT=fault,
                                            EXECUTABLE=str(executed), INVOCATIONS=str(invocations),
                                            GATE_EXIT=str(gate_exit))
+                        artifacts = ([] if fault == 'unbound' else
+                                     ['--ci-artifacts=' + ('other-artifacts' if fault == 'different'
+                                                          else '.zig-cache/o/ci-compiled')])
                         result = subprocess.run([sys.executable, '-B', '-c', setup, '["test-logic"]',
-                                                 '--reuse-evidence'], env=environment,
+                                                 '--reuse-evidence', *artifacts], env=environment,
                                                 capture_output=True, text=True)
                         self.assertEqual(result.returncode, 0 if fault == 'matching' else gate_exit,
                                          result.stdout + result.stderr)
                         self.assertEqual(invocations.exists(), fault != 'matching')
                         if fault != 'matching':
+                            option = ' -D' + artifacts[0].removeprefix('--') if artifacts else ''
                             self.assertEqual(invocations.read_text().splitlines(),
-                                             ['build test-logic --summary all'])
+                                             ['build test-logic' + option + ' --summary all'])
 
     def test_acceptance_requires_the_complete_target_closure_not_the_entire_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
