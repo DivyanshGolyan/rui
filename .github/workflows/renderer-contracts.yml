@@ -1,5 +1,6 @@
 name: Renderer contracts (Linux)
 on:
+  workflow_dispatch:
   push:
     branches: ['td3/**']
   pull_request:
@@ -42,6 +43,50 @@ jobs:
         with:
           name: renderer-mutations-${{ github.sha }}-${{ github.run_attempt }}
           path: .amp/td3/mutations
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  contracts:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["test", "test-logic", "human-cli-integration"]'
+          check-part: renderer-contracts-native
+      - name: Build one production artifact for the independent PTY suites
+        run: |
+          mkdir -p .amp/td3/contracts
+          git rev-parse HEAD > .amp/td3/contracts/revision.txt
+          zig build -j2 -Doptimize=ReleaseSafe --summary all
+          sha256sum zig-out/bin/rui > .amp/td3/contracts/binary.sha256
+      - name: TD2 complete binding contracts (case27 remains mandatory)
+        run: |
+          set -o pipefail
+          zig build test-logic -j2 -Dtest-filter=TD2 --summary all 2>&1 | tee .amp/td3/contracts/td2.log
+      - name: TD1 sequences through actual frontend transitions
+        if: ${{ !cancelled() }}
+        run: python3 tests/integration/session_sequence_model.py --source "$PWD" --output .amp/td3/contracts/td1
+      - name: TD4 driver and disposal controls
+        if: ${{ !cancelled() }}
+        run: |
+          python3 tests/qualification/direct-pty/test_driver.py -v
+          python3 tests/qualification/direct-pty/controls.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/controls
+      - name: TD4 direct PTY and short tmux smoke
+        if: ${{ !cancelled() }}
+        run: python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/pty --jobs 4
+      - name: TD2 original-recovery encoding contracts
+        if: ${{ !cancelled() }}
+        run: python3 tests/integration/input_equivalence.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/recovery
+      - name: Retain each independent result without masking mandatory failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-contracts-${{ github.sha }}-${{ github.run_attempt }}
+          path: .amp/td3/contracts
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3

@@ -83,7 +83,11 @@ MUTATIONS = (
              logic("terminal input owns fragmentation and paste provenance without an event queue")),
     Mutation("escape-alt", "ESC prefix preserves the key's Alt modifier", "6277744c",
              "src/TerminalInput.zig", "key.mods.alt = true;", "key.mods.alt = false;",
-             logic("an unbound Alt or Meta chord never inserts its bare character")),
+             logic("TD2 binding outcomes across raw ESC-prefix and kitty at every fragmentation boundary")),
+    Mutation("input-expiry-edge", "pending input expires at the inclusive 80ms/2s deadline", "359567e6",
+             "src/SessionTerminal.zig", "now - self.pending_at >= (if (pending == .escape)",
+             "now - self.pending_at > (if (pending == .escape)",
+             logic("TD2 SessionTerminal expiry boundaries use a controlled clock and retain queued bytes")),
     Mutation("escape-suffix", "an interrupted OSC retains the following sequence", "0e3b44b5",
              "src/TerminalInput.zig", "self.used -= result.n;", "self.used = 0;",
              logic("an interrupted OSC keeps the following sequence and key")),
@@ -92,6 +96,10 @@ MUTATIONS = (
              "if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt)",
              "if (shown.next.order(input.action_seen) == .gt)",
              logic("Action approval requires contiguous displayed rows and resets after resize")),
+    Mutation("consent-freshness", "a pending decoder never grants fresh permission input", "359567e6",
+             "src/session_consent.zig", "service != .empty or decoder_pending or stopped",
+             "service != .empty or (decoder_pending and false) or stopped",
+             logic("consent requires real emptiness after completed prompt")),
 )
 
 

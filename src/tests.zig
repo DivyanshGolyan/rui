@@ -30,6 +30,7 @@ test {
     _ = @import("cli_args.zig");
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
+    _ = @import("terminal_input_equivalence_test.zig");
     _ = @import("SessionSubmission.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("session_reads.zig");
