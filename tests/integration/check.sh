@@ -36,6 +36,27 @@ else
     esac
 fi
 
+# Terminal fixtures import these pins. Check them before any native case so a
+# private interpreter missing one fails in seconds, not after the execution cases.
+if [ "$part" != execution ]; then
+    python3 - "$directory/terminal_requirements.txt" <<'PY'
+import importlib.metadata
+import sys
+wrong = []
+for line in open(sys.argv[1]):
+    name, version = line.strip().split("==")
+    try:
+        found = importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        found = "absent"
+    if found != version:
+        wrong.append(f"{name}=={version} (found {found})")
+if wrong:
+    sys.exit(f"Terminal fixtures require {', '.join(wrong)} for {sys.executable}. "
+             "Install tests/integration/terminal_requirements.txt before running checks.")
+PY
+fi
+
 # One process inventory feeds every policy. Its order is the serial full gate's
 # order; parallel policies defer isolated cases until every batch peer retires.
 cases() {

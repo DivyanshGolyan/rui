@@ -130,7 +130,8 @@ runs:
           packages+=('h2==4.3.0')
         fi
         if [ '${{ steps.requirements.outputs.terminal }}' = true ]; then
-          packages+=('pyte==0.8.2' 'wcwidth==0.2.13')
+          # The same pins check.sh verifies before native terminal cases.
+          while IFS= read -r pin; do packages+=("$pin"); done < tests/integration/terminal_requirements.txt
         fi
         "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 "${packages[@]}"
         echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"
