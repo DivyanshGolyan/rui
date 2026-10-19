@@ -2019,7 +2019,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             "routine retirement diagnostics leaked into conversation", settled)
         if timed_out:
             assert f"! {description} — Timed out" in settled, settled
-            assert "[summary shortened; /details]" in settled, settled
+            # The notice wraps with the text beside the timestamp margin.
+            assert "[summary shortened; /details]" in " ".join(settled.split()), settled
         elif exit_code:
             assert f"! {description} — Failed (exit {exit_code})" in settled, ("quiet view hid tool failure", settled)
             assert "Exit code:" not in settled, ("exit status repeated below its heading", settled)
@@ -2035,7 +2036,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if signal_failure:
             assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
             if timed_out:
-                assert "[summary shortened; /details]\n  Process-group signaling reported a failure.\n" in settled, settled
+                # The warning starts its own line after the wrapped notice.
+                assert re.search(r"\[summary\s+shortened;\s+/details\]\n  Process-group signaling reported a failure\.\n", settled), settled
         assert f"\n  {answer}" in settled, settled
         assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
         if not timed_out:
