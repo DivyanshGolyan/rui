@@ -1,0 +1,133 @@
+name: Renderer contracts
+# Nonblocking: Selected checks and the landing rule never require these. The
+# nightly run adds the mutation campaign and files an issue on failure.
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'tests/ci/renderer_mutation*'
+      - 'tests/integration/session_sequence_model*'
+      - 'tests/integration/input_equivalence.py'
+      - 'tests/integration/terminal_input_replay.py'
+      - 'tests/integration/terminal_restoration_integration.py'
+      - 'tests/qualification/direct-pty/**'
+      - '.github/workflows/renderer-contracts.yml'
+  push:
+    branches: ['wip/land-*']
+    paths:
+      - 'src/**'
+      - 'build.zig'
+      - 'tests/ci/renderer_mutation*'
+      - 'tests/integration/session_sequence_model*'
+      - 'tests/integration/input_equivalence.py'
+      - 'tests/integration/terminal_input_replay.py'
+      - 'tests/integration/terminal_restoration_integration.py'
+      - 'tests/qualification/direct-pty/**'
+      - '.github/workflows/renderer-contracts.yml'
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: renderer-contracts-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["terminal-restoration-integration"]'
+          check-part: renderer-contracts
+      - name: Install tmux for the smoke rows
+        run: command -v tmux || { sudo apt-get update -q && sudo apt-get install -yq tmux; }
+      - name: Harness self-tests
+        run: zig build renderer-contracts-selftest -j2 --summary all
+      - name: Direct-PTY key matrix and tmux smoke
+        if: ${{ !cancelled() }}
+        run: zig build direct-pty -j2 --summary all -- --output "$RUNNER_TEMP/contracts/pty" --jobs 2
+      - name: Ghostty primary input vectors
+        if: ${{ !cancelled() }}
+        run: zig build direct-pty -j2 --summary all -- --output "$RUNNER_TEMP/contracts/ghostty" --jobs 2 --vectors "$PWD/tests/qualification/direct-pty/ghostty.json"
+      - name: Driver and disposal controls
+        if: ${{ !cancelled() }}
+        run: zig build direct-pty-controls -j2 --summary all -- --output "$RUNNER_TEMP/contracts/controls"
+      - name: Original-recovery input encodings
+        if: ${{ !cancelled() }}
+        run: zig build input-equivalence -j2 --summary all -- --output "$RUNNER_TEMP/contracts/recovery"
+      - name: Unattended input replay
+        if: ${{ !cancelled() }}
+        run: zig build terminal-restoration-integration -j2 --summary all -- input-replay
+      - name: Sequence models through frontend transitions
+        if: ${{ !cancelled() }}
+        run: |
+          ulimit -Sn 256
+          zig build sequence-model -j2 --summary all -- --output "$RUNNER_TEMP/contracts/sequence"
+      - name: Retain contract results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-contracts-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/contracts
+          retention-days: 3
+          if-no-files-found: ignore
+  mutations:
+    if: ${{ !github.event.repository.private && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [test, test-logic, sequence-model]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["test", "test-logic", "terminal-restoration-integration"]'
+          check-part: renderer-mutations
+      - name: Require behavioral kills in isolated source copies
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 -B tests/ci/renderer_mutation.py --target "$TARGET" --output "$RUNNER_TEMP/mutations"
+      - name: Retain counterexamples, patches and command logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: renderer-mutations-${{ matrix.target }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mutations
+          retention-days: 3
+          if-no-files-found: ignore
+  report:
+    needs: [contracts, mutations]
+    if: ${{ always() && github.event_name == 'schedule' && (needs.contracts.result != 'success' || needs.mutations.result != 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: File an issue for the failed nightly run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTRACTS: ${{ needs.contracts.result }}
+          MUTATIONS: ${{ needs.mutations.result }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -B tests/ci/main_health.py report \
+            --title "Nightly renderer contracts failed on ${GITHUB_SHA::12}" \
+            --body "Nightly renderer contracts on main $GITHUB_SHA: contracts $CONTRACTS, mutations $MUTATIONS. $URL"
