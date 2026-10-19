@@ -1,0 +1,227 @@
+{
+  "archive": "l5-landing-evidence-20261019.tar.gz",
+  "text_files": 55,
+  "credential_shape_hits": [],
+  "files": [
+    {
+      "path": "l5/native-restored.log",
+      "bytes": 3714
+    },
+    {
+      "path": "l5/codex-h2-integration.log",
+      "bytes": 4712
+    },
+    {
+      "path": "l5/check-dependencies-restored.log",
+      "bytes": 122457
+    },
+    {
+      "path": "l5/current-facts-integration.log",
+      "bytes": 3699
+    },
+    {
+      "path": "l5/check.log",
+      "bytes": 9850
+    },
+    {
+      "path": "l5/transport-h2-integration.log",
+      "bytes": 9021
+    },
+    {
+      "path": "l5/test-logic.log",
+      "bytes": 3060
+    },
+    {
+      "path": "l5/hosted-upgrades-watch.log",
+      "bytes": 9485
+    },
+    {
+      "path": "l5/codec-baseline-red.log",
+      "bytes": 1066
+    },
+    {
+      "path": "l5/native-focused.log",
+      "bytes": 8826
+    },
+    {
+      "path": "l5/server-delivery-integration.log",
+      "bytes": 3945
+    },
+    {
+      "path": "l5/review.diff",
+      "bytes": 20487
+    },
+    {
+      "path": "l5/hosted-selected-watch.log",
+      "bytes": 104342
+    },
+    {
+      "path": "l5/hosted-upgrades.log",
+      "bytes": 325403
+    },
+    {
+      "path": "l5/hosted-selected.log",
+      "bytes": 1150239
+    },
+    {
+      "path": "l5/policy-codec.log",
+      "bytes": 13359
+    },
+    {
+      "path": "l5/selection.json",
+      "bytes": 1024
+    },
+    {
+      "path": "l5/policy-final.log",
+      "bytes": 13540
+    },
+    {
+      "path": "l5/pstack/principle-fix-root-causes.md",
+      "bytes": 1821
+    },
+    {
+      "path": "l5/pstack/principle-sequence-verifiable-units.md",
+      "bytes": 1705
+    },
+    {
+      "path": "l5/pstack/principle-prove-it-works.md",
+      "bytes": 1371
+    },
+    {
+      "path": "l5/check-formatted.log",
+      "bytes": 102670
+    },
+    {
+      "path": "l5/codec-drift-control.log",
+      "bytes": 1058
+    },
+    {
+      "path": "l5/session-list-proof.log",
+      "bytes": 10082
+    },
+    {
+      "path": "l5/import-red.log",
+      "bytes": 4769
+    },
+    {
+      "path": "l5/host-process.log",
+      "bytes": 4512
+    },
+    {
+      "path": "l5/post-l2/landing-record.md",
+      "bytes": 7675
+    },
+    {
+      "path": "l5/post-l2/rebase.log",
+      "bytes": 107
+    },
+    {
+      "path": "l5/post-l2/queued-before-publication.jsonl",
+      "bytes": 0
+    },
+    {
+      "path": "l5/post-l2/issue-after-landing.json",
+      "bytes": 171
+    },
+    {
+      "path": "l5/post-l2/issue-before-comment.jsonl",
+      "bytes": 16680
+    },
+    {
+      "path": "l5/post-l2/pre-push-39197130026.json",
+      "bytes": 24279
+    },
+    {
+      "path": "l5/post-l2/run-39197130026-latest.json",
+      "bytes": 24279
+    },
+    {
+      "path": "l5/post-l2/landing-record-readback-exact.md",
+      "bytes": 7675
+    },
+    {
+      "path": "l5/post-l2/plan.log",
+      "bytes": 0
+    },
+    {
+      "path": "l5/post-l2/hosted-upgrades.log",
+      "bytes": 354375
+    },
+    {
+      "path": "l5/post-l2/landing-record-readback.md",
+      "bytes": 7676
+    },
+    {
+      "path": "l5/post-l2/hosted-selected.log",
+      "bytes": 1211497
+    },
+    {
+      "path": "l5/post-l2/main-after-ls-remote.txt",
+      "bytes": 57
+    },
+    {
+      "path": "l5/post-l2/final-checks.json",
+      "bytes": 2569
+    },
+    {
+      "path": "l5/post-l2/candidate.patch",
+      "bytes": 20807
+    },
+    {
+      "path": "l5/post-l2/push-time.txt",
+      "bytes": 21
+    },
+    {
+      "path": "l5/post-l2/checks-at-push.json",
+      "bytes": 45982
+    },
+    {
+      "path": "l5/post-l2/landing-record-url.txt",
+      "bytes": 73
+    },
+    {
+      "path": "l5/post-l2/active-before-publication.jsonl",
+      "bytes": 481
+    },
+    {
+      "path": "l5/post-l2/main-after-api.json",
+      "bytes": 334
+    },
+    {
+      "path": "l5/post-l2/approved.patch",
+      "bytes": 20807
+    },
+    {
+      "path": "l5/post-l2/range-diff.txt",
+      "bytes": 183
+    },
+    {
+      "path": "l5/post-l2/landing-comment.json",
+      "bytes": 11179
+    },
+    {
+      "path": "l5/post-l2/pre-push-39197130021.json",
+      "bytes": 5116
+    },
+    {
+      "path": "l5/post-l2/run-39197130021-latest.json",
+      "bytes": 5116
+    },
+    {
+      "path": "l5/post-l2/main-push.log",
+      "bytes": 113
+    },
+    {
+      "path": "l5/native-focused-current.log",
+      "bytes": 3714
+    },
+    {
+      "path": "l5/native-focused-fixed.log",
+      "bytes": 8423
+    },
+    {
+      "path": "l5/native-positional-red.log",
+      "bytes": 5917
+    }
+  ]
+}

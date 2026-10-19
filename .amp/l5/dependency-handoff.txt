@@ -1,0 +1,12 @@
+L5 archival dependency assessment, 2026-10-19
+
+Renderer owner T-01a14d2a-ffa4-706f-9884-6bdb2b5bfc96 explicitly replied:
+"Confirmed: the renderer doesn't need anything from the L5 orb. It's fine to archive it."
+
+L5 has no other announced private-file or live-process handoff. Its five-file implementation is on authoritative main e59ac70902ac05ce7ae9ab082e2ca46d83fc18e6. Historical and final logs, patch equivalence, source references, landing checks and published-record readback are in the unchanged archive. Other owners can fetch that source and evidence without this orb.
+
+The automatic post-main upgrade run 39199445126 executes on GitHub-hosted ubuntu-24.04 and macos-15 workers. Its checkout, setup, builds and fixtures do not call this orb or require a local service. Pending hosted work is not a regression and is not retried by this preservation task.
+
+No L5 Host, build, test, watcher or evidence server remains active locally. Archival must not remove /tmp/rui-complect-l5, /tmp/rui-complect-l5-evidence or the original archive at /home/user/workspace/repo/.amp/in/artifacts/l5-landing-evidence-20261019.tar.gz.
+
+This handoff grants no qualification, source-change, landing, retry, issue-closure or new model authority.
