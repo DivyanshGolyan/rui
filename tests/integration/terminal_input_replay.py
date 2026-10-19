@@ -59,7 +59,7 @@ def replay(actor, name, steps, *, error=None):
                 assert os.write(master, bytes([byte])) == 1
             expected.extend(lines)
             wanted = ("\n".join(expected) + "\n").encode()
-            drain_until(lambda: records.endswith(b"\n") and len(records) >= len(wanted))
+            drain_until(lambda: records.count(b"\n") >= len(expected))
             assert bytes(records) == wanted, (name, "decoded events", wanted, bytes(records))
 
         # Keep the slave until exit and drain both channels through reap. A
