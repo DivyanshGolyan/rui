@@ -519,7 +519,7 @@ Every Store entry point runs its locked body through one canonical access that d
 
 ### Store format and upgrades
 
-SQLite `PRAGMA user_version` is the Store's format version. Current schema 24 includes nullable Session compaction overrides and frozen Operation policy. Until Rui is stable, there is no migration framework, compatibility reader or dual-write layer. An unsupported Store must fail promptly in foreground and detached startup, naming the Store, found and supported versions, and recovery options without modifying saved work.
+SQLite `PRAGMA user_version` is the Store's format version. Current schema 25 includes nullable Session compaction overrides, frozen Operation policy and each Message admission's Host wall-clock second. Until Rui is stable, there is no migration framework, compatibility reader or dual-write layer. An unsupported Store must fail promptly in foreground and detached startup, naming the Store, found and supported versions, and recovery options without modifying saved work.
 
 Recovery is an explicit choice: use a compatible build at the original Store path, or back up the stopped Store and select a separate fresh Store. Rui never automatically recreates an incompatible Store. Store identity binds the canonical original path; moving or copying its directory does not relocate that identity. Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration. The [recovery instructions](README.md#start-fresh-after-a-store-format-change) leave the original Store untouched.
 
