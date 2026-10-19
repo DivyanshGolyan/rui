@@ -151,7 +151,9 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         # A running client may connect at any moment, so the public path
         # always names a listening socket: the Host's until the proxy is
         # renamed over it, and the Host's again once it is renamed back.
-        staging = self.path.with_suffix(".canonical-proxy")
+        # The staging name is no longer than the Host's, so wherever the Host
+        # could bind (macOS allows 103 path bytes), the proxy can too.
+        staging = self.path.with_name("~" + self.path.name[1:])
         os.link(self.path, self.backend)
         super().__init__(str(staging), Exchange)
         os.chmod(staging, 0o600)
@@ -862,7 +864,8 @@ def proxy_swap_cases(state):
         self.listener_inode = os.stat(self.server_address).st_ino
         live.add(self.listener_inode)
     def server_close(self):
-        live.discard(self.listener_inode)
+        # A failed bind closes before activation: keep its error primary.
+        live.discard(getattr(self, "listener_inode", None))
         close_listener(self)
         probe("server_close")
     try:
