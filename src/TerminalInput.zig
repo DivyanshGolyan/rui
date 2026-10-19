@@ -35,7 +35,8 @@ pub fn pending(self: *const Self) Pending {
     if (self.paste) return .incomplete;
     const used = self.used - self.consumed;
     if (used == 0) return .none;
-    return if (used == 1 and self.bytes[self.consumed] == 0x1b) .escape else .incomplete;
+    const rest = self.bytes[self.consumed..self.used];
+    return if (std.mem.eql(u8, rest, "\x1b") or std.mem.eql(u8, rest, "\x1b\x1b")) .escape else .incomplete;
 }
 
 /// Returns true when the expired input was a lone Escape key.
@@ -92,6 +93,36 @@ fn invalid(self: *Self, line_end: bool) Decoded {
     return .{ .invalid = .{ .line_end = line_end } };
 }
 
+/// ESC before a key that starts no sequence is Alt on that key, decoded as
+/// it would be alone: ESC ^H is Alt-Backspace and ESC é one Alt chord, never
+/// a raw byte or a split scalar. ESC ESC is Esc, and the second ESC begins
+/// whatever follows, so an Esc just before a paste or an arrow keeps it whole.
+fn alt(self: *Self, bytes: []const u8, line_end: bool) Decoded {
+    var key: vaxis.Key = .{ .codepoint = vaxis.Key.escape };
+    var n: usize = 1;
+    if (bytes[1] == 0x1b) {
+        if (bytes.len == 2) return .none;
+    } else {
+        if (bytes[1] >= 0x80) {
+            const needed = std.unicode.utf8ByteSequenceLength(bytes[1]) catch return self.invalid(line_end);
+            if (bytes.len < 1 + needed) return .none;
+            _ = std.unicode.utf8Decode(bytes[1 .. 1 + needed]) catch return self.invalid(line_end);
+        }
+        const result = self.parser.parse(bytes[1..], null) catch return self.invalid(line_end);
+        key = switch (result.event orelse return self.invalid(line_end)) {
+            .key_press => |value| value,
+            else => return self.invalid(line_end),
+        };
+        // The terminal keeps ICRNL, so LF is Enter: ESC CR arrives as ESC LF.
+        if (key.matches('j', .{ .ctrl = true })) key = .{ .codepoint = vaxis.Key.enter };
+        key.mods.alt = true;
+        key.text = null;
+        n += result.n;
+    }
+    if (n == self.used) self.used = 0 else self.consumed = n;
+    return .{ .event = .{ .event = .{ .key_press = key }, .pasted = false } };
+}
+
 fn decode(self: *Self, line_end: bool) Decoded {
     while (self.used != 0) {
         const bytes = self.bytes[0..self.used];
@@ -127,6 +158,9 @@ fn decode(self: *Self, line_end: bool) Decoded {
                 self.used = 0;
                 return if (status == '2') .{ .report = .alternate_scroll_reset } else .none;
             }
+        }
+        if (!self.paste and bytes[0] == 0x1b and bytes.len >= 2 and std.mem.indexOfScalar(u8, "OPX[]^_", bytes[1]) == null) {
+            return self.alt(bytes, line_end);
         }
         const pasted = self.paste;
         const result = self.parser.parse(bytes, null) catch return self.invalid(line_end);
@@ -174,6 +208,15 @@ test "terminal input owns fragmentation and paste provenance without an event qu
     for ("\x1b[201~") |byte| _ = input.feed(byte);
     try std.testing.expectEqual(Pending.none, input.pending());
     _ = input.feed(0x1b);
+    try std.testing.expectEqual(Pending.escape, input.pending());
+    try std.testing.expect(try input.expire());
+    try std.testing.expectEqual(Pending.none, input.pending());
+}
+
+test "a held ESC ESC expires as one Esc" {
+    var input: Self = .{};
+    try std.testing.expect(input.feed(0x1b) == .none);
+    try std.testing.expect(input.feed(0x1b) == .none);
     try std.testing.expectEqual(Pending.escape, input.pending());
     try std.testing.expect(try input.expire());
     try std.testing.expectEqual(Pending.none, input.pending());

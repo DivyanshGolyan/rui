@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const client = @import("client.zig");
+const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
 const Submission = @import("SessionSubmission.zig");
 const Task = @import("ClientTask.zig");
@@ -166,15 +167,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         };
         job.result.mark = .{ .cursor = mark };
     } else if (page.facts.count != 0) {
-        // Everything before this page's first item precedes its live output.
-        // Only a conversation item is a cursor into the Conversation; before
-        // an Admission or call row it ends at the previous position, and
-        // before the first position there is nothing.
-        const first = page.facts.items[0];
-        job.result.mark = .{ .cursor = switch (first.value) {
-            .user, .assistant, .tool_result => .{ .end = page.facts.end, .before_position = first.position, .before_ordinal = first.ordinal },
-            else => if (first.position > 1) .{ .end = first.position - 1 } else null,
-        } };
+        job.result.mark = .{ .cursor = beginningBefore(page.facts.items[0], page.facts.end) };
     }
     try job.inspection_file.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
@@ -262,6 +255,34 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         try writeSubmission(job, &output.interface);
     }
     try output.flush();
+}
+
+/// Where the Conversation before a live page's first item ends: everything
+/// earlier precedes its live output. Only a conversation item is a cursor
+/// into the Conversation; before an Admission or call row it ends at the
+/// previous position, and before the first position there is nothing.
+fn beginningBefore(first: protocol.ActivityItem, end: u64) ?client.ConversationCursor {
+    return switch (first.value) {
+        .user, .assistant, .tool_result => .{ .end = end, .before_position = first.position, .before_ordinal = first.ordinal },
+        else => if (first.position > 1) .{ .end = first.position - 1 } else null,
+    };
+}
+
+test "a live page's beginning precedes its first item, without repeating or skipping one" {
+    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content };
+    const outcome: protocol.ActivityItem.Outcome = .{ .turn = 1, .operation = 1, .code = .{}, .content = null };
+    const Case = struct { item: protocol.ActivityItem, cursor: ?client.ConversationCursor };
+    for ([_]Case{
+        .{ .item = .{ .position = 5, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
+        .{ .item = .{ .position = 7, .ordinal = 2, .value = .{ .tool_result = .{ .content = content, .presentation = undefined } } }, .cursor = .{ .end = 9, .before_position = 7, .before_ordinal = 2 } },
+        // Rows at position 4 that are not conversation items: the
+        // Conversation before them ends at 3, so position 4's results stay
+        // live and none repeats in the older page.
+        .{ .item = .{ .position = 4, .value = .{ .admission = message } }, .cursor = .{ .end = 3 } },
+        .{ .item = .{ .position = 4, .value = .{ .outcome = outcome } }, .cursor = .{ .end = 3 } },
+        .{ .item = .{ .position = 1, .value = .{ .admission = message } }, .cursor = null },
+    }) |case| try std.testing.expectEqualDeep(case.cursor, beginningBefore(case.item, 9));
 }
 
 test "a Host command writes its page and inherits no saved terminal descriptor" {
