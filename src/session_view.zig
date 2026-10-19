@@ -335,36 +335,20 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
 }
 
 /// Exact fixed-end summary requires a metadata walk, not Current or the newest
-/// page. Retain only the oldest four identities; never retain history payloads.
+/// page. Retains no identity or payload: a transcript lists unapplied Messages
+/// in full where they belong (see `message`).
 pub const Pending = struct {
     total: u64 = 0,
-    /// The newest queued Message's admission id.
+    /// The newest queued Message's admission id. Once applied, its row shows
+    /// nothing live, so live reads count it shown (see session_reads.Messages).
     newest: u64 = 0,
-    count: usize = 0,
-    items: [4]struct { position: u64, ordinal: u64, content: protocol.ActivityItem.Content } = undefined,
+    /// The lowest position of a Message not applied at the end, if any:
+    /// where a transcript's search for unapplied Messages may stop.
+    lowest: ?u64 = null,
 
-    pub fn render(self: *const Pending, requests: client.Requests, store: []const u8, session: []const u8, sink: anytype) !void {
+    pub fn render(self: *const Pending, sink: anytype) !void {
         if (self.total == 0) return;
         try print(sink, "Rui: {d} queued messages.\n", .{self.total});
-        const Preview = struct {
-            escaped: Escaped(@TypeOf(sink)),
-            remaining: usize = 256,
-            omitted: bool = false,
-            pub fn feed(self_: *@This(), bytes: []const u8) !void {
-                const count = @min(self_.remaining, bytes.len);
-                try self_.escaped.feed(bytes[0..count]);
-                self_.remaining -= count;
-                self_.omitted = self_.omitted or count != bytes.len;
-            }
-        };
-        for (self.items[0..self.count]) |item| {
-            try sink.feed("Queued: ");
-            var preview: Preview = .{ .escaped = .{ .sink = sink, .text = .{ .mode = .line } } };
-            if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = item.content.length, .digest = item.content.digest }, &preview)) |failure| return requests.failRead(failure);
-            try preview.escaped.finish();
-            if (preview.omitted) try sink.feed(" [preview truncated]");
-            try sink.feed("\n");
-        }
     }
 };
 
@@ -377,15 +361,35 @@ pub fn pending(requests: client.Requests, store: []const u8, session: []const u8
             .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| {
-            if (item.value != .admission or item.value.admission.state != .queued) continue;
+            if (item.value != .admission or item.value.admission.state == .applied) continue;
+            if (summary.lowest == null) summary.lowest = item.position;
+            if (item.value.admission.state != .queued) continue;
             summary.total += 1;
             summary.newest = @max(summary.newest, item.value.admission.admission);
-            if (summary.count == summary.items.len) continue;
-            summary.items[summary.count] = .{ .position = item.position, .ordinal = item.ordinal, .content = item.value.admission.content };
-            summary.count += 1;
         }
         cursor = page.continuation() orelse return summary;
     }
+}
+
+/// What a Message's state was when read: a transcript labels it as of then.
+pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state")) ?[]const u8 {
+    return switch (state) {
+        .applied => null,
+        .queued => "Queued",
+        .excluded => "Stopped before it ran · send it again to run it",
+    };
+}
+
+/// One Message in full, labelled unless applied: live, in the opening and in
+/// a transcript's listing alike.
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, sink: anytype, colour: bool) !void {
+    if (label) if (messageLabel(value.state)) |text| try print(sink, "\n! {s}", .{text});
+    try sink.feed("\n");
+    try sink.feed(Style.user.code(colour));
+    try sink.feed("›");
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(" ");
+    try content(requests, store, session, item, value.content, sink);
 }
 
 fn content(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, reference: protocol.ActivityItem.Content, sink: anytype) !void {
@@ -656,26 +660,15 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
         switch (item.value) {
-            .admission => |message| {
-                if (historical and message.state == .applied) continue;
+            .admission => |value| {
+                if (historical and value.state == .applied) continue;
                 compact_tools.* = false;
-                if (historical) try sink.feed("\n! Unapplied input:");
-                try sink.feed("\n");
-                try sink.feed(Style.user.code(colour));
-                try sink.feed("›");
-                try sink.feed(Style.normal.code(colour));
-                try sink.feed(" ");
-                try content(requests, store, session, item, message.content, sink);
+                try message(requests, store, session, item, value, historical, sink, colour);
             },
-            .user => |message| {
+            .user => |value| {
                 if (!historical) continue; // Live Admission already showed it.
                 compact_tools.* = false;
-                try sink.feed("\n");
-                try sink.feed(Style.user.code(colour));
-                try sink.feed("›");
-                try sink.feed(Style.normal.code(colour));
-                try sink.feed(" ");
-                try content(requests, store, session, item, message.content, sink);
+                try message(requests, store, session, item, value, false, sink, colour);
             },
             .assistant => |reference| {
                 compact_tools.* = false;
