@@ -341,7 +341,8 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
     if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
-    // Kitty reports a quick double Esc as Alt-Escape; it still means Esc.
+    // A CSI-u report (Kitty or tmux extended keys) can name Alt-Escape;
+    // it still means Esc. Legacy ESC ESC already decodes as Esc.
     if (value.matches(Key.escape, .{}) or value.matches(Key.escape, .{ .alt = true })) return .close_view;
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
     if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);

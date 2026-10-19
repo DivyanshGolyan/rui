@@ -724,6 +724,9 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
         return err;
     };
     try self.submission.begin(.{ .message = ticket });
+    // A sent Message continues the conversation: show it and its reply
+    // rather than the frozen transcript or page the reader was browsing.
+    try self.terminal.screen.latest();
 }
 
 fn actionVisible(self: *const Self) bool {
