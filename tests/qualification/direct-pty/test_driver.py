@@ -2,11 +2,15 @@
 import json
 import os
 import pathlib
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from driver import DirectPty, ScreenCapture
+from matrix import run_one
 
 
 class DriverTests(unittest.TestCase):
@@ -59,6 +63,27 @@ finally:
             self.assertIsNotNone(tty.process.poll())
             with self.assertRaises(OSError):
                 os.fstat(tty.master)
+
+    def test_pass_receipt_requires_successful_worker_exit(self):
+        # A real child writes a valid receipt, then exits normally, fails, or
+        # dies by signal. The controller must not turn the last two green.
+        launch = subprocess.Popen
+        for status in (0, 17, -signal.SIGTERM):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                def child(args, **kwargs):
+                    output = args[args.index("--output") + 1]
+                    source = '''import json, os, pathlib, signal, sys
+pathlib.Path(sys.argv[1], "result.json").write_text(json.dumps({"row": "probe", "status": "passed"}))
+status = int(sys.argv[2])
+if status < 0:
+    os.kill(os.getpid(), -status)
+sys.exit(status)
+'''
+                    return launch([sys.executable, "-c", source, output, str(status)], **kwargs)
+                with patch("matrix.subprocess.Popen", child):
+                    result = run_one(pathlib.Path(sys.executable), pathlib.Path(directory), {"name": "probe"})
+                self.assertEqual(result["worker_exit"], status)
+                self.assertEqual(result["status"], "passed" if status == 0 else "exit-receipt-mismatch")
 
 
 if __name__ == "__main__":
