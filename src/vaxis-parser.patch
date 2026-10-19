@@ -160,7 +160,7 @@ index 823686b..1c47dcc 100644
 +        for (0..3) |boundary| {
 +            var bytes: [256]u8 = undefined;
 +            var out = std.Io.Writer.fixed(&bytes);
-+            try out.writeAll("\x1b[5;1;");
++            try out.writeAll("\x1b[1;1;");
 +            for (0..31) |_| try out.writeAll("128512:");
 +            // 128 bytes fits; a scalar beginning at 128 or spanning 127..129
 +            // must reject the complete event, never publish a partial key.
@@ -430,7 +430,20 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
      const final = sequence[sequence.len - 1];
      if (final == 'R') report: {
-@@ -461,32 +466,17 @@
+@@ -440,8 +445,10 @@
+             // Split first into fields delimited by ';'
+             var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
+ 
+-            // skip the first field
+-            _ = field_iter.next(); //
++            // The key number is 1 or absent. A cursor position report also
++            // ends in R; one no request expects is ignored, not a key.
++            const number_buf = field_iter.next().?;
++            if (number_buf.len != 0 and !std.mem.eql(u8, number_buf, "1")) return if (final == 'R') null_event else invalid_key;
+ 
+             var is_release: bool = false;
+             var key: Key = .{
+@@ -461,32 +468,17 @@
                  },
              };
  
@@ -470,16 +483,23 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -514,6 +504,8 @@
+@@ -512,8 +504,14 @@
+             // CSI number ; modifier:event_type ; text_as_codepoint ~
+             var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
              const number_buf = field_iter.next() orelse unreachable; // always will have one field
-             const number = parseParam(u16, number_buf, null) orelse return null_event;
+-            const number = parseParam(u16, number_buf, null) orelse return null_event;
++            // A private marker begins some other report, not a key. Otherwise
++            // the key number is decimal; a number no key has is unknown.
++            if (number_buf.len != 0 and std.mem.indexOfScalar(u8, "<=>?", number_buf[0]) != null) return null_event;
++            for (number_buf) |b| if (!std.ascii.isDigit(b)) return invalid_key;
++            const number = parseDecimal(u16, number_buf) orelse return null_event;
              if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
 +            // A modifier field exists only on a supported key; malformed ones
 +            // fail closed below instead of ignoring the key the user pressed.
  
              var key: Key = .{
                  .codepoint = switch (number) {
-@@ -543,32 +535,17 @@
+@@ -543,32 +541,17 @@
              };
  
              var is_release: bool = false;
@@ -519,7 +539,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -667,44 +644,30 @@
+@@ -667,44 +650,30 @@
                  const field_buf = field_iter.next() orelse unreachable; // There will always be at least one field
                  var param_iter = std.mem.splitScalar(u8, field_buf, ':');
                  const codepoint_buf = param_iter.next() orelse unreachable;
@@ -575,7 +595,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              {
                  // We check if we have *only* shift, no text, and a printable character. This can
-@@ -780,13 +743,15 @@
+@@ -780,13 +749,15 @@
  /// the code is the key's codepoint, unchecked as in the Kitty form. It is a
  /// press with no associated text.
  fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
@@ -598,7 +618,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
      return .{
          .event = .{ .key_press = .{
              .codepoint = code,
-@@ -796,6 +761,52 @@
+@@ -796,6 +767,52 @@
      };
  }
  
