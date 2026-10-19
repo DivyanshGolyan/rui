@@ -117,8 +117,8 @@ def main():
     targets = json.loads(args.targets)
     inputs = None
     if args.reuse_evidence:
-        import evidence
         try:
+            import evidence
             if args.ci_artifacts != ".zig-cache/o/ci-compiled":
                 raise ValueError("Acceptance requires execution of the inventoried compiled artifacts")
             inputs = evidence.identity(targets, args.check_part)

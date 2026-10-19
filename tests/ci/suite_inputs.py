@@ -38,10 +38,11 @@ POLICY = ("tests/ci/suite_inputs.py", "tests/ci/import_architecture.py",
           "tests/ci/evidence.py", "tests/ci/run_selected.py", "tests/ci/build_artifact.py",
           "build.zig", "build.zig.zon", ".github/workflows/check.yml",
           ".github/actions/setup/action.yml")
-# The declarations above were audited against this build graph. A new build
-# graph must update/review its declarations, not silently acquire old authority
-# merely because both it and the candidate manifest have reached main.
-BUILD_OWNER = "e07081ff14f6cf382df1e3b601b88dad242b5d68b69bb0e104fd4043f0880bb1"
+# Native includes and shell reads are not Zig imports. Their consumers must
+# remain the reviewed build/native/bootstrap code; any change or added consumer
+# requires a closure review, even after reaching main. Current consumers read
+# only the bound source, package and toolchain sets, with no root-local headers.
+BUILD_OWNER = "be48131518e18fcfd78af42a77bfcf2a8c59f64bb45fe10acbb9360eb2107633"
 
 
 def git(*args, binary=False):
@@ -68,6 +69,16 @@ class Source:
             self.contents[path] = git("show", f"{self.revision}:{path}", binary=True)
         return self.contents[path]
 
+    def fingerprints(self, files):
+        return {path: {"sha256": hashlib.sha256(self.read(path)).hexdigest(), "mode": self.entries[path]}
+                for path in sorted(files)}
+
+
+def build_files(source):
+    return {path for path in source.entries
+            if path in {"build.zig", "build.zig.zon", "install.sh", ".agents/setup"}
+            or (path.startswith("src/") and not path.endswith(".zig"))}
+
 
 def trusted_policy(source, trusted):
     for path in POLICY:
@@ -82,8 +93,9 @@ def source_inputs(targets, part, revision="HEAD", trusted_revision=None):
     trusted_revision = trusted_revision or git("merge-base", "HEAD", "origin/main").strip()
     trusted = Source(trusted_revision)
     trusted_policy(source, trusted)
-    if hashlib.sha256(source.read("build.zig")).hexdigest() != BUILD_OWNER:
-        raise ValueError("Build graph has no reviewed suite-input declaration")
+    build_key = hashlib.sha256(json.dumps(source.fingerprints(build_files(source)), sort_keys=True).encode()).hexdigest()
+    if build_key != BUILD_OWNER:
+        raise ValueError("Build/native/bootstrap inputs have no reviewed suite-input declaration")
     declared = {target: dict(SUITES[target], options={"optimize": "ReleaseSafe", "cpu": "baseline",
                                                     "target": "native", "test_filter": None})
                 for target in sorted(targets)}
@@ -106,6 +118,8 @@ def source_inputs(targets, part, revision="HEAD", trusted_revision=None):
         tokens = [m.group() for m in TOKEN.finditer(text)
                   if not m.group().startswith(("//", "\\\\"))]
         for index, token in enumerate(tokens):
+            if token in {"@cImport", "@cInclude", "@cDefine", "@cUndef"}:
+                raise ValueError(f"Undeclared native dependency: {path}")
             if token not in {"@import", "@embedFile"}:
                 continue
             arguments = tokens[index + 1:index + 5]
@@ -157,6 +171,4 @@ def source_inputs(targets, part, revision="HEAD", trusted_revision=None):
             if (actual.is_symlink() or actual.read_bytes() != source.read(name)
                     or bool(actual.stat().st_mode & 0o111) != (source.entries[name] == "100755")):
                 raise ValueError(f"Working input differs from committed input: {name}")
-    return {"declarations": declared, "files": {
-        path: {"sha256": hashlib.sha256(source.read(path)).hexdigest(), "mode": source.entries[path]}
-        for path in sorted(files)}}
+    return {"declarations": declared, "files": source.fingerprints(files)}
