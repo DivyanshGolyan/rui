@@ -164,8 +164,12 @@ def execute(command, root, log, timeout, environment):
 
 
 def run_check(check, root, log, timeout, environment):
+    deadline = time.monotonic() + timeout
     result = execute(check.command(), root, log, timeout, environment)
     output = log.read_text(errors="replace")
+    if result["timeout"] or result["returncode"] not in (0, 1):
+        result["outcome"] = classify(result, output, check)
+        return result
     # Zig 0.17's build protocol can say "failed without output", omitting the
     # assertion error. Execute that SAME narrow binary in terminal-report mode
     # for a named OK/FAIL and error type, not a second build or acceptance retry.
@@ -173,13 +177,15 @@ def run_check(check, root, log, timeout, environment):
     for line in output.splitlines():
         if line.startswith("info(verbose): "):
             command = shlex.split(line.removeprefix("info(verbose): "))
+            while command and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", command[0]):
+                command.pop(0)
             if command and Path(command[0]).name == "test" and Path(command[0]).is_file():
                 binaries.append(Path(command[0]))
     if not result["timeout"] and len(binaries) == 1:
         binary = binaries[0]
         result["binary_sha256"] = sha(binary)
         diagnostic = log.with_suffix(".assertion.log")
-        result["assertion"] = execute([str(binary)], root, diagnostic, timeout,
+        result["assertion"] = execute([str(binary)], root, diagnostic, max(0, deadline - time.monotonic()),
                                       {**environment, "RUI_TEST_EXACT_INACTIVITY": "0"})
         output += "\n" + diagnostic.read_text(errors="replace")
         if result["assertion"]["timeout"]:
@@ -191,6 +197,8 @@ def run_check(check, root, log, timeout, environment):
 def classify(result, output, check):
     if result["timeout"]:
         return "timeout"
+    if result["returncode"] not in (0, 1):
+        return "build-or-process-error"
     # A named assertion is necessary but not sufficient: reject an accompanying
     # compile failure or abnormal child exit. Never accept a generic nonzero.
     if re.search(r"compilation errors?|error: (?:the following command|unable to)|terminated by signal", output):
@@ -240,8 +248,15 @@ def run(source, output, selected, timeout):
             if manifest(baseline, paths) != original:
                 raise ValueError("baseline source identity mismatch")
             for index, check in enumerate(checks):
+                if manifest(baseline, paths) != original:
+                    raise ValueError("baseline source changed before execution")
                 log = output / f"baseline-{index}.log"
                 result = run_check(check, baseline, log, timeout, environment)
+                after = manifest(baseline, paths)
+                result["source_unchanged"] = after == original
+                if not result["source_unchanged"]:
+                    write_json(output / f"baseline-{index}.source-after.json", after)
+                    result["outcome"] = "source-drift"
                 result.update(check=dataclasses.asdict(check))
                 report["baseline"].append(result)
                 write_json(report_path, report)
@@ -250,6 +265,8 @@ def run(source, output, selected, timeout):
             for mutation in selected:
                 isolated = scratch / mutation.name
                 copy_source(source, isolated, paths)
+                if manifest(isolated, paths) != original:
+                    raise ValueError("mutant source identity mismatch before mutation")
                 patch = apply(isolated, mutation)
                 (output / f"{mutation.name}.patch").write_text(patch)
                 expected = {**original, mutation.path: manifest(isolated, [Path(mutation.path)])[mutation.path]}
@@ -257,6 +274,11 @@ def run(source, output, selected, timeout):
                     raise ValueError("mutation changed files outside its declared protection")
                 log = output / f"{mutation.name}.log"
                 result = run_check(mutation.check, isolated, log, timeout, environment)
+                after = manifest(isolated, paths)
+                result["source_unchanged"] = after == expected
+                if not result["source_unchanged"]:
+                    write_json(output / f"{mutation.name}.source-after.json", after)
+                    result["outcome"] = "source-drift"
                 outcome = result["outcome"]
                 result.update(mutation=dataclasses.asdict(mutation), outcome="survived-gap" if outcome == "passed" else outcome)
                 report["mutations"].append(result)
@@ -275,7 +297,7 @@ def main():
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mutation", action="append", choices=[m.name for m in MUTATIONS])
-    parser.add_argument("--timeout", type=int, default=300, help="per narrow check; timeout never counts as a kill")
+    parser.add_argument("--timeout", type=int, default=600, help="per build plus direct assertion; timeout never counts as a kill")
     args = parser.parse_args()
     selected = [m for m in MUTATIONS if args.mutation is None or m.name in args.mutation]
     try:
@@ -283,6 +305,9 @@ def main():
     except (OSError, ValueError, RuntimeError) as error:
         print(f"renderer mutation gate failed: {error}", flush=True)
         return 1
+    finally:
+        print(f"Evidence: {args.output.resolve()}/report.json (logs beside it). "
+              "Keep this attempt; any rerun requires a fresh --output directory.", flush=True)
 
 
 if __name__ == "__main__":

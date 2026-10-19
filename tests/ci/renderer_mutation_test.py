@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -32,6 +33,81 @@ class MutationGateTests(unittest.TestCase):
                 self.assertNotEqual(gate.classify(failed, output, self.check), "behavioral-kill")
         self.assertEqual(gate.classify({**failed, "timeout": True}, self.assertion, self.check), "timeout")
         self.assertEqual(gate.classify({**failed, "returncode": 0}, "0/0 tests passed", self.check), "no-tests")
+
+    def test_unhealthy_build_exit_cannot_count_or_replay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "test"
+            binary.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\n"
+                              "Path('replayed').touch()\n"
+                              "print('2/2 Module.a named renderer boundary...FAIL (TestExpectedEqual)')\n"
+                              "raise SystemExit(1)\n")
+            binary.chmod(0o755)
+            for status in (-9, -11, 42):
+                with self.subTest(status=status):
+                    script = ("import os, resource; resource.setrlimit(resource.RLIMIT_CORE, (0, 0)); "
+                              f"print('info(verbose): {binary} --listen=-', flush=True); "
+                              "print(\"error: 'Module.a named renderer boundary' failed without output\", flush=True); "
+                              f"os.kill(os.getpid(), {-status})" if status < 0 else
+                              f"print('info(verbose): {binary} --listen=-', flush=True); "
+                              "print(\"error: 'Module.a named renderer boundary' failed without output\", flush=True); "
+                              f"raise SystemExit({status})")
+                    with patch.object(gate.Check, "command", return_value=[sys.executable, "-c", script]):
+                        result = gate.run_check(self.check, root, root / f"exit-{status}.log", 5, dict(os.environ))
+                    self.assertEqual(result["returncode"], status)
+                    self.assertEqual(result["outcome"], "build-or-process-error")
+                    self.assertFalse((root / "replayed").exists())
+
+    def test_environment_prefixed_native_binary_is_executed_and_identified(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "test"
+            binary.write_text("#!/usr/bin/env python3\n"
+                              "print('2/2 Module.a named renderer boundary...OK')\n")
+            binary.chmod(0o755)
+            script = f"print('info(verbose): RUI_TEST_EXACT_INACTIVITY=0 {binary} --listen=-')"
+            with patch.object(gate.Check, "command", return_value=[sys.executable, "-c", script]):
+                result = gate.run_check(self.check, root, root / "native.log", 5, dict(os.environ))
+            self.assertEqual(result["outcome"], "passed")
+            self.assertEqual(result["binary_sha256"], gate.sha(binary))
+
+    def test_source_drift_during_baseline_or_mutant_execution_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (source / "owner.zig").write_text("guard A;\n")
+            mutation = gate.Mutation("A", "invariant", "fix", "owner.zig", "guard A", "no A", self.check)
+            for stage in ("baseline", "A"):
+                with self.subTest(stage=stage):
+                    # A real builder changes a tracked input while emitting the
+                    # expected test transcript. Caller-tree checks cannot see it.
+                    script = ("from pathlib import Path\n"
+                              "owner = Path('owner.zig')\n"
+                              "failed = 'no A' in owner.read_text()\n"
+                              "binary = Path('test').resolve()\n"
+                              "binary.write_text('#!/usr/bin/env python3\\nprint(' + repr("
+                              "'2/2 Module.a named renderer boundary...FAIL (TestExpectedEqual)' if failed else "
+                              "'2/2 Module.a named renderer boundary...OK') + ')\\nraise SystemExit(' + str(int(failed)) + ')\\n')\n"
+                              "binary.chmod(0o755)\n"
+                              f"if Path.cwd().name == {stage!r}: owner.write_text('builder changed input')\n"
+                              "print(f'info(verbose): {binary} --listen=-')\n"
+                              "if failed: print(\"error: 'Module.a named renderer boundary' failed without output\")\n"
+                              "raise SystemExit(int(failed))\n")
+                    output = root / stage
+                    with patch.object(gate, "tracked", return_value=[Path("owner.zig")]), \
+                         patch.object(gate.subprocess, "check_output", return_value="fixture"), \
+                         patch.object(gate.Check, "command", return_value=[sys.executable, "-c", script]):
+                        if stage == "baseline":
+                            with self.assertRaisesRegex(RuntimeError, "source-drift"):
+                                gate.run(source, output, [mutation], 5)
+                        else:
+                            self.assertFalse(gate.run(source, output, [mutation], 5))
+                    report = json.loads((output / "report.json").read_text())
+                    self.assertTrue(report["tree_unchanged"])
+                    rows = report["baseline"] if stage == "baseline" else report["mutations"]
+                    self.assertEqual(rows[-1]["outcome"], "source-drift")
+                    self.assertEqual((source / "owner.zig").read_text(), "guard A;\n")
 
     def test_isolated_mutants_and_baseline_preserve_caller_tree_and_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
