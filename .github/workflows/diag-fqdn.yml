@@ -1,0 +1,35 @@
+name: perf diagnostic loopback resolver
+# Temporary diagnostic branch only: does http.server's post-bind getfqdn stall on hosted macOS?
+on:
+  push:
+    branches: ['perf/diag-fqdn']
+permissions:
+  contents: read
+jobs:
+  resolve:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Loopback name resolution timings
+        run: |
+          set -x
+          sw_vers; hostname; scutil --get LocalHostName || true; scutil --get HostName || true
+          cat /etc/hosts
+          for py in python3 /usr/bin/python3; do
+            "$py" --version
+            timeout 60 "$py" - <<'PY' || echo "exit $?"
+          import socket, time, http.server
+          def t(label, fn):
+              s = time.monotonic()
+              try: r = fn()
+              except Exception as e: r = repr(e)
+              print(f"{label}: {time.monotonic()-s:.3f}s -> {r}", flush=True)
+          t("gethostname", socket.gethostname)
+          t("gethostbyaddr(127.0.0.1)", lambda: socket.gethostbyaddr("127.0.0.1"))
+          t("getfqdn(127.0.0.1)", lambda: socket.getfqdn("127.0.0.1"))
+          t("getfqdn()", socket.getfqdn)
+          t("ThreadingHTTPServer(127.0.0.1,0)", lambda: http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler).server_name)
+          t("again ThreadingHTTPServer", lambda: http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler).server_name)
+          PY
+          done
+          scutil --dns | head -40
