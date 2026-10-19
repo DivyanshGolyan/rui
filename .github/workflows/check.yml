@@ -145,6 +145,7 @@ jobs:
         with:
           targets: ${{ needs.plan.outputs.targets }}
           check-part: compiled
+          save-cache: 'false'  # perf diagnostic: never publish into the shared quota
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
@@ -177,7 +178,7 @@ jobs:
         run: python3 -B tests/ci/cache_execution.py
   macos_build:
     needs: plan
-    if: ${{ needs.plan.outputs.native == 'true' }}
+    if: ${{ false }}  # perf diagnostic: Linux producer timing only
     runs-on: macos-15
     timeout-minutes: 15
     outputs:
@@ -203,7 +204,7 @@ jobs:
   macos_cache_policy:
     # Same proof on Apple Silicon, beside the producer instead of before its compile.
     needs: plan
-    if: ${{ needs.plan.outputs.native == 'true' && needs.plan.outputs.cache_execution == 'true' }}
+    if: ${{ false }}  # perf diagnostic: Linux producer timing only
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -218,7 +219,7 @@ jobs:
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build]
-    if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
+    if: ${{ false }}  # perf diagnostic: Linux producer timing only
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -308,7 +309,7 @@ jobs:
   macos_suites:
     name: macos suites (${{ matrix.name }})
     needs: [plan, macos_build]
-    if: ${{ needs.plan.outputs.native == 'true' }}
+    if: ${{ false }}  # perf diagnostic: Linux producer timing only
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
