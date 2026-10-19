@@ -1,5 +1,5 @@
 name: perf diagnostic helper fixture start
-# Temporary diagnostic branch only: where does the pinned helper's provider fixture stall on hosted macOS?
+# Temporary diagnostic branch only: which interpreters stall on a fresh process's first loopback reverse lookup?
 on:
   push:
     branches: ['perf/diag-fixture']
@@ -13,24 +13,26 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          path: diag
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: 6da04df5e7bb9f2be72d341997f01f5b60a5ce8c
-          persist-credentials: false
-          path: perf
-      - name: Probe
+      - name: Fresh-process first lookups by interpreter
         run: |
-          set -x
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" -q --disable-pip-version-check install -r perf/tests/integration/terminal_requirements.txt
-          py="$RUNNER_TEMP/venv/bin/python"
-          helper="$GITHUB_WORKSPACE/perf/tests/qualification/renderer-macos/verify-rui"
-          probe="$GITHUB_WORKSPACE/diag/.github/diag/fixture_probe.py"
-          src="$GITHUB_WORKSPACE/perf"
-          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o1" cold
-          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o2" ttl
-          "$py" -B "$probe" "$helper" "$src" "$RUNNER_TEMP/o3" parallel
-          (time dscacheutil -q host -a ip_address 127.0.0.1) 2>&1
-          (time dig +time=2 +tries=1 -x 127.0.0.1) 2>&1 | tail -12
+          clang -O1 -o "$RUNNER_TEMP/lookup" .github/diag/lookup.c
+          ls -d /Users/runner/hostedtoolcache/Python/*/arm64/bin/python3 2>/dev/null || true
+          ls /opt/homebrew/bin/python3* || true
+          code='import socket,sys,time
+          s=time.monotonic(); r=socket.gethostbyaddr("127.0.0.1"); a=time.monotonic()-s
+          s=time.monotonic(); n=socket.getnameinfo(("127.0.0.1",0),0); b=time.monotonic()-s
+          print(f"{sys.executable} {sys.version.split()[0]}: gethostbyaddr {a:.3f}s {r} | getnameinfo-after {b:.3f}s {n}", flush=True)'
+          for round in 1 2; do
+            echo "== round $round $(date -u +%T)"
+            "$RUNNER_TEMP/lookup"; "$RUNNER_TEMP/lookup"
+            for py in /usr/bin/python3 /opt/homebrew/bin/python3 /opt/homebrew/bin/python3.1[0-9] /Users/runner/hostedtoolcache/Python/*/arm64/bin/python3; do
+              [ -x "$py" ] || continue
+              "$py" -c "$code" || echo "$py failed"
+            done
+          done
+          for py in /usr/bin/python3 /opt/homebrew/bin/python3; do
+            "$py" -c 'import socket,time; s=time.monotonic(); print("getnameinfo-first", socket.getnameinfo(("127.0.0.1",0),0), f"{time.monotonic()-s:.3f}s")'
+          done
+          otool -L "$(/opt/homebrew/bin/python3 -c 'import _socket; print(_socket.__file__)')" | head
+          codesign -dv /opt/homebrew/bin/python3 2>&1 | head -5
           true
