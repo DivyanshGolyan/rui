@@ -1,0 +1,21 @@
+{
+  "modules": 56,
+  "cyclic_edges": [
+    [
+      "src/model_capability.zig",
+      "src/provider_selection.zig"
+    ],
+    [
+      "src/provider_output.zig",
+      "src/store.zig"
+    ],
+    [
+      "src/provider_selection.zig",
+      "src/model_capability.zig"
+    ],
+    [
+      "src/store.zig",
+      "src/provider_output.zig"
+    ]
+  ]
+}

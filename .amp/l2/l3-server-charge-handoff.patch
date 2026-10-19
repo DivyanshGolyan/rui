@@ -1,0 +1,67 @@
+From 930b4fd823a85f80d4aaa6b4a74c4d230fa2aa5e Mon Sep 17 00:00:00 2001
+From: Amp <amp@ampcode.com>
+Date: Sun, 18 Oct 2026 22:40:41 +0000
+Subject: [PATCH] Rename four server test accounting charges for L2 API cutover
+
+Owner-approved server-only mechanical handoff based exactly on
+ad16a67b01e419ed0cb78773f0508bd53c54bc0a. All four receivers are
+protocol.ScratchBudget values; retain accounting-only semantics via
+charge rather than reclamation-capable allocate.
+
+CustodyPool reserve calls remain byte-unchanged. No schema27 assembly,
+provider sites, ScratchBudget API definitions or compatibility aliases
+are included. Depends on the L2 charge/chargeUpTo API rename; L2 owns
+corrected-head compilation, review and canonical qualification.
+
+Validation: exact four-substitution source comparison, unchanged custody
+call census, Zig format/AST check and diff-check. No runtime pass claimed.
+
+Amp-Thread-ID: https://ampcode.com/threads/T-01a15022-775a-71e9-8d4b-58490578910b
+Co-authored-by: Divyansh Golyan <divyanshdgolyan@gmail.com>
+---
+ src/server.zig | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/src/server.zig b/src/server.zig
+index cd52cf15..a8dc1480 100644
+--- a/src/server.zig
++++ b/src/server.zig
+@@ -5558,7 +5558,7 @@ test "HTTP error capture retires before execution custody" {
+         Boundary.retirement_observed = false;
+         const request_file = try tmp.dir.createFile(io, "request", .{ .read = true });
+         try request_file.writeStreamingAll(io, "{}");
+-        try std.testing.expect(budget.reserve(2));
++        try std.testing.expect(budget.charge(2));
+         var writer = provider.CaptureWriter{ .io = io };
+         var retained: ?named_scratch.Owner = null;
+         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
+@@ -5574,7 +5574,7 @@ test "HTTP error capture retires before execution custody" {
+         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
+         const response = &slot.provider.transfer.response;
+         try response.file.writeStreamingAll(io, body);
+-        try std.testing.expect(budget.reserve(body.len));
++        try std.testing.expect(budget.charge(body.len));
+         response.charged = body.len;
+         response.length = body.len;
+         try response.seal(false);
+@@ -6453,7 +6453,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
+ 
+     var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
+     var stderr_file = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+-    try std.testing.expect(root_budget.reserve(2));
++    try std.testing.expect(root_budget.charge(2));
+     const pair = (try retention.reservePair("stdout", 1, "stderr", 1)).?;
+     var retained_metadata: ?named_scratch.Owner = null;
+     var metadata = try store_module.OutputMetadataWriter.init(
+@@ -6950,7 +6950,7 @@ test "retired ordinary capture still consumes its intake classification and reso
+             .retained_scratch, .report => {
+                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
+                 try file.writeStreamingAll(host.io, "abc");
+-                try std.testing.expect(budget.reserve(3));
++                try std.testing.expect(budget.charge(3));
+                 retained_fd = file.handle;
+                 if (custody == .retained_scratch) {
+                     // Failed reclaim must stay off intake, even with no ingress left.
+-- 
+2.55.0
+

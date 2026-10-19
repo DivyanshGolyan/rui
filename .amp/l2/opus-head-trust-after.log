@@ -1,0 +1,25 @@
+test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) ... 
+  test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=True) ... FAIL
+  test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=False) ... FAIL
+
+======================================================================
+FAIL: test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 100, in test_candidate_cannot_enlarge_allowance_from_trusted_git_base
+    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 100, in test_candidate_cannot_enlarge_allowance_from_trusted_git_base
+    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.181s
+
+FAILED (failures=2)
+CONFIRMED: both committed bootstrap and established cases kill HEAD-trust at the intended assertion

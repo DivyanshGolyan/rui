@@ -1,0 +1,62 @@
+test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) ... 
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test', imported='root') ... ERROR
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test', imported='a.zig') ... ERROR
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test "nested"', imported='root') ... ERROR
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test "nested"', imported='a.zig') ... ERROR
+
+======================================================================
+ERROR: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test', imported='root')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 56, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/rui-complect-l2/tests/ci/import_architecture.py", line 125, in check
+    raise ValueError("new production cyclic imports:\n" + "\n".join(
+ValueError: new production cyclic imports:
+  a.zig -> b.zig
+  b.zig -> a.zig
+
+======================================================================
+ERROR: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test', imported='a.zig')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 56, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/rui-complect-l2/tests/ci/import_architecture.py", line 125, in check
+    raise ValueError("new production cyclic imports:\n" + "\n".join(
+ValueError: new production cyclic imports:
+  a.zig -> b.zig
+  b.zig -> a.zig
+
+======================================================================
+ERROR: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test "nested"', imported='root')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 56, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/rui-complect-l2/tests/ci/import_architecture.py", line 125, in check
+    raise ValueError("new production cyclic imports:\n" + "\n".join(
+ValueError: new production cyclic imports:
+  a.zig -> b.zig
+  b.zig -> a.zig
+
+======================================================================
+ERROR: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (declaration='test "nested"', imported='a.zig')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 56, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    self.assertEqual(check(root, baseline, ("a.zig",))["modules"], 3)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/rui-complect-l2/tests/ci/import_architecture.py", line 125, in check
+    raise ValueError("new production cyclic imports:\n" + "\n".join(
+ValueError: new production cyclic imports:
+  a.zig -> b.zig
+  b.zig -> a.zig
+
+----------------------------------------------------------------------
+Ran 1 test in 0.005s
+
+FAILED (errors=4)

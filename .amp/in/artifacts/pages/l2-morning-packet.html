@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>L2 guardrails and clean scratch allocation, landed</title>
+		<style>
+			:root {
+				color-scheme: light dark;
+				--bg: #ffffff;
+				--surface: #f6f7f9;
+				--border: #e1e4ea;
+				--line: #aeb6c4;
+				--text: #1b1f27;
+				--muted: #5d6675;
+				--accent: #2f5fd0;
+				--accent-soft: #eaf0fd;
+				--ok: #1f7a4d;
+				--ok-soft: #e4f4ec;
+				--warn: #8a5a00;
+				--warn-soft: #fdf1d8;
+				--bad: #b3261e;
+				--bad-soft: #fde8e6;
+				--sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+				--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+			}
+			@media (prefers-color-scheme: dark) {
+				:root {
+					--bg: #14161a;
+					--surface: #1c1f25;
+					--border: #2c313a;
+					--line: #566070;
+					--text: #e7e9ee;
+					--muted: #9ba3b1;
+					--accent: #8fb0ff;
+					--accent-soft: #1e2a47;
+					--ok: #6fd3a0;
+					--ok-soft: #173326;
+					--warn: #f0c36a;
+					--warn-soft: #3a2e12;
+					--bad: #ff9d94;
+					--bad-soft: #401f1c;
+				}
+			}
+			* {
+				box-sizing: border-box;
+			}
+			html {
+				scroll-behavior: smooth;
+			}
+			body {
+				margin: 0;
+				background: var(--bg);
+				color: var(--text);
+				font: 16px/1.55 var(--sans);
+				-webkit-text-size-adjust: 100%;
+			}
+			.layout {
+				display: grid;
+				grid-template-columns: minmax(0, 1fr);
+				max-width: 46rem;
+				margin: 0 auto;
+				/* Bottom space keeps the last block clear of the review button in the corner. */
+				padding: 2.5rem 1.25rem 6rem;
+			}
+			.toc {
+				display: none;
+			}
+			@media (min-width: 64rem) {
+				.layout {
+					grid-template-columns: 13rem minmax(0, 46rem);
+					gap: 3rem;
+					max-width: 64rem;
+				}
+				.toc {
+					display: block;
+					position: sticky;
+					top: 2.5rem;
+					align-self: start;
+					max-height: calc(100vh - 5rem);
+					overflow-y: auto;
+					font-size: 0.875rem;
+				}
+			}
+			.toc ol {
+				list-style: none;
+				margin: 0;
+				padding: 0;
+			}
+			.toc a {
+				display: block;
+				padding: 0.3rem 0.6rem;
+				border-left: 2px solid var(--border);
+				color: var(--muted);
+				text-decoration: none;
+			}
+			.toc a:hover,
+			.toc a[aria-current='true'] {
+				border-left-color: var(--accent);
+				color: var(--text);
+			}
+			h1,
+			h2,
+			h3 {
+				line-height: 1.25;
+				text-wrap: balance;
+			}
+			h1 {
+				margin: 0.4rem 0 0.75rem;
+				font-size: 2rem;
+				letter-spacing: -0.01em;
+			}
+			h2 {
+				margin: 0 0 0.9rem;
+				font-size: 1.3rem;
+			}
+			h3 {
+				margin: 0;
+				font-size: 1.02rem;
+			}
+			p,
+			ul,
+			ol,
+			dl,
+			figure,
+			pre {
+				margin: 0 0 0.9rem;
+			}
+			a {
+				color: var(--accent);
+			}
+			section {
+				margin-top: 2.75rem;
+			}
+			[id] {
+				scroll-margin-top: 1.5rem;
+			}
+			.kicker,
+			.meta {
+				margin: 0;
+				color: var(--muted);
+				font-size: 0.875rem;
+			}
+			.meta {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 0.5rem 0.75rem;
+				align-items: center;
+			}
+			.lede {
+				font-size: 1.15rem;
+				color: var(--text);
+			}
+
+			/* Summary: the part every reader sees. */
+			.facts {
+				display: grid;
+				gap: 1px;
+				margin: 0;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				background: var(--border);
+				overflow: hidden;
+			}
+			.facts > div {
+				display: grid;
+				grid-template-columns: 8.5rem minmax(0, 1fr);
+				gap: 1rem;
+				padding: 0.7rem 1rem;
+				background: var(--surface);
+			}
+			.facts dt {
+				color: var(--muted);
+				font-size: 0.875rem;
+				font-weight: 600;
+			}
+			.facts dd {
+				margin: 0;
+			}
+			/* The first row is what the reader is asked to do, so it stands out from the rest. */
+			.facts > .ask {
+				background: var(--accent-soft);
+			}
+			.facts > .ask dt {
+				color: var(--accent);
+			}
+			@media (max-width: 34rem) {
+				h1 {
+					font-size: 1.6rem;
+				}
+				.facts > div {
+					grid-template-columns: minmax(0, 1fr);
+					gap: 0.15rem;
+				}
+			}
+
+			/* Items: one decision, step, or alternative per block, so one comment hits one thing. */
+			.items {
+				list-style: none;
+				margin: 0;
+				padding: 0;
+				display: grid;
+				gap: 0.75rem;
+			}
+			.item {
+				padding: 0.9rem 1rem;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+			}
+			.item > :last-child {
+				margin-bottom: 0;
+			}
+			.item-head {
+				display: flex;
+				flex-wrap: wrap;
+				gap: 0.5rem 0.6rem;
+				align-items: center;
+				margin-bottom: 0.5rem;
+			}
+			.item-head h3 {
+				flex: 1 1 12rem;
+			}
+			.tag {
+				padding: 0.05rem 0.4rem;
+				border-radius: 5px;
+				background: var(--accent-soft);
+				color: var(--accent);
+				font: 600 0.8rem/1.5 var(--mono);
+				white-space: nowrap;
+			}
+			:target {
+				outline: 2px solid var(--accent);
+				outline-offset: 3px;
+				border-radius: 10px;
+			}
+			.chip {
+				display: inline-block;
+				padding: 0.05rem 0.55rem;
+				border-radius: 999px;
+				background: var(--surface);
+				border: 1px solid var(--border);
+				color: var(--muted);
+				font-size: 0.78rem;
+				font-weight: 600;
+				white-space: nowrap;
+			}
+			.chip.review,
+			.chip.doing {
+				background: var(--warn-soft);
+				border-color: transparent;
+				color: var(--warn);
+			}
+			.chip.done,
+			.chip.pick {
+				background: var(--ok-soft);
+				border-color: transparent;
+				color: var(--ok);
+			}
+			.chip.blocked {
+				background: var(--bad-soft);
+				border-color: transparent;
+				color: var(--bad);
+			}
+			.options {
+				padding-left: 1.2rem;
+				list-style: disc;
+			}
+			.options li {
+				margin-bottom: 0.3rem;
+			}
+			.detail {
+				display: grid;
+				grid-template-columns: 4.5rem minmax(0, 1fr);
+				gap: 0.25rem 0.75rem;
+				font-size: 0.92rem;
+			}
+			.detail dt {
+				color: var(--muted);
+				font-weight: 600;
+			}
+			.detail dd {
+				margin: 0;
+			}
+			.quiet {
+				color: var(--muted);
+				font-size: 0.92rem;
+			}
+
+			.note {
+				margin: 0 0 0.9rem;
+				padding: 0.75rem 1rem;
+				border-left: 3px solid var(--accent);
+				border-radius: 0 8px 8px 0;
+				background: var(--accent-soft);
+			}
+			.note.warn {
+				border-left-color: var(--warn);
+				background: var(--warn-soft);
+			}
+			.note > :last-child {
+				margin-bottom: 0;
+			}
+
+			.table-wrap {
+				margin: 0 0 0.9rem;
+				overflow-x: auto;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+			}
+			table {
+				width: 100%;
+				/* On a phone the table scrolls sideways instead of squeezing its columns. */
+				min-width: 34rem;
+				border-collapse: collapse;
+				font-size: 0.92rem;
+			}
+			th,
+			td {
+				padding: 0.55rem 0.8rem;
+				border-bottom: 1px solid var(--border);
+				text-align: left;
+				vertical-align: top;
+			}
+			th {
+				background: var(--surface);
+				color: var(--muted);
+				font-size: 0.82rem;
+			}
+			tr:last-child td {
+				border-bottom: 0;
+			}
+			td:has(> .tag:only-child) {
+				width: 1%;
+				white-space: nowrap;
+			}
+
+			code {
+				padding: 0.1em 0.3em;
+				border-radius: 4px;
+				background: var(--surface);
+				font: 0.88em var(--mono);
+				overflow-wrap: anywhere;
+			}
+			pre {
+				padding: 0.8rem 1rem;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				background: var(--surface);
+				overflow-x: auto;
+				font: 0.84rem/1.45 var(--mono);
+			}
+			pre code {
+				padding: 0;
+				background: none;
+				font: inherit;
+				overflow-wrap: normal;
+			}
+			/* Box-drawing diagrams need tight lines, or the vertical strokes show gaps. */
+			figure pre {
+				line-height: 1.2;
+			}
+			/* Before and After side by side; the panes stack when the page is narrow. */
+			.compare {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+				gap: 0.75rem;
+				margin: 0 0 0.9rem;
+			}
+			.compare > div {
+				min-width: 0;
+			}
+			.compare pre {
+				margin: 0;
+			}
+			.pane {
+				margin: 0 0 0.3rem;
+				color: var(--muted);
+				font-size: 0.82rem;
+				font-weight: 600;
+			}
+			/* The script at the end of the page adds these classes. */
+			pre .hot {
+				color: var(--accent);
+			}
+			.line {
+				display: block;
+			}
+			.line.add {
+				background: var(--ok-soft);
+				color: var(--ok);
+			}
+			.line.del {
+				background: var(--bad-soft);
+				color: var(--bad);
+			}
+			/* Visuals. .viz frames one picture. .flow, .parts, and .bars are ready-made pictures. */
+			.viz {
+				container-type: inline-size;
+				padding: 1.1rem 1rem;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+				background: var(--surface);
+				overflow-x: auto;
+			}
+			.viz > :last-child {
+				margin-bottom: 0;
+			}
+			.viz svg {
+				margin: 0 auto;
+				color: var(--text);
+				font-family: var(--sans);
+			}
+			.compare > div {
+				display: flex;
+				flex-direction: column;
+			}
+			.compare .viz {
+				flex: 1;
+			}
+
+			/* A flow: nodes joined by edges, top to bottom. */
+			.flow {
+				display: flex;
+				flex-direction: column;
+				align-items: center;
+			}
+			.node {
+				min-width: 6.5rem;
+				max-width: 100%;
+				padding: 0.45rem 0.85rem;
+				border: 1.5px solid var(--line);
+				border-radius: 8px;
+				background: var(--bg);
+				font-size: 0.92rem;
+				font-weight: 600;
+				line-height: 1.3;
+				text-align: center;
+			}
+			.node small {
+				display: block;
+				margin-top: 0.15rem;
+				color: var(--muted);
+				font-size: 0.8rem;
+				font-weight: 400;
+			}
+			.node.hot {
+				border-color: var(--accent);
+				background: var(--accent-soft);
+			}
+			.node.ok {
+				border-color: var(--ok);
+				background: var(--ok-soft);
+			}
+			.node.bad {
+				border-color: var(--bad);
+				background: var(--bad-soft);
+			}
+			.node.gone {
+				border-style: dashed;
+				background: none;
+				color: var(--muted);
+			}
+			/* The line is a background, the arrowhead is ::after, and ::before is the moving dot. */
+			.edge {
+				position: relative;
+				align-self: stretch;
+				display: grid;
+				grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+				column-gap: 1.2rem;
+				min-height: 2.5rem;
+				margin: 2px 0;
+				color: var(--line);
+				background: linear-gradient(currentColor, currentColor) top center / 1.5px calc(100% - 5px)
+					no-repeat;
+			}
+			.edge::after {
+				content: '';
+				position: absolute;
+				left: 50%;
+				bottom: 0;
+				translate: -50% 0;
+				border: 5px solid transparent;
+				border-top: 7px solid currentColor;
+				border-bottom-width: 0;
+			}
+			.edge > span {
+				grid-column: 2;
+				align-self: center;
+				padding: 0.4rem 0 0.6rem;
+				color: var(--muted);
+				font-size: 0.8rem;
+				line-height: 1.25;
+			}
+			.edge.hot,
+			.edge.hot > span {
+				color: var(--accent);
+			}
+			/* Nodes that belong together or run in parallel. */
+			.group {
+				position: relative;
+				display: flex;
+				flex-wrap: wrap;
+				align-items: flex-start;
+				justify-content: center;
+				gap: 0.5rem;
+				max-width: 100%;
+				padding: 1.7rem 0.6rem 0.6rem;
+				border: 1.5px dashed var(--line);
+				border-radius: 10px;
+			}
+			.group::before {
+				content: attr(data-label);
+				position: absolute;
+				top: 0.35rem;
+				left: 0.7rem;
+				color: var(--muted);
+				font-size: 0.75rem;
+				font-weight: 600;
+			}
+			/* Left to right, when the picture is wide enough. */
+			@container (min-width: 34rem) {
+				.flow.row {
+					flex-direction: row;
+					justify-content: center;
+				}
+				.flow.row > .edge {
+					align-self: center;
+					flex: 1 1 3rem;
+					min-width: 3rem;
+					max-width: 10rem;
+					grid-template-columns: minmax(0, 1fr);
+					grid-template-rows: 1fr 1fr;
+					min-height: 2.6rem;
+					margin: 0 2px;
+					background-position: left center;
+					background-size: calc(100% - 5px) 1.5px;
+				}
+				.flow.row > .edge::after {
+					left: auto;
+					right: 0;
+					bottom: auto;
+					top: 50%;
+					translate: 0 -50%;
+					border: 5px solid transparent;
+					border-left: 7px solid currentColor;
+					border-right-width: 0;
+				}
+				.flow.row > .edge > span {
+					grid-column: 1;
+					grid-row: 1;
+					align-self: end;
+					padding: 0 0.6rem 0.3rem 0.2rem;
+					text-align: center;
+				}
+				.flow.row > .group {
+					flex-direction: column;
+					align-items: stretch;
+				}
+			}
+
+			/* One text split into labelled parts. */
+			.parts {
+				display: grid;
+				gap: 0.5rem;
+			}
+			.parts > div {
+				display: grid;
+				grid-template-columns: 8.5rem minmax(0, 1fr);
+				gap: 0.75rem;
+				align-items: start;
+			}
+			.parts dt {
+				padding-top: 0.55rem;
+				color: var(--muted);
+				font-size: 0.8rem;
+				font-weight: 600;
+			}
+			.parts dd {
+				margin: 0;
+				padding: 0.5rem 0.8rem;
+				border: 1.5px solid var(--line);
+				border-radius: 8px;
+				background: var(--bg);
+				font-size: 0.92rem;
+			}
+			.parts.code dd {
+				font: 0.84rem/1.5 var(--mono);
+				white-space: pre-wrap;
+				overflow-wrap: anywhere;
+			}
+			.parts > .hot dt {
+				color: var(--accent);
+			}
+			.parts > .hot dd {
+				border-color: var(--accent);
+				background: var(--accent-soft);
+			}
+			@container (max-width: 26rem) {
+				.parts > div {
+					grid-template-columns: minmax(0, 1fr);
+					gap: 0.15rem;
+				}
+				.parts dt {
+					padding-top: 0;
+				}
+			}
+
+			/* Bars: --v on each row is its length in percent of the longest bar. */
+			.bars {
+				display: grid;
+				grid-template-columns: auto minmax(3rem, 1fr) auto;
+				gap: 0.45rem 0.7rem;
+				padding: 0;
+				list-style: none;
+				font-size: 0.9rem;
+			}
+			.bars li {
+				display: grid;
+				grid-column: 1 / -1;
+				grid-template-columns: subgrid;
+				align-items: center;
+			}
+			.bars li::after {
+				content: '';
+				grid-column: 2;
+				grid-row: 1;
+				width: calc(var(--v, 0) * 1%);
+				min-width: 2px;
+				height: 0.85rem;
+				border-radius: 3px;
+				background: var(--line);
+				/* A script that changes --v gets a smooth change. */
+				transition: width 0.25s ease-out;
+			}
+			.bars li > span {
+				grid-column: 1;
+				max-width: 11rem;
+			}
+			.bars li > b {
+				grid-column: 3;
+				font: 600 0.84rem var(--mono);
+			}
+			.bars li.hot::after {
+				background: var(--accent);
+			}
+			.bars li.hot > b {
+				color: var(--accent);
+			}
+
+			/* Motion. Every picture is complete when it stands still: in print, in a screenshot, and
+			   for a reader who turned motion off. */
+			@media screen and (prefers-reduced-motion: no-preference) {
+				/* A dot travels along a live edge. Use it for the path that the data takes. */
+				.edge.live::before {
+					content: '';
+					position: absolute;
+					left: 50%;
+					top: 0;
+					width: 7px;
+					height: 7px;
+					margin: -3.5px;
+					border-radius: 50%;
+					background: var(--accent);
+					animation: travel-down 1.8s linear infinite;
+				}
+				@keyframes travel-down {
+					0% {
+						top: 0;
+						opacity: 0;
+					}
+					15%,
+					80% {
+						opacity: 1;
+					}
+					100% {
+						top: calc(100% - 6px);
+						opacity: 0;
+					}
+				}
+				@container (min-width: 34rem) {
+					.flow.row > .edge.live::before {
+						left: 0;
+						top: 50%;
+						animation-name: travel-right;
+					}
+				}
+				@keyframes travel-right {
+					0% {
+						left: 0;
+						opacity: 0;
+					}
+					15%,
+					80% {
+						opacity: 1;
+					}
+					100% {
+						left: calc(100% - 6px);
+						opacity: 0;
+					}
+				}
+				/* The script at the end of the page adds .play when the figure scrolls into view. */
+				.play .seq > * {
+					animation: appear 0.45s ease-out both;
+					animation-delay: calc(var(--i, 0) * 0.3s);
+				}
+				.play .bars li::after {
+					transform-origin: left;
+					animation: grow 0.8s ease-out both;
+				}
+				@keyframes appear {
+					from {
+						opacity: 0;
+						transform: translateY(-6px);
+					}
+				}
+				@keyframes grow {
+					from {
+						transform: scaleX(0);
+					}
+				}
+			}
+			.replay {
+				margin-left: 0.5rem;
+				padding: 0;
+				border: 0;
+				background: none;
+				color: var(--accent);
+				font: inherit;
+				text-decoration: underline;
+				cursor: pointer;
+			}
+			@media print {
+				.replay {
+					display: none;
+				}
+			}
+			figure svg,
+			figure img {
+				display: block;
+				max-width: 100%;
+				height: auto;
+			}
+			figcaption {
+				margin-top: 0.4rem;
+				color: var(--muted);
+				font-size: 0.875rem;
+			}
+			details {
+				margin: 0 0 0.6rem;
+				border: 1px solid var(--border);
+				border-radius: 10px;
+			}
+			summary {
+				padding: 0.6rem 1rem;
+				cursor: pointer;
+				font-weight: 600;
+			}
+			details > :not(summary) {
+				margin-left: 1rem;
+				margin-right: 1rem;
+			}
+			@media print {
+				.toc {
+					display: none;
+				}
+				.layout {
+					display: block;
+					max-width: none;
+					padding: 0;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<div class="layout">
+			<nav class="toc" aria-label="Contents"></nav>
+
+			<main>
+				<header id="top">
+					<p class="kicker">Morning packet · DivyanshGolyan/rui · L2</p>
+					<h1>L2 guardrails and clean scratch allocation, landed</h1>
+					<p class="lede">The import ratchet, bounded-value extraction and clean ScratchBudget cutover are implemented. Capability construction still needs renderer-owned CLI migration; endpoint and configuration proposals remain design-only.</p>
+					<p class="meta"><span class="chip done" id="packet-status">Landed; remote main verified</span><span>Version 8 · 2026-10-19 · 03:54Z</span></p>
+				</header>
+
+				<section id="summary" data-toc="Summary">
+					<h2>The approved original landed with its reviewed tree unchanged</h2>
+					<dl class="facts">
+						<div class="ask" id="summary-ask"><dt>Needs from you</dt><dd>Nothing for this landing. Puck released the single non-force push after verifying fresh evidence. Capability construction and the separate diagnostic-scanner caveat remain open. Other lanes remain the coordinator's responsibility; L2 performed no L5 action.</dd></div>
+						<div id="summary-state"><dt>State</dt><dd id="summary-state-value">One non-force fast-forward push moved remote main from exact cdad5aaf to approved original 620c1ee4. Live remote-ref read and a subsequent fetch verified it at 03:51:33Z. A no-op rebase preserved tree <code>134a51422aa53511cd93a4036989935e9a426fdc</code>, exactly the reviewed tree. Fresh Selected attempt 2 passed all 13 jobs; both upgrade jobs passed. No check failed or unexpected main movement occurred during requalification. This is not whole-L2 completion.</dd></div>
+						<div id="summary-location"><dt>Location</dt><dd><code>/tmp/rui-complect-l2</code>, branch <code>wip/complect-l2-guardrails</code>, from exact <a href="https://github.com/DivyanshGolyan/rui/commit/cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff">cdad5aaf</a>. Original checkout's local main is unchanged.</dd></div>
+						<div id="summary-head"><dt>Candidate</dt><dd id="summary-head-value">Published and remote-verified <a href="https://github.com/DivyanshGolyan/rui/commit/620c1ee48061aa9476e59342c7c67e77a2f3d757"><code>620c1ee48061aa9476e59342c7c67e77a2f3d757</code></a> on <code>wip/complect-l2-guardrails</code>. The new accounting names supersede the initial <a href="https://github.com/DivyanshGolyan/rui/commit/d2160a3b588df52e4bf1e1aab4881c49687d3faa">d2160a3b</a> runtime checkpoint, which remains independently identifiable.</dd></div>
+						<div id="summary-measurement"><dt>Measured imports</dt><dd>Base: <strong>55 production modules, three cyclic components</strong>. Candidate: <strong>56 modules, two components</strong>. The superseded 56-base count is not evidence.</dd></div>
+					</dl>
+				</section>
+
+				<section id="units" data-toc="Implemented units">
+					<h2>The ratchet remains a separate first candidate</h2>
+					<ol class="items">
+						<li class="item" id="unit-ratchet"><div class="item-head"><span class="tag">F1</span><h3>Reject new cyclic edges and allowance growth</h3></div><p><code>tests/ci/import_architecture.py</code> walks literal first-party imports from <code>addRui</code>'s <code>src/cli.zig</code>, across platform branches but outside test declarations, comments and strings. It resolves Zig's <code>root</code> alias and preserves outer exclusion through nested tests. The evaluator executable is C-only; its private Zig adapter is fixture-only.</p><p>Every edge with a return path counts, including additions inside existing cyclic components. Candidate exceptions must shrink from trusted main merge-base history; first introduction derives exceptions from immutable authorized base source. Removed cycles must lose their exceptions. The existing policy job runs the canonical tests with full Git history; reserved selectors stay untouched.</p><p>Initial <a href="https://github.com/DivyanshGolyan/rui/commit/cd34182da2f0435e900934ec1314529ed6e2cf8e">cd34182d</a>, corrected root discovery <a href="https://github.com/DivyanshGolyan/rui/commit/f4c20522f7fab5eb9ee774a2344bb29c346491df">f4c20522</a>, bypass fixes <a href="https://github.com/DivyanshGolyan/rui/commit/855a3fc62a018ba19582e466c2c59edda913bc96">855a3fc6</a>, then nested-test correction. These guard-only patches apply independently to the exact base, without leaf/API changes.</p></li>
+						<li class="item" id="unit-leaf"><div class="item-head"><span class="tag">F2</span><h3>Values sit below protocol and named scratch</h3></div><p><a href="https://github.com/DivyanshGolyan/rui/commit/b9d28c72b55deecbfeb9525249151eff1b34ae29">b9d28c72</a> moves unchanged bounded UTF-8 values into <code>src/bounded.zig</code>. Named scratch imports that value primitive and <code>ScratchBudget</code> directly. The protocol/named-scratch production cycle disappears; test-only protocol references remain tests. No wire or Store format changes.</p></li>
+						<li class="item" id="unit-scratch"><div class="item-head"><span class="tag">F3</span><h3>Accounting never silently reclaims files</h3></div><p><a href="https://github.com/DivyanshGolyan/rui/commit/620c1ee48061aa9476e59342c7c67e77a2f3d757">620c1ee4</a> gives accounting-only operations fresh <code>charge</code> names and retains explicit <code>allocate</code> calls at all eight producers. FIFO reclamation still evicts eligible oldest output and charges inside its callback without recursive reclamation. Stale <code>reserve</code> callers fail compilation. No aliases or <code>WithoutReclaim</code> variants remain; the unused queue growth pair is deleted.</p></li>
+					</ol>
+					<details id="ratchet-independent"><summary>Guard-only first morning candidate: independently checked</summary><p>Apply cd34182d, f4c20522, 855a3fc6, ad16a67b and <a href="https://github.com/DivyanshGolyan/rui/commit/8737efe24b76a488870c75ee172f5005d49cb1f0">8737efe2</a> to the exact cdad5aa base; omit the leaf, API and proposal commits. A scratch clone applied that slice without conflicts: only three import files and the policy checkout change. Its unchanged base graph has 55 modules/three components; all 91 policy tests pass in 83.736s. This is independent local policy evidence, not a separate hosted runtime qualification.</p><p><a href="l2-ratchet-only.patch">Combined guard-only patch</a>, SHA-256 <code>73f3583a68a981c86300e93a728f4acc768adcb579f4286b36b64a9d5d44029f</code>. Both Python files compare byte-for-byte with current head; only the initial allowance retains the base's six existing cyclic edges.</p></details>
+				</section>
+
+				<section id="measurements" data-toc="Measured cycles">
+					<h2>Three existing cycles become two, not zero</h2>
+					<figure id="fig-production-cycles"><div class="compare"><div><p class="pane">Pinned base · 55 modules</p><div class="viz"><div class="flow"><div class="node">Store ↔ provider_output</div><div class="node">provider_selection ↔ model_capability</div><div class="node hot">protocol ↔ named_scratch</div></div></div></div><div><p class="pane">Candidate · 56 modules</p><div class="viz"><div class="flow"><div class="node">Store ↔ provider_output</div><div class="node">provider_selection ↔ model_capability</div><div class="node ok">protocol → named_scratch<small>both use bounded values below them</small></div></div></div></div></div><figcaption>Only the protocol/named-scratch cycle is removed here. Store's test-only model-adapter imports never count as production edges.</figcaption></figure>
+					<p id="measurement-method">The count is literal source-import reachability, not Zig lazy declaration analysis. Non-<code>.zig</code> imports and production build mappings were audited: <code>root</code> is special; standard modules, generated C/options and pinned vaxis packages are external. Current first-party named build modules belong to fixtures. A future production first-party named import requires a checker update; the checker itself remains review-controlled. Unrecognized nonliteral imports fail closed rather than silently disappear.</p>
+					<p id="measurement-data"><a href="l2-import-measurement.json">Exact source measurement</a> recomputes the pinned base from Git blobs and candidate 620c1ee4 from its actual source. The final import gate accepts four directed cyclic edges in two components.</p>
+				</section>
+
+				<section id="api" data-toc="Clean API and callers">
+					<h2>Choose effects explicitly at each producer</h2>
+					<figure id="fig-clean-api"><div class="compare"><div><p class="pane">Accounting only</p><div class="viz"><pre>charge(self: ScratchBudget,
+    amount: u64) bool
+chargeUpTo(self: ScratchBudget,
+    maximum: u64) u64</pre></div></div><div><p class="pane">May reclaim retained output</p><div class="viz"><pre>allocate(self: ScratchBudget,
+    amount: u64) bool
+allocateUpTo(self: ScratchBudget,
+    maximum: u64) u64</pre></div></div></div><figcaption>Before: producer <code>budget.reserve(bytes.len)</code> could reclaim. After: producer <code>budget.allocate(bytes.len)</code> says so; accounting <code>charge</code> cannot invoke cleanup. The old ScratchBudget names do not compile.</figcaption></figure>
+					<div class="table-wrap"><table id="caller-map" style="min-width:0;table-layout:fixed;overflow-wrap:anywhere"><colgroup><col style="width:20%"><col style="width:45%"><col style="width:35%"></colgroup><thead><tr><th>Lane</th><th>Reclaim-capable producers</th><th>Authority</th></tr></thead><tbody><tr id="caller-local"><td>L2</td><td>Bash capture/script, evaluator output, protocol ContentSink</td><td>Unreserved local consumers</td></tr><tr id="caller-l1"><td>L1</td><td>OutputMetadataWriter.append; SessionReportCapture.flush</td><td>Two owner-approved Store edits only</td></tr><tr id="caller-l3"><td>L3</td><td>provider CaptureWriter.offer; model_adapter RequestWriter.write</td><td>Two owner-approved edits only</td></tr></tbody></table></div>
+					<p id="caller-accounting">Remaining budget charges are accounting, queue admission or test setup; unrelated CustodyPool methods are unchanged. Every old ScratchBudget spelling was swept, including tests. Owners must reconcile this narrow dependency with their separate redesigns; L2 did not adopt their redesigns or schema27. L3's isolated apply-check found one metadata-test context conflict: preserve its <code>output_format.OutputMetadataWriter</code> owner and rename only the accounting call. No integration is claimed.</p>
+					<details id="patch-provenance"><summary>Approved patch provenance</summary><p>The initial producer patches target exact cdad5aa. Store SHA-256 <code>2eb9817c542d8a946560d61d8be504315c44ba5fe1861c051fd3ba9bd2edab85</code>; L3 SHA-256 <code>6b24c89c5eec198e90bc603b774e0b7bfebe8ea890288f921eb703e5e1990c3b</code>.</p><p>The charge correction includes exact owner-approved test handoffs, both parented on ad16. Server source commit 930b4fd8: four calls, patch SHA-256 <code>419dc8c6055e824b8442ccbd5de7b88deda4bed868a0866d0dc5506e1ed04ae8</code>. Provider source commit 83b4dcdd: two calls, patch SHA-256 <code>0e33f478faeb2d696df7dbef8b6a58985c53aa332e224f4f169a02bef6a2b459</code>. Whole-file equality and all 34 server CustodyPool reserve lines were checked. Retained originals are under <code>.amp/l2/</code>; owner-supplied format checks do not replace integrated runtime gates.</p></details>
+				</section>
+
+				<section id="gates" data-toc="Exact gates">
+					<h2>Hosted acceptance belongs to its exact head</h2>
+					<p id="hosted-state">Fresh landing qualification passed on unchanged 620c1ee4: <a href="https://github.com/DivyanshGolyan/rui/actions/runs/39174654494/attempts/2">Selected attempt 2, 13/13 successful jobs</a> and <a href="https://github.com/DivyanshGolyan/rui/actions/runs/39174654493/attempts/2">both upgrades attempt 2, 2/2 successful jobs</a>, submitted at 03:20Z. All twelve platform/target executions exited 0. The existing verifier excludes artifacts from its current run ID, including its prior attempt; logs contain no adoption of earlier same-tree acceptance. Full logs, job snapshots and artifact identities remain under <code>.amp/l2/landing-20261019/</code>.</p>
+					<div class="table-wrap"><table id="gate-matrix" style="min-width:0;table-layout:fixed;overflow-wrap:anywhere"><colgroup><col style="width:25%"><col style="width:75%"></colgroup><thead><tr><th>Gate</th><th>Executed evidence</th></tr></thead><tbody><tr id="gate-policy"><td>Fresh hosted policy</td><td><code>python3 -B -m unittest discover -s tests/ci -v</code>: 91 tests pass in 76.401s, including eight import tests. Pinned actionlint 1.7.7 passes. Independent local guard-only slice: 91 pass in 83.736s. Local whitespace and Zig format/AST checks pass.</td></tr><tr id="gate-native"><td>Earlier local Linux runtime</td><td><code>run_selected.py</code> executed the canonical six-target plan, with each native batch isolated. <code>test-logic</code>: 222/222; full Debug admission: 38/38 steps; <code>check</code>: 98/98 steps, native 640 pass, one documented skip, zero failed. This earlier evidence does not replace fresh hosted attempt 2.</td></tr><tr id="gate-h2"><td>Earlier local H2 and lifecycle</td><td>Codex H2: 38/38 steps; evaluator churn: 5/5; transport H2: 39/39. All six batches exit 0. Focused <code>ScratchBudget</code>: 5/5; retention: 37/37. Exact plan and merged output remain <code>.amp/l2/opus-final-plan.json</code> and <code>opus-canonical-local-gates.log</code>.</td></tr><tr id="gate-hosted"><td>Fresh hosted mapping</td><td>All six targets pass natively on Linux x86-64 and Apple Silicon macOS: <code>test-logic</code> 222/222 each, <code>admission-debug-integration</code>, <code>check</code>, <code>codex-h2-integration</code>, <code>evaluator-churn</code> and <code>transport-h2-integration</code>. Native units: Linux 640 pass/one skip; macOS 638 pass/three skips. Both skip the opt-in 60-second witness; macOS also skips two Linux-only assertions. Fresh Linux artifact 12161382321 and macOS artifact 12161607393 were verified before execution.</td></tr><tr id="gate-upgrades"><td>Fresh installed upgrades</td><td>Both platforms pass normal <code>~/.local/bin/rui</code> installation, soft-256 startup and same-format saved-work/restart. Prior build <a href="https://github.com/DivyanshGolyan/rui/commit/0e4b2225d106dd63fa9c38801188facb5e9c6335">0e4b2225</a> uses format 21; candidate 24 explicitly refuses start and serve with unchanged SQLite hashes. No migration or old-format reader is included.</td></tr></tbody></table></div>
+					<p id="landing-record">The <a href="https://github.com/DivyanshGolyan/rui/issues/532#issuecomment-6259263397">published landing record on issue #532</a> names the exact landed SHA, fresh gates and scoped reviews. The API readback matches the prepared text byte-for-byte; the issue remains open. This does not imply whole-L2 or architecture closure.</p>
+					<details id="gate-failures"><summary>Failed attempts and limits are preserved</summary><p>The first local broad run failed because pyte was missing. Installing pinned pyte 0.8.2, wcwidth 0.2.13 and h2 4.3.0 corrected that identified infrastructure problem; the one retry passed. The original log remains <code>.amp/l2/clean-api-check.log</code>; the successful stable-source log is <code>clean-api-check-after-deps.log</code>.</p><p>Earlier d216 Selected run's macOS job was superseded/cancelled by 855a publication, not passed. CI capacity cancellation is neither product failure nor acceptance. No cold-build, physical Mac, live provider, power-loss or broad resource-performance claim is made.</p></details>
+				</section>
+
+				<section id="review" data-toc="Review and mutations">
+					<h2>Review found real detector defects; corrections stay explicit</h2>
+					<p id="review-state"><strong>PASS on exact 620c1ee4</strong> from <a href="https://ampcode.com/threads/T-01a1513f-4900-7238-a30c-1257ede7ab79">Puck's cloud Opus 5.5 medium correction re-review</a>. Both medium classes and the low unused-growth finding are closed, with nothing new found. The reviewer independently ran eight import tests, trust mutations, API compile probes and <code>zig build test</code>: 40/40 steps, 640 pass, one skip. The <a href="https://ampcode.com/threads/T-01a15113-ed53-74f1-9e79-50abfa6dc313">initial Opus review</a> and earlier <a href="https://ampcode.com/threads/T-01a15057-e51f-7625-9a34-66fd9b8c56b2">Sol PASS</a> remain identified separately. Reviewer-native Linux checks do not stand in for the owner's hosted platform and upgrade gates.</p>
+					<ol class="items"><li class="item" id="review-root"><div class="item-head"><span class="tag">R1</span><h3>Root imports must remain first-party</h3></div><p>The first reviewer reproduced a missed cycle through <code>@import("root")</code>. The correction resolves the executable root. Alias and explicit return imports reject in production and remain harmless inside tests.</p></li><li class="item" id="review-allowance"><div class="item-head"><span class="tag">R2</span><h3>The candidate cannot authorize its own growth</h3></div><p>The first reviewer admitted a cycle by enlarging candidate JSON. Trusted Git bounds now reject growth during bootstrap and established-baseline operation; stale exceptions reject. Restoring trust in candidate JSON kills the canonical negative control at the missing-ValueError assertion.</p></li><li class="item" id="review-nesting"><div class="item-head"><span class="tag">R3</span><h3>Nested container tests must not end the outer exclusion</h3></div><p>The correction reviewer reproduced false cycles after an inner test closed. Four named/anonymous × root/explicit cases went red before the one-condition fix. They now accept only test-local returns, retain the following real production import, and reject a later production return.</p></li></ol>
+					<p id="mutation-evidence">The committed-candidate fixture has three distinct commits for HEAD, main and their merge-base. Trusting HEAD survives the old fixture but fails both corrected bootstrap and established cases with the intended missing-ValueError assertion. Separate stale <code>reserve</code> and <code>reserveUpTo</code> probes compile against ad16 and fail against the corrected API with missing-member errors. Existing retention tests establish FIFO eviction, unconfirmed deletion accounting and release ownership. Earlier cycle, root, nesting and allowance suppression controls remain recorded.</p>
+					<details id="review-limits"><summary>Correction-review controls and limits</summary><p>The reviewer killed HEAD-trust, HEAD-baseline, HEAD-bootstrap and omitted-growth-check mutations. Trusting the landed main tip instead of the merge-base survived; the reviewer classified it as stricter rejection, not an allowance-growth escape.</p><p>Owner artifact hashes and exact-file comparisons establish the six approved test substitutions; the review clone did not contain their unpublished source commit objects. The reviewer reported a literal <code>failed command</code> test-binary line despite zero build exit, then confirmed a zero-exit direct binary and a successful full summary. Owner native gate logs do not reproduce that test-binary line; hosted transport setup separately emits the same prefix beside a successful summary. The reporting-path cause was not established; raw reviewer-log transfer was unavailable after reviewer archival. Qualification uses successful exits, native assertions and required job outcomes, not that prefix alone.</p></details>
+				</section>
+
+				<section id="seams" data-toc="Ownership and gaps">
+					<h2>Renderer-owned CLI remains untouched</h2>
+					<ul><li id="seam-capability"><strong>F4 — Capability cycle remains.</strong> Clean capability construction needs migration of renderer-owned <code>cli.zig</code>'s existing <code>provider_selection.codex</code> calls. No wrapper or shim was introduced. L2 does not claim this unit complete.</li><li id="seam-owners"><strong>F5 — No unapproved cross-owner edits.</strong> Renderer files and reserved docs, selectors and helpers remain untouched. Renderer E, F and current G diff-path intersections with L2 are empty. Other-owner changes are the four initial producer migrations and six exact approved accounting-test substitutions. Lane redesigns and schema27 are not integrated; L3 has one expected metadata-owner context conflict on later assembly.</li><li id="seam-core-parser"><strong>F6 — Separate pre-existing diagnostic scanner issue.</strong> The same nested-test-depth mechanism exists in <code>src/core_boundary.zig</code>'s permission for <code>std.debug.print</code>. A native scratch probe accepts ordinary diagnostics but rejects equivalent nested-test diagnostics. That separate owner remains unchanged and is reported, not hidden behind a repository-wide closure claim.</li><li id="seam-ci"><strong>F7 — Renderer has CI priority.</strong> At 18:46Z renderer macOS full-callers was genuinely queued after its build succeeded. L3 cancelled both own runs, then renderer full-callers started 18:47:23Z and both cancellations became terminal. L2 stopped submissions until pressure cleared. The immediate pre-push queue for 620c1ee4 was empty; no renderer run was cancelled.</li></ul>
+					<details id="core-probe"><summary>F6 affected boundary and native probe</summary><p>Search of test-depth state under <code>tests/ci</code> and <code>src</code> found only the import parser (corrected) and <code>core_boundary.scan</code> lines 93–100 (diagnostic permission, explicitly deferred). No current <code>src</code> nested-test shape was found. The reviewer inspected the mechanism but did not independently rerun this native probe.</p><p><a href="l2-core-scope-probe.zig">Probe source</a> calls the unchanged public <code>check</code> interface. From the repository root:</p><pre>zig run --dep boundary \
+    -Mroot=path/to/l2-core-scope-probe.zig \
+    -Mboundary=src/core_boundary.zig
+ordinary diagnostic accepted: true
+nested diagnostic accepted: false</pre><p>This establishes a pre-existing false rejection, not an import-graph cycle or repository-wide repair.</p></details>
+				</section>
+
+				<section id="design" data-toc="Design-only proposals">
+					<h2>Endpoint identity and CLI policy each need one owner</h2>
+					<p id="proposal-endpoints"><strong>F8 — Protocol-owned endpoint identity.</strong> One exhaustive value mapping should own exact method/path/request/reply/traffic class; handlers keep execution policy. Unknown Control paths remain separately classified. Changed framing/identity requires an explicit version marker and mismatch refusal, not old aliases or dual decoders. Optional L6 implementation was not started.</p>
+					<p id="proposal-cli"><strong>F9 — Parse, resolve defaults, capture/send and present separately.</strong> Keep product defaults in their current owner; addressed updates remain sparse, fresh sessions resolve omitted defaults at composition, and presentation preserves admission truth and the saved request identity. The just-landed default values are unchanged.</p>
+					<p>Both write-ups are in <code>docs/proposals/l2-boundaries.md</code>, <a href="https://github.com/DivyanshGolyan/rui/commit/759ade6177b39249fc25850fb92de0c9c65409fc">759ade61</a>. No endpoint, CLI, defaults, wire or Store-format implementation is included.</p>
+				</section>
+
+				<section id="sources" data-toc="Pinned sources">
+					<h2>The actual audit and principle sources are pinned</h2>
+					<p id="source-audit">Read the actual <a href="https://ampcode.com/threads/T-01a1500e-2a79-72ed-9be6-b9e1b1a69b57">final audit</a>; earlier reports use different numbering. Concrete authorized L2 scope, not numbering, controls this branch.</p>
+					<p id="source-principles">Actual <code>cursor/plugins</code> <code>pstack/skills/</code> files were read at <a href="https://github.com/cursor/plugins/commit/0b8e952052d482ee6de06deebf14d590d77b1b34">0b8e9520</a>: <code>principle-sequence-verifiable-units/SKILL.md</code>, <code>principle-fix-root-causes/SKILL.md</code>, and <code>principle-prove-it-works/SKILL.md</code>. Separating accounting from effects and moving shared values below independent owners are interpretations of Hickey's simplicity principles, not his endorsement.</p>
+					<p id="source-artifacts">Reproduction logs, approved patches, failed-before controls and job snapshots remain under <code>.amp/l2/</code>. This packet is served from the lane's orb; the floating review button accepts comments on individual blocks.</p>
+				</section>
+			</main>
+		</div>
+
+		<script>
+			// Builds the side contents list from the sections, so it cannot drift from the page.
+			const toc = document.querySelector('.toc')
+			const sections = [...document.querySelectorAll('main > section[id]')]
+			const list = document.createElement('ol')
+			const links = new Map()
+			for (const section of sections) {
+				const label = section.dataset.toc || section.querySelector('h2')?.textContent.trim()
+				if (!label) continue
+				const link = document.createElement('a')
+				link.href = `#${section.id}`
+				link.textContent = label
+				const count = section.querySelectorAll('.item, tbody > tr[id]').length
+				if (count > 0) link.textContent += ` (${count})`
+				links.set(section, link)
+				const entry = document.createElement('li')
+				entry.append(link)
+				list.append(entry)
+			}
+			toc.append(list)
+			const observer = new IntersectionObserver(
+				(entries) => {
+					for (const entry of entries) {
+						if (!entry.isIntersecting) continue
+						for (const link of links.values()) link.removeAttribute('aria-current')
+						links.get(entry.target)?.setAttribute('aria-current', 'true')
+					}
+				},
+				{ rootMargin: '0px 0px -70% 0px' },
+			)
+			for (const section of links.keys()) observer.observe(section)
+
+			// A line break before the end tag of a view would show as an empty last line.
+			for (const pre of document.querySelectorAll('figure pre')) {
+				const last = pre.lastChild
+				if (last?.nodeType === Node.TEXT_NODE) last.data = last.data.trimEnd()
+			}
+
+			// Colors the heavy glyphs in a drawing, so the changed parts stand out from the light lines.
+			const heavy = /([━┃┏┓┗┛┣┫┳┻╋▶◀▲▼●◆■]+)/
+			for (const pre of document.querySelectorAll('pre.diagram')) {
+				const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT)
+				const texts = []
+				while (walker.nextNode()) texts.push(walker.currentNode)
+				for (const text of texts) {
+					const parts = text.data.split(heavy)
+					if (parts.length === 1) continue
+					const pieces = parts.map((part, index) => {
+						if (index % 2 === 0) return part
+						const span = document.createElement('span')
+						span.className = 'hot'
+						span.textContent = part
+						return span
+					})
+					text.replaceWith(...pieces)
+				}
+			}
+
+			// Colors the added and removed lines in a diff view. The view holds text only.
+			for (const pre of document.querySelectorAll('pre.diff')) {
+				const lines = pre.textContent.split('\n').map((line) => {
+					const span = document.createElement('span')
+					span.className = line.startsWith('+') ? 'line add' : line.startsWith('-') ? 'line del' : 'line'
+					span.textContent = line === '' ? ' ' : line
+					return span
+				})
+				pre.replaceChildren(...lines)
+			}
+
+			// Plays the one-shot motion of a picture when it scrolls into view, and adds a Replay
+			// button. Without this script the pictures are complete and still.
+			if (matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+				const play = new IntersectionObserver((entries) => {
+					for (const entry of entries) {
+						if (!entry.isIntersecting) continue
+						entry.target.classList.add('play')
+						play.unobserve(entry.target)
+					}
+				})
+				for (const figure of document.querySelectorAll('figure')) {
+					if (!figure.querySelector('.seq, .bars')) continue
+					for (const sequence of figure.querySelectorAll('.seq')) {
+						;[...sequence.children].forEach((child, index) => child.style.setProperty('--i', index))
+					}
+					play.observe(figure)
+					// A picture with its own controls needs no Replay button.
+					if (figure.querySelector('input, select, button')) continue
+					const button = document.createElement('button')
+					button.type = 'button'
+					button.className = 'replay'
+					button.textContent = 'Replay'
+					button.addEventListener('click', () => {
+						figure.classList.remove('play')
+						void figure.offsetWidth
+						figure.classList.add('play')
+					})
+					const caption = figure.querySelector('figcaption') ?? figure
+					caption.append(button)
+				}
+			}
+		</script>
+	</body>
+</html>

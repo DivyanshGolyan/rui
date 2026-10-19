@@ -1,0 +1,10 @@
+test_baseline_test_only_and_new_cycle_controls (test_import_architecture.ImportArchitectureTest.test_baseline_test_only_and_new_cycle_controls) ... ok
+test_lexical_noise_and_anonymous_tests_do_not_create_dependencies (test_import_architecture.ImportArchitectureTest.test_lexical_noise_and_anonymous_tests_do_not_create_dependencies) ... ok
+test_new_disjoint_and_self_cycles_are_rejected (test_import_architecture.ImportArchitectureTest.test_new_disjoint_and_self_cycles_are_rejected) ... ok
+test_repository_production_imports_do_not_add_cycles (test_import_architecture.ImportArchitectureTest.test_repository_production_imports_do_not_add_cycles) ... ok
+test_store_test_adapter_is_not_a_production_dependency (test_import_architecture.ImportArchitectureTest.test_store_test_adapter_is_not_a_production_dependency) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.541s
+
+OK

@@ -1,0 +1,15 @@
+test_baseline_test_only_and_new_cycle_controls (test_import_architecture.ImportArchitectureTest.test_baseline_test_only_and_new_cycle_controls) ... FAIL
+
+======================================================================
+FAIL: test_baseline_test_only_and_new_cycle_controls (test_import_architecture.ImportArchitectureTest.test_baseline_test_only_and_new_cycle_controls)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 29, in test_baseline_test_only_and_new_cycle_controls
+    with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.002s
+
+FAILED (failures=1)
+EXPECTED RED: cycle detector suppression caught by new-cycle assertion

@@ -1,0 +1,3048 @@
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 2 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 2 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 3 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 3 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 4 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 4 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 5 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 5 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux_build (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 6 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (test-logic) (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  * Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  * Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (evaluator-churn) (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  * Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  * Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 6 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (test-logic) (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (evaluator-churn) (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 7 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (test-logic) (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (evaluator-churn) (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 7 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (test-logic) (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (evaluator-churn) (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 8 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (evaluator-churn) (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 8 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos_build (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  * Compile selected gates once, never test acceptance
+  * Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (transport-h2-integration) (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 9 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  * Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 9 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  * Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 10 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 11 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 11 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 12 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 12 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 13 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* linux suites (check) (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Existing Linux measurement-tool checks, not resource qualification
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 13 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 14 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 14 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 15 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 15 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 16 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 16 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+* macos suites (native) (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  * Run required native targets
+  * Publish input- and artifact-verified evidence
+  * Retain bounded failed-fixture diagnostics
+  * Post Run ./.github/actions/setup
+  * Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+Refreshing run status every 30 seconds. Press Ctrl+C to quit.
+
+* wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 17 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+X macos suites (native) in 7m51s (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  X Run required native targets
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+* macos (ID 117756326358)
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+X wip/complect-l2-guardrails Selected checks · 39153711158
+Triggered via push about 17 minutes ago
+
+JOBS
+✓ policy in 1m13s (ID 117752438026)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run python3 -B -m unittest discover -s tests/ci -v
+  ✓ Reject undefined fixture names before native builds
+  ✓ Install the pinned workflow linter
+  ✓ Validate workflows with one pinned-linter compatibility exception
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ plan in 8s (ID 117752438303)
+  ✓ Set up job
+  ✓ Avoid duplicate development work for a ready PR
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Select existing targets
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux_build in 5m52s (ID 117752475402)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ macos_build in 8m50s (ID 117752475437)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  - Prove warm compilation does not cache test acceptance
+  ✓ Compile selected gates once, never test acceptance
+  ✓ Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (test-logic) in 2m10s (ID 117753811483)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  ✓ Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (check) in 7m0s (ID 117753811512)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (evaluator-churn) in 2m25s (ID 117753811520)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux suites (transport-h2-integration) in 3m3s (ID 117753811527)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  ✓ Run selected targets or verify identical-tree evidence
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  - Existing Linux measurement-tool checks, not resource qualification
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+X macos suites (native) in 7m51s (ID 117754488414)
+  ✓ Set up job
+  ✓ Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Run ./.github/actions/setup
+  ✓ Verify the exact producer artifact before executing gates
+  X Run required native targets
+  - Publish input- and artifact-verified evidence
+  - Retain bounded failed-fixture diagnostics
+  ✓ Post Run ./.github/actions/setup
+  ✓ Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+  ✓ Complete job
+✓ linux in 4s (ID 117755406172)
+  ✓ Set up job
+  ✓ Require every selected Linux part
+  ✓ Complete job
+X macos in 3s (ID 117756326358)
+  ✓ Set up job
+  X Require every selected Apple Silicon part
+  ✓ Complete job
+
+ANNOTATIONS
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+policy: .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+plan: .github#10
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux_build: .github#4
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262, actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (test-logic): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (evaluator-churn): .github#2
+
+! Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+linux suites (transport-h2-integration): .github#2
+
+X Process completed with exit code 1.
+macos: .github#11
+

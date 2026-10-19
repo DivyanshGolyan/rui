@@ -1,0 +1,12 @@
+1/1 ScratchBudget.test.only allocation may reclaim and partial allocation preserves charged progress...FAIL (TestUnexpectedResult)
+/home/user/.local/opt/zig-0.17.0/lib/std/testing.zig:584:14: 0x124e989 in expect (std.zig)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+/tmp/tmpomfh9j_8/ScratchBudget.zig:152:5: 0x124eb85 in test.only allocation may reclaim and partial allocation preserves charged progress (ScratchBudget.zig)
+    try std.testing.expect(!budget.reserve(2));
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache/o/2adb8e40431e507d488d5133152f209f/test --seed=0x2cd89149
+
+EXPECTED RED: implicit reclamation at reserve fails the accounting-only public contract

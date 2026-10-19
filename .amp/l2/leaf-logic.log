@@ -1,0 +1,56 @@
+Build Summary: 34/34 steps succeeded; 221/221 tests passed
+test-logic success
++- run test 221 pass (221 total) 3s MaxRSS:10M
+|  +- compile test safe native success 36s MaxRSS:610M
+|     +- translate-c posix cached
+|     |  +- compile exe translate-c fast native cached 5ms MaxRSS:40M
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- run exe generate-def (aarch64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native cached 5ms MaxRSS:39M
+|     |  |  +- run exe generate-def (amdgcn.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (arm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (bpf.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (common.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (hexagon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (loongarch.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (mips.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (neon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (nvptx.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (powerpc.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (riscv.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (s390x.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (ve.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (wasm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86_64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (xcore.zig) cached
+|     |  |     +- compile exe generate-def debug native (reused)
+|     |  +- WriteFile posix.h cached
+|     +- run bash (vaxis) cached
+|     +- run bash (vaxis) (reused)
+|     +- run bash (vaxis) (reused)
+|     +- run exe uucode_generate (tables.zig) cached
+|     |  +- compile exe uucode_generate debug native cached 5ms MaxRSS:40M
+|     |     +- WriteFile build_config.zig cached
+|     +- WriteFile build_config.zig (reused)
++- run exe rui-answer-renderer-allocation-test success 192ms
+   +- compile exe rui-answer-renderer-allocation-test safe native cached 9ms MaxRSS:40M
+

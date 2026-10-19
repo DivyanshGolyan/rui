@@ -1,0 +1,99 @@
+{
+  "base_sha": "cdad5aaf4dc43cbb7864f0fa0a4a08bf4f25a8ff",
+  "base": {
+    "modules": 55,
+    "sccs": [
+      [
+        "src/model_capability.zig",
+        "src/provider_selection.zig"
+      ],
+      [
+        "src/named_scratch.zig",
+        "src/protocol.zig"
+      ],
+      [
+        "src/provider_output.zig",
+        "src/store.zig"
+      ]
+    ],
+    "cyclic_edges": [
+      [
+        "src/model_capability.zig",
+        "src/provider_selection.zig"
+      ],
+      [
+        "src/named_scratch.zig",
+        "src/protocol.zig"
+      ],
+      [
+        "src/protocol.zig",
+        "src/named_scratch.zig"
+      ],
+      [
+        "src/provider_output.zig",
+        "src/store.zig"
+      ],
+      [
+        "src/provider_selection.zig",
+        "src/model_capability.zig"
+      ],
+      [
+        "src/store.zig",
+        "src/provider_output.zig"
+      ]
+    ]
+  },
+  "candidate_sha": "620c1ee48061aa9476e59342c7c67e77a2f3d757",
+  "candidate": {
+    "modules": 56,
+    "sccs": [
+      [
+        "src/model_capability.zig",
+        "src/provider_selection.zig"
+      ],
+      [
+        "src/provider_output.zig",
+        "src/store.zig"
+      ]
+    ],
+    "cyclic_edges": [
+      [
+        "src/model_capability.zig",
+        "src/provider_selection.zig"
+      ],
+      [
+        "src/provider_output.zig",
+        "src/store.zig"
+      ],
+      [
+        "src/provider_selection.zig",
+        "src/model_capability.zig"
+      ],
+      [
+        "src/store.zig",
+        "src/provider_output.zig"
+      ]
+    ]
+  },
+  "gate": {
+    "modules": 56,
+    "cyclic_edges": [
+      [
+        "src/model_capability.zig",
+        "src/provider_selection.zig"
+      ],
+      [
+        "src/provider_output.zig",
+        "src/store.zig"
+      ],
+      [
+        "src/provider_selection.zig",
+        "src/model_capability.zig"
+      ],
+      [
+        "src/store.zig",
+        "src/provider_output.zig"
+      ]
+    ]
+  }
+}

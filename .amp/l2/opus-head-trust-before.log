@@ -1,0 +1,7 @@
+test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.090s
+
+OK
+CONFIRMED: HEAD-trust mutant survives old fixture

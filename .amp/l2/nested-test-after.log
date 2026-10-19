@@ -1,0 +1,13 @@
+test_baseline_test_only_and_new_cycle_controls (test_import_architecture.ImportArchitectureTest.test_baseline_test_only_and_new_cycle_controls) ... ok
+test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) ... ok
+test_lexical_noise_and_anonymous_tests_do_not_create_dependencies (test_import_architecture.ImportArchitectureTest.test_lexical_noise_and_anonymous_tests_do_not_create_dependencies) ... ok
+test_new_disjoint_and_self_cycles_are_rejected (test_import_architecture.ImportArchitectureTest.test_new_disjoint_and_self_cycles_are_rejected) ... ok
+test_removed_cycles_must_also_remove_their_allowance (test_import_architecture.ImportArchitectureTest.test_removed_cycles_must_also_remove_their_allowance) ... ok
+test_repository_production_imports_do_not_add_cycles (test_import_architecture.ImportArchitectureTest.test_repository_production_imports_do_not_add_cycles) ... ok
+test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) ... ok
+test_store_test_adapter_is_not_a_production_dependency (test_import_architecture.ImportArchitectureTest.test_store_test_adapter_is_not_a_production_dependency) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 1.072s
+
+OK

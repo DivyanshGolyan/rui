@@ -1,0 +1,27 @@
+301:policy	Run python3 -B -m unittest discover -s tests/ci -v	2026-10-19T03:20:52.0723090Z Verified compiled artifact 101; compiled only, gate acceptance not yet established
+393:policy	Run python3 -B -m unittest discover -s tests/ci -v	2026-10-19T03:22:08.4570419Z Ran 91 tests in 76.401s
+3513:macos suites (native)	Verify the exact producer artifact before executing gates	2026-10-19T03:34:29.6143270Z Verified compiled artifact 12161607393; compiled only, gate acceptance not yet established
+3542:macos suites (native)	Run required native targets	2026-10-19T03:35:41.9623940Z Completed test-logic: 72.148s; exit 0
+3605:macos suites (native)	Run required native targets	2026-10-19T03:35:52.2042240Z Completed admission-debug-integration: 10.242s; exit 0
+3690:macos suites (native)	Run required native targets	2026-10-19T03:37:42.8337980Z 80/641 platform.test.absent destination preflight checks read-only ancestor reached through dot dot...SKIP
+3953:macos suites (native)	Run required native targets	2026-10-19T03:37:42.8517890Z 310/641 client.test.Host processing wait does not consume response transfer inactivity...SKIP
+4008:macos suites (native)	Run required native targets	2026-10-19T03:37:42.8547850Z 362/641 client.test.transport cancellation saturated Unix backlog is not a connected writable socket...SKIP
+4298:macos suites (native)	Run required native targets	2026-10-19T03:37:42.8715770Z 638 passed; 3 skipped; 0 failed.
+4791:macos suites (native)	Run required native targets	2026-10-19T03:42:25.5270200Z Completed check: 393.323s; exit 0
+4806:macos suites (native)	Run required native targets	2026-10-19T03:42:32.4191670Z Completed codex-h2-integration: 6.847s; exit 0
+4813:macos suites (native)	Run required native targets	2026-10-19T03:43:36.3377150Z Completed evaluator-churn: 63.964s; exit 0
+4884:macos suites (native)	Run required native targets	2026-10-19T03:44:30.9485800Z Completed transport-h2-integration: 54.610s; exit 0
+5218:linux suites (admission-debug-integration)	Verify the exact producer artifact before executing gates	2026-10-19T03:35:49.8987592Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+5298:linux suites (admission-debug-integration)	Run selected targets or verify identical-tree evidence	2026-10-19T03:37:18.8631561Z Completed admission-debug-integration: 88.713s; exit 0
+5632:linux suites (check)	Verify the exact producer artifact before executing gates	2026-10-19T03:36:06.2320356Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+5998:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-19T03:39:19.0568706Z 310/641 client.test.Host processing wait does not consume response transfer inactivity...SKIP
+6343:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-19T03:39:19.0813163Z 640 passed; 1 skipped; 0 failed.
+6805:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-19T03:42:55.8196016Z Completed check: 409.279s; exit 0
+7139:linux suites (evaluator-churn)	Verify the exact producer artifact before executing gates	2026-10-19T03:35:57.2168083Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+7164:linux suites (evaluator-churn)	Run selected targets or verify identical-tree evidence	2026-10-19T03:37:26.7539183Z Completed evaluator-churn: 89.284s; exit 0
+7498:linux suites (transport-h2-integration)	Verify the exact producer artifact before executing gates	2026-10-19T03:36:05.1315009Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+7558:linux suites (transport-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-19T03:38:22.6808751Z Completed transport-h2-integration: 137.239s; exit 0
+7891:linux suites (test-logic)	Verify the exact producer artifact before executing gates	2026-10-19T03:35:54.7625379Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+7915:linux suites (test-logic)	Run selected targets or verify identical-tree evidence	2026-10-19T03:37:39.8362048Z Completed test-logic: 104.413s; exit 0
+8275:linux suites (codex-h2-integration)	Verify the exact producer artifact before executing gates	2026-10-19T03:36:00.7461953Z Verified compiled artifact 12161382321; compiled only, gate acceptance not yet established
+8305:linux suites (codex-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-19T03:37:46.3889583Z Completed codex-h2-integration: 105.333s; exit 0

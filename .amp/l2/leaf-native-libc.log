@@ -1,0 +1,26 @@
+1/25 named_scratch.test.owner retains every resource after retryable removal failure...OK
+2/25 named_scratch.test.an already absent name reclaims handles and accounting...OK
+3/25 named_scratch.test.injected removal failure retains ownership until the same owner can retry...OK
+4/25 protocol.test.semantic digest distinguishes omission, null, and value...OK
+5/25 protocol.test.Request Store borrow remains in its active union payload...OK
+6/25 protocol.test.captured content cleanup closes sealed custody...OK
+7/25 protocol.test.configuration content sealing peaks at four descriptors with its socket...OK
+8/25 protocol.test.content sink enforces the decoded consumer boundary before retention...OK
+9/25 protocol.test.fixed JSON buffers preserve control bytes and enforce capacity...OK
+10/25 protocol.test.ingress charges decoded growth and transfers file charge through cleanup...OK
+11/25 protocol.test.failed ingress unlink retains an actionable owner and only the affected charge...OK
+12/25 protocol.test.ingress unknown write failure keeps submitted charge until close...OK
+13/25 protocol.test.observation needs no scratch at a full budget...OK
+14/25 protocol.test.Conversation content stream wire requires start zero and literal true...OK
+15/25 protocol.test.conversation cursor parser rejects unfixed and malformed continuations...OK
+16/25 protocol.test.configuration token heuristics parse sparsely and bind idempotency...OK
+17/25 protocol.test.configuration provider envelope preserves exact spelling and omission...OK
+18/25 protocol.test.Session report profile is closed and omission selects Current...OK
+19/25 protocol.test.Session listing wire distinguishes all, exact workspace, continuation and invalid cursor...OK
+20/25 protocol.test.incremental ingress streams fragmented content and transfers charged custody only at complete framing...OK
+21/25 protocol.test.incremental ingress preserves grammar and releases both captures after late failure...OK
+22/25 ScratchBudget.test.concurrent scratch reservations share one ceiling...OK
+23/25 ScratchBudget.test.partial scratch reservation owns only available capacity...OK
+24/25 ScratchBudget.test.narrowing a scratch budget cannot widen its authority...OK
+25/25 ScratchBudget.test.shared usage is baseline-relative and failed growth reserves nothing...OK
+All 25 tests passed.

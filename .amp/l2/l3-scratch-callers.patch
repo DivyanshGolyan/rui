@@ -1,0 +1,24 @@
+diff --git a/src/provider.zig b/src/provider.zig
+--- a/src/provider.zig
++++ b/src/provider.zig
+@@ -351,7 +351,7 @@
+             capture.failure = .write_failed;
+             return 0;
+         }
+-        if (!capture.budget.reserve(bytes.len)) {
++        if (!capture.budget.allocate(bytes.len)) {
+             capture.failure = .scratch_exhausted;
+             return 0;
+         }
+diff --git a/src/model_adapter.zig b/src/model_adapter.zig
+--- a/src/model_adapter.zig
++++ b/src/model_adapter.zig
+@@ -150,7 +150,7 @@
+             return error.RequestLengthOverflow;
+         const next_charged = std.math.add(u64, self.charged, bytes.len) catch
+             return error.RequestLengthOverflow;
+-        if (!self.budget.reserve(bytes.len)) return error.RequestScratchExhausted;
++        if (!self.budget.allocate(bytes.len)) return error.RequestScratchExhausted;
+         // The complete slice is charged before the OS write. A partial/error
+         // write retains that full reservation until both file aliases close.
+         self.charged = next_charged;

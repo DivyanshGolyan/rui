@@ -1,0 +1,11 @@
+.amp/l2/old-scratch-reserve.zig:7:15: error: no field or member function named 'reserve' in 'ScratchBudget'
+    _ = budget.reserve(1);
+        ~~~~~~^~~~~~~~
+src/ScratchBudget.zig:1:1: note: struct declared here
+const std = @import("std");
+^~~~~
+referenced by:
+    callMain [inlined]: /home/user/.local/opt/zig-0.17.0/lib/std/start.zig:788:64
+    callMainWithArgs [inlined]: /home/user/.local/opt/zig-0.17.0/lib/std/start.zig:729:20
+    posixCallMainAndExit: /home/user/.local/opt/zig-0.17.0/lib/std/start.zig:681:38
+    2 reference(s) hidden; use '-freference-trace=5' to see all references

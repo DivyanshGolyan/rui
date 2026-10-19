@@ -1,0 +1,49 @@
+test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) ... 
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (imported='root') ... FAIL
+  test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (imported='a.zig') ... FAIL
+
+======================================================================
+FAIL: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (imported='root')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 49, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_root_alias_and_explicit_root_return_paths_are_both_cycles (test_import_architecture.ImportArchitectureTest.test_root_alias_and_explicit_root_return_paths_are_both_cycles) (imported='a.zig')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 49, in test_root_alias_and_explicit_root_return_paths_are_both_cycles
+    with self.assertRaisesRegex(ValueError, "new production cyclic imports"):
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.003s
+
+FAILED (failures=2)
+test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) ... 
+  test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=True) ... FAIL
+  test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=False) ... FAIL
+
+======================================================================
+FAIL: test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=True)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 73, in test_candidate_cannot_enlarge_allowance_from_trusted_git_base
+    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_candidate_cannot_enlarge_allowance_from_trusted_git_base (test_import_architecture.ImportArchitectureTest.test_candidate_cannot_enlarge_allowance_from_trusted_git_base) (bootstrap=False)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/tmp/rui-complect-l2/tests/ci/test_import_architecture.py", line 73, in test_candidate_cannot_enlarge_allowance_from_trusted_git_base
+    with self.assertRaisesRegex(ValueError, "cycle allowance grew"):
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 1 test in 0.044s
+
+FAILED (failures=2)
+Both suppressions killed at the intended missing-ValueError assertions (two variants each).

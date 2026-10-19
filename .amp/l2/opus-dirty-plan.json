@@ -1,0 +1,56 @@
+{
+  "phase": "review",
+  "targets": [
+    "admission-debug-integration",
+    "check",
+    "codex-h2-integration",
+    "evaluator-churn",
+    "test-logic",
+    "transport-h2-integration"
+  ],
+  "native_targets": [
+    "admission-debug-integration",
+    "check",
+    "codex-h2-integration",
+    "evaluator-churn",
+    "test-logic",
+    "transport-h2-integration"
+  ],
+  "native_required": true,
+  "cache_execution_checks": true,
+  "linux_memory_checks": false,
+  "manual_checks": [],
+  "reasons": [
+    "Admission/capture owner: complete Debug recovery matrix, not artifact smoke",
+    "Bash execution, direct custody and process-crash recovery",
+    "CI policy: selector and workflow checks",
+    "Documentation: references and diff whitespace, no runtime change",
+    "Evaluator lifetime, output and cleanup",
+    "Model admission and transport",
+    "Shared protocol, native execution or resource ownership",
+    "Startup capacity: every refusal boundary, managed transport and its companion oracle",
+    "Store SQL owners: composed Linux caller checks and native SQLite tests",
+    "Unmapped source: full fallback"
+  ],
+  "acceptance_reused": false,
+  "execution_batches": [
+    [
+      "test-logic"
+    ],
+    [
+      "admission-debug-integration"
+    ],
+    [
+      "check"
+    ],
+    [
+      "codex-h2-integration"
+    ],
+    [
+      "evaluator-churn"
+    ],
+    [
+      "transport-h2-integration"
+    ]
+  ]
+}

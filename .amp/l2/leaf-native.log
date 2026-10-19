@@ -1,0 +1,7 @@
+/home/user/.local/opt/zig-0.17.0/lib/std/c.zig:11371:12: error: dependency on libc must be explicitly specified in the build command
+pub extern "c" fn poll(fds: [*]pollfd, nfds: nfds_t, timeout: c_int) c_int;
+           ^~~
+referenced by:
+    pollExchange: src/protocol.zig:732:29
+    refill: src/protocol.zig:777:25
+    6 reference(s) hidden; use '-freference-trace=8' to see all references

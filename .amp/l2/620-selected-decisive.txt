@@ -1,0 +1,103 @@
+727:policy	Run python3 -B -m unittest discover -s tests/ci -v	2026-10-18T23:00:32.8298500Z Verified compiled artifact 101; compiled only, gate acceptance not yet established
+732:policy	Run python3 -B -m unittest discover -s tests/ci -v	2026-10-18T23:00:32.9068509Z test_source_tree_is_verified_independently_of_the_receipt (test_evidence.EvidenceTest.test_source_tree_is_verified_independently_of_the_receipt) ... ok
+819:policy	Run python3 -B -m unittest discover -s tests/ci -v	2026-10-18T23:01:45.6180583Z Ran 91 tests in 72.804s
+839:policy	Install the pinned workflow linter	2026-10-18T23:01:49.0065790Z ^[[36;1m  https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \^[[0m
+840:policy	Install the pinned workflow linter	2026-10-18T23:01:49.0066870Z ^[[36;1m  -o "$RUNNER_TEMP/actionlint.tar.gz"^[[0m
+841:policy	Install the pinned workflow linter	2026-10-18T23:01:49.0067510Z ^[[36;1mecho "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -^[[0m
+842:policy	Install the pinned workflow linter	2026-10-18T23:01:49.0068242Z ^[[36;1mtar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint^[[0m
+853:policy	Install the pinned workflow linter	2026-10-18T23:01:49.1054412Z /home/runner/work/_temp/actionlint.tar.gz: OK
+859:policy	Validate workflows with one pinned-linter compatibility exception	2026-10-18T23:01:49.1468179Z ^[[36;1m    actionlint -shellcheck= -ignore '^unexpected key "cache-mode" for "workflow" section\.' "$workflow"^[[0m
+861:policy	Validate workflows with one pinned-linter compatibility exception	2026-10-18T23:01:49.1469086Z ^[[36;1m    actionlint -shellcheck= "$workflow"^[[0m
+1202:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:01:21.3341090Z Build Summary: 34/34 steps succeeded; 5/5 tests passed
+1258:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:01:21.7632450Z Build Summary: 34/34 steps succeeded; 5/5 tests passed
+1323:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:23.0624690Z Build Summary: 40/40 steps succeeded; 5/5 tests passed
+1399:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:23.6806680Z Build Summary: 40/40 steps succeeded; 5/5 tests passed
+1475:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:24.1866230Z Build Summary: 38/38 steps succeeded; 5/5 tests passed
+1549:macos_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:24.6865420Z Build Summary: 38/38 steps succeeded; 5/5 tests passed
+1631:macos_build	Compile selected gates once, never test acceptance	2026-10-18T23:08:28.6142200Z Build Summary: 117/117 steps succeeded
+2275:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:12.3014709Z Build Summary: 34/34 steps succeeded; 5/5 tests passed
+2331:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:04:12.4955371Z Build Summary: 34/34 steps succeeded; 5/5 tests passed
+2396:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:07:03.7936186Z Build Summary: 40/40 steps succeeded; 5/5 tests passed
+2465:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:07:03.9909295Z Build Summary: 40/40 steps succeeded; 5/5 tests passed
+2534:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:07:04.0308488Z Build Summary: 38/38 steps succeeded; 5/5 tests passed
+2601:linux_build	Prove warm compilation does not cache test acceptance	2026-10-18T23:07:04.0689258Z Build Summary: 38/38 steps succeeded; 5/5 tests passed
+2676:linux_build	Compile selected gates once, never test acceptance	2026-10-18T23:11:05.8874113Z Build Summary: 117/117 steps succeeded
+3248:macos suites (native)	Verify the exact producer artifact before executing gates	2026-10-18T23:09:34.2975850Z Verified compiled artifact 12154340729; compiled only, gate acceptance not yet established
+3270:macos suites (native)	Run required native targets	2026-10-18T23:09:35.0803530Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+3271:macos suites (native)	Run required native targets	2026-10-18T23:09:35.0804640Z Executing: test-logic
+3272:macos suites (native)	Run required native targets	2026-10-18T23:11:00.1662060Z Build Summary: 3/3 steps succeeded; 222/222 tests passed
+3277:macos suites (native)	Run required native targets	2026-10-18T23:11:00.1673160Z Completed test-logic: 85.044s; exit 0
+3278:macos suites (native)	Run required native targets	2026-10-18T23:11:00.1673570Z Executing: admission-debug-integration
+3336:macos suites (native)	Run required native targets	2026-10-18T23:11:10.8648880Z Build Summary: 2/2 steps succeeded
+3340:macos suites (native)	Run required native targets	2026-10-18T23:11:10.8655510Z Completed admission-debug-integration: 10.693s; exit 0
+3341:macos suites (native)	Run required native targets	2026-10-18T23:11:10.8656490Z Executing: check
+3526:macos suites (native)	Run required native targets	2026-10-18T23:13:37.1447920Z 180/641 store.test.external content identity is verified before canonical commit...OK
+4033:macos suites (native)	Run required native targets	2026-10-18T23:13:37.1912140Z 638 passed; 3 skipped; 0 failed.
+4519:macos suites (native)	Run required native targets	2026-10-18T23:17:51.8277380Z Build Summary: 6/6 steps succeeded
+4527:macos suites (native)	Run required native targets	2026-10-18T23:17:51.8285520Z Completed check: 400.894s; exit 0
+4528:macos suites (native)	Run required native targets	2026-10-18T23:17:51.8286020Z Executing: codex-h2-integration
+4538:macos suites (native)	Run required native targets	2026-10-18T23:17:57.8407930Z Build Summary: 2/2 steps succeeded
+4542:macos suites (native)	Run required native targets	2026-10-18T23:17:57.8410830Z Completed codex-h2-integration: 6.012s; exit 0
+4543:macos suites (native)	Run required native targets	2026-10-18T23:17:57.8411380Z Executing: evaluator-churn
+4545:macos suites (native)	Run required native targets	2026-10-18T23:18:58.8207260Z Build Summary: 2/2 steps succeeded
+4549:macos suites (native)	Run required native targets	2026-10-18T23:18:58.8236700Z Completed evaluator-churn: 60.982s; exit 0
+4550:macos suites (native)	Run required native targets	2026-10-18T23:18:58.8237810Z Executing: transport-h2-integration
+4615:macos suites (native)	Run required native targets	2026-10-18T23:20:04.4955270Z Build Summary: 3/3 steps succeeded
+4620:macos suites (native)	Run required native targets	2026-10-18T23:20:04.4963610Z Completed transport-h2-integration: 65.674s; exit 0
+4954:linux suites (evaluator-churn)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:49.1537613Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+4972:linux suites (evaluator-churn)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:49.4671221Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+4973:linux suites (evaluator-churn)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:49.4672675Z Executing: evaluator-churn
+4975:linux suites (evaluator-churn)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:39.0285405Z Build Summary: 2/2 steps succeeded
+4979:linux suites (evaluator-churn)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:39.0289470Z Completed evaluator-churn: 109.562s; exit 0
+5313:linux suites (test-logic)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:52.4897721Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+5331:linux suites (test-logic)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:53.2319445Z Executing: test-logic
+5332:linux suites (test-logic)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:18.6345839Z Build Summary: 3/3 steps succeeded; 222/222 tests passed
+5337:linux suites (test-logic)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:18.6352089Z Completed test-logic: 85.403s; exit 0
+5338:linux suites (test-logic)	Publish input- and artifact-verified evidence	﻿2026-10-18T23:13:18.8098395Z ##[group]Run actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+5339:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8098787Z with:
+5340:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8099193Z   name: rui-evidence-1efdcc869f63e1b633c3bbf50854db6fb82bf4af368a69e41f0f8daed2325115
+5341:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8099633Z   path: /home/runner/work/_temp/rui-evidence
+5342:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8099982Z   overwrite: true
+5343:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8100224Z   retention-days: 3
+5344:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8100692Z   if-no-files-found: warn
+5345:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8101007Z   compression-level: 6
+5346:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8101294Z   include-hidden-files: false
+5347:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8101609Z env:
+5348:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8101866Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/.cache/zig
+5349:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.8102156Z ##[endgroup]
+5350:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.9548605Z (node:2293) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+5351:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.9549825Z (Use `node --trace-deprecation ...` to show where the warning was created)
+5352:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:18.9608853Z With the provided path, there will be 3 files uploaded
+5353:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:19.1771347Z Artifact name is valid!
+5354:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:19.1772002Z Root directory input is valid!
+5355:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:19.3927845Z Beginning upload of artifact content to blob storage
+5356:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:19.7142286Z (node:2293) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+5357:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.3697810Z Uploaded bytes 3376810
+5358:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.4315191Z Finished uploading artifact content to blob storage!
+5359:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.4316206Z SHA256 digest of uploaded artifact zip is 87ecbb76a38fd57c2cbd792f6737e9828940d26c011280b6dd276d470d509ce5
+5360:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.4317048Z Finalizing artifact upload
+5361:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.6602906Z Artifact rui-evidence-1efdcc869f63e1b633c3bbf50854db6fb82bf4af368a69e41f0f8daed2325115.zip successfully finalized. Artifact ID 12154117749
+5362:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.6604778Z Artifact rui-evidence-1efdcc869f63e1b633c3bbf50854db6fb82bf4af368a69e41f0f8daed2325115 has been successfully uploaded! Final size is 3376810 bytes. Artifact ID is 12154117749
+5363:linux suites (test-logic)	Publish input- and artifact-verified evidence	2026-10-18T23:13:20.6609892Z Artifact download URL: https://github.com/DivyanshGolyan/rui/actions/runs/39174654494/artifacts/12154117749
+5696:linux suites (codex-h2-integration)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:48.3116000Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+5714:linux suites (codex-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:48.6218665Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+5715:linux suites (codex-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:48.6220284Z Executing: codex-h2-integration
+5722:linux suites (codex-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:33.7212611Z Build Summary: 2/2 steps succeeded
+5726:linux suites (codex-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:33.7216250Z Completed codex-h2-integration: 105.100s; exit 0
+6059:linux suites (transport-h2-integration)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:47.0131985Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+6077:linux suites (transport-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:47.4219289Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+6078:linux suites (transport-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:47.4219726Z Executing: transport-h2-integration
+6114:linux suites (transport-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:27.9722247Z Build Summary: 3/3 steps succeeded
+6119:linux suites (transport-h2-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:27.9726532Z Completed transport-h2-integration: 100.551s; exit 0
+6452:linux suites (check)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:48.6120785Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+6470:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:48.9206991Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+6471:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:48.9207868Z Executing: check
+6656:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:15:01.4851779Z 180/641 store.test.external content identity is verified before canonical commit...OK
+7163:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:15:01.5278710Z 640 passed; 1 skipped; 0 failed.
+7618:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:18:37.4205444Z Build Summary: 6/6 steps succeeded
+7626:linux suites (check)	Run selected targets or verify identical-tree evidence	2026-10-18T23:18:37.4210507Z Completed check: 408.500s; exit 0
+7960:linux suites (admission-debug-integration)	Verify the exact producer artifact before executing gates	2026-10-18T23:11:54.2152820Z Verified compiled artifact 12153982812; compiled only, gate acceptance not yet established
+7978:linux suites (admission-debug-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:54.5475432Z Evidence unavailable; executing selected gates: Process/sanitizer gates require fresh execution: temporary native helpers are not retained
+7979:linux suites (admission-debug-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:11:54.5476674Z Executing: admission-debug-integration
+8036:linux suites (admission-debug-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:41.7778709Z Build Summary: 2/2 steps succeeded
+8040:linux suites (admission-debug-integration)	Run selected targets or verify identical-tree evidence	2026-10-18T23:13:41.7782584Z Completed admission-debug-integration: 107.231s; exit 0

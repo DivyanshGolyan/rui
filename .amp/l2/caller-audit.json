@@ -1,0 +1,17 @@
+{
+  "api": "reserve/reserveUpTo accounting only; allocate/allocateUpTo reclaim capable",
+  "production_growth": [
+    "bash capture and script",
+    "protocol ContentSink",
+    "evaluator Scratch",
+    "model_adapter RequestWriter",
+    "provider CaptureWriter",
+    "store OutputMetadataWriter and SessionReportCapture"
+  ],
+  "remaining_accounting": [
+    "ScratchBudget internals",
+    "output_retention Queue.reserveGrowth and reclaimForReservation",
+    "unit fixture initial charges including server tests"
+  ],
+  "unrelated_reserve": "server/execution CustodyPool"
+}

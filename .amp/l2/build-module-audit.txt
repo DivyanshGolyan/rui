@@ -1,0 +1,24 @@
+87:        .root_source_file = b.path("src/evaluator.zig"),
+94:    evaluator_host.root_module.addImport("evaluator", evaluator_module);
+108:            .root_source_file = b.path("src/tests.zig"),
+134:            .root_source_file = b.path("src/logic_tests.zig"),
+157:    renderer_allocation.root_module.addImport("AnswerRenderer", b.createModule(.{
+158:        .root_source_file = b.path("src/AnswerRenderer.zig"),
+175:        .root_source_file = b.path("src/SessionTerminal.zig"),
+182:    terminal_notice.root_module.addImport("terminal", terminal_module);
+205:        .root_source_file = b.path("src/client.zig"),
+210:    session_list_client.root_module.addImport("rui_client", read_client);
+220:    proposal_client.root_module.addImport("rui_client", read_client);
+235:    activity_client.root_module.addImport("rui_client", read_client);
+357:        .root_source_file = b.path("src/codex_credentials.zig"),
+362:    credential_actor.root_module.addImport("codex_credentials", credentials_module);
+382:        .root_source_file = b.path("src/preferences.zig"),
+387:    preference_policy_actor.root_module.addImport("preferences", preferences_module);
+430:    host_status_actor.root_module.addImport("client", read_client);
+875:            .root_source_file = b.path("src/cli.zig"),
+1029:    while (imports.next()) |entry| vaxis.addImport(entry.key_ptr.*, entry.value_ptr.*);
+1038:        pure.addImport("uucode", upstream.import_table.get("uucode").?);
+1039:        module.addImport(name, pure);
+1040:        vaxis.addImport(name, pure);
+1042:    module.addImport("vaxis", vaxis);
+1060:    module.addImport(name, bindings.mod);

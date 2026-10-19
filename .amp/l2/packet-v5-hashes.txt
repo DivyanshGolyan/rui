@@ -1,0 +1,3 @@
+8838af3c080c41acff18e515a6d52168f78515a9a19ef9a87a1f60eee7e25818  .amp/in/artifacts/pages/l2-morning-packet.html
+bef890819133dcd55e1b847d39e664f7dc46cda72018a593462a57224b45ff3d  .amp/in/artifacts/pages/l2-import-measurement.json
+73f3583a68a981c86300e93a728f4acc768adcb579f4286b36b64a9d5d44029f  .amp/in/artifacts/pages/l2-ratchet-only.patch

@@ -1,0 +1,6 @@
+1/5 ScratchBudget.test.concurrent scratch reservations share one ceiling...OK
+2/5 ScratchBudget.test.partial scratch reservation owns only available capacity...OK
+3/5 ScratchBudget.test.narrowing a scratch budget cannot widen its authority...OK
+4/5 ScratchBudget.test.shared usage is baseline-relative and failed growth reserves nothing...OK
+5/5 ScratchBudget.test.only allocation may reclaim and partial allocation preserves charged progress...OK
+All 5 tests passed.

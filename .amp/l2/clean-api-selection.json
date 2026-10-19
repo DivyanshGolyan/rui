@@ -1,0 +1,29 @@
+{
+  "phase": "review",
+  "targets": [
+    "check",
+    "evaluator-churn",
+    "test-logic",
+    "transport-h2-integration"
+  ],
+  "native_targets": [
+    "check",
+    "evaluator-churn",
+    "test-logic",
+    "transport-h2-integration"
+  ],
+  "native_required": true,
+  "cache_execution_checks": false,
+  "linux_memory_checks": false,
+  "manual_checks": [],
+  "reasons": [
+    "Bash execution, direct custody and process-crash recovery",
+    "CI policy: selector and workflow checks",
+    "Evaluator lifetime, output and cleanup",
+    "Model admission and transport",
+    "Shared protocol, native execution or resource ownership",
+    "Store SQL owners: composed Linux caller checks and native SQLite tests",
+    "Unmapped source: full fallback"
+  ],
+  "acceptance_reused": false
+}

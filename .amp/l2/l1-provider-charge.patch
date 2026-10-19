@@ -1,0 +1,31 @@
+From 83b4dcdd2e3c835d2db48f8624ccd2bf5a7ec7df Mon Sep 17 00:00:00 2001
+From: Amp <amp@ampcode.com>
+Date: Sun, 18 Oct 2026 22:41:02 +0000
+Subject: [PATCH] Rename provider accounting test calls to charge
+
+Owner-approved mechanical handoff on ad16a67b01e419ed0cb78773f0508bd53c54bc0a. Only the two ScratchBudget accounting assertions change; reclaiming allocation and CustodyPool APIs are untouched. Requires the L2 owner charge/chargeUpTo API correction; this commit is not a standalone runnable candidate.
+
+Amp-Thread-ID: https://ampcode.com/threads/T-01a1501e-d263-742a-8206-0ec02d5e1340
+Co-authored-by: Divyansh Golyan <divyanshdgolyan@gmail.com>
+---
+ src/provider.zig | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/provider.zig b/src/provider.zig
+index 1e207e20..c1956164 100644
+--- a/src/provider.zig
++++ b/src/provider.zig
+@@ -931,8 +931,8 @@ pub fn validateEndpoint(endpoint: []const u8) !void {
+ test "scratch reservation is bounded and releases exact charge" {
+     var used = std.atomic.Value(u64).init(0);
+     const budget = ScratchBudget{ .used = &used, .limit = 10 };
+-    try std.testing.expect(budget.reserve(7));
+-    try std.testing.expect(!budget.reserve(4));
++    try std.testing.expect(budget.charge(7));
++    try std.testing.expect(!budget.charge(4));
+     budget.release(7);
+     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+ }
+-- 
+2.55.0
+

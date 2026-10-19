@@ -1,0 +1,78 @@
+test
++- run test
+   +- compile test safe native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /tmp/rui-complect-l2/src/curl-post-retry.patch /tmp/rui-complect-l2/.zig-cache/o/d2f20ba8d3075f77e58f9ca47863d4d8/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+
+Build Summary: 40/40 steps succeeded; 11/11 tests passed
+test success
++- run test 11 pass (11 total) 200ms MaxRSS:5M
+|  +- compile test safe native success 1m MaxRSS:860M
+|     +- run sh (pinned-transport-x86_64-linux) success 3m
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- translate-c sqlite success 67ms
+|     |  +- compile exe translate-c fast native cached 5ms MaxRSS:40M
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- run exe generate-def (aarch64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native cached 5ms MaxRSS:39M
+|     |  |  +- run exe generate-def (amdgcn.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (arm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (bpf.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (common.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (hexagon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (loongarch.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (mips.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (neon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (nvptx.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (powerpc.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (riscv.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (s390x.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (ve.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (wasm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86_64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (xcore.zig) cached
+|     |  |     +- compile exe generate-def debug native (reused)
+|     |  +- WriteFile sqlite.h success
+|     +- translate-c posix cached
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile posix.h cached
+|     +- run bash (vaxis) cached
+|     +- run bash (vaxis) (reused)
+|     +- run bash (vaxis) (reused)
+|     +- options success
+|     +- translate-c curl success 87ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile curl.h success
+|     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run exe uucode_generate (tables.zig) cached
+|     |  +- compile exe uucode_generate debug native cached 5ms MaxRSS:40M
+|     |     +- WriteFile build_config.zig cached
+|     +- WriteFile build_config.zig (reused)
++- run exe rui-answer-renderer-allocation-test success 215ms
+   +- compile exe rui-answer-renderer-allocation-test safe native cached 5ms MaxRSS:40M
+

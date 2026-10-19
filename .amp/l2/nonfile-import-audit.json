@@ -1,0 +1,102 @@
+{
+  "builtin": [
+    "src/SessionScreen.zig",
+    "src/TestObservation.zig",
+    "src/bash.zig",
+    "src/cli.zig",
+    "src/codex_auth.zig",
+    "src/codex_credentials.zig",
+    "src/descriptor_limit.zig",
+    "src/provider.zig",
+    "src/server.zig",
+    "src/store.zig"
+  ],
+  "curl": [
+    "src/codex_auth.zig",
+    "src/provider.zig"
+  ],
+  "posix": [
+    "src/HostDiagnostics.zig",
+    "src/SessionTerminal.zig",
+    "src/TerminalEditor.zig",
+    "src/TestObservation.zig",
+    "src/codex_credentials.zig",
+    "src/descriptor_limit.zig",
+    "src/platform.zig",
+    "src/preferences.zig",
+    "src/server.zig"
+  ],
+  "sqlite": [
+    "src/store.zig"
+  ],
+  "std": [
+    "src/AnswerRenderer.zig",
+    "src/BashLifecycle.zig",
+    "src/ClientTask.zig",
+    "src/ConversationViewport.zig",
+    "src/HostDiagnostics.zig",
+    "src/ScratchBudget.zig",
+    "src/SessionFrontend.zig",
+    "src/SessionInput.zig",
+    "src/SessionScreen.zig",
+    "src/SessionSubmission.zig",
+    "src/SessionTerminal.zig",
+    "src/TerminalEditor.zig",
+    "src/TerminalFrame.zig",
+    "src/TerminalInput.zig",
+    "src/TerminalText.zig",
+    "src/TestObservation.zig",
+    "src/attempt.zig",
+    "src/bash.zig",
+    "src/bounded.zig",
+    "src/cli.zig",
+    "src/cli_args.zig",
+    "src/client.zig",
+    "src/codex_auth.zig",
+    "src/codex_credential_policy.zig",
+    "src/codex_credentials.zig",
+    "src/codex_token_wire.zig",
+    "src/deadline.zig",
+    "src/descriptor_capacity.zig",
+    "src/descriptor_limit.zig",
+    "src/execution.zig",
+    "src/execution_turn.zig",
+    "src/json_ascii.zig",
+    "src/model_adapter.zig",
+    "src/model_capability.zig",
+    "src/named_scratch.zig",
+    "src/new_session_selection.zig",
+    "src/output_retention.zig",
+    "src/platform.zig",
+    "src/preference_values.zig",
+    "src/preferences.zig",
+    "src/protocol.zig",
+    "src/provider.zig",
+    "src/provider_output.zig",
+    "src/provider_selection.zig",
+    "src/request_encoding.zig",
+    "src/server.zig",
+    "src/session_consent.zig",
+    "src/session_departure.zig",
+    "src/session_history.zig",
+    "src/session_view.zig",
+    "src/stderr.zig",
+    "src/store.zig",
+    "src/tools.zig",
+    "src/transport_policy.zig"
+  ],
+  "terminal_unicode": [
+    "src/ConversationViewport.zig"
+  ],
+  "terminal_width": [
+    "src/ConversationViewport.zig"
+  ],
+  "transport_options": [
+    "src/provider.zig"
+  ],
+  "vaxis": [
+    "src/SessionScreen.zig",
+    "src/TerminalEditor.zig",
+    "src/TerminalInput.zig"
+  ]
+}

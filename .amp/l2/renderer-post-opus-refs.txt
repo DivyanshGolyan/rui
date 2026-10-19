@@ -1,0 +1,7 @@
+9e117d713a96c967b18e3186975aa9df8d2a24af	refs/heads/wip/sole-renderer-a
+08ace0d818dd2fe1ac649bfe26db0f9ba1200ce4	refs/heads/wip/sole-renderer-b
+60bbceebe75945f2fdf42c0182290551458be428	refs/heads/wip/sole-renderer-c
+007e31c1589c64fa681bbff0dc33ccdcd3910931	refs/heads/wip/sole-renderer-d
+69f0bdfbc5ce2876080ae8021550753a4a4d334e	refs/heads/wip/sole-renderer-e
+4aee82e456f61865b9060fcd29be111ee27b918b	refs/heads/wip/sole-renderer-f
+4cd6b3f9b8ded0370e92b866c86070e1739974b7	refs/heads/wip/sole-renderer-g

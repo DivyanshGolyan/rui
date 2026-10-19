@@ -1,0 +1,1026 @@
+upgrade (macos-15)	Set up job	﻿2026-10-18T18:56:40.4532680Z Current runner version: '2.337.0'
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4552730Z ##[group]Runner Image Provisioner
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4553430Z Hosted Compute Agent
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4553890Z Version: 20260828.587
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4554310Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4554800Z Build Date: 2026-08-28T16:44:25Z
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4555230Z Worker ID: {e5dfea65-cb6c-4110-8fcf-2a07a2a9dcaf}
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4555680Z Azure Region: westus
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4556030Z ##[endgroup]
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4557140Z ##[group]Operating System
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4557540Z macOS
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4557860Z 15.7.9
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4558170Z 24G830
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4558500Z ##[endgroup]
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4558890Z ##[group]Runner Image
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4559300Z Image: macos-15-arm64
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4559700Z Version: 20260907.0337.1
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4560540Z Included Software: https://github.com/actions/runner-images/blob/macos-15-arm64/20260907.0337/images/macos/macos-15-arm64-Readme.md
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4561720Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-15-arm64%2F20260907.0337
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4562450Z ##[endgroup]
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4563230Z ##[group]GITHUB_TOKEN Permissions
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4564510Z Contents: read
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4564870Z Metadata: read
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4565220Z ##[endgroup]
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4566750Z Secret source: Actions
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4567780Z Cache mode: read
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4568240Z Prepare workflow directory
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4848880Z Prepare all required actions
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.4891020Z Getting action download info
+upgrade (macos-15)	Set up job	2026-10-18T18:56:40.9006320Z Download action repository 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+upgrade (macos-15)	Set up job	2026-10-18T18:56:41.1598340Z Download action repository 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+upgrade (macos-15)	Set up job	2026-10-18T18:56:41.3850860Z Complete job name: upgrade (macos-15)
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	﻿2026-10-18T18:56:41.4316860Z ##[group]Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4317570Z with:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4317900Z   persist-credentials: false
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4318280Z   repository: DivyanshGolyan/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4321430Z   token: ***
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4321770Z   ssh-strict: true
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4322160Z   ssh-user: git
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4322590Z   clean: true
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4322990Z   sparse-checkout-cone-mode: true
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4323400Z   fetch-depth: 1
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4323730Z   fetch-tags: false
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4324210Z   show-progress: true
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4324610Z   lfs: false
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4324920Z   submodules: false
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4325270Z   set-safe-directory: true
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4341430Z   allow-unsafe-pr-checkout: false
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.4342710Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.7665540Z Syncing repository: DivyanshGolyan/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.7667430Z ##[group]Getting Git version info
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8161870Z Working directory is '/Users/runner/work/rui/rui'
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8163270Z [command]/opt/homebrew/bin/git version
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8163710Z git version 2.55.0
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8176690Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8185140Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/dc2b64a9-9df4-4755-b1ee-980f77acf25a/.gitconfig'
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8195740Z Temporarily overriding HOME='/Users/runner/work/_temp/dc2b64a9-9df4-4755-b1ee-980f77acf25a' before making global git config changes
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8196840Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8199130Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/rui/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8309680Z Deleting the contents of '/Users/runner/work/rui/rui'
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8312520Z ##[group]Initializing the repository
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8316690Z [command]/opt/homebrew/bin/git init /Users/runner/work/rui/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8513150Z hint: Using 'master' as the name for the initial branch. This default branch name
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8514220Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8514930Z hint: to use in all of your new repositories, which will suppress this warning,
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8515470Z hint: call:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8515810Z hint:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8516210Z hint: 	git config --global init.defaultBranch <name>
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8516670Z hint:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8517200Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8517890Z hint: 'development'. The just-created branch can be renamed via this command:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8518440Z hint:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8518760Z hint: 	git branch -m <name>
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8519140Z hint:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8519600Z hint: Disable this message with "git config set advice.defaultBranchName false"
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8520290Z Initialized empty Git repository in /Users/runner/work/rui/rui/.git/
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8521760Z [command]/opt/homebrew/bin/git remote add origin https://github.com/DivyanshGolyan/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8597280Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8598040Z ##[group]Disabling automatic garbage collection
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8600470Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8665950Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8666660Z ##[group]Setting up auth
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8670130Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:41.8729230Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.0073300Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.0116610Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.1065620Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.1122310Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.2043540Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.2132400Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.2134310Z ##[group]Fetching the repository
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:42.2142300Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +ad16a67b01e419ed0cb78773f0508bd53c54bc0a:refs/remotes/origin/wip/complect-l2-guardrails
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1605310Z From https://github.com/DivyanshGolyan/rui
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1606440Z  * [new ref]         ad16a67b01e419ed0cb78773f0508bd53c54bc0a -> origin/wip/complect-l2-guardrails
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1609170Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1609920Z ##[group]Determining the checkout info
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1610640Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1613610Z [command]/opt/homebrew/bin/git sparse-checkout disable
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1690980Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1763340Z ##[group]Checking out the ref
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.1764990Z [command]/opt/homebrew/bin/git checkout --progress --force -B wip/complect-l2-guardrails refs/remotes/origin/wip/complect-l2-guardrails
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5528400Z Switched to a new branch 'wip/complect-l2-guardrails'
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5537770Z branch 'wip/complect-l2-guardrails' set up to track 'origin/wip/complect-l2-guardrails'.
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5547710Z ##[endgroup]
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5658520Z [command]/opt/homebrew/bin/git log -1 --format=%H
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5732200Z ad16a67b01e419ed0cb78773f0508bd53c54bc0a
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5738000Z ##[group]Removing auth
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5741190Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.5811630Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.7658320Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.7661890Z http.https://github.com/.extraheader
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.7672390Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.7678780Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.8612280Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.8881150Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (macos-15)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:43.9567670Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	﻿2026-10-18T18:56:43.9871140Z Prepare all required actions
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:43.9871780Z Getting action download info
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.1322000Z Download action repository 'actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff' (SHA:40f1582b2485089dde7abd97c1529aa768e1baff)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.5310410Z Download action repository 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6212770Z ##[group]Run ./.github/actions/setup
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6213110Z with:
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6213300Z   targets: []
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6213470Z   check-part: all
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6213640Z   cold: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6213860Z   compiled: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6214020Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6271310Z ##[start-action display=Select fixture dependencies;id=__self.requirements]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6303070Z ##[group]Run python3 - <<'PY'
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6303400Z ^[[36;1mpython3 - <<'PY'^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6303640Z ^[[36;1mimport json, os, sys^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6303930Z ^[[36;1msys.path.insert(0, 'tests/ci')^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6304220Z ^[[36;1mfrom select_tests import setup_requirements^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6304560Z ^[[36;1mwith open(os.environ['GITHUB_OUTPUT'], 'a') as output:^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6305040Z ^[[36;1m    for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6305580Z ^[[36;1m        print(f'{name}={str(required).lower()}', file=output)^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6305920Z ^[[36;1mPY^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6344000Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6344320Z env:
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6344500Z   TARGETS: []
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.6344670Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8436110Z ##[end-action id=__self.requirements;outcome=success;conclusion=success;duration_ms=216]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8440100Z ##[start-action display=Run actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff;id=__self.__actions_setup-go]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8453930Z ##[end-action id=__self.__actions_setup-go;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8455940Z ##[start-action display=Identify the actual native build tools;id=__self.tools]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8475540Z ##[group]Run set -euo pipefail
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8475940Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8476280Z ^[[36;1midentity="$RUNNER_TEMP/rui-native-tools.txt"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8476590Z ^[[36;1m{^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8476840Z ^[[36;1m  uname -sm^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8477100Z ^[[36;1m  cc --version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8477320Z ^[[36;1m  make --version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8477560Z ^[[36;1m  perl -v^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8478210Z ^[[36;1m  if [ "$(uname -s)" = Darwin ]; then^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8478520Z ^[[36;1m    xcodebuild -version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8478790Z ^[[36;1m    xcrun --sdk macosx --show-sdk-path^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8479120Z ^[[36;1m    xcrun --sdk macosx --show-sdk-version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8479470Z ^[[36;1m    xcrun --sdk macosx --show-sdk-build-version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8479950Z ^[[36;1m  else^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8480190Z ^[[36;1m    cat /etc/os-release^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8480480Z ^[[36;1m    ldd --version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8480760Z ^[[36;1m    ld --version^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8481030Z ^[[36;1m  fi^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8481240Z ^[[36;1m} > "$identity"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8481450Z ^[[36;1mcat "$identity"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8481810Z ^[[36;1mecho "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8517480Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:44.8517860Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2329110Z Darwin arm64
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2333990Z Apple clang version 17.0.0 (clang-1700.0.13.5)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2334820Z Target: arm64-apple-darwin24.6.0
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2336140Z Thread model: posix
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2336760Z InstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2339400Z GNU Make 3.81
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2339700Z Copyright (C) 2006  Free Software Foundation, Inc.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2340150Z This is free software; see the source for copying conditions.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2340590Z There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2340990Z PARTICULAR PURPOSE.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2341150Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2341300Z This program built for i386-apple-darwin11.3.0
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2341530Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2341740Z This is perl 5, version 44, subversion 0 (v5.44.0) built for darwin-thread-multi-2level
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2342040Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2342560Z Copyright 1987-2026, Larry Wall
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2488440Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2489410Z Perl may be copied only under the terms of either the Artistic License or the
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2490870Z GNU General Public License, which may be found in the Perl 5 source kit.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2491770Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2492250Z Complete documentation for Perl, including FAQ lists, should be found on
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2493720Z this system using "man perl" or "perldoc perl".  If you have access to the
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2495500Z Internet, point your browser at https://www.perl.org/, the Perl Home Page.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2496250Z 
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2496430Z Xcode 16.4
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2496860Z Build version 16F6
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2497880Z /Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.5.sdk
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2905170Z 15.5
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2905890Z 24F74
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2921910Z ##[end-action id=__self.tools;outcome=success;conclusion=success;duration_ms=4446]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.2929990Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__self.__actions_cache]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3040500Z ##[group]Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3040870Z with:
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3041120Z   path: /Users/runner/work/_temp/rui-zig
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3041460Z   key: rui-compiler-macOS-ARM64-0.17.0
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3041730Z   enableCrossOsArchive: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3042030Z   fail-on-cache-miss: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3042380Z   lookup-only: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3042630Z   save-always: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.3042870Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.4654970Z (node:2375) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.4656090Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.7435820Z Cache hit for: rui-compiler-macOS-ARM64-0.17.0
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:49.7516660Z (node:2375) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:51.0726960Z Received 0 of 84820490 (0.0%), 0.0 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:52.0709990Z Received 58720256 of 84820490 (69.2%), 27.9 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:52.2944610Z Received 84820490 of 84820490 (100.0%), 36.3 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:52.2970300Z Cache Size: ~81 MB (84820490 B)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:52.3153630Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/902aee5b-f61f-42ae-af33-99c3d59d49af/cache.tzst -P -C /Users/runner/work/rui/rui --delay-directory-restore --use-compress-program unzstd
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:56.9491400Z Cache restored successfully
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:56.9916930Z Cache restored from key: rui-compiler-macOS-ARM64-0.17.0
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:57.0074330Z ##[end-action id=__self.__actions_cache;outcome=success;conclusion=success;duration_ms=7713]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:57.0095010Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__self.build-cache]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4317310Z ##[group]Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4317820Z with:
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4318060Z   path: ~/.cache/zig
+upgrade (macos-15)	Run ./.github/actions/setup	.zig-cache
+upgrade (macos-15)	Run ./.github/actions/setup	zig-pkg
+upgrade (macos-15)	Run ./.github/actions/setup	
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4325470Z   key: rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-all
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4327800Z   restore-keys: rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-
+upgrade (macos-15)	Run ./.github/actions/setup	rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-
+upgrade (macos-15)	Run ./.github/actions/setup	
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4329480Z   enableCrossOsArchive: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4329750Z   fail-on-cache-miss: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4330050Z   lookup-only: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4330400Z   save-always: false
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.4330550Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.6099270Z (node:2528) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.6105030Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.8665860Z Cache hit for restore-key: rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-compiled
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:56:58.8745130Z (node:2528) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:00.1520530Z Received 0 of 286236476 (0.0%), 0.0 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:01.1623850Z Received 67108864 of 286236476 (23.4%), 32.0 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:02.1558880Z Received 134217728 of 286236476 (46.9%), 42.6 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:03.1567980Z Received 222298112 of 286236476 (77.7%), 52.9 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:04.1589800Z Received 282042172 of 286236476 (98.5%), 53.7 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:04.2091020Z Received 286236476 of 286236476 (100.0%), 54.0 MBs/sec
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:04.2104730Z Cache Size: ~273 MB (286236476 B)
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:04.2292670Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/3b1390cd-fdbb-4341-a3fe-36b44455bc00/cache.tzst -P -C /Users/runner/work/rui/rui --delay-directory-restore --use-compress-program unzstd
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9307850Z Cache restored successfully
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9599810Z Cache restored from key: rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-compiled
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9848020Z ##[end-action id=__self.build-cache;outcome=success;conclusion=success;duration_ms=11975]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9856860Z ##[start-action display=Install pinned compiler;id=__self.__run]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9938910Z ##[group]Run set -euo pipefail
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9939450Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9939850Z ^[[36;1mcase "$(uname -s)/$(uname -m)" in^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9940200Z ^[[36;1m  Linux/x86_64)^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9940640Z ^[[36;1m    archive=zig-x86_64-linux-0.17.0^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9941150Z ^[[36;1m    checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9941560Z ^[[36;1m    ;;^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9941980Z ^[[36;1m  Darwin/arm64)^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9942340Z ^[[36;1m    archive=zig-aarch64-macos-0.17.0^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9942860Z ^[[36;1m    checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9943380Z ^[[36;1m    ;;^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9943830Z ^[[36;1m  *) echo "Unsupported actual native architecture" >&2; exit 1 ;;^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9944290Z ^[[36;1mesac^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9944630Z ^[[36;1mif [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9953230Z ^[[36;1m  curl --fail --location --show-error --connect-timeout 10 --max-time 90 \^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9954520Z ^[[36;1m    --retry 1 --retry-delay 1 --retry-max-time 95 \^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9955980Z ^[[36;1m    "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9957630Z ^[[36;1m  echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9958780Z ^[[36;1m  mkdir -p "$RUNNER_TEMP/rui-zig"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9959980Z ^[[36;1m  tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9961190Z ^[[36;1mfi^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9961980Z ^[[36;1mtest "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9963180Z ^[[36;1mecho "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9964160Z ^[[36;1mecho "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:08.9965320Z ^[[36;1mmkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:09.0043840Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:09.0044320Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0506440Z ##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=1064]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0509800Z ##[start-action display=Install the selected Python fixture dependencies;id=__self.__run_2]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0541870Z ##[end-action id=__self.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0544580Z ##[start-action display=Select empty caches for scheduled acceptance;id=__self.__run_3]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0552530Z ##[end-action id=__self.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0555500Z ##[start-action display=Fetch the existing pinned dependency graph;id=__self.__run_4]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0603490Z ##[group]Run set -euo pipefail
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0603790Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0604000Z ^[[36;1mmkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0604360Z ^[[36;1mbash src/fetch_dependencies.sh^[[0m
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0647640Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0648550Z env:
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0649190Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/.cache/zig
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:10.0650090Z ##[endgroup]
+upgrade (macos-15)	Run ./.github/actions/setup	2026-10-18T18:57:11.0595620Z ##[end-action id=__self.__run_4;outcome=success;conclusion=success;duration_ms=1003]
+upgrade (macos-15)	Normal detached startup under the default soft limit	﻿2026-10-18T18:57:11.0657600Z ##[group]Run zig build host-launch-integration -j2 --summary all
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0658050Z ^[[36;1mzig build host-launch-integration -j2 --summary all^[[0m
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0717370Z shell: /bin/bash -e {0}
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0717660Z env:
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0717900Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/.cache/zig
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0718270Z   RUI_FAILURE_ARTIFACTS: /Users/runner/work/_temp/rui-failure-artifacts
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T18:57:11.0718620Z ##[endgroup]
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.2864210Z host-launch-integration
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.2964900Z +- run python3
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3167630Z    +- compile exe rui-release-safe-check safe native
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3269280Z       +- run sh (pinned-transport-aarch64-macos) w
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3371960Z Building pinned OpenSSL ...
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3416800Z Building pinned nghttp2 ...
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3520640Z Building pinned curl ...
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3627120Z failed command: sh ./src/build_transport.sh /Users/runner/work/rui/rui/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /Users/runner/work/rui/rui/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /Users/runner/work/rui/rui/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /Users/runner/work/rui/rui/src/curl-post-retry.patch /Users/runner/work/rui/rui/.zig-cache/o/a501e49241e7f58614ffba78716ddcc6/pinned-transport-aarch64-macos aarch64-macos /Users/runner/work/_temp/rui-zig/zig
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:00:06.3735250Z 
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8761490Z Host process discovery: ENOENT/ESRCH retirement, exact/subtree Store selection, lookalike/executable exclusion and real read failures passed
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8767780Z action-ready counterexample RED: pipe-only wait blocked with actual PTY credit withheld
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8770460Z action-ready credit: exact final transcript, one notification and original deadline passed
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8772630Z host-launch exit reader: exact transcript/outcome/reap, remaining budget and overflow passed
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8775000Z Host-launch failure retention: actual status, diagnostics, private Store, process disposal and primary failure passed
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:02.8777640Z default capacity refused below 575 descriptors (default intake needs 935)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:03.0634350Z detached startup soft-256: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/soft-256', 'instance': 'd814bc8c6aa2f8901a29cefed35db773', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '935', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/soft-256/diagnostics'}
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:03.6663180Z detached startup linux-1024: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/linux-1024', 'instance': 'd47b1681348c80fae98ce378e6516d35', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '1024', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/linux-1024/diagnostics'}
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:04.6042900Z detached startup hard-minimum: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/hard-minimum', 'instance': 'ec1115c18e5cfbd8f10f206046594a86', 'active_capacity': '100', 'intake_capacity': '10', 'descriptor_limit': '575', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/private/var/folders/nj/vtw8zd2j31d1gdrtntc5y4600000gn/T/rui-host-launch-ti7rtsqc/hard-minimum/diagnostics'}
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:06.7534630Z startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.8614570Z host-launch passed: held lease, 6 aliases -> 1 capacity-100 Host, detached stdio, bounded failure
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9005200Z Build Summary: 38/38 steps succeeded
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9005640Z host-launch-integration success
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9020510Z +- run python3 success 10s
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9020980Z    +- compile exe rui-release-safe-check safe native success 1m MaxRSS:1G
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9021520Z       +- run sh (pinned-transport-aarch64-macos) success 2m
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9021950Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9022480Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9023110Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9023560Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9024020Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9024520Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9025330Z       +- translate-c sqlite success 59ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9025820Z       |  +- compile exe translate-c fast native cached 159ms MaxRSS:38M
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9026420Z       |  |  +- options cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9026730Z       |  |  +- options cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9027140Z       |  |  +- options cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9027630Z       |  |  +- run exe generate-def (aarch64.zig) success 67ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9028210Z       |  |  |  +- compile exe generate-def debug native cached 106ms MaxRSS:38M
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9028770Z       |  |  +- run exe generate-def (amdgcn.zig) success 286ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9029390Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9029910Z       |  |  +- run exe generate-def (arm.zig) success 44ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9030390Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9030880Z       |  |  +- run exe generate-def (bpf.zig) success 9ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9031320Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9031730Z       |  |  +- run exe generate-def (common.zig) success 268ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9032270Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9032930Z       |  |  +- run exe generate-def (hexagon.zig) success 452ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9033440Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9033940Z       |  |  +- run exe generate-def (loongarch.zig) success 206ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9034310Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9034830Z       |  |  +- run exe generate-def (mips.zig) success 130ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9035400Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9035790Z       |  |  +- run exe generate-def (neon.zig) success 260ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9036590Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9037140Z       |  |  +- run exe generate-def (nvptx.zig) success 193ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9037770Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9038250Z       |  |  +- run exe generate-def (powerpc.zig) success 86ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9038770Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9039350Z       |  |  +- run exe generate-def (riscv.zig) success 26ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9039810Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9040260Z       |  |  +- run exe generate-def (s390x.zig) success 46ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9040790Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9041670Z       |  |  +- run exe generate-def (ve.zig) success 280ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9042140Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9042760Z       |  |  +- run exe generate-def (wasm.zig) success 62ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9043290Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9044130Z       |  |  +- run exe generate-def (x86_64.zig) success 88ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9044790Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9045500Z       |  |  +- run exe generate-def (x86.zig) success 556ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9045870Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9046340Z       |  |  +- run exe generate-def (xcore.zig) success 10ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9046800Z       |  |     +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9047270Z       |  +- WriteFile sqlite.h cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9047550Z       +- translate-c posix success 183ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9048050Z       |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9048570Z       |  +- WriteFile posix.h cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9048860Z       +- run bash (vaxis) success 69ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9049250Z       +- run bash (vaxis) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9049700Z       +- run bash (vaxis) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9050090Z       +- options cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9050400Z       +- translate-c curl success 151ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9050940Z       |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9051450Z       |  +- WriteFile curl.h cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9051900Z       |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9052910Z       |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9053800Z       |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9054230Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9054730Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9055170Z       +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9055590Z       +- run exe uucode_generate (tables.zig) success 646ms
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9056100Z       |  +- compile exe uucode_generate debug native cached 106ms MaxRSS:39M
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9056640Z       |     +- WriteFile build_config.zig cached
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9057130Z       +- WriteFile build_config.zig (reused)
+upgrade (macos-15)	Normal detached startup under the default soft limit	2026-10-18T19:02:10.9057360Z 
+upgrade (macos-15)	Check out the previous known installed build	﻿2026-10-18T19:02:10.9234510Z ##[group]Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9235070Z with:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9235410Z   ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9235760Z   path: .amp/previous-release
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9236120Z   persist-credentials: false
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9236840Z   repository: DivyanshGolyan/rui
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9240160Z   token: ***
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9240400Z   ssh-strict: true
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9240810Z   ssh-user: git
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9257200Z   clean: true
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9257460Z   sparse-checkout-cone-mode: true
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9257720Z   fetch-depth: 1
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9257970Z   fetch-tags: false
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9258240Z   show-progress: true
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9258490Z   lfs: false
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9258730Z   submodules: false
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9258990Z   set-safe-directory: true
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9259240Z   allow-unsafe-pr-checkout: false
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9259560Z env:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9259780Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/.cache/zig
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:10.9260130Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.2789730Z Syncing repository: DivyanshGolyan/rui
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.2790320Z ##[group]Getting Git version info
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.2790730Z Working directory is '/Users/runner/work/rui/rui/.amp/previous-release'
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.2826200Z [command]/opt/homebrew/bin/git version
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3108400Z git version 2.55.0
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3121320Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3127710Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/b9a6471f-d3c6-4d9b-9992-e8f47428bf3d/.gitconfig'
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3135630Z Temporarily overriding HOME='/Users/runner/work/_temp/b9a6471f-d3c6-4d9b-9992-e8f47428bf3d' before making global git config changes
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3136460Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3139050Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/rui/rui/.amp/previous-release
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3263020Z ##[group]Initializing the repository
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3267270Z [command]/opt/homebrew/bin/git init /Users/runner/work/rui/rui/.amp/previous-release
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3437990Z hint: Using 'master' as the name for the initial branch. This default branch name
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3438680Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3439170Z hint: to use in all of your new repositories, which will suppress this warning,
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3439580Z hint: call:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3439750Z hint:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3439970Z hint: 	git config --global init.defaultBranch <name>
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3441560Z hint:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3442330Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3442870Z hint: 'development'. The just-created branch can be renamed via this command:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3443290Z hint:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3443490Z hint: 	git branch -m <name>
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3443710Z hint:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3444000Z hint: Disable this message with "git config set advice.defaultBranchName false"
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3444520Z Initialized empty Git repository in /Users/runner/work/rui/rui/.amp/previous-release/.git/
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3449530Z [command]/opt/homebrew/bin/git remote add origin https://github.com/DivyanshGolyan/rui
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3527220Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3528170Z ##[group]Disabling automatic garbage collection
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3529600Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3593350Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3593690Z ##[group]Setting up auth
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3598210Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.3660540Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.4788610Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.4850610Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.5663920Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.5928130Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.7839500Z [command]/opt/homebrew/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.8035330Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.8041270Z ##[group]Fetching the repository
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:11.8043420Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8689550Z From https://github.com/DivyanshGolyan/rui
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8690130Z  * branch            0e4b2225d106dd63fa9c38801188facb5e9c6335 -> FETCH_HEAD
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8694320Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8694720Z ##[group]Determining the checkout info
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8696290Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8700680Z [command]/opt/homebrew/bin/git sparse-checkout disable
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8898850Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8976630Z ##[group]Checking out the ref
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:12.8991220Z [command]/opt/homebrew/bin/git checkout --progress --force 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4099930Z HEAD is now at 0e4b222 Merge pull request #502 from DivyanshGolyan/zig-0.17-migration
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4130640Z ##[endgroup]
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4314220Z [command]/opt/homebrew/bin/git log -1 --format=%H
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4408110Z 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4420450Z ##[group]Removing auth
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4424950Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.4521610Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.6318720Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.6320930Z http.https://github.com/.extraheader
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.6458920Z [command]/opt/homebrew/bin/git config --local --unset-all http.https://github.com/.extraheader
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.6462280Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.8269970Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:13.8574730Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (macos-15)	Check out the previous known installed build	2026-10-18T19:02:14.0587260Z ##[endgroup]
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	﻿2026-10-18T19:02:14.0904590Z ##[group]Run set -euo pipefail
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0904880Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0905070Z ^[[36;1muname -sm^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0905240Z ^[[36;1mgit rev-parse HEAD^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0905420Z ^[[36;1mzig version^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0905610Z ^[[36;1mmkdir -p "$RUI_UPGRADE_FAILURES"^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0905930Z ^[[36;1mmv .amp/previous-release "$RUNNER_TEMP/previous-release"^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0906330Z ^[[36;1mpython3 -B tests/integration/previous_release_upgrade.py . .^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.0906820Z ^[[36;1mpython3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .^[[0m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1255590Z shell: /bin/bash -e {0}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1256050Z env:
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1256380Z   ZIG_GLOBAL_CACHE_DIR: /Users/runner/.cache/zig
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1256840Z   RUI_UPGRADE_FAILURES: /Users/runner/work/_temp/rui-upgrade-data
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1257220Z ##[endgroup]
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1812480Z Darwin arm64
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.1938010Z ad16a67b01e419ed0cb78773f0508bd53c54bc0a
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.3120170Z 0.17.0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:14.4397770Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:15.9412440Z Building ad16a67 with Zig 0.17.0.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:15.9414750Z Preparing dependencies in /Users/runner/.cache/zig ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:16.5968940Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:31.6914110Z Build still running (15 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:46.7680090Z Build still running (30 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:01.8257120Z Build still running (45 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:16.8883300Z Build still running (60 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:31.9438470Z Build still running (75 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.0022860Z Build still running (90 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:02.0572450Z Build still running (105 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6586510Z Build Summary: 42/42 steps succeeded
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6587670Z install success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6588110Z +- install rui success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6588610Z |  +- compile exe rui safe native success 1m MaxRSS:1G
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6589330Z |     +- run sh (pinned-transport-aarch64-macos) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6589760Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6590340Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6590860Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6591300Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6726870Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6727320Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6727680Z |     +- translate-c sqlite cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6728090Z |     |  +- compile exe translate-c fast native cached 228ms MaxRSS:38M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6728500Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6728760Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6729080Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6729410Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6729840Z |     |  |  |  +- compile exe generate-def debug native cached 187ms MaxRSS:38M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6730290Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6730630Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6731060Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6731450Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6731850Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6732190Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6732640Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6733030Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6733370Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6734490Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6734920Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6735250Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6735700Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6736270Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6736670Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6737000Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6737380Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6737760Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6738110Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6738480Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6738880Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6739220Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6739600Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6739990Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6740380Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6740700Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6741090Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6741470Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6741800Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6742210Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6742590Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6742920Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6743290Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6743680Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6744080Z |     |  +- WriteFile sqlite.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6744340Z |     +- translate-c posix cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6744740Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6745150Z |     |  +- WriteFile posix.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6745910Z |     +- run bash (vaxis) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6746250Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6746630Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6746900Z |     +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6747250Z |     +- translate-c curl cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6747670Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6748030Z |     |  +- WriteFile curl.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6748430Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6748860Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6749350Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6749760Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6750210Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6750620Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6750950Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6751380Z |     |  +- compile exe uucode_generate debug native cached 188ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6751830Z |     |     +- WriteFile build_config.zig cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6752120Z |     +- WriteFile build_config.zig (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6752530Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6752940Z +- install rui-evaluator success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6754330Z    +- compile exe rui-evaluator safe native success 33s MaxRSS:736M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6754730Z       +- run sh (quickjs.c) success 125ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.6755060Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.7255720Z Checking the built command ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8232150Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8232980Z Installed ad16a67 at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/home/.local/bin/rui.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8233670Z Previous builds, Stores and credentials were preserved.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8292120Z Your PATH currently selects: no rui command
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8292900Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8294230Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8295380Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8295710Z Selected Store status (read only):
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8357130Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8359460Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:09.8360370Z Start with: "/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/home/.local/bin/rui"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.0334590Z Installed artifact sha256=0700788aabefa44c2ff12544188dc790478c483fa0b4b7bfe83b3ee1e1e93b97
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.5623530Z rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store $'/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store' --instance edb47ac9006b760dee32442dca785cfb
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.5625260Z {"version":"1","type":"host_stop","status":"acknowledged","store":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store","instance":"edb47ac9006b760dee32442dca785cfb","retirement":"unconfirmed"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.7694290Z Previous build saved the exact answer and released the Store
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.7944570Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.9477220Z Building ad16a67 with Zig 0.17.0.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:10.9477750Z Preparing dependencies in /Users/runner/.cache/zig ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.2712880Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7284740Z Build Summary: 42/42 steps succeeded
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7286190Z install success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7287030Z +- install rui success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7287410Z |  +- compile exe rui safe native cached 84ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7287980Z |     +- run sh (pinned-transport-aarch64-macos) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7289400Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7290330Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7291850Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7293230Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7293870Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7294350Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7295760Z |     +- translate-c sqlite cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7296800Z |     |  +- compile exe translate-c fast native cached 119ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7297400Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7297810Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7298050Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7298320Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7299150Z |     |  |  |  +- compile exe generate-def debug native cached 95ms MaxRSS:38M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7300200Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7323810Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7324320Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7324610Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7324990Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7325880Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7327070Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7327470Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7327800Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7328180Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7328610Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7329150Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7329640Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7330070Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7330500Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7330940Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7331450Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7331860Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7332210Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7332630Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7333070Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7333400Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7333800Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7334210Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7334550Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7334940Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7335280Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7335640Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7336160Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7336590Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7337060Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7337720Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7338130Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7338500Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7338780Z |     |  +- WriteFile sqlite.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7339330Z |     +- translate-c posix cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7339630Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7339940Z |     |  +- WriteFile posix.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7340360Z |     +- run bash (vaxis) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7340720Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7341070Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7341410Z |     +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7341690Z |     +- translate-c curl cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7342010Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7342490Z |     |  +- WriteFile curl.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7342900Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7343270Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7343640Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7344010Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7344400Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7344780Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7345190Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7345580Z |     |  +- compile exe uucode_generate debug native cached 99ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7346230Z |     |     +- WriteFile build_config.zig cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7347300Z |     +- WriteFile build_config.zig (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7347760Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7348120Z +- install rui-evaluator success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7348540Z    +- compile exe rui-evaluator safe native cached 79ms MaxRSS:38M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7348940Z       +- run sh (quickjs.c) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7349140Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.7675230Z Checking the built command ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8146260Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8147220Z Installed ad16a67 at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/home/.local/bin/rui.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8147910Z Previous builds, Stores and credentials were preserved.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8154820Z Your PATH currently selects: no rui command
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8155810Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8156280Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8156680Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8157400Z Selected Store status (read only):
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8223510Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8230870Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8234150Z Start with: "/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/home/.local/bin/rui"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:11.8405300Z Installed artifact sha256=0700788aabefa44c2ff12544188dc790478c483fa0b4b7bfe83b3ee1e1e93b97
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.0617600Z {"version":"1","type":"host_status","status":"ready","store":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store","instance":"2e7fd02432c118048e78cd943d0f8c71","active_capacity":"100","intake_capacity":"100","descriptor_limit":"935","capabilities":{"bash":true,"model":true,"managed_authentication":true},"diagnostics":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store/diagnostics"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.0619110Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.0912760Z {"version":"1","type":"host_status","status":"ready","store":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store","instance":"2e7fd02432c118048e78cd943d0f8c71","active_capacity":"100","intake_capacity":"100","descriptor_limit":"935","capabilities":{"bash":true,"model":true,"managed_authentication":true},"diagnostics":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store/diagnostics"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.0914310Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.1746020Z rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store $'/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store' --instance 2e7fd02432c118048e78cd943d0f8c71
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.1748410Z {"version":"1","type":"host_stop","status":"acknowledged","store":"/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-800rof79/store","instance":"2e7fd02432c118048e78cd943d0f8c71","retirement":"unconfirmed"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.4069370Z Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:12.5222190Z Installing 0e4b2225d106dd63fa9c38801188facb5e9c6335 through ./install.sh
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4111390Z Building 0e4b222 with Zig 0.17.0.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4111900Z Preparing dependencies in /Users/runner/.cache/zig ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4334920Z Preparing pinned openssl dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4479090Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4479820Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4480140Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.4880460Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.6390090Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:13.6403970Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:14.0522180Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:14.0559270Z 100 52.4M  100 52.4M    0     0  86.7M      0 --:--:-- --:--:-- --:--:-- 86.7M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:26.6361490Z warning: overwriting existing dependency named "openssl"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:26.6671260Z Preparing pinned sqlite dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:26.6922070Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:26.6998650Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:26.7054720Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:27.7162230Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:28.4418760Z   0     0    0     0    0     0      0      0 --:--:--  0:00:01 --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:28.4419530Z 100 2877k  100 2877k    0     0  1640k      0  0:00:01  0:00:01 --:--:-- 1641k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.1057530Z warning: overwriting existing dependency named "sqlite"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.1232200Z Preparing pinned curl dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.1470090Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.1470970Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.1471500Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.4770780Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.5470550Z   7 2883k    7  205k    0     0   621k      0  0:00:04 --:--:--  0:00:04  620k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:30.5472290Z 100 2883k  100 2883k    0     0  7206k      0 --:--:-- --:--:-- --:--:-- 7191k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.4987200Z warning: overwriting existing dependency named "curl"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.6068690Z Preparing pinned nghttp2 dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.6376640Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.6480850Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.6579130Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.8177580Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.8181310Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.8743370Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:34.8744660Z 100 1971k  100 1971k    0     0  8243k      0 --:--:-- --:--:-- --:--:-- 8243k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.3929170Z warning: overwriting existing dependency named "nghttp2"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.4174450Z Preparing pinned utf8proc dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.4446100Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.4451040Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.4451420Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.4931610Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.6277170Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.6277920Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.8467730Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.8468470Z 100  197k  100  197k    0     0   491k      0 --:--:-- --:--:-- --:--:--  491k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.2825210Z warning: overwriting existing dependency named "utf8proc"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.3038770Z Preparing pinned quickjs dependency ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.3158750Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.3172710Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.3173070Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.4736800Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.4839590Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.4938770Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.7907220Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:38.7968260Z 100  881k    0  881k    0     0  1858k      0 --:--:-- --:--:-- --:--:-- 2976k
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:39.7747540Z warning: overwriting existing dependency named "quickjs"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:40.0016750Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:55.1462820Z Build still running (15 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:05:10.1510540Z Build still running (30 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:05:25.2812670Z Build still running (45 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:05:40.2840070Z Build still running (60 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:05:55.2946870Z Build still running (75 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:06:10.4211070Z Build still running (90 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:06:25.5130020Z Build still running (105 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:06:40.5524680Z Build still running (120 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:06:55.6030330Z Build still running (135 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:10.6272810Z Build still running (150 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:25.6347170Z Build still running (165 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9122630Z install
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9224290Z +- install rui
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9324480Z    +- compile exe rui safe native
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9337240Z       +- run sh (pinned-transport-aarch64-macos) w
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9352410Z Building pinned OpenSSL ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9366910Z Building pinned nghttp2 ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9390170Z Building pinned curl ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9392440Z failed command: sh ./src/build_transport.sh /Users/runner/work/_temp/previous-release/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /Users/runner/work/_temp/previous-release/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /Users/runner/work/_temp/previous-release/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /Users/runner/work/_temp/previous-release/src/curl-post-retry.patch /Users/runner/work/_temp/previous-release/.zig-cache/o/a4a2bc49e092c88dc4c067c226103879/pinned-transport-aarch64-macos aarch64-macos /Users/runner/work/_temp/rui-zig/zig
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:26.9394860Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:40.6800140Z Build still running (180 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:07:55.6852700Z Build still running (195 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:08:10.7360170Z Build still running (210 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:08:25.7526540Z Build still running (225 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:08:40.7621500Z Build still running (240 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:08:55.7670820Z Build still running (255 seconds elapsed).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1767030Z Build Summary: 38/38 steps succeeded
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1768300Z install success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1769000Z +- install rui success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1769910Z |  +- compile exe rui safe native success 1m MaxRSS:1G
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1891540Z |     +- run sh (pinned-transport-aarch64-macos) success 2m
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1891990Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1892490Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1892950Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1893460Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1893960Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1894390Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1894710Z |     +- translate-c sqlite success 41ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1895100Z |     |  +- compile exe translate-c fast native success 1m MaxRSS:1G
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1895470Z |     |  |  +- options success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1895740Z |     |  |  +- options success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1896000Z |     |  |  +- options success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1896330Z |     |  |  +- run exe generate-def (aarch64.zig) success 66ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1896770Z |     |  |  |  +- compile exe generate-def debug native success 3s MaxRSS:267M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1897160Z |     |  |  +- run exe generate-def (amdgcn.zig) success 397ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1897570Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1898030Z |     |  |  +- run exe generate-def (arm.zig) success 50ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1922190Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1923290Z |     |  |  +- run exe generate-def (bpf.zig) success 6ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1924310Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1925540Z |     |  |  +- run exe generate-def (common.zig) success 307ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1926540Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1927660Z |     |  |  +- run exe generate-def (hexagon.zig) success 433ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1928850Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1929910Z |     |  |  +- run exe generate-def (loongarch.zig) success 198ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1930950Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1932020Z |     |  |  +- run exe generate-def (mips.zig) success 134ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1933020Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1934090Z |     |  |  +- run exe generate-def (neon.zig) success 372ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1935110Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1936190Z |     |  |  +- run exe generate-def (nvptx.zig) success 312ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1937140Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1938160Z |     |  |  +- run exe generate-def (powerpc.zig) success 121ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1939160Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1940040Z |     |  |  +- run exe generate-def (riscv.zig) success 27ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1941010Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1941980Z |     |  |  +- run exe generate-def (s390x.zig) success 40ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1942420Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1942750Z |     |  |  +- run exe generate-def (ve.zig) success 239ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1943520Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1943980Z |     |  |  +- run exe generate-def (wasm.zig) success 50ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1944340Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1944780Z |     |  |  +- run exe generate-def (x86_64.zig) success 79ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1945270Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1945620Z |     |  |  +- run exe generate-def (x86.zig) success 731ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1946010Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1946970Z |     |  |  +- run exe generate-def (xcore.zig) success 5ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1947330Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1947700Z |     |  +- WriteFile sqlite.h success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1948010Z |     +- translate-c posix success 85ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1948410Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1948780Z |     |  +- WriteFile posix.h success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1949070Z |     +- options success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1949350Z |     +- translate-c curl success 92ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1949690Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1950120Z |     |  +- WriteFile curl.h success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1950470Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1950820Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1951220Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1951610Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1951960Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1952340Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1952760Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1953650Z +- install rui-evaluator success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1953990Z    +- compile exe rui-evaluator safe native success 31s MaxRSS:731M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1954430Z       +- run sh (quickjs.c) success 115ms
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.1954670Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.2005780Z Checking the built command ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3034740Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3036060Z Installed 0e4b222 at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/home/.local/bin/rui.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3037750Z Previous builds, Stores and credentials were preserved.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3050370Z Your PATH currently selects: no rui command
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3052020Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3053250Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3054460Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3055040Z Selected Store status (read only):
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3137180Z Host: unavailable (no current Store owner established)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3140780Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3144590Z Start with: "/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/home/.local/bin/rui"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.3961780Z Installed artifact sha256=7ffd39e865c3b81910077b910888479d333088eb11e78124f8fa58f3aeaf7f63
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.7349400Z Rui: Stop affects all work in this Store. Retain this exact target if the reply is lost.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.7349990Z Store: /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/store
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.7352270Z Host instance: 6c17c4bb58a706e78bc43dcad3d2cee0 (retry with --instance 6c17c4bb58a706e78bc43dcad3d2cee0)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:06.7354120Z Rui: Stop acknowledged; completion and lease release are not confirmed. Inspect rui host status.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:07.0373710Z Previous build saved the exact answer and released the Store
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:07.0789320Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:07.3006630Z Building ad16a67 with Zig 0.17.0.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:07.3007650Z Preparing dependencies in /Users/runner/.cache/zig ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:07.7951470Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5242560Z Build Summary: 42/42 steps succeeded
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5243200Z install success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5243950Z +- install rui success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5246890Z |  +- compile exe rui safe native cached 104ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5298050Z |     +- run sh (pinned-transport-aarch64-macos) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5299980Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5300600Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5303760Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5304690Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5305480Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5306150Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5306990Z |     +- translate-c sqlite cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5307910Z |     |  +- compile exe translate-c fast native cached 164ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5308390Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5309170Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5309850Z |     |  |  +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5310500Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5311300Z |     |  |  |  +- compile exe generate-def debug native cached 102ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5311940Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5312350Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5312760Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5313340Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5314010Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5324020Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5324900Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5325700Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5326180Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5326750Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5327710Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5328220Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5328970Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5329790Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5330260Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5330930Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5331690Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5332390Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5333000Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5335370Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5336330Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5336800Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5337440Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5338100Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5338540Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5339210Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5340040Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5340800Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5341480Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5341970Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5342680Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5344130Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5344750Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5345110Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5346650Z |     |  +- WriteFile sqlite.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5347250Z |     +- translate-c posix cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5347670Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5348140Z |     |  +- WriteFile posix.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5348530Z |     +- run bash (vaxis) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5348850Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5349560Z |     +- run bash (vaxis) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5350060Z |     +- options cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5350550Z |     +- translate-c curl cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5351310Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5352040Z |     |  +- WriteFile curl.h cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5352930Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5353390Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5353890Z |     |  +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5354370Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5354750Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5355180Z |     +- run sh (pinned-transport-aarch64-macos) (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5355590Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5356010Z |     |  +- compile exe uucode_generate debug native cached 130ms MaxRSS:39M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5357070Z |     |     +- WriteFile build_config.zig cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5357450Z |     +- WriteFile build_config.zig (reused)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5357840Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5358300Z +- install rui-evaluator success
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5358680Z    +- compile exe rui-evaluator safe native cached 118ms MaxRSS:38M
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5359120Z       +- run sh (quickjs.c) cached
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.5359270Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.6310660Z Checking the built command ...
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7130230Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7131760Z Installed ad16a67 at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/home/.local/bin/rui.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7133400Z Previous builds, Stores and credentials were preserved.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7141530Z Your PATH currently selects: no rui command
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7142120Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7142900Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7143360Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7143540Z Selected Store status (read only):
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7226160Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7231730Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.7233060Z Start with: "/Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/home/.local/bin/rui"
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:08.8702890Z Installed artifact sha256=0700788aabefa44c2ff12544188dc790478c483fa0b4b7bfe83b3ee1e1e93b97
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0248770Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0249660Z rui: detached Host startup failed for Store /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/store:
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0251140Z rui: unsupported Store format at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/store: found schema 21, this build supports schema 24 (wire 1). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0252960Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0253210Z rui: host serve failed; syntax and recovery: rui host serve --help
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0253570Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0253750Z error: WrongStoreVersion (exit status 1)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0254020Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0254260Z rui: host start failed; syntax and recovery: rui host start --help
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0254580Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0255240Z error: HostStartupFailed (exit status 1)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0255520Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0346810Z Breaking format 21→24 host start refused in 0.145s; SQLite hashes unchanged
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0522190Z rui: unsupported Store format at /Users/runner/work/_temp/rui-upgrade-data/rui-upgrade-uyz00q7p/store: found schema 21, this build supports schema 24 (wire 1). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0529860Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0536880Z rui: host serve failed; syntax and recovery: rui host serve --help
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0541490Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0541900Z error: WrongStoreVersion (exit status 1)
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0544950Z 
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.0620240Z Breaking format 21→24 host serve refused in 0.019s; SQLite hashes unchanged
+upgrade (macos-15)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:09:09.1240320Z Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay
+upgrade (macos-15)	Post Check out the previous known installed build	﻿2026-10-18T19:09:09.1614430Z Post job cleanup.
+upgrade (macos-15)	Post Run ./.github/actions/setup	﻿2026-10-18T19:09:09.6019350Z Post job cleanup.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:09.6025020Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__03f5209b-22d2-43d8-b326-e0cffbf36d21.build-cache]
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:11.0431710Z Post job cleanup.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:11.2351350Z (node:30607) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:11.2353220Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:11.2671740Z [command]/opt/homebrew/bin/gtar --posix -cf cache.tzst --exclude cache.tzst -P -C /Users/runner/work/rui/rui --files-from manifest.txt --delay-directory-restore --use-compress-program zstdmt
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.1406410Z ##[warning]Cache reservation failed: cache write denied: token has no writable scopes
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.1409510Z Failed to save: Unable to reserve cache with key rui-build-v2-macOS-ARM64-0.17.0-3fb932d7b927781edb38f5fa6c38969238328794b856d2f9e92fcc6ccf30666d-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-all, another job may be creating this cache.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.1428120Z ##[end-action id=__03f5209b-22d2-43d8-b326-e0cffbf36d21.build-cache;outcome=success;conclusion=success;duration_ms=7540]
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.1439440Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__03f5209b-22d2-43d8-b326-e0cffbf36d21.__actions_cache]
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.1553180Z Post job cleanup.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.3204550Z Cache hit occurred on the primary key rui-compiler-macOS-ARM64-0.17.0, not saving cache.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.3206710Z (node:30792) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.3208050Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (macos-15)	Post Run ./.github/actions/setup	2026-10-18T19:09:17.3237750Z ##[end-action id=__03f5209b-22d2-43d8-b326-e0cffbf36d21.__actions_cache;outcome=success;conclusion=success;duration_ms=179]
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	﻿2026-10-18T19:09:17.3335790Z Post job cleanup.
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4369650Z [command]/opt/homebrew/bin/git version
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4574750Z git version 2.55.0
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4594960Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/39e36b0c-8c5e-4623-a010-82bd5c33a34b/.gitconfig'
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4606990Z Temporarily overriding HOME='/Users/runner/work/_temp/39e36b0c-8c5e-4623-a010-82bd5c33a34b' before making global git config changes
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4607840Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4610690Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/rui/rui
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4746800Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.4822510Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.5803110Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.5863970Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.6752880Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (macos-15)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:09:17.6826090Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (macos-15)	Complete job	﻿2026-10-18T19:09:17.8710280Z Cleaning up orphan processes
+upgrade (macos-15)	Complete job	2026-10-18T19:09:19.4010340Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

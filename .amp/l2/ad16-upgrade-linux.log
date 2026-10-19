@@ -1,0 +1,1008 @@
+upgrade (ubuntu-24.04)	Set up job	﻿2026-10-18T18:56:34.6346400Z Current runner version: '2.337.0'
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6363675Z ##[group]Runner Image Provisioner
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6364326Z Hosted Compute Agent
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6364830Z Version: 20261012.601
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6365433Z Commit: f3dc54e1fb89da6852db922499a0233137369e1d
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6365875Z Build Date: 2026-10-12T17:48:21Z
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6366347Z Worker ID: {6719efd7-93c0-4785-8fcf-4155b311c2d7}
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6366785Z Region: centralus
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6367127Z Cloud: Azure
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6367518Z ##[endgroup]
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6368640Z ##[group]Operating System
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6369048Z Ubuntu
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6369382Z 24.04.5
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6369694Z LTS
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6370080Z ##[endgroup]
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6370449Z ##[group]Runner Image
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6370795Z Image: ubuntu-24.04
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6371187Z Version: 20261012.334.1
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6371826Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20261012.334/images/ubuntu/Ubuntu2404-Readme.md
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6373086Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20261012.334
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6373859Z ##[endgroup]
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6374581Z ##[group]GITHUB_TOKEN Permissions
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6375900Z Contents: read
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6376368Z Metadata: read
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6376705Z ##[endgroup]
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6377999Z Secret source: Actions
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6378534Z Cache mode: read
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6379118Z Prepare workflow directory
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6696498Z Prepare all required actions
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.6727520Z Getting action download info
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:34.8855882Z Download action repository 'actions/checkout@11d5960a326750d5838078e36cf38b85af677262' (SHA:11d5960a326750d5838078e36cf38b85af677262)
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:35.1682243Z Download action repository 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+upgrade (ubuntu-24.04)	Set up job	2026-10-18T18:56:35.5337603Z Complete job name: upgrade (ubuntu-24.04)
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	﻿2026-10-18T18:56:35.6074882Z ##[group]Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6075810Z with:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6076268Z   persist-credentials: false
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6076839Z   repository: DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6081916Z   token: ***
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6082521Z   ssh-strict: true
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6082977Z   ssh-user: git
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6083419Z   clean: true
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6083884Z   sparse-checkout-cone-mode: true
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6084447Z   fetch-depth: 1
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6084896Z   fetch-tags: false
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6085358Z   show-progress: true
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6085830Z   lfs: false
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6086265Z   submodules: false
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6086754Z   set-safe-directory: true
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6087300Z   allow-unsafe-pr-checkout: false
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6087944Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6766624Z Syncing repository: DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6769193Z ##[group]Getting Git version info
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6770271Z Working directory is '/home/runner/work/rui/rui'
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6786899Z [command]/usr/bin/git version
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6894243Z git version 2.55.0
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6913331Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6927952Z Temporarily overriding HOME='/home/runner/work/_temp/d7bd54f6-28c7-4312-9cd7-06dc3d4b2e8f' before making global git config changes
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6930630Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.6933819Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/rui/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7182252Z Deleting the contents of '/home/runner/work/rui/rui'
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7190342Z ##[group]Initializing the repository
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7192820Z [command]/usr/bin/git init /home/runner/work/rui/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7423139Z hint: Using 'master' as the name for the initial branch. This default branch name
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7424472Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7425837Z hint: to use in all of your new repositories, which will suppress this warning,
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7426640Z hint: call:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7427060Z hint:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7427645Z hint: 	git config --global init.defaultBranch <name>
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7428313Z hint:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7428933Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7429962Z hint: 'development'. The just-created branch can be renamed via this command:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7430769Z hint:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7431233Z hint: 	git branch -m <name>
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7431730Z hint:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7432530Z hint: Disable this message with "git config set advice.defaultBranchName false"
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7439700Z Initialized empty Git repository in /home/runner/work/rui/rui/.git/
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7449352Z [command]/usr/bin/git remote add origin https://github.com/DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7611871Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7612863Z ##[group]Disabling automatic garbage collection
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7614267Z [command]/usr/bin/git config --local gc.auto 0
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7774677Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7775449Z ##[group]Setting up auth
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7776219Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.7810936Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.8263249Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.8291386Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.8469573Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.8489942Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.8670144Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.9098713Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.9101305Z ##[group]Fetching the repository
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:35.9104024Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +ad16a67b01e419ed0cb78773f0508bd53c54bc0a:refs/remotes/origin/wip/complect-l2-guardrails
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5158148Z From https://github.com/DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5159436Z  * [new ref]         ad16a67b01e419ed0cb78773f0508bd53c54bc0a -> origin/wip/complect-l2-guardrails
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5161342Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5161759Z ##[group]Determining the checkout info
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5163650Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5167898Z [command]/usr/bin/git sparse-checkout disable
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5859119Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5885243Z ##[group]Checking out the ref
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.5888775Z [command]/usr/bin/git checkout --progress --force -B wip/complect-l2-guardrails refs/remotes/origin/wip/complect-l2-guardrails
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8050899Z Switched to a new branch 'wip/complect-l2-guardrails'
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8054687Z branch 'wip/complect-l2-guardrails' set up to track 'origin/wip/complect-l2-guardrails'.
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8077726Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8117875Z [command]/usr/bin/git log -1 --format=%H
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8140606Z ad16a67b01e419ed0cb78773f0508bd53c54bc0a
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8147716Z ##[group]Removing auth
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8150038Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8176629Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8350428Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8471778Z http.https://github.com/.extraheader
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8477237Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8504929Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8676784Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8700868Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (ubuntu-24.04)	Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T18:56:37.8872600Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	﻿2026-10-18T18:56:37.9131693Z Prepare all required actions
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:37.9132337Z Getting action download info
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.0126833Z Download action repository 'actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff' (SHA:40f1582b2485089dde7abd97c1529aa768e1baff)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.4404417Z Download action repository 'actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' (SHA:0057852bfaa89a56745cba8c7296529d2fc39830)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5686538Z ##[group]Run ./.github/actions/setup
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5686729Z with:
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5686859Z   targets: []
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5686971Z   check-part: all
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5687085Z   cold: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5687195Z   compiled: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5687310Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5728541Z ##[start-action display=Select fixture dependencies;id=__self.requirements]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5754398Z ##[group]Run python3 - <<'PY'
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5754618Z ^[[36;1mpython3 - <<'PY'^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5754776Z ^[[36;1mimport json, os, sys^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5754955Z ^[[36;1msys.path.insert(0, 'tests/ci')^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5755162Z ^[[36;1mfrom select_tests import setup_requirements^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5755377Z ^[[36;1mwith open(os.environ['GITHUB_OUTPUT'], 'a') as output:^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5755658Z ^[[36;1m    for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5755949Z ^[[36;1m        print(f'{name}={str(required).lower()}', file=output)^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5756129Z ^[[36;1mPY^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5979845Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5980048Z env:
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5980158Z   TARGETS: []
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.5980272Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6332397Z ##[end-action id=__self.requirements;outcome=success;conclusion=success;duration_ms=60]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6335162Z ##[start-action display=Run actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff;id=__self.__actions_setup-go]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6346183Z ##[end-action id=__self.__actions_setup-go;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6347406Z ##[start-action display=Identify the actual native build tools;id=__self.tools]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6359923Z ##[group]Run set -euo pipefail
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360104Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360270Z ^[[36;1midentity="$RUNNER_TEMP/rui-native-tools.txt"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360439Z ^[[36;1m{^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360549Z ^[[36;1m  uname -sm^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360671Z ^[[36;1m  cc --version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360798Z ^[[36;1m  make --version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6360925Z ^[[36;1m  perl -v^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6361059Z ^[[36;1m  if [ "$(uname -s)" = Darwin ]; then^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6361221Z ^[[36;1m    xcodebuild -version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6361379Z ^[[36;1m    xcrun --sdk macosx --show-sdk-path^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6361562Z ^[[36;1m    xcrun --sdk macosx --show-sdk-version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6361750Z ^[[36;1m    xcrun --sdk macosx --show-sdk-build-version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362035Z ^[[36;1m  else^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362312Z ^[[36;1m    cat /etc/os-release^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362451Z ^[[36;1m    ldd --version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362582Z ^[[36;1m    ld --version^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362705Z ^[[36;1m  fi^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362819Z ^[[36;1m} > "$identity"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6362948Z ^[[36;1mcat "$identity"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6363155Z ^[[36;1mecho "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6414552Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6414736Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6715529Z Linux x86_64
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6715806Z cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6716086Z Copyright (C) 2023 Free Software Foundation, Inc.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6716438Z This is free software; see the source for copying conditions.  There is NO
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6716863Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6717380Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6717463Z GNU Make 4.3
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6717665Z Built for x86_64-pc-linux-gnu
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6717923Z Copyright (C) 1988-2020 Free Software Foundation, Inc.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6718300Z License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6718691Z This is free software: you are free to change and redistribute it.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6718960Z There is NO WARRANTY, to the extent permitted by law.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719085Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719222Z This is perl 5, version 38, subversion 2 (v5.38.2) built for x86_64-linux-gnu-thread-multi
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719486Z (with 67 registered patches, see perl -V for more detail)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719615Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719722Z Copyright 1987-2023, Larry Wall
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6719860Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6720034Z Perl may be copied only under the terms of either the Artistic License or the
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6720457Z GNU General Public License, which may be found in the Perl 5 source kit.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6720699Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6720868Z Complete documentation for Perl, including FAQ lists, should be found on
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6721269Z this system using "man perl" or "perldoc perl".  If you have access to the
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6721657Z Internet, point your browser at https://www.perl.org/, the Perl Home Page.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6721817Z 
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6721876Z PRETTY_NAME="Ubuntu 24.04.5 LTS"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722012Z NAME="Ubuntu"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722262Z VERSION_ID="24.04"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722385Z VERSION="24.04.5 LTS (Noble Numbat)"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722528Z VERSION_CODENAME=noble
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722645Z ID=ubuntu
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722751Z ID_LIKE=debian
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6722876Z HOME_URL="https://www.ubuntu.com/"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723035Z SUPPORT_URL="https://help.ubuntu.com/"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723211Z BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723475Z PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723703Z UBUNTU_CODENAME=noble
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723823Z LOGO=ubuntu-logo
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6723944Z ldd (Ubuntu GLIBC 2.39-0ubuntu8.9) 2.39
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6724108Z Copyright (C) 2024 Free Software Foundation, Inc.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6724322Z This is free software; see the source for copying conditions.  There is NO
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6724579Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6724823Z Written by Roland McGrath and Ulrich Drepper.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6724988Z GNU ld (GNU Binutils for Ubuntu) 2.42
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6725167Z Copyright (C) 2024 Free Software Foundation, Inc.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6725411Z This program is free software; you may redistribute it under the terms of
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6725673Z the GNU General Public License version 3 or (at your option) a later version.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6726007Z This program has absolutely no warranty.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6865624Z ##[end-action id=__self.tools;outcome=success;conclusion=success;duration_ms=51]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6866979Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__self.__actions_cache]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908045Z ##[group]Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908246Z with:
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908370Z   path: /home/runner/work/_temp/rui-zig
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908533Z   key: rui-compiler-Linux-X64-0.17.0
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908691Z   enableCrossOsArchive: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908836Z   fail-on-cache-miss: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6908970Z   lookup-only: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6909092Z   save-always: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.6909210Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.7545694Z (node:2173) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.7546323Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.8967995Z Cache hit for: rui-compiler-Linux-X64-0.17.0
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:38.9033338Z (node:2173) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:39.8903243Z Received 86706861 of 86706861 (100.0%), 98.9 MBs/sec
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:39.8904593Z Cache Size: ~83 MB (86706861 B)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:39.8949535Z [command]/usr/bin/tar -xf /home/runner/work/_temp/6801c52a-b6d2-443a-b52e-e422db320fd5/cache.tzst -P -C /home/runner/work/rui/rui --use-compress-program unzstd
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:40.6956069Z Cache restored successfully
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:40.7046159Z Cache restored from key: rui-compiler-Linux-X64-0.17.0
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:40.7127790Z ##[end-action id=__self.__actions_cache;outcome=success;conclusion=success;duration_ms=2026]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:40.7130093Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__self.build-cache]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0424671Z ##[group]Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0424894Z with:
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0425024Z   path: ~/.cache/zig
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	.zig-cache
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	zig-pkg
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0425637Z   key: rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-all
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0427046Z   restore-keys: rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0428029Z   enableCrossOsArchive: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0428189Z   fail-on-cache-miss: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0428325Z   lookup-only: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0428445Z   save-always: false
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.0428567Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.1114273Z (node:2246) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.1114901Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.2543289Z Cache hit for restore-key: rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-compiled
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:41.2599441Z (node:2246) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:42.4220132Z Received 134217728 of 428187480 (31.3%), 128.1 MBs/sec
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:43.4221109Z Received 402653184 of 428187480 (94.0%), 192.1 MBs/sec
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:43.5297516Z Received 428187480 of 428187480 (100.0%), 193.8 MBs/sec
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:43.5298819Z Cache Size: ~408 MB (428187480 B)
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:43.5381934Z [command]/usr/bin/tar -xf /home/runner/work/_temp/ed447e01-6805-429e-aef1-34871526acc7/cache.tzst -P -C /home/runner/work/rui/rui --use-compress-program unzstd
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.5946227Z Cache restored successfully
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6174297Z Cache restored from key: rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-compiled
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6274084Z ##[end-action id=__self.build-cache;outcome=success;conclusion=success;duration_ms=8914]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6276839Z ##[start-action display=Install pinned compiler;id=__self.__run]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6342990Z ##[group]Run set -euo pipefail
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6343285Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6343525Z ^[[36;1mcase "$(uname -s)/$(uname -m)" in^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6343780Z ^[[36;1m  Linux/x86_64)^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6344012Z ^[[36;1m    archive=zig-x86_64-linux-0.17.0^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6344408Z ^[[36;1m    checksum=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6344793Z ^[[36;1m    ;;^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6344985Z ^[[36;1m  Darwin/arm64)^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6345219Z ^[[36;1m    archive=zig-aarch64-macos-0.17.0^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6345610Z ^[[36;1m    checksum=b607e9b9234790a008116ae5bdb71c6243b84b9fb42a53a9e70fde41c06c536a^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6345973Z ^[[36;1m    ;;^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6346247Z ^[[36;1m  *) echo "Unsupported actual native architecture" >&2; exit 1 ;;^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6346567Z ^[[36;1mesac^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6346801Z ^[[36;1mif [ ! -x "$RUNNER_TEMP/rui-zig/zig" ]; then^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6347196Z ^[[36;1m  curl --fail --location --show-error --connect-timeout 10 --max-time 90 \^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6347607Z ^[[36;1m    --retry 1 --retry-delay 1 --retry-max-time 95 \^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6348040Z ^[[36;1m    "https://pkg.hexops.org/zig/$archive.tar.xz" -o "$RUNNER_TEMP/zig.tar.xz"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6348501Z ^[[36;1m  echo "$checksum  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6348847Z ^[[36;1m  mkdir -p "$RUNNER_TEMP/rui-zig"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6349240Z ^[[36;1m  tar -xJf "$RUNNER_TEMP/zig.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/rui-zig"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6349609Z ^[[36;1mfi^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6349852Z ^[[36;1mtest "$("$RUNNER_TEMP/rui-zig/zig" version)" = 0.17.0^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6350194Z ^[[36;1mecho "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6350543Z ^[[36;1mecho "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6350919Z ^[[36;1mmkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6411039Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6411242Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6565564Z ##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=28]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6567103Z ##[start-action display=Install the selected Python fixture dependencies;id=__self.__run_2]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6584590Z ##[end-action id=__self.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6585803Z ##[start-action display=Select empty caches for scheduled acceptance;id=__self.__run_3]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6587728Z ##[end-action id=__self.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6588692Z ##[start-action display=Fetch the existing pinned dependency graph;id=__self.__run_4]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6640315Z ##[group]Run set -euo pipefail
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6640502Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6640805Z ^[[36;1mmkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6640995Z ^[[36;1mbash src/fetch_dependencies.sh^[[0m
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6688557Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6688758Z env:
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6688894Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/.cache/zig
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:56:49.6689063Z ##[endgroup]
+upgrade (ubuntu-24.04)	Run ./.github/actions/setup	2026-10-18T18:57:48.0024935Z ##[end-action id=__self.__run_4;outcome=success;conclusion=success;duration_ms=58343]
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	﻿2026-10-18T18:57:48.0059222Z ##[group]Run zig build host-launch-integration -j2 --summary all
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0059522Z ^[[36;1mzig build host-launch-integration -j2 --summary all^[[0m
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0113204Z shell: /usr/bin/bash -e {0}
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0113357Z env:
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0113499Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/.cache/zig
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0113728Z   RUI_FAILURE_ARTIFACTS: /home/runner/work/_temp/rui-failure-artifacts
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:57:48.0113940Z ##[endgroup]
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7123146Z host-launch-integration
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7123750Z +- run python3
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7124183Z    +- compile exe rui-release-safe-check safe native
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7124455Z       +- run sh (pinned-transport-x86_64-linux) w
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7124627Z Building pinned OpenSSL ...
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7124768Z Building pinned nghttp2 ...
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7124899Z Building pinned curl ...
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7125885Z failed command: sh ./src/build_transport.sh /home/runner/work/rui/rui/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/runner/work/rui/rui/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/runner/work/rui/rui/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/runner/work/rui/rui/src/curl-post-retry.patch /home/runner/work/rui/rui/.zig-cache/o/dbbe8fe1c0655d193ac38243bc8c19db/pinned-transport-x86_64-linux x86_64-linux /home/runner/work/_temp/rui-zig/zig
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T18:59:27.7126872Z 
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6415688Z Host process discovery: ENOENT/ESRCH retirement, exact/subtree Store selection, lookalike/executable exclusion and real read failures passed
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6416234Z action-ready counterexample RED: pipe-only wait blocked with actual PTY credit withheld
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6416556Z action-ready credit: exact final transcript, one notification and original deadline passed
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6416953Z host-launch exit reader: exact transcript/outcome/reap, remaining budget and overflow passed
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6417312Z Host-launch failure retention: actual status, diagnostics, private Store, process disposal and primary failure passed
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.6417650Z default capacity refused below 570 descriptors (default intake needs 930)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:38.7871572Z detached startup soft-256: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-oh_vp1gr/soft-256', 'instance': '0ea6b133d829fdb66051bdc613a71273', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '930', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-oh_vp1gr/soft-256/diagnostics'}
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:39.0004505Z detached startup linux-1024: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-oh_vp1gr/linux-1024', 'instance': '6127a2cfb02cf956410026d98e3c9458', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '1024', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-oh_vp1gr/linux-1024/diagnostics'}
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:39.5882867Z detached startup hard-minimum: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-oh_vp1gr/hard-minimum', 'instance': '2f09bca1472b9199bcd3b510ea84da96', 'active_capacity': '100', 'intake_capacity': '10', 'descriptor_limit': '570', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-oh_vp1gr/hard-minimum/diagnostics'}
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:40.5129297Z startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5542928Z host-launch passed: held lease, 6 aliases -> 1 capacity-100 Host, detached stdio, bounded failure
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5710418Z Build Summary: 38/38 steps succeeded
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5710679Z host-launch-integration success
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5710894Z +- run python3 success 3s
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5711174Z    +- compile exe rui-release-safe-check safe native success 1m MaxRSS:1G
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5711849Z       +- run sh (pinned-transport-x86_64-linux) success 1m
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5712249Z       +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5712523Z       +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5712796Z       +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5713045Z       +- translate-c sqlite success 19ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5713320Z       |  +- compile exe translate-c fast native success 1m MaxRSS:1G
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5713653Z       |  |  +- options cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5713856Z       |  |  +- options cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5714056Z       |  |  +- options cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5714295Z       |  |  +- run exe generate-def (aarch64.zig) success 18ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5714634Z       |  |  |  +- compile exe generate-def debug native success 314ms MaxRSS:149M
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5714970Z       |  |  +- run exe generate-def (amdgcn.zig) success 77ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5715265Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5715538Z       |  |  +- run exe generate-def (arm.zig) success 19ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5715805Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5716078Z       |  |  +- run exe generate-def (bpf.zig) success 2ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5716359Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5716630Z       |  |  +- run exe generate-def (common.zig) success 78ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5716908Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5717184Z       |  |  +- run exe generate-def (hexagon.zig) success 107ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5717489Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5717766Z       |  |  +- run exe generate-def (loongarch.zig) success 61ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5718043Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5718321Z       |  |  +- run exe generate-def (mips.zig) success 37ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5718598Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5718814Z       |  |  +- run exe generate-def (neon.zig) success 86ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5718998Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5719184Z       |  |  +- run exe generate-def (nvptx.zig) success 63ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5719373Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5719564Z       |  |  +- run exe generate-def (powerpc.zig) success 39ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5719750Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5719936Z       |  |  +- run exe generate-def (riscv.zig) success 8ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5720117Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5720301Z       |  |  +- run exe generate-def (s390x.zig) success 15ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5720486Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5720672Z       |  |  +- run exe generate-def (ve.zig) success 59ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5720859Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5721043Z       |  |  +- run exe generate-def (wasm.zig) success 18ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5721226Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5721408Z       |  |  +- run exe generate-def (x86_64.zig) success 25ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5721753Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5721938Z       |  |  +- run exe generate-def (x86.zig) success 122ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5722297Z       |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5722508Z       |  |  +- run exe generate-def (xcore.zig) success 1ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5722693Z       |  |     +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5722862Z       |  +- WriteFile sqlite.h cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723111Z       +- translate-c posix success 63ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723313Z       |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723517Z       |  +- WriteFile posix.h cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723660Z       +- run bash (vaxis) success 20ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723804Z       +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5723945Z       +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5724102Z       +- options cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5724234Z       +- translate-c curl success 91ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5724636Z       |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5725159Z       |  +- WriteFile curl.h cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5725491Z       |  +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5725916Z       +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5726184Z       +- run exe uucode_generate (tables.zig) success 306ms
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5726581Z       |  +- compile exe uucode_generate debug native success 2s MaxRSS:337M
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5727061Z       |     +- WriteFile build_config.zig cached
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5727397Z       +- WriteFile build_config.zig (reused)
+upgrade (ubuntu-24.04)	Normal detached startup under the default soft limit	2026-10-18T19:00:41.5727558Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	﻿2026-10-18T19:00:41.5779194Z ##[group]Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5779399Z with:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5779528Z   ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5779702Z   path: .amp/previous-release
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5779845Z   persist-credentials: false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5779987Z   repository: DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781383Z   token: ***
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781494Z   ssh-strict: true
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781607Z   ssh-user: git
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781717Z   clean: true
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781834Z   sparse-checkout-cone-mode: true
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5781974Z   fetch-depth: 1
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782224Z   fetch-tags: false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782382Z   show-progress: true
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782498Z   lfs: false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782604Z   submodules: false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782720Z   set-safe-directory: true
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782861Z   allow-unsafe-pr-checkout: false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5782998Z env:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5783119Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/.cache/zig
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.5783301Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6283802Z Syncing repository: DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6286176Z ##[group]Getting Git version info
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6286606Z Working directory is '/home/runner/work/rui/rui/.amp/previous-release'
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6306469Z [command]/usr/bin/git version
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6339511Z git version 2.55.0
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6349913Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6360842Z Temporarily overriding HOME='/home/runner/work/_temp/47cda58d-828f-447a-be4d-37ed009802e4' before making global git config changes
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6361524Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6363701Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/rui/rui/.amp/previous-release
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6389367Z ##[group]Initializing the repository
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6391831Z [command]/usr/bin/git init /home/runner/work/rui/rui/.amp/previous-release
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6431959Z hint: Using 'master' as the name for the initial branch. This default branch name
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6432655Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6433501Z hint: to use in all of your new repositories, which will suppress this warning,
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6433927Z hint: call:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6435334Z hint:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6435601Z hint: 	git config --global init.defaultBranch <name>
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6435871Z hint:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6436130Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6436561Z hint: 'development'. The just-created branch can be renamed via this command:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6436896Z hint:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6437071Z hint: 	git branch -m <name>
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6437273Z hint:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6437553Z hint: Disable this message with "git config set advice.defaultBranchName false"
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6438051Z Initialized empty Git repository in /home/runner/work/rui/rui/.amp/previous-release/.git/
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6438932Z [command]/usr/bin/git remote add origin https://github.com/DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6463614Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6463991Z ##[group]Disabling automatic garbage collection
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6466006Z [command]/usr/bin/git config --local gc.auto 0
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6489330Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6489682Z ##[group]Setting up auth
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6494354Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6518232Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6714012Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6741703Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6919085Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.6947035Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.7113565Z [command]/usr/bin/git config --local http.https://github.com/.extraheader AUTHORIZATION: basic ***
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.7145123Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.7145445Z ##[group]Fetching the repository
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:41.7150623Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7665431Z From https://github.com/DivyanshGolyan/rui
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7665828Z  * branch            0e4b2225d106dd63fa9c38801188facb5e9c6335 -> FETCH_HEAD
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7669981Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7670311Z ##[group]Determining the checkout info
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7671993Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7676416Z [command]/usr/bin/git sparse-checkout disable
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7710064Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7733824Z ##[group]Checking out the ref
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.7737147Z [command]/usr/bin/git checkout --progress --force 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9754379Z Note: switching to '0e4b2225d106dd63fa9c38801188facb5e9c6335'.
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9754684Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9754854Z You are in 'detached HEAD' state. You can look around, make experimental
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9755193Z changes and commit them, and you can discard any commits you make in this
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9755447Z state without impacting any branches by switching back to a branch.
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9755595Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9755697Z If you want to create a new branch to retain commits you create, you may
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9755979Z do so (now or later) by using -c with the switch command. Example:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756113Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756177Z   git switch -c <new-branch-name>
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756706Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756765Z Or undo this operation with:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756856Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756904Z   git switch -
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9756972Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9757086Z Turn off this advice by setting config variable advice.detachedHead to false
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9757248Z 
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9757370Z HEAD is now at 0e4b222 Merge pull request #502 from DivyanshGolyan/zig-0.17-migration
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9780553Z ##[endgroup]
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9816609Z [command]/usr/bin/git log -1 --format=%H
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9837299Z 0e4b2225d106dd63fa9c38801188facb5e9c6335
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9843996Z ##[group]Removing auth
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9846494Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:42.9870977Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0038929Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0057459Z http.https://github.com/.extraheader
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0062416Z [command]/usr/bin/git config --local --unset-all http.https://github.com/.extraheader
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0088127Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0249940Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0272963Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (ubuntu-24.04)	Check out the previous known installed build	2026-10-18T19:00:43.0431017Z ##[endgroup]
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	﻿2026-10-18T19:00:43.0524577Z ##[group]Run set -euo pipefail
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0524766Z ^[[36;1mset -euo pipefail^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0524902Z ^[[36;1muname -sm^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0525026Z ^[[36;1mgit rev-parse HEAD^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0525156Z ^[[36;1mzig version^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0525285Z ^[[36;1mmkdir -p "$RUI_UPGRADE_FAILURES"^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0525491Z ^[[36;1mmv .amp/previous-release "$RUNNER_TEMP/previous-release"^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0525735Z ^[[36;1mpython3 -B tests/integration/previous_release_upgrade.py . .^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0526038Z ^[[36;1mpython3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .^[[0m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0577203Z shell: /usr/bin/bash -e {0}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0577342Z env:
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0577466Z   ZIG_GLOBAL_CACHE_DIR: /home/runner/.cache/zig
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0577672Z   RUI_UPGRADE_FAILURES: /home/runner/work/_temp/rui-upgrade-data
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0577862Z ##[endgroup]
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0644242Z Linux x86_64
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0654689Z ad16a67b01e419ed0cb78773f0508bd53c54bc0a
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.0683247Z 0.17.0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.1105641Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.2765545Z Building ad16a67 with Zig 0.17.0.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.2765820Z Preparing dependencies in /home/runner/.cache/zig ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:43.3279026Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:00:58.3420421Z Build still running (15 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:13.3421210Z Build still running (30 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:28.3422581Z Build still running (45 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:43.3423744Z Build still running (60 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9714661Z Build Summary: 42/42 steps succeeded
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9715016Z install success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9715217Z +- install rui success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9715410Z |  +- compile exe rui safe native success 1m MaxRSS:1G
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9715620Z |     +- run sh (pinned-transport-x86_64-linux) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9715858Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9716513Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9716830Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9717110Z |     +- translate-c sqlite cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9717401Z |     |  +- compile exe translate-c fast native cached 5ms MaxRSS:39M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9717706Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9717924Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9718129Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9718362Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9718684Z |     |  |  |  +- compile exe generate-def debug native cached 6ms MaxRSS:40M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9718953Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9719147Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9719364Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9719551Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9719738Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9719923Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9720110Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9720296Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9720486Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9720673Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9720866Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9721057Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9721268Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9721456Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9721869Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9722238Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9722455Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9722638Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9722829Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723016Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723201Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723387Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723570Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723752Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9723936Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9724124Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9724315Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9724499Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9724683Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9724868Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725049Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725231Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725414Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725596Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725773Z |     |  +- WriteFile sqlite.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9725925Z |     +- translate-c posix cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9726127Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9726336Z |     |  +- WriteFile posix.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9726485Z |     +- run bash (vaxis) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9726728Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9726872Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727010Z |     +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727142Z |     +- translate-c curl cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727333Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727538Z |     |  +- WriteFile curl.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727710Z |     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9727903Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9728088Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9728296Z |     |  +- compile exe uucode_generate debug native cached 5ms MaxRSS:39M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9728504Z |     |     +- WriteFile build_config.zig cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9728670Z |     +- WriteFile build_config.zig (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9728874Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9729077Z +- install rui-evaluator success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9729261Z    +- compile exe rui-evaluator safe native success 20s MaxRSS:951M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9729454Z       +- run sh (quickjs.c) success 8ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:52.9729552Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0250447Z Checking the built command ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0459463Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0460101Z Installed ad16a67 at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/home/.local/bin/rui.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0460493Z Previous builds, Stores and credentials were preserved.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0464222Z Your PATH currently selects: no rui command
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0464514Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0464896Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0465159Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0465247Z Selected Store status (read only):
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0472293Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0474017Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0474503Z Start with: "/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/home/.local/bin/rui"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.0797168Z Installed artifact sha256=14629493e1eab15709176d53f8bae5d9134cfc4d406c277b910979d6e299e346
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.2771810Z rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store $'/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store' --instance 69cebb90c0a5e212361c92f2d0b3834c
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.2773218Z {"version":"1","type":"host_stop","status":"acknowledged","store":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store","instance":"69cebb90c0a5e212361c92f2d0b3834c","retirement":"unconfirmed"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.3523915Z Previous build saved the exact answer and released the Store
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.3536211Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.3735496Z Building ad16a67 with Zig 0.17.0.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.3735814Z Preparing dependencies in /home/runner/.cache/zig ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4232791Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4914917Z Build Summary: 42/42 steps succeeded
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4915418Z install success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4915673Z +- install rui success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4915922Z |  +- compile exe rui safe native cached 13ms MaxRSS:42M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4916253Z |     +- run sh (pinned-transport-x86_64-linux) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4916491Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4916675Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4916851Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4917018Z |     +- translate-c sqlite cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4917239Z |     |  +- compile exe translate-c fast native cached 6ms MaxRSS:40M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4917831Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4918025Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4918224Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4918456Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4918772Z |     |  |  |  +- compile exe generate-def debug native cached 5ms MaxRSS:36M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4919101Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4919385Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4919669Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4919944Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4920213Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4920391Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4920577Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4920756Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4920945Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4921123Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4921308Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4921493Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4921670Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4921850Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4922023Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4922344Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4922526Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4922704Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923017Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923200Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923376Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923554Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923730Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4923907Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924085Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924265Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924447Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924624Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924804Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4924985Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4925159Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4925338Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4925516Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4925693Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4925866Z |     |  +- WriteFile sqlite.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926015Z |     +- translate-c posix cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926213Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926417Z |     |  +- WriteFile posix.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926559Z |     +- run bash (vaxis) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926697Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926833Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4926968Z |     +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4927094Z |     +- translate-c curl cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4927280Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4927594Z |     |  +- WriteFile curl.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4927761Z |     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4927949Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4928132Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4928330Z |     |  +- compile exe uucode_generate debug native cached 5ms MaxRSS:37M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4928531Z |     |     +- WriteFile build_config.zig cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4928692Z |     +- WriteFile build_config.zig (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4928884Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4929076Z +- install rui-evaluator success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4929253Z    +- compile exe rui-evaluator safe native cached 12ms MaxRSS:39M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4929437Z       +- run sh (quickjs.c) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.4929526Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5065219Z Checking the built command ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5273912Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5274413Z Installed ad16a67 at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/home/.local/bin/rui.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5274956Z Previous builds, Stores and credentials were preserved.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5278097Z Your PATH currently selects: no rui command
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5278383Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5278819Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5279045Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5279126Z Selected Store status (read only):
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5285766Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5287452Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.5287919Z Start with: "/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/home/.local/bin/rui"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.6049987Z Installed artifact sha256=14629493e1eab15709176d53f8bae5d9134cfc4d406c277b910979d6e299e346
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.7762464Z {"version":"1","type":"host_status","status":"ready","store":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store","instance":"b2fd51614d23b66cc634ef22dc72075a","active_capacity":"100","intake_capacity":"100","descriptor_limit":"930","capabilities":{"bash":true,"model":true,"managed_authentication":true},"diagnostics":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store/diagnostics"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.7763379Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.7974016Z {"version":"1","type":"host_status","status":"ready","store":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store","instance":"b2fd51614d23b66cc634ef22dc72075a","active_capacity":"100","intake_capacity":"100","descriptor_limit":"930","capabilities":{"bash":true,"model":true,"managed_authentication":true},"diagnostics":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store/diagnostics"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.7974914Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.8439111Z rui: stop affects all work in this Store. Retry only this exact target: rui host stop --store $'/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store' --instance b2fd51614d23b66cc634ef22dc72075a
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.8441025Z {"version":"1","type":"host_stop","status":"acknowledged","store":"/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-xb0v8n93/store","instance":"b2fd51614d23b66cc634ef22dc72075a","retirement":"unconfirmed"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.8883658Z Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:53.9334500Z Installing 0e4b2225d106dd63fa9c38801188facb5e9c6335 through ./install.sh
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.0885440Z Building 0e4b222 with Zig 0.17.0.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.0885820Z Preparing dependencies in /home/runner/.cache/zig ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.0977841Z Preparing pinned openssl dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.1039556Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.1040264Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.1040590Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.2707572Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.2707937Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.3493137Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.6458520Z   0 52.4M    0  110k    0     0   449k      0  0:01:59 --:--:--  0:01:59  449k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:01:54.6458928Z 100 52.4M  100 52.4M    0     0  96.6M      0 --:--:-- --:--:-- --:--:--  176M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.2921344Z warning: overwriting existing dependency named "openssl"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.2967613Z Preparing pinned sqlite dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.3005792Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.3006228Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.3006506Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.3650506Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.9325407Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:01.9325896Z 100 2877k  100 2877k    0     0  4553k      0 --:--:-- --:--:-- --:--:-- 4553k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:02.6676134Z warning: overwriting existing dependency named "sqlite"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:02.6724064Z Preparing pinned curl dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:02.6763156Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:02.6763600Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:02.6763840Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:03.1197407Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:03.1197922Z 100 2883k  100 2883k    0     0  6503k      0 --:--:-- --:--:-- --:--:-- 6509k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.5757838Z warning: overwriting existing dependency named "curl"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.5805248Z Preparing pinned nghttp2 dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.5845008Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.5845462Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.5845714Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.7615813Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.7616291Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.9215421Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:04.9216058Z 100 1971k  100 1971k    0     0  5848k      0 --:--:-- --:--:-- --:--:-- 5848k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.7490114Z warning: overwriting existing dependency named "nghttp2"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.7538165Z Preparing pinned utf8proc dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.7577033Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.7577516Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.7577775Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.9488022Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:05.9488386Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.2093116Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.2094804Z 100  197k  100  197k    0     0   437k      0 --:--:-- --:--:-- --:--:--  437k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.2996685Z warning: overwriting existing dependency named "utf8proc"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.3041304Z Preparing pinned quickjs dependency ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.3079931Z   % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.3080327Z                                  Dload  Upload   Total   Spent    Left  Speed
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.3080479Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.3619058Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.4469483Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.4469862Z   0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.8052641Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:06.8052918Z 100  881k    0  881k    0     0  1771k      0 --:--:-- --:--:-- --:--:-- 1771k
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:07.2177974Z warning: overwriting existing dependency named "quickjs"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:07.2556618Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:22.2773177Z Build still running (15 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:37.2713351Z Build still running (30 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:02:52.2701158Z Build still running (45 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:07.2703130Z Build still running (60 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:22.2704405Z Build still running (75 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:37.2713257Z Build still running (90 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5147754Z install
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148004Z +- install rui
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148187Z    +- compile exe rui safe native
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148363Z       +- run sh (pinned-transport-x86_64-linux) w
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148548Z Building pinned OpenSSL ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148686Z Building pinned nghttp2 ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5148822Z Building pinned curl ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5149905Z failed command: sh ./src/build_transport.sh /home/runner/work/_temp/previous-release/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/runner/work/_temp/previous-release/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/runner/work/_temp/previous-release/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/runner/work/_temp/previous-release/src/curl-post-retry.patch /home/runner/work/_temp/previous-release/.zig-cache/o/f170400f0262ef861c70965072ed9605/pinned-transport-x86_64-linux x86_64-linux /home/runner/work/_temp/rui-zig/zig
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:47.5150951Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:03:52.2707861Z Build still running (105 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:07.2708999Z Build still running (120 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:22.2710311Z Build still running (135 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:37.2711496Z Build still running (150 seconds elapsed).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1864306Z Build Summary: 38/38 steps succeeded
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1864755Z install success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1865129Z +- install rui success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1865426Z |  +- compile exe rui safe native success 1m MaxRSS:932M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1865755Z |     +- run sh (pinned-transport-x86_64-linux) success 1m
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1866061Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1866351Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1866677Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1866957Z |     +- translate-c sqlite success 26ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1867264Z |     |  +- compile exe translate-c fast native success 1m MaxRSS:1G
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1867569Z |     |  |  +- options success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1867825Z |     |  |  +- options success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1868035Z |     |  |  +- options success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1868297Z |     |  |  +- run exe generate-def (aarch64.zig) success 26ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1868535Z |     |  |  |  +- compile exe generate-def debug native success 500ms MaxRSS:148M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1868767Z |     |  |  +- run exe generate-def (amdgcn.zig) success 110ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1868968Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1869168Z |     |  |  +- run exe generate-def (arm.zig) success 18ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1869363Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1869559Z |     |  |  +- run exe generate-def (bpf.zig) success 2ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1869751Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1869948Z |     |  |  +- run exe generate-def (common.zig) success 109ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1870144Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1870345Z |     |  |  +- run exe generate-def (hexagon.zig) success 148ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1872323Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1872525Z |     |  |  +- run exe generate-def (loongarch.zig) success 75ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1872722Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1872926Z |     |  |  +- run exe generate-def (mips.zig) success 36ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1873122Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1873316Z |     |  |  +- run exe generate-def (neon.zig) success 85ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1873513Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1873710Z |     |  |  +- run exe generate-def (nvptx.zig) success 75ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1873906Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1874104Z |     |  |  +- run exe generate-def (powerpc.zig) success 38ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1874304Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1874506Z |     |  |  +- run exe generate-def (riscv.zig) success 8ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1874700Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1874898Z |     |  |  +- run exe generate-def (s390x.zig) success 14ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1875089Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1875283Z |     |  |  +- run exe generate-def (ve.zig) success 84ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1875483Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1875689Z |     |  |  +- run exe generate-def (wasm.zig) success 22ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1875885Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1876082Z |     |  |  +- run exe generate-def (x86_64.zig) success 25ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1876277Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1876603Z |     |  |  +- run exe generate-def (x86.zig) success 170ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1876798Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1876994Z |     |  |  +- run exe generate-def (xcore.zig) success 1ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1877188Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1877366Z |     |  +- WriteFile sqlite.h success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1877526Z |     +- translate-c posix success 35ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1877740Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1877960Z |     |  +- WriteFile posix.h success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1878107Z |     +- options success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1878244Z |     +- translate-c curl success 44ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1878446Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1878656Z |     |  +- WriteFile curl.h success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1878832Z |     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879037Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879260Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879469Z +- install rui-evaluator success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879656Z    +- compile exe rui-evaluator safe native success 41s MaxRSS:911M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879850Z       +- run sh (quickjs.c) success 7ms
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.1879954Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2138370Z Checking the built command ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2355468Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2355901Z Installed 0e4b222 at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/home/.local/bin/rui.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2356582Z Previous builds, Stores and credentials were preserved.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2359841Z Your PATH currently selects: no rui command
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2360165Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2360700Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2361123Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2361206Z Selected Store status (read only):
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2368008Z Host: unavailable (no current Store owner established)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2369577Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2370090Z Start with: "/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/home/.local/bin/rui"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.2872519Z Installed artifact sha256=99566cd9fedb32fd9fd23678fcd3058c6180eda25c95402ffb070b9ffd0dca39
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.4669336Z Rui: Stop affects all work in this Store. Retain this exact target if the reply is lost.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.4669784Z Store: /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/store
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.4670132Z Host instance: 3c94257a421d781871aaf3018e26c777 (retry with --instance 3c94257a421d781871aaf3018e26c777)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.4674561Z Rui: Stop acknowledged; completion and lease release are not confirmed. Inspect rui host status.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.5839643Z Previous build saved the exact answer and released the Store
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.5852237Z Installing ad16a67b01e419ed0cb78773f0508bd53c54bc0a through ./install.sh
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.6055904Z Building ad16a67 with Zig 0.17.0.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.6056247Z Preparing dependencies in /home/runner/.cache/zig ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.6572921Z Building Rui and its native dependencies. A first build can take several minutes.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7237166Z Build Summary: 42/42 steps succeeded
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7237597Z install success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7237922Z +- install rui success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7238138Z |  +- compile exe rui safe native cached 13ms MaxRSS:42M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7238357Z |     +- run sh (pinned-transport-x86_64-linux) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7238559Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7238760Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7238949Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7239398Z |     +- translate-c sqlite cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7239601Z |     |  +- compile exe translate-c fast native cached 6ms MaxRSS:42M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7239795Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7239935Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7240066Z |     |  |  +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7240217Z |     |  |  +- run exe generate-def (aarch64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7240435Z |     |  |  |  +- compile exe generate-def debug native cached 5ms MaxRSS:40M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7240653Z |     |  |  +- run exe generate-def (amdgcn.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7240847Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241051Z |     |  |  +- run exe generate-def (arm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241239Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241425Z |     |  |  +- run exe generate-def (bpf.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241615Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241809Z |     |  |  +- run exe generate-def (common.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7241997Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7242428Z |     |  |  +- run exe generate-def (hexagon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7242618Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7242811Z |     |  |  +- run exe generate-def (loongarch.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243006Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243192Z |     |  |  +- run exe generate-def (mips.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243382Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243566Z |     |  |  +- run exe generate-def (neon.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243749Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7243939Z |     |  |  +- run exe generate-def (nvptx.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7244131Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7244464Z |     |  |  +- run exe generate-def (powerpc.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7244656Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7244846Z |     |  |  +- run exe generate-def (riscv.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245036Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245223Z |     |  |  +- run exe generate-def (s390x.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245407Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245597Z |     |  |  +- run exe generate-def (ve.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245788Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7245978Z |     |  |  +- run exe generate-def (wasm.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7246165Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7246356Z |     |  |  +- run exe generate-def (x86_64.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7246552Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7246737Z |     |  |  +- run exe generate-def (x86.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7246922Z |     |  |  |  +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7247108Z |     |  |  +- run exe generate-def (xcore.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7247292Z |     |  |     +- compile exe generate-def debug native (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7247470Z |     |  +- WriteFile sqlite.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7247624Z |     +- translate-c posix cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7247829Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248041Z |     |  +- WriteFile posix.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248190Z |     +- run bash (vaxis) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248336Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248479Z |     +- run bash (vaxis) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248717Z |     +- options cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7248854Z |     +- translate-c curl cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7249048Z |     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7249257Z |     |  +- WriteFile curl.h cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7249432Z |     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7249630Z |     +- run sh (pinned-transport-x86_64-linux) (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7249893Z |     +- run exe uucode_generate (tables.zig) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7250134Z |     |  +- compile exe uucode_generate debug native cached 3ms MaxRSS:39M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7250345Z |     |     +- WriteFile build_config.zig cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7250513Z |     +- WriteFile build_config.zig (reused)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7250716Z +- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7250920Z +- install rui-evaluator success
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7251106Z    +- compile exe rui-evaluator safe native cached 14ms MaxRSS:38M
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7251302Z       +- run sh (quickjs.c) cached
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7251400Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7397750Z Checking the built command ...
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7611658Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7612017Z Installed ad16a67 at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/home/.local/bin/rui.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7612617Z Previous builds, Stores and credentials were preserved.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7622679Z Your PATH currently selects: no rui command
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7623315Z For this shell, run: export PATH="$HOME/.local/bin:$PATH"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7623760Z If an open shell still selects an older command, run hash -r (Bash) or rehash (Zsh).
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7624053Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7624147Z Selected Store status (read only):
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7625519Z {"version":"1","type":"host_status","status":"unavailable"}
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7627628Z A running Host keeps its old executable. After its work finishes, use rui host stop.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.7628181Z Start with: "/home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/home/.local/bin/rui"
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.8275257Z Installed artifact sha256=14629493e1eab15709176d53f8bae5d9134cfc4d406c277b910979d6e299e346
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9556773Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9557634Z rui: detached Host startup failed for Store /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/store:
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9558992Z rui: unsupported Store format at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/store: found schema 21, this build supports schema 24 (wire 1). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560095Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560253Z rui: host serve failed; syntax and recovery: rui host serve --help
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560476Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560578Z error: WrongStoreVersion (exit status 1)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560788Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9560917Z rui: host start failed; syntax and recovery: rui host start --help
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9561076Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9561139Z error: HostStartupFailed (exit status 1)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9561246Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9572302Z Breaking format 21→24 host start refused in 0.102s; SQLite hashes unchanged
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9583993Z rui: unsupported Store format at /home/runner/work/_temp/rui-upgrade-data/rui-upgrade-d0tf2opw/store: found schema 21, this build supports schema 24 (wire 1). Use a compatible Rui build at the Store's original path, or back up this Store and choose a fresh Store with --store. No migration was performed; do not delete your saved work.
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9585006Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9585168Z rui: host serve failed; syntax and recovery: rui host serve --help
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9585398Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9585498Z error: WrongStoreVersion (exit status 1)
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9585639Z 
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9593658Z Breaking format 21→24 host serve refused in 0.001s; SQLite hashes unchanged
+upgrade (ubuntu-24.04)	Install, save real work, reinstall and restart the same Store	2026-10-18T19:04:51.9842984Z Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay
+upgrade (ubuntu-24.04)	Post Check out the previous known installed build	﻿2026-10-18T19:04:51.9988534Z Post job cleanup.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	﻿2026-10-18T19:04:52.0641717Z Post job cleanup.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:52.0645814Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__212cd4f3-e9ff-451f-bddd-2400ab85cc99.build-cache]
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:52.4108380Z Post job cleanup.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:52.4821276Z (node:97178) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:52.4821909Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:52.4936553Z [command]/usr/bin/tar --posix -cf cache.tzst --exclude cache.tzst -P -C /home/runner/work/rui/rui --files-from manifest.txt --use-compress-program zstdmt
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.3119080Z ##[warning]Cache reservation failed: cache write denied: token has no writable scopes
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.3120825Z Failed to save: Unable to reserve cache with key rui-build-v2-Linux-X64-0.17.0-3785dd965ef2fad41dcb55a9675d3974da29c76f52a071be90aa7f1f2d90b840-5be2cf99dd65f8a4a4921cbfd513e6c50cbf99f8cd24479587bff93deb99f920-04fec4c2c27c0d608d36ca00679eca1f80900e84b3588b6d021644bf5f69e8f1-all, another job may be creating this cache.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.3595147Z ##[end-action id=__212cd4f3-e9ff-451f-bddd-2400ab85cc99.build-cache;outcome=success;conclusion=success;duration_ms=3294]
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.3597398Z ##[start-action display=Run actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830;id=__212cd4f3-e9ff-451f-bddd-2400ab85cc99.__actions_cache]
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.3623842Z Post job cleanup.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.4366914Z Cache hit occurred on the primary key rui-compiler-Linux-X64-0.17.0, not saving cache.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.4367929Z (node:97198) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.4368537Z (Use `node --trace-deprecation ...` to show where the warning was created)
+upgrade (ubuntu-24.04)	Post Run ./.github/actions/setup	2026-10-18T19:04:55.4423734Z ##[end-action id=__212cd4f3-e9ff-451f-bddd-2400ab85cc99.__actions_cache;outcome=success;conclusion=success;duration_ms=82]
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	﻿2026-10-18T19:04:55.4482920Z Post job cleanup.
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5051572Z [command]/usr/bin/git version
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5084893Z git version 2.55.0
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5114872Z Temporarily overriding HOME='/home/runner/work/_temp/3ca6afa7-5ad3-403e-8c2e-b33db1c92fb1' before making global git config changes
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5115440Z Adding repository directory to the temporary git global config as a safe directory
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5115873Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/rui/rui
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5150466Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5180559Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5384100Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5412855Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5653037Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+upgrade (ubuntu-24.04)	Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262	2026-10-18T19:04:55.5683685Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+upgrade (ubuntu-24.04)	Complete job	﻿2026-10-18T19:04:55.5985381Z Cleaning up orphan processes
+upgrade (ubuntu-24.04)	Complete job	2026-10-18T19:04:55.6189639Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830, actions/checkout@11d5960a326750d5838078e36cf38b85af677262. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

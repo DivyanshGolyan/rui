@@ -1,0 +1,15 @@
+.github/workflows/check.yml
+docs/proposals/l2-boundaries.md
+src/ScratchBudget.zig
+src/bash.zig
+src/bounded.zig
+src/evaluator.zig
+src/model_adapter.zig
+src/named_scratch.zig
+src/output_retention.zig
+src/protocol.zig
+src/provider.zig
+src/store.zig
+tests/ci/import_architecture.py
+tests/ci/import_cycles.json
+tests/ci/test_import_architecture.py
