@@ -31,7 +31,7 @@ FOREIGN = {"std", "builtin", "posix", "sqlite", "curl", "transport_options",
 # Only these reviewed lint loops expand literal file lists. Changing a loop
 # requires reviewing its expansion, even after the new source reaches main.
 DYNAMIC_EMBEDS = {
-    "src/logic_tests.zig": "c40eaf0047dade839fc0af1c0a812b62b538a83509fb0954a9fd3b5b13f9b597",
+    "src/logic_tests.zig": "c53e88f9288fa3a93df8f57c7ec8816805347d88dfb71e53f5191b14df723033",
     "src/socket_fixture.zig": "02be8f3f2defeefdca57d5aeabc992c2f8d1654f048bfc1276fd737628ab5837",
 }
 POLICY = ("tests/ci/suite_inputs.py", "tests/ci/import_architecture.py",
@@ -42,7 +42,7 @@ POLICY = ("tests/ci/suite_inputs.py", "tests/ci/import_architecture.py",
 # remain the reviewed build/native/bootstrap code; any change or added consumer
 # requires a closure review, even after reaching main. Current consumers read
 # only the bound source, package and toolchain sets, with no root-local headers.
-BUILD_OWNER = "be48131518e18fcfd78af42a77bfcf2a8c59f64bb45fe10acbb9360eb2107633"
+BUILD_OWNER = "29657aae51cb082a498aa85b8c7ce024a7621f21db45db9c57c8e459223795c7"
 
 
 def git(*args, binary=False):
