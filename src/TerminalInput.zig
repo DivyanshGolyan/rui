@@ -431,7 +431,9 @@ test "malformed keyboard values fail closed on every supported route; unknown ke
     }
     // Keys this parser does not know, private reports and an unrequested
     // cursor position report are still ignored, keeping what follows.
-    for ([_][]const u8{ "\x1b[123;4~", "\x1b[27~", "\x1b[99999~", "\x1b[?1~", "\x1b[5;10R", "\x1b[?5;10;1R" }) |sequence| {
+    // A private marker means not a key on every route, so one terminal
+    // setting (xterm modifyCursorKeys/modifyFunctionKeys 3) is ignored alike.
+    for ([_][]const u8{ "\x1b[123;4~", "\x1b[27~", "\x1b[99999~", "\x1b[?1~", "\x1b[>5;5~", "\x1b[>1;5A", "\x1b[?1;0;256S", "\x1b[>1;2u", "\x1b[=1u", "\x1b[<1u", "\x1b[5;10R", "\x1b[?5;10;1R" }) |sequence| {
         var input: Self = .{};
         for (sequence) |byte| try std.testing.expect(input.feed(byte, 0) == .none);
         try std.testing.expectEqualStrings("Q", testEvent(input.feed('Q', 0)).?.key_press.text.?);
