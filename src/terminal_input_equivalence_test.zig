@@ -246,7 +246,7 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
     }
     // Encoded Enter/Ctrl-R are never keyboard gestures inside marked paste.
     // In particular they cannot submit or recover, even if framing splits.
-    for ([_][]const u8{ "\x1b[13u", "\x1b[114;5u", "\x1b[27;5;114~" }) |encoded| {
+    for ([_][]const u8{ "\x1b[13u", "\x1b[114;5u", "\x1b[27;5;114~", "\x1b[13;2u", "\x1b[27;2;13~", "\x1b[13;5u", "\x1b[27;5;13~" }) |encoded| {
         var storage: [128]u8 = undefined;
         var editor: Editor = .{ .buffer = &storage };
         var input: Input = .{};
@@ -259,6 +259,29 @@ test "TD2 double ESC retains fragmented paste provenance and the following edit"
         try std.testing.expectEqual(Editor.Event.invalid, outcome.event);
         try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         try std.testing.expectEqualStrings("kept", storage[0..editor.length]);
+    }
+}
+
+test "TD2 Ghostty Ctrl-Enter cannot turn retained choice text into a submission" {
+    // Ghostty's legacy function-key table emits case27 even without mode
+    // negotiation. Ctrl-Enter is not Rui's Enter binding: like other unbound
+    // Ctrl chords it rejects input, rather than submitting an existing 'a'.
+    for ([_][]const u8{ "\x1b[13;5u", "\x1b[27;5;13~" }) |encoded| {
+        for (0..encoded.len + 1) |split| for ([_]bool{ false, true }) |choice| {
+            var storage: [128]u8 = undefined;
+            var editor: Editor = .{ .buffer = &storage, .allow_paste = !choice };
+            var input: Input = .{};
+            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+            feed(&editor, &input, "a", &outcome);
+            feed(&editor, &input, encoded[0..split], &outcome);
+            feed(&editor, &input, encoded[split..], &outcome);
+            try std.testing.expectEqual(@as(usize, 0), outcome.submits);
+            try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+            feed(&editor, &input, "\r", &outcome);
+            try std.testing.expectEqual(Editor.Event.invalid, outcome.event);
+            try std.testing.expectEqual(@as(usize, 0), outcome.submits);
+            try std.testing.expectEqualStrings("a", storage[0..editor.length]);
+        };
     }
 }
 
