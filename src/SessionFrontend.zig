@@ -648,7 +648,6 @@ fn retainChoiceCommand(self: *Self) void {
     if (std.mem.startsWith(u8, self.choice.buffer[0..self.choice.length], "/")) return;
     self.choice.length = 0;
     self.choice.cursor = 0;
-    self.choice.plain_ascii = true;
 }
 
 /// The choice keeps the Action's heading lines beside it once paging hides
@@ -801,7 +800,7 @@ fn olderWanted(self: *const Self) bool {
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     const stream = &self.input.stream;
     const pending = stream.pending();
-    const byte = (self.terminal.next(self.init.io, pending, wait) catch |err| switch (err) {
+    const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
         error.InputDeadline => {
             if (try stream.expire()) try self.navigation(.close_view);
             // Successful expiry releases decoder custody. Revisit redraw and
@@ -815,7 +814,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     self.dirty = true;
     // One stream decodes every byte; replies never reach an editor, and an
     // event left in a suffix is delivered in order before the next byte.
-    var decoded = stream.feed(byte);
+    var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
             .width => |method| self.terminal.screen.setWidth(method),
@@ -1361,7 +1360,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         const Keys = struct {
             fn send(frontend: *Self, bytes: []const u8) !void {
                 for (bytes) |byte| {
-                    var decoded = frontend.input.stream.feed(byte);
+                    var decoded = frontend.input.stream.feed(byte, 0);
                     while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
                 }
             }

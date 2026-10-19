@@ -408,3 +408,246 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  /// Parse a param buffer, returning a default value if the param was empty
  inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
      if (buf.len == 0) return default;
+diff --git a/src/Parser.zig b/src/Parser.zig
+--- a/src/Parser.zig
++++ b/src/Parser.zig
+@@ -16,6 +16,10 @@
+ pub const Result = struct {
+     event: ?Event,
+     n: usize,
++    /// A complete keyboard sequence of a supported form whose values are
++    /// malformed: modifiers, event type, key scalar or associated text. `n`
++    /// covers the sequence. It is not an unknown sequence to ignore.
++    invalid: bool = false,
+ };
+ 
+ /// Shared cursor query state. The count and idle deadline are updated together
+@@ -410,6 +414,7 @@
+         }
+     } else return .{ .event = null, .n = 0 };
+     const null_event: Result = .{ .event = null, .n = sequence.len };
++    const invalid_key: Result = .{ .event = null, .n = sequence.len, .invalid = true };
+ 
+     const final = sequence[sequence.len - 1];
+     if (final == 'R') report: {
+@@ -461,32 +466,17 @@
+                 },
+             };
+ 
+-            field2: {
++            if (field_iter.next()) |field_buf| {
+                 // modifier_mask:event_type
+-                const field_buf = field_iter.next() orelse break :field2;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                const modifier_buf = param_iter.next() orelse unreachable;
+-                const modifier_mask = parseParam(u8, modifier_buf, 1) orelse return null_event;
+-                key.mods = @bitCast(modifier_mask -| 1);
+-
+-                if (param_iter.next()) |event_type_buf| {
+-                    is_release = std.mem.eql(u8, event_type_buf, "3");
+-                }
++                const modifiers = parseKeyModifiers(field_buf) orelse return invalid_key;
++                key.mods = modifiers.mods;
++                is_release = modifiers.release;
+             }
+-
+-            field3: {
++            if (field_iter.next()) |field_buf| {
+                 // text_as_codepoint[:text_as_codepoint]
+-                const field_buf = field_iter.next() orelse break :field3;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                var total: usize = 0;
+-                while (param_iter.next()) |cp_buf| {
+-                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
+-                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (length > text_buf.len - total) return null_event;
+-                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+-                }
+-                key.text = text_buf[0..total];
++                key.text = parseKeyText(field_buf, text_buf) orelse return invalid_key;
+             }
++            if (field_iter.next() != null) return invalid_key;
+ 
+             const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
+             return .{
+@@ -514,6 +504,8 @@
+             const number_buf = field_iter.next() orelse unreachable; // always will have one field
+             const number = parseParam(u16, number_buf, null) orelse return null_event;
+             if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
++            // A modifier field exists only on a supported key; malformed ones
++            // fail closed below instead of ignoring the key the user pressed.
+ 
+             var key: Key = .{
+                 .codepoint = switch (number) {
+@@ -543,32 +535,17 @@
+             };
+ 
+             var is_release: bool = false;
+-            field2: {
++            if (field_iter.next()) |field_buf| {
+                 // modifier_mask:event_type
+-                const field_buf = field_iter.next() orelse break :field2;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                const modifier_buf = param_iter.next() orelse unreachable;
+-                const modifier_mask = parseParam(u8, modifier_buf, 1) orelse return null_event;
+-                key.mods = @bitCast(modifier_mask -| 1);
+-
+-                if (param_iter.next()) |event_type_buf| {
+-                    is_release = std.mem.eql(u8, event_type_buf, "3");
+-                }
++                const modifiers = parseKeyModifiers(field_buf) orelse return invalid_key;
++                key.mods = modifiers.mods;
++                is_release = modifiers.release;
+             }
+-
+-            field3: {
++            if (field_iter.next()) |field_buf| {
+                 // text_as_codepoint[:text_as_codepoint]
+-                const field_buf = field_iter.next() orelse break :field3;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                var total: usize = 0;
+-                while (param_iter.next()) |cp_buf| {
+-                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
+-                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (length > text_buf.len - total) return null_event;
+-                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+-                }
+-                key.text = text_buf[0..total];
++                key.text = parseKeyText(field_buf, text_buf) orelse return invalid_key;
+             }
++            if (field_iter.next() != null) return invalid_key;
+ 
+             const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
+             return .{
+@@ -667,44 +644,30 @@
+                 const field_buf = field_iter.next() orelse unreachable; // There will always be at least one field
+                 var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+                 const codepoint_buf = param_iter.next() orelse unreachable;
+-                key.codepoint = parseParam(u21, codepoint_buf, null) orelse return null_event;
++                key.codepoint = parseScalar(codepoint_buf) orelse return invalid_key;
+ 
+                 if (param_iter.next()) |shifted_cp_buf| {
+-                    key.shifted_codepoint = parseParam(u21, shifted_cp_buf, null);
++                    if (shifted_cp_buf.len != 0) key.shifted_codepoint = parseScalar(shifted_cp_buf) orelse return invalid_key;
+                 }
+                 if (param_iter.next()) |base_layout_buf| {
+-                    key.base_layout_codepoint = parseParam(u21, base_layout_buf, null);
++                    key.base_layout_codepoint = parseScalar(base_layout_buf) orelse return invalid_key;
+                 }
++                if (param_iter.next() != null) return invalid_key;
+             }
+ 
+             var is_release: bool = false;
+ 
+-            field2: {
++            if (field_iter.next()) |field_buf| {
+                 // modifier_mask:event_type
+-                const field_buf = field_iter.next() orelse break :field2;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                const modifier_buf = param_iter.next() orelse unreachable;
+-                const modifier_mask = parseParam(u8, modifier_buf, 1) orelse return null_event;
+-                key.mods = @bitCast(modifier_mask -| 1);
+-
+-                if (param_iter.next()) |event_type_buf| {
+-                    is_release = std.mem.eql(u8, event_type_buf, "3");
+-                }
++                const modifiers = parseKeyModifiers(field_buf) orelse return invalid_key;
++                key.mods = modifiers.mods;
++                is_release = modifiers.release;
+             }
+-
+-            field3: {
++            if (field_iter.next()) |field_buf| {
+                 // text_as_codepoint[:text_as_codepoint]
+-                const field_buf = field_iter.next() orelse break :field3;
+-                var param_iter = std.mem.splitScalar(u8, field_buf, ':');
+-                var total: usize = 0;
+-                while (param_iter.next()) |cp_buf| {
+-                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
+-                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (length > text_buf.len - total) return null_event;
+-                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
+-                }
+-                key.text = text_buf[0..total];
++                key.text = parseKeyText(field_buf, text_buf) orelse return invalid_key;
+             }
++            if (field_iter.next() != null) return invalid_key;
+ 
+             {
+                 // We check if we have *only* shift, no text, and a printable character. This can
+@@ -780,13 +743,15 @@
+ /// the code is the key's codepoint, unchecked as in the Kitty form. It is a
+ /// press with no associated text.
+ fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
+-    const null_event: Result = .{ .event = null, .n = n };
+-    const modifier_buf = fields.next() orelse return null_event;
+-    const code_buf = fields.next() orelse return null_event;
+-    if (fields.next() != null) return null_event;
+-    const modifier = parseParam(u8, modifier_buf, null) orelse return null_event;
+-    if (modifier < 1 or modifier > 16) return null_event;
+-    const code = parseParam(u21, code_buf, null) orelse return null_event;
++    // CSI 27 ~ alone is no key this parser knows: ignore it, as other
++    // unknown keys. With fields, every malformed value fails closed.
++    const modifier_buf = fields.next() orelse return .{ .event = null, .n = n };
++    const invalid_key: Result = .{ .event = null, .n = n, .invalid = true };
++    const code_buf = fields.next() orelse return invalid_key;
++    if (fields.next() != null) return invalid_key;
++    const modifier = parseDecimal(u8, modifier_buf) orelse return invalid_key;
++    if (modifier < 1 or modifier > 16) return invalid_key;
++    const code = parseScalar(code_buf) orelse return invalid_key;
+     return .{
+         .event = .{ .key_press = .{
+             .codepoint = code,
+@@ -796,6 +761,52 @@
+     };
+ }
+ 
++/// Kitty's modifiers[:event-type] field. The modifier is 1 plus an eight-bit
++/// mask, 1 through 256, and empty means 1. The event type is 1 (press), 2
++/// (repeat) or 3 (release), and empty means press. Any other value is null:
++/// never saturate or truncate it into a different key.
++fn parseKeyModifiers(field: []const u8) ?struct { mods: Key.Modifiers, release: bool } {
++    var params = std.mem.splitScalar(u8, field, ':');
++    const mask_buf = params.next().?;
++    const mask = if (mask_buf.len == 0) 1 else parseDecimal(u16, mask_buf) orelse return null;
++    if (mask < 1 or mask > 256) return null;
++    var event_type: u8 = 1;
++    if (params.next()) |buf| {
++        if (buf.len != 0) event_type = parseDecimal(u8, buf) orelse return null;
++    }
++    if (event_type < 1 or event_type > 3 or params.next() != null) return null;
++    return .{ .mods = @bitCast(@as(u8, @intCast(mask - 1))), .release = event_type == 3 };
++}
++
++/// Associated text: Unicode scalars that fit in `buffer`, or null if any is
++/// malformed or the whole text does not fit. Inserting it is the editor's
++/// decision, which rejects controls; a bound key ignores its text.
++fn parseKeyText(field: []const u8, buffer: []u8) ?[]const u8 {
++    var params = std.mem.splitScalar(u8, field, ':');
++    var total: usize = 0;
++    while (params.next()) |buf| {
++        const cp = parseScalar(buf) orelse return null;
++        const length = std.unicode.utf8CodepointSequenceLength(cp) catch unreachable;
++        if (length > buffer.len - total) return null;
++        total += std.unicode.utf8Encode(cp, buffer[total..]) catch unreachable;
++    }
++    return buffer[0..total];
++}
++
++/// A decimal Unicode scalar value: no surrogate, nothing past U+10FFFF.
++fn parseScalar(buf: []const u8) ?u21 {
++    const cp = parseDecimal(u21, buf) orelse return null;
++    if (cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff)) return null;
++    return cp;
++}
++
++/// Digits only: no sign, separator or empty value.
++fn parseDecimal(comptime T: type, buf: []const u8) ?T {
++    if (buf.len == 0) return null;
++    for (buf) |b| if (!std.ascii.isDigit(b)) return null;
++    return std.fmt.parseInt(T, buf, 10) catch null;
++}
++
+ /// Parse a param buffer, returning a default value if the param was empty
+ inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
+     if (buf.len == 0) return default;

@@ -315,9 +315,9 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | [Saved defaults](ARCHITECTURE.md#store-selection-and-defaults) | `'preference edits'`, `human_cli_integration.py` | Not credential, launch, Mac or power-loss |
 | Preference publication faults | `preference-policy-integration`, `zig test -lc src/preferences.zig --test-filter 'directory sync'` | Linux and macOS in `check`. No crash or power-loss durability |
 | Provider selection, credential status | `'installed local credential status'` | Selection does not prove remote acceptance |
-| Login chooser and SIGINT race | `'login owner'`, `codex_token_wire` tests | Synthetic exchange. Full chooser exchange and Mac PTY still required |
+| Login chooser and SIGINT race | `'login owner'`, `codex_token_wire` tests, `human_cli_integration.py` chooser keys | Synthetic exchange. Full chooser exchange and Mac PTY still required |
 | Masked login signal installation | `login-signal-integration` | Linux only. Unfixed owner must fail |
-| [Bounded editor](ARCHITECTURE.md#staged-persistent-input) | `test-logic -Dtest-filter=TerminalEditor`, `human_cli_integration.py long-input` | 65,536 bytes accept, 65,537 reject; non-sticky overflow must fail it. Linux PTY not Mac display or Option/Command keys |
+| [Bounded editor](ARCHITECTURE.md#staged-persistent-input) | `test-logic -Dtest-filter=TerminalEditor`, `TerminalInput` malformed/paste tests, `human_cli_integration.py long-input` | 65,536 bytes accept, 65,537 reject; non-sticky overflow must fail it. Linux PTY not Mac display or Option/Command keys |
 | [Lost-reply recovery](ARCHITECTURE.md#recovering-a-submission-after-a-lost-reply) in the composer | `human_cli_integration.py`, `zig test src/SessionSubmission.zig -lc --test-filter 'submission bounded'` | Count mutation exchanges, not only provider runs. Removing digest check must fail |
 | Tool activity presentation | `human_cli_integration.py` | Native Linux and macOS visual qualification required |
 | Departure and consent values | `session_departure`, `session_consent` in `test-logic` | Not native consent evidence |
