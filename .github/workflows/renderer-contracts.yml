@@ -8,7 +8,7 @@ on:
       - 'src/**'
       - 'build.zig*'
       - 'tests/ci/renderer_mutation*'
-      - 'tests/integration/session_sequence_model.py'
+      - 'tests/integration/session_sequence_model*.py'
       - 'tests/integration/input_equivalence.py'
       - 'tests/qualification/direct-pty/**'
       - '.github/workflows/renderer-contracts.yml'
@@ -28,6 +28,10 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [test, test-logic, sequence-model]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup
@@ -35,15 +39,24 @@ jobs:
           targets: '["test", "test-logic", "human-cli-integration"]'
           check-part: renderer-contracts
       - name: Test mutation evidence classification and isolation
-        run: python3 tests/ci/renderer_mutation_test.py
+        run: |
+          mkdir -p .amp/td3
+          set -o pipefail
+          python3 tests/ci/renderer_mutation_test.py 2>&1 | tee .amp/td3/mutation-selftests.log
+      - name: Test executed-overlay identity and internal build health
+        run: |
+          set -o pipefail
+          python3 tests/integration/session_sequence_model_test.py -v 2>&1 | tee .amp/td3/model-selftests.log
       - name: Require behavioral kills in isolated source copies
-        run: python3 tests/ci/renderer_mutation.py --output .amp/td3/mutations
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 tests/ci/renderer_mutation.py --target "$TARGET" --output .amp/td3/mutations
       - name: Retain exact-source counterexamples, patches and command logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: renderer-mutations-${{ github.sha }}-${{ github.run_attempt }}
-          path: .amp/td3/mutations
+          name: renderer-mutations-${{ matrix.target }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: .amp/td3
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
@@ -59,6 +72,7 @@ jobs:
           targets: '["test", "test-logic", "terminal-restoration-integration"]'
           check-part: renderer-contracts-native
       - name: Build one production artifact for the independent PTY suites
+        id: production
         run: |
           mkdir -p .amp/td3/contracts
           git rev-parse HEAD > .amp/td3/contracts/revision.txt
@@ -66,24 +80,27 @@ jobs:
           sha256sum zig-out/bin/rui > .amp/td3/contracts/binary.sha256
       - name: TD2 complete binding contracts (case27 remains mandatory)
         run: |
+          ulimit -Sn 256
           set -o pipefail
           zig build test-logic -j2 -Dtest-filter=TD2 --summary all 2>&1 | tee .amp/td3/contracts/td2.log
       - name: TD1 sequences through actual frontend transitions
         if: ${{ !cancelled() }}
-        run: python3 tests/integration/session_sequence_model.py --source "$PWD" --output .amp/td3/contracts/td1
+        run: |
+          ulimit -Sn 256
+          python3 tests/integration/session_sequence_model.py --source "$PWD" --output .amp/td3/contracts/td1
       - name: TD4 driver and disposal controls
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           python3 tests/qualification/direct-pty/test_driver.py -v
           python3 tests/qualification/direct-pty/controls.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/controls
       - name: TD4 direct PTY and short tmux smoke
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/pty --jobs 4
       - name: Ghostty primary input contracts (mandatory, separate from smoke)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: python3 tests/qualification/direct-pty/matrix.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/ghostty --jobs 4 --vectors tests/qualification/direct-pty/ghostty.json
       - name: TD2 original-recovery encoding contracts
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: python3 tests/integration/input_equivalence.py "$PWD/zig-out/bin/rui" --output .amp/td3/contracts/recovery
       - name: Retain each independent result without masking mandatory failures
         if: always()

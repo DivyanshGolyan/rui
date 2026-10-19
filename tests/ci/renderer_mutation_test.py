@@ -212,6 +212,25 @@ class MutationGateTests(unittest.TestCase):
                     gate.apply(root, mutation)
                 self.assertEqual((root / "source").read_text(), content)
 
+    def test_target_partition_runs_each_protection_once_and_rejects_empty_selection(self):
+        seen = []
+        for target in ("test", "test-logic", "sequence-model"):
+            with self.subTest(target=target), patch.object(sys, "argv", [
+                    gate.__file__, "--output", "unused", "--target", target]), \
+                    patch.object(gate, "run", return_value=True) as run:
+                self.assertEqual(gate.main(), 0)
+                selected = run.call_args.args[2]
+                self.assertTrue(selected)
+                self.assertTrue(all(mutation.check.target == target for mutation in selected))
+                seen.extend(mutation.name for mutation in selected)
+        self.assertCountEqual(seen, [mutation.name for mutation in gate.MUTATIONS])
+        with patch.object(sys, "argv", [gate.__file__, "--output", "unused", "--target", "test",
+                                        "--mutation", "stale-details"]), patch.object(gate, "run") as run:
+            with self.assertRaises(SystemExit) as error:
+                gate.main()
+            self.assertEqual(error.exception.code, 2)
+            run.assert_not_called()
+
     def test_timeout_is_reaped_and_recorded_not_counted(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

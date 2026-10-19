@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,14 +25,75 @@ import time
 
 
 SELECTORS = ("focus", "pages", "acknowledgement", "retention", "publication")
+SCRATCH = {".git", ".zig-cache", "zig-out", ".amp", "__pycache__"}
+
+
+def entry(path):
+    mode = path.lstat().st_mode
+    record = {"mode": stat.S_IMODE(mode)}
+    if stat.S_ISLNK(mode):
+        record.update(kind="link", target=str(path.readlink()))
+        if path.exists():
+            record["target_mode"] = stat.S_IMODE(path.stat().st_mode)
+    elif stat.S_ISDIR(mode):
+        record["kind"] = "directory"
+    else:
+        record["kind"] = "file" if stat.S_ISREG(mode) else "special"
+    if path.is_file():
+        record["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return record
+
+
+def manifest(root):
+    # Bind all source/test bytes and modes, plus root links and their file
+    # targets. Native dependency directories are bound by link, not traversed.
+    paths = [path for path in root.iterdir() if path.name not in SCRATCH]
+    for name in ("src", "tests"):
+        paths.extend(path for path in (root / name).rglob("*")
+                     if not SCRATCH.intersection(path.relative_to(root).parts))
+    return {str(path.relative_to(root)): entry(path) for path in sorted(paths)}
+
+
+def identity(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def unsafe_cache(cache, source):
+    overlay = cache / "source"
+    # Default compilation scratch below .zig-cache is allowed. No cache write
+    # may overlap supplied inputs, including an equal/ancestor overlay root.
+    if source.is_relative_to(overlay.resolve()):
+        return f"cache overlaps supplied source: {overlay}"
+    for path in (cache, overlay.resolve()):
+        if path == source or (path.is_relative_to(source) and
+                              path.relative_to(source).parts[0] not in SCRATCH):
+            return f"cache writes supplied inputs: {path}"
+    for path in (cache, overlay, overlay / "src", cache / "build"):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            return f"unsafe cache directory: {path}"
+    lock = cache / "lock"
+    paths = [lock] if lock.exists() or lock.is_symlink() else []
+    paths.extend((overlay / "src").rglob("*"))
+    for path in paths:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or (not stat.S_ISDIR(mode) and
+                                (not stat.S_ISREG(mode) or path.stat().st_nlink != 1)):
+            return f"unsafe cache entry: {path}"
+    return None
 
 
 @contextmanager
-def source_overlay(cache):
+def source_overlay(cache, source):
     # Stable source paths let Zig reuse compiled dependencies across selectors
     # and mutations. Concurrent invocations never share writable source custody.
+    unsafe = unsafe_cache(cache, source)
+    assert unsafe is None, unsafe
     with (cache / "lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Recheck under custody: a preceding invocation may have retired a
+        # failed, aliased overlay between preflight and lock acquisition.
+        unsafe = unsafe_cache(cache, source)
+        assert unsafe is None, unsafe
         overlay = cache / "source"
         overlay.mkdir(exist_ok=True)
         yield overlay
@@ -147,18 +209,41 @@ test "TD1 sequence model {name}" {{
     }}, .{name});
 }}
 '''
-    source_inputs = sorted(path for path in (source / "src").rglob("*") if path.is_file())
-    source_inputs += [source / "build.zig", source / "build.zig.zon"]
-    inputs = {str(path.relative_to(source)): hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in source_inputs}
+    supplied = manifest(source)
+    inputs = {path: record["sha256"] for path, record in supplied.items() if "sha256" in record}
     inputs["tests/integration/session_sequence_model.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    # Expected authority comes from supplied inputs, NEVER cache/source. The
+    # only transformed input is the frontend with these exact declarations.
+    expected_overlay = dict(supplied)
+    for path in source.iterdir():
+        if path.name in SCRATCH or path.name == "src":
+            continue
+        expected_overlay[path.name] = {"kind": "link", "mode": 0o777, "target": str(path),
+                                       "target_mode": stat.S_IMODE(path.stat().st_mode)}
+        if path.is_file():
+            expected_overlay[path.name]["sha256"] = supplied[path.name]["sha256"]
+    expected_overlay["src/SessionFrontend.zig"] = {
+        **supplied["src/SessionFrontend.zig"],
+        "sha256": hashlib.sha256((original + bridge).encode()).hexdigest(),
+    }
+    (output / "overlay-manifest.json").write_text(json.dumps(expected_overlay, indent=2, sort_keys=True) + "\n")
     # Keep compilation scratch outside the review-artifact directory. The
     # shared cache contains compilation only; Zig's Run step executes afresh.
     cache = cache.resolve() if cache is not None else source / ".zig-cache/td1-model"
+    unsafe = unsafe_cache(cache, source)
+    if unsafe is not None:
+        # Preserve refusal BEFORE root acquisition, copying or chmod. A failed
+        # retained overlay is not authority to dereference a cached alias.
+        receipt = {"source": str(source), "selector": selector, "inputs": inputs,
+                   "exit": None, "direct_exit": None, "binary": None, "binary_sha256": None,
+                   "source_unchanged": manifest(source) == supplied,
+                   "overlay_unchanged": False, "failure": unsafe}
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        raise AssertionError(unsafe)
     cache.mkdir(parents=True, exist_ok=True)
-    with source_overlay(cache) as overlay:
+    with source_overlay(cache, source) as overlay:
         for path in source.iterdir():
-            if path.name in ("src", ".git", ".zig-cache", "zig-out", ".amp"):
+            if path.name == "src" or path.name in SCRATCH:
                 continue
             link = overlay / path.name
             if link.is_symlink() and link.readlink() != path:
@@ -178,6 +263,9 @@ test "TD1 sequence model {name}" {{
             data = (original + bridge).encode() if path == frontend else path.read_bytes()
             if not target.exists() or target.read_bytes() != data:
                 target.write_bytes(data)
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if stat.S_IMODE(target.stat().st_mode) != mode:
+                target.chmod(mode)
         for path in (overlay / "src").rglob("*"):
             if path.is_file() and path not in expected:
                 path.unlink()
@@ -185,35 +273,53 @@ test "TD1 sequence model {name}" {{
                    "-Dtest-filter=TD1 sequence model" + ("" if selector == "all" else " " + selector),
                    "--summary", "all", "--verbose"]
         print("Running:", " ".join(command), flush=True)
+        observations = {}
+        differences = {}
+
+        def observe(phase):
+            actual = manifest(overlay)
+            observations[phase] = identity(actual)
+            differences[phase] = sorted(path for path in actual.keys() | expected_overlay.keys()
+                                        if actual.get(path) != expected_overlay.get(path))
+            return not differences[phase]
+
+        result = direct = binary = binary_digest = None
         with (output / "test.log").open("w") as log:
-            result = execute(command, overlay, log, selector in ("all", "retention"), cache)
+            if observe("before_build"):
+                result = execute(command, overlay, log, selector in ("all", "retention"), cache)
+            observe("after_build")
         report = (output / "test.log").read_text()
-        binaries = set(re.findall(r"(?m)^info\(verbose\): [^\n]*?(/[^\s\"]+/test) --cache-dir=", report))
-        binary = None
-        binary_digest = None
-        direct = None
-        if len(binaries) == 1:
-            binary = Path(binaries.pop())
-            binary_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-            # Diagnostic execution of the SAME narrow artifact, not a retry
-            # accepted in place of a failed gate. Zig 0.17's build protocol can
-            # omit returned errors; direct mode retains named OK/FAIL records.
-            with (output / "terminal-report.log").open("w") as log:
-                direct = execute([str(binary)], overlay, log, selector in ("all", "retention"), cache)
-            report += (output / "terminal-report.log").read_text()
-        unchanged = all(hashlib.sha256((source / path).read_bytes()).hexdigest() == digest
-                        for path, digest in inputs.items() if path != "tests/integration/session_sequence_model.py")
+        # An abnormal build is not an assertion failure and must not launch a
+        # binary, even when its verbose log contains a discoverable path.
+        if result in (0, 1) and not any(differences.values()):
+            binaries = set(re.findall(r"(?m)^info\(verbose\): [^\n]*?(/[^\s\"]+/test) --cache-dir=", report))
+            if len(binaries) == 1 and observe("before_direct"):
+                binary = Path(binaries.pop())
+                binary_digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+                # SAME artifact; diagnostic replay never substitutes for the
+                # build result. Zig's protocol can omit assertion error types.
+                with (output / "terminal-report.log").open("w") as log:
+                    direct = execute([str(binary)], overlay, log, selector in ("all", "retention"), cache)
+                observe("after_direct")
+                report += (output / "terminal-report.log").read_text()
+        unchanged = manifest(source) == supplied
         unchanged = unchanged and hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == inputs["tests/integration/session_sequence_model.py"]
+        overlay_unchanged = len(observations) == 4 and not any(differences.values())
         receipt = {"source": str(source), "selector": selector, "inputs": inputs,
                    "bridge_sha256": hashlib.sha256(bridge.encode()).hexdigest(),
                    "exit": result, "direct_exit": direct, "binary_sha256": binary_digest,
                    "binary": str(binary) if binary is not None else None,
                    "assertions": re.findall(r"FAIL \(([^)]+)\)", report),
-                   "source_unchanged": unchanged}
+                   "source_unchanged": unchanged, "overlay_unchanged": overlay_unchanged,
+                   "overlay": {"expected_sha256": identity(expected_overlay),
+                               "observations": observations, "differences": differences}}
         (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(report, end="")
         assert unchanged, "source changed during model execution; evidence invalid"
+        assert not any(differences.values()), "executed overlay changed; evidence invalid"
+        assert result in (0, 1), f"abnormal build status {result}; direct replay prohibited"
         assert direct is not None, "emitted narrow test executable missing from verbose build output"
+        assert overlay_unchanged, "executed overlay checks incomplete; evidence invalid"
         assert (result == 0) == (direct == 0), "build/direct outcomes disagree"
         required = SELECTORS if selector == "all" else (selector,)
         if result == 0:

@@ -402,9 +402,14 @@ def main():
     parser.add_argument("--source", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--mutation", action="append", choices=[m.name for m in MUTATIONS])
+    parser.add_argument("--target", choices=sorted({m.check.target for m in MUTATIONS}),
+                        help="Run one check family; omitted means every protection")
     parser.add_argument("--timeout", type=int, default=600, help="per build plus direct assertion; timeout never counts as a kill")
     args = parser.parse_args()
-    selected = [m for m in MUTATIONS if args.mutation is None or m.name in args.mutation]
+    selected = [m for m in MUTATIONS if (args.mutation is None or m.name in args.mutation) and
+                (args.target is None or m.check.target == args.target)]
+    if not selected:
+        parser.error("no protections match --target and --mutation")
     try:
         return 0 if run(args.source, args.output, selected, args.timeout) else 1
     except (OSError, ValueError, RuntimeError) as error:
