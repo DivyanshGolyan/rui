@@ -35,14 +35,14 @@ fn replay(io: std.Io, terminal: *Terminal) !void {
     var input: Input = .{};
     std.debug.print("ready\n", .{});
     while (true) {
-        const byte = terminal.next(io, input.pending(), 10) catch |err| switch (err) {
+        const read = terminal.next(io, &input, 10) catch |err| switch (err) {
             error.InputDeadline => {
                 if (try input.expire()) std.debug.print("expired escape\n", .{});
                 continue;
             },
             else => return err,
         } orelse continue;
-        var decoded = input.feed(byte);
+        var decoded = input.feed(read.byte, read.at);
         while (decoded != .none) : (decoded = input.next()) {
             const event = editor.apply(decoded);
             // This bounded private transcript exposes decoded events as well
