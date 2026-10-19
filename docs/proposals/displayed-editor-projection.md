@@ -28,10 +28,11 @@ Move the frontend's consent value into it. Keep `session_consent.zig` as its
 pure value policy, extended to derive one typed projection. No new controller,
 event bus, worker, or presentation cache is needed.
 
-The projection selects the editor, prompt kind, approval instructions, and
-whether Enter can request a Message or an exact Permission Decision. Rendering
-and dispatch consume that same value. Prompt text is output of that selection,
-never an input to policy. The current `prompt == "> "` inference disappears.
+The projection selects the editor, prompt kind, and approval instructions.
+Rendering and dispatch consume that same value. Live owner probes separately
+check whether Enter can request a Message or an exact Permission Decision.
+Prompt text is output of selection, never an input to policy. The current
+`prompt == "> "` inference disappears.
 
 `SessionInput` still owns draft banks and the sole byte stream. The frontend
 still owns the 64-byte choice editor and performs effects. `SessionSubmission`
@@ -395,6 +396,11 @@ only if its targeted mutation fails at its intended assertion, not setup or
 timeout. The audit's stale-page mutation passed the old scripted renderer
 selection, so those passes alone are insufficient evidence for that contract.
 
+For the queued-command Decision control, replace the whole live probe with
+cached readiness. Removing only `command_blocked` may still reject through
+command-induced freshness invalidation, so that narrower mutation cannot by
+itself establish the cached-permission regression's effectiveness.
+
 ## Implement in stages only after renderer landing
 
 1. **Reconcile the landed base and freeze behavior.** Re-read the final renderer
@@ -470,6 +476,24 @@ Prompt freshness independently retains its current post-write blocker checks.
 This accounts for the known submission paths without asserting a current
 runtime bug or expanding into worker scheduling.
 
-Corrected-artifact review and final document checks remain to be recorded before
-handoff. There are no native, physical-terminal, hosted Mac, rendered-UX, or
-runtime-correctness claims in this proposal.
+The reviewer closed the finding at the design level on corrected artifact
+[`2d36578f`](https://github.com/DivyanshGolyan/rui/commit/2d36578fc900edf2a44c5cc9f8392a45f25ed3c6),
+with no remaining must-fix in the requested scope. The follow-up verified both
+production `beginMessage` callers, the sealing and Decision boundaries, and
+original-only recovery. `Input.feed` is a test helper, not another frontend
+submission route. Source review does not demonstrate the future tests or their
+negative controls.
+
+Document validation checked relative references and anchors, the exact renderer
+base, one-document delta, and `git diff --check`. Running
+`python3 tests/ci/select_tests.py --base f15c2b57dea17a92b60a0bfcefed6e77b7e1ea87 --phase review`
+selected no runtime or native targets, with the documentation-only reason.
+Design commits use `[skip ci]` to avoid competing hosted qualification; the
+branch's Actions run inventory was empty when checked. Only this proposal is
+published. No PR, merge, runtime change, canonical-document edit, compatibility
+path, native campaign, Mac runner, or workflow dispatch is part of delivery.
+
+TD1's current-state results remain with that owner and must be reconciled with
+the final landed renderer before implementation. Keep this design branch and
+thread available for that handoff. There are no native, physical-terminal,
+hosted Mac, rendered-UX, or runtime-correctness claims in this proposal.
