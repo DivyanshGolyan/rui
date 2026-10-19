@@ -49,6 +49,7 @@ cases() {
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"
     run_case execution codex python3 "$directory/codex_integration.py" "$release_safe"
+    run_case execution model-catalog python3 "$directory/model_catalog_integration.py" "$release_safe"
     run_case execution control python3 "$directory/control_integration.py" "$release_safe"
     run_case callers session-list python3 "$directory/session_list_integration.py" "$release_safe" "$session_list_client"
     run_case callers conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"

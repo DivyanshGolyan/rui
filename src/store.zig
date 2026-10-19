@@ -4,6 +4,7 @@ const named_scratch = @import("named_scratch.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const model_capability = @import("model_capability.zig");
+const codex_model_catalog = @import("codex_model_catalog.zig");
 const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 const output_format = @import("output_format.zig");
@@ -91,6 +92,10 @@ pub const Faults = struct {
     // The Host supplies its own capability fact at admission; tests default
     // to an available model unless exercising a missing-capability boundary.
     model_available: bool = true,
+    // The Host's confirmed catalog verdict that the requested model is absent
+    // from its account's fresh catalog. It rejects only a configuration that
+    // would establish a Session, and that rejection is not saved.
+    model_absent_from_catalog: bool = false,
     content_read: bool = false,
     content_import: bool = false,
     before_commit: bool = false,
@@ -162,6 +167,8 @@ pub const ConfigureReply = union(enum) {
     accepted: AcceptedConfiguration,
     rejected: RejectedConfiguration,
     conflict,
+    /// Not saved: the command rolled back and its key has no saved answer.
+    model_unavailable,
     infrastructure_failure,
 };
 
@@ -786,7 +793,15 @@ pub const SessionReportOptions = struct {
     request_number: u64,
     profile: protocol.ReportProfile = .current,
     execution: SessionReportExecution,
+    model_catalog: ?ModelCatalogObserver = null,
     fail_unlink: bool = false,
+};
+
+/// The Host's catalog verdict for a Session's model. Called under the Store
+/// lock; the observer may take its own lock but never the Store's.
+pub const ModelCatalogObserver = struct {
+    context: *anyopaque,
+    observe: *const fn (*anyopaque, []const u8) codex_model_catalog.Observation,
 };
 
 pub const SessionListOptions = struct {
@@ -1639,6 +1654,12 @@ pub const Store = struct {
             ),
             .update => |actions| actions,
         };
+        // After every saved rejection and replay, so the catalog cannot
+        // override a saved answer or a definite invalid-input rejection.
+        if (created and faults.model_absent_from_catalog) {
+            try exec(self.database, "ROLLBACK");
+            return .model_unavailable;
+        }
 
         var command_instructions_id: ?i64 = null;
         switch (content_actions.instructions) {
@@ -3099,7 +3120,7 @@ pub const Store = struct {
         {
             const access = try self.enter(.none);
             defer access.release();
-            try access.finishCapture(&capture, self.renderSessionReportLocked(session_ref, options.profile, options.execution, &capture));
+            try access.finishCapture(&capture, self.renderSessionReportLocked(session_ref, options.profile, options.execution, options.model_catalog, &capture));
         }
         return capture.seal();
     }
@@ -3191,6 +3212,7 @@ pub const Store = struct {
         session_ref: []const u8,
         profile: protocol.ReportProfile,
         execution: SessionReportExecution,
+        model_catalog: ?ModelCatalogObserver,
         capture: *SessionReportCapture,
     ) !void {
         const maybe_current = try self.readSession(session_ref);
@@ -3219,6 +3241,17 @@ pub const Store = struct {
         try capture.appendJsonString(@tagName(current.provider));
         try capture.append(",\"model\":");
         try capture.appendJsonString(current.model.slice());
+        try capture.append(",\"model_catalog\":");
+        {
+            const observation: codex_model_catalog.Observation = if (model_catalog) |observer|
+                observer.observe(observer.context, current.model.slice())
+            else
+                .{ .verdict = .{ .unchecked = .not_applicable } };
+            var buffer: [codex_model_catalog.max_observation_json_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            codex_model_catalog.writeObservationJson(observation, &writer) catch unreachable;
+            try capture.append(writer.buffered());
+        }
         const policy = model_capability.compactionPolicy(current.model.slice(), current.compaction_trigger, current.output_reservation);
         try capture.append(",\"compaction_trigger\":");
         if (policy.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
@@ -11868,6 +11901,48 @@ test "saved incomplete initialization stays rejected after Session creation" {
     const replay = storage.configure(&incomplete, .{});
     try std.testing.expect(replay == .rejected);
     try std.testing.expect(replay.rejected.replayed);
+}
+
+test "catalog absence rejects only a new Session and saves nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    const absent: Faults = .{ .model_absent_from_catalog = true };
+
+    // Unsaved: no Session, no command record, and the same key is judged
+    // again on retry.
+    var fresh = try completeConfiguration("catalog-new", "direct/catalog-new", workspace, "gpt-5-codex");
+    try std.testing.expect(storage.configure(&fresh, absent) == .model_unavailable);
+    try std.testing.expect(!(try storage.inspectSession(fresh.session.slice())).found);
+    try std.testing.expectEqual(.absent, (try storage.observeCommand(fresh.key.slice())).status);
+    try std.testing.expect(storage.configure(&fresh, absent) == .model_unavailable);
+    const later = storage.configure(&fresh, .{});
+    try std.testing.expect(later == .accepted and !later.accepted.replayed and later.accepted.created);
+
+    // Replay runs first: a saved acceptance survives a later absent verdict.
+    const replay = storage.configure(&fresh, absent);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+
+    // Existing Sessions never reject: equal explicit model and sparse update.
+    var equal = try completeConfiguration("catalog-equal", "direct/catalog-new", workspace, "gpt-5-codex");
+    try std.testing.expect(storage.configure(&equal, absent) == .accepted);
+    var sparse: protocol.ConfigureCommand = .{};
+    try sparse.key.set("catalog-sparse");
+    try sparse.session.set("direct/catalog-new");
+    sparse.configuration.permission_mode.state = .value;
+    try sparse.configuration.permission_mode.value.set("ask");
+    try std.testing.expect(storage.configure(&sparse, absent) == .accepted);
+
+    // Saved invalid-input rejections keep precedence and remain saved.
+    var incomplete = try completeConfiguration("catalog-incomplete", "direct/catalog-incomplete", workspace, "gpt-5-codex");
+    incomplete.configuration.workspace = .{};
+    const rejected = storage.configure(&incomplete, absent);
+    try std.testing.expect(rejected == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.incomplete_initial_configuration, rejected.rejected.code);
+    try std.testing.expectEqual(.rejected, (try storage.observeCommand(incomplete.key.slice())).status);
 }
 
 test "capability-required configuration rejects on replacement and replays its saved decision" {

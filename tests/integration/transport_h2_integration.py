@@ -37,6 +37,7 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.connections = []
         self.streams = []
         self.request_headers = []
+        self.catalog_requests = 0
         self.refuse_at = refuse_at
         self.refused = False
         self.dead_reuse = dead_reuse
@@ -221,8 +222,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
         bodies = {}
         pending = []
         outgoing_bodies = {}
-        with self.server.lock:
-            self.server.connections.append(self.client_address)
+        counted = False
         while True:
             try:
                 data = sock.recv(65536)
@@ -233,8 +233,21 @@ class StreamHandler(socketserver.BaseRequestHandler):
             for event in conn.receive_data(data):
                 if isinstance(event, h2.events.RequestReceived):
                     assert event.stream_id not in bodies
+                    headers = dict(event.headers)
+                    if headers.get(b":method") == b"GET" and headers.get(b":path", b"").startswith(b"/models?"):
+                        # The Host's model catalog worker uses its own
+                        # connection; it is not part of the /responses transport.
+                        with self.server.lock:
+                            self.server.catalog_requests += 1
+                        conn.send_headers(event.stream_id, [(":status", "404"), ("content-length", "0")],
+                                          end_stream=True)
+                        sock.sendall(conn.data_to_send())
+                        continue
                     with self.server.lock:
-                        self.server.request_headers.append(dict(event.headers))
+                        if not counted:
+                            self.server.connections.append(self.client_address)
+                            counted = True
+                        self.server.request_headers.append(headers)
                         refuse = self.server.refuse_at == "headers" and not self.server.refused
                         if refuse:
                             self.server.refused = True

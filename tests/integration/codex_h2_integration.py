@@ -29,10 +29,11 @@ def assert_managed_descriptor_rejection(rejected, limit):
     fixed_host = 11 if sys.platform == "darwin" else 9
     authentication = 10 if sys.platform == "darwin" else 8
     # 100 ordinary exchanges at four descriptors, two controls and discovery.
-    required = inherited + fixed_host + 403 + 10 + authentication + 2
+    # The model catalog worker has the authentication worker's shape.
+    required = inherited + fixed_host + 403 + 10 + 2 * authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
                     inherited=inherited, fixed_host=fixed_host, clients=403,
-                    execution=10, authentication=authentication, self_wake=2)
+                    execution=10, authentication=authentication, model_catalog=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
     assert limit < required - 4 * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
@@ -64,7 +65,7 @@ def run(*, observed=False, intake=100):
     try:
         # These totals describe default intake100, not the refusal boundary.
         # Ten ordinary clients remain viable after dropping 90 * 4 descriptors.
-        default_required = {"linux": 435, "darwin": 439}[sys.platform]
+        default_required = {"linux": 443, "darwin": 449}[sys.platform]
         minimum_required = default_required - 4 * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",

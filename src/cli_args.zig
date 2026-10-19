@@ -3,7 +3,7 @@
 const std = @import("std");
 const product_defaults = @import("product_defaults.zig");
 
-pub const Resource = enum { session, request, action, host, defaults, auth };
+pub const Resource = enum { session, request, action, host, defaults, model, auth };
 pub const Command = enum {
     session_configure,
     session_send,
@@ -28,6 +28,7 @@ pub const Command = enum {
     host_serve,
     defaults_inspect,
     defaults_configure,
+    model_list,
     auth_login,
 
     pub fn definition(self: Command) Definition {
@@ -65,6 +66,7 @@ pub const Command = enum {
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
+            .model_list => .{ .resource = .model, .name = "list", .description = "Read the running Host's Codex model catalog for its signed-in account as one JSON value. --refresh asks the Host to fetch it first and waits briefly. Never starts a Host or contacts the provider from this process.", .options = destination ++ &[_]Option{flag("refresh")} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }

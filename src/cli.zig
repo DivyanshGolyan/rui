@@ -7,6 +7,7 @@ const TestObservation = @import("TestObservation.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const codex_model_catalog = @import("codex_model_catalog.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
 const model_adapter = @import("model_adapter.zig");
@@ -123,6 +124,12 @@ fn run(init: std.process.Init) !void {
         // Defaults and auth never contact a Host.
         if ((err == error.FileNotFound or err == error.ConnectionRefused) and resource != .defaults and resource != .auth)
             TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
+        // The catalog rejection already explained itself and saved nothing.
+        if (err == error.ModelUnavailable) return err;
+        if (err == error.HostPredatesModelCatalog) {
+            TerminalText.diagnostic("rui: the Host serving this Store was started by a Rui version without the model catalog. Restart it with rui host stop, then rui host start.\n", .{});
+            return err;
+        }
         if (err == error.MutationNotAccepted) {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
@@ -164,8 +171,73 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, args: [][]const u
             if (operands.len == 0) return usage();
             try setup(init, operands, false);
         },
+        .model_list => try modelList(init, operands),
         .auth_login => try login(init, operands, false, codex_auth.login),
     }
+}
+
+/// `rui model list [--store PATH] [--refresh]`: the Host's catalog read.
+/// Refresh polls instead of holding a Host intake worker during the fetch.
+fn modelList(init: std.process.Init, args: []const []const u8) !void {
+    var explicit: ?[]const u8 = null;
+    var refresh = false;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--store") and explicit == null) {
+            explicit = try takeValue(args, &index);
+        } else if (std.mem.eql(u8, args[index], "--refresh") and !refresh) {
+            refresh = true;
+        } else return usage();
+    }
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const selected = try selectedStore(init, explicit, &fallback);
+    const allocator = init.arena.allocator();
+    const buffer = try allocator.create(client.ModelCatalogBuffer);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const requester: client.Requests = .{ .io = init.io };
+    var listing = switch (try requester.modelCatalog(selected, refresh, buffer, arena.allocator())) {
+        .listing => |value| value,
+        .failure => |failure| return requester.failRead(failure),
+    };
+    var refreshed: ?bool = null;
+    if (listing.refresh_target) |target| {
+        // The Host bounds each fetch to five seconds after credentials.
+        const deadline = std.Io.Clock.Timestamp.now(init.io, .awake).addDuration(.{ .raw = .fromSeconds(12), .clock = .awake });
+        while (listing.completed < target) {
+            if (std.Io.Clock.Timestamp.now(init.io, .awake).durationTo(deadline).raw.nanoseconds <= 0) break;
+            try init.io.sleep(.fromMilliseconds(200), .awake);
+            _ = arena.reset(.retain_capacity);
+            listing = switch (try requester.modelCatalog(selected, false, buffer, arena.allocator())) {
+                .listing => |value| value,
+                .failure => |failure| return requester.failRead(failure),
+            };
+        }
+        refreshed = listing.completed >= target;
+        if (refreshed == false)
+            TerminalText.diagnostic("rui: model catalog refresh is still running after 12 s; showing the previous catalog. Run rui model list again shortly.\n", .{});
+    }
+    if (!listing.applicable)
+        TerminalText.diagnostic("rui: this Host has no Codex endpoint, so it has no model catalog.\n", .{});
+    var output: JsonOutput = undefined;
+    const writer = output.init(init.io, .stdout);
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"model_catalog\",\"store\":");
+    try std.json.Stringify.value(selected, .{}, writer);
+    try writer.print(",\"applicable\":{},\"available\":{},\"age_seconds\":", .{ listing.applicable, listing.available });
+    if (listing.age_seconds) |age| try writer.print("\"{d}\"", .{age}) else try writer.writeAll("null");
+    try writer.writeAll(",\"last_failure\":");
+    try std.json.Stringify.value(if (listing.last_failure) |reason| @tagName(reason) else null, .{}, writer);
+    try writer.writeAll(",\"refresh\":");
+    try std.json.Stringify.value(if (refreshed) |done| (if (done) "completed" else "pending") else null, .{}, writer);
+    try writer.writeAll(",\"models\":[");
+    for (listing.rows, 0..) |row, position| {
+        if (position != 0) try writer.writeAll(",");
+        try writer.writeAll("{\"slug\":");
+        try std.json.Stringify.value(row.slug, .{}, writer);
+        try writer.print(",\"visibility\":\"{s}\"}}", .{@tagName(row.visibility)});
+    }
+    try writer.writeAll("]}\n");
+    try output.finish();
 }
 
 fn configureHostAllocator(init: std.process.Init, args: []const []const u8) !void {
@@ -1111,6 +1183,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         try writeMutationReply(init.io, reply, .human);
         return error.SessionConfigurationRejected;
     }
+    if (reply.answer) |answer| warnModelCatalog(answer.model_catalog, selected.model.slice()) else |_| {}
     return saved;
 }
 
@@ -1369,8 +1442,10 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
+    if (reply.answer) |answer| warnModelCatalog(answer.model_catalog, if (input.model.present) input.model.value else "") else |_| {}
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json) catch |err| {
-        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        // A catalog rejection already explained itself and saved nothing.
+        if (human and interactive and reply.catalog_rejection == null) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
@@ -2211,6 +2286,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
         try writer.writeAll("Rui: Configured.\n");
         return writer.flush();
     }
+    if (reply.catalog_rejection) |*rejection| reportModelUnavailable(rejection, reply.context.store.slice());
     if (presentation == .json) {
         try writeMutationJson(writer, reply);
         try writer.writeByte('\n');
@@ -2230,6 +2306,11 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: client.MutationReply, pre
         else => {},
     }
     const answer = reply.answer catch |err| {
+        if (reply.catalog_rejection != null) {
+            try writer.writeAll("Session not created: model unavailable; nothing saved\n");
+            try writer.flush();
+            return err;
+        }
         try writer.print("invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ @errorName(err), reply.status });
         if (reply.diagnostic) |diagnostic| {
             try writeMutationField(writer, "type: ", diagnostic.type.slice());
@@ -2273,10 +2354,22 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
         else => {},
     }
     const answer = reply.answer catch |err| {
-        try writer.print(",\"error\":{{\"status\":\"{d}\",\"reason\":\"{s}\",\"certainty\":\"unconfirmed\",\"type\":", .{ reply.status, @errorName(err) });
+        // A catalog rejection is known not to be saved; other errors are not.
+        const certainty = if (reply.catalog_rejection != null) "not_saved" else "unconfirmed";
+        try writer.print(",\"error\":{{\"status\":\"{d}\",\"reason\":\"{s}\",\"certainty\":\"{s}\",\"type\":", .{ reply.status, @errorName(err), certainty });
         try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.type.slice() else null, .{}, writer);
         try writer.writeAll(",\"code\":");
         try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.code.slice() else null, .{}, writer);
+        if (reply.catalog_rejection) |*rejection| {
+            try writer.writeAll(",\"model\":");
+            try std.json.Stringify.value(rejection.model.slice(), .{}, writer);
+            try writer.print(",\"age_seconds\":\"{d}\",\"available_models\":[", .{rejection.age_seconds});
+            for (rejection.availableModels(), 0..) |*slug, index| {
+                if (index != 0) try writer.writeAll(",");
+                try std.json.Stringify.value(slug.slice(), .{}, writer);
+            }
+            try writer.print("],\"available_count\":\"{d}\"", .{rejection.available_count});
+        }
         try writer.writeAll("}}");
         return;
     };
@@ -2314,7 +2407,67 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: client.MutationReply) !void 
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
+    if (answer.model_catalog) |observation| {
+        try writer.writeAll(",\"model_catalog\":");
+        try codex_model_catalog.writeObservationJson(observation, writer);
+    }
     try writer.writeByte('}');
+}
+
+/// One stderr line for a catalog verdict a human should notice; quiet for
+/// listed models and Hosts without a catalog.
+fn warnModelCatalog(observation: ?codex_model_catalog.Observation, model: []const u8) void {
+    const value = observation orelse return;
+    switch (value.verdict) {
+        .listed => {},
+        .unchecked => |reason| if (reason != .not_applicable)
+            TerminalText.diagnostic("rui: warning: could not check model {s} against this account's model catalog ({s}). If the provider rejects it, the first message fails; rui model list --refresh shows available models.\n", .{ model, catalogReasonText(reason) }),
+        .hidden => TerminalText.diagnostic("rui: warning: model {s} is not offered in this account's model picker; the provider may still reject it when a message runs. rui model list shows available models.\n", .{model}),
+        .absent => TerminalText.diagnostic("rui: warning: this Session keeps model {s}, which this account's model catalog does not list; its next message may fail. rui model list shows available models.\n", .{model}),
+    }
+}
+
+fn catalogReasonText(reason: codex_model_catalog.Reason) []const u8 {
+    return switch (reason) {
+        .not_applicable => "no catalog for this provider",
+        .not_fetched => "catalog not fetched yet",
+        .stale => "catalog is over an hour old",
+        .other_account => "catalog belongs to another signed-in account",
+        .credential_unavailable => "Codex credentials unavailable",
+        .transport_failure => "could not reach the catalog",
+        .timeout => "catalog request timed out",
+        .http_status => "catalog request returned an HTTP error",
+        .too_large => "catalog response too large",
+        .unparseable => "catalog response unreadable",
+    };
+}
+
+/// Two lines, each within the 1024-byte stderr line bound: slugs fill only
+/// the room the Store path leaves, and the rest are counted.
+fn reportModelUnavailable(rejection: *const client.CatalogRejection, store: []const u8) void {
+    if (rejection.available_count == 0) {
+        TerminalText.diagnostic("rui: Model {s} is not available for this Codex account, and its model catalog lists no models; nothing was saved.\n", .{rejection.model.slice()});
+        TerminalText.diagnostic("rui: Run rui model list --store {s} --refresh, then try again.\n", .{store});
+        return;
+    }
+    TerminalText.diagnostic("rui: Model {s} is not available for this Codex account; nothing was saved.\n", .{rejection.model.slice()});
+    const fixed = "\nrui: Available models: . Choose one of these with --model, or run rui model list --store  --refresh to update the list.\n".len + " and 18446744073709551615 more".len;
+    var list: [1024]u8 = undefined;
+    const budget = 1024 - fixed - @min(store.len, 1024 - fixed);
+    var shown: usize = 0;
+    var used: usize = 0;
+    for (rejection.availableModels()) |*slug| {
+        const separator: usize = if (shown == 0) 0 else 2;
+        if (used + separator + slug.len > budget) break;
+        if (separator != 0) @memcpy(list[used..][0..2], ", ");
+        @memcpy(list[used + separator ..][0..slug.len], slug.slice());
+        used += separator + slug.len;
+        shown += 1;
+    }
+    var more: [" and 18446744073709551615 more".len]u8 = undefined;
+    const hidden = rejection.available_count - shown;
+    const suffix = if (hidden == 0) "" else std.fmt.bufPrint(&more, "{s}{d} more", .{ if (shown == 0) "" else " and ", hidden }) catch unreachable;
+    TerminalText.diagnostic("rui: Available models: {s}{s}. Choose one of these with --model, or run rui model list --store {s} --refresh to update the list.\n", .{ list[0..used], suffix, store });
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -2741,7 +2894,7 @@ const usage_text =
     \\    resource or former command name.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
-    \\    Resources: session, request, action, host, defaults, auth.
+    \\    Resources: session, request, action, host, defaults, model, auth.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\

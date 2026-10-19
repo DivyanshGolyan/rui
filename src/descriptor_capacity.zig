@@ -17,6 +17,7 @@ pub const Requirement = struct {
     clients: usize,
     execution: usize,
     authentication: usize,
+    model_catalog: usize,
     self_wake: usize,
     total: usize,
 };
@@ -95,6 +96,14 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
 
+    // The Codex model catalog worker has the same shape and runs
+    // independently: credential acquisition can refresh (credential parent and
+    // lock, curl wakeups, two sockets, two trust-loading handles), then its
+    // own fetch holds the same curl populations after releasing the lease.
+    // Its rare configuration-time snapshot read stays within the ordinary
+    // client's four descriptors, which are not all held at that point.
+    const model_catalog = authentication;
+
     // The intake owner retains both ends of one nonblocking wake socket pair.
     // Workers and the execution fence notify without opening new connections.
     const self_wake: usize = 2;
@@ -102,6 +111,7 @@ pub fn calculate(
     total = try add(total, clients);
     total = try add(total, execution);
     total = try add(total, authentication);
+    total = try add(total, model_catalog);
     total = try add(total, self_wake);
     return .{
         .inherited = inherited,
@@ -109,6 +119,7 @@ pub fn calculate(
         .clients = clients,
         .execution = execution,
         .authentication = authentication,
+        .model_catalog = model_catalog,
         .self_wake = self_wake,
         .total = total,
     };
@@ -174,7 +185,8 @@ test "requirement uses simultaneous owner populations rather than summing exclus
 
     const managed = try calculate(3, 2, 10, 2, true, true, .linux);
     try std.testing.expectEqual(@as(usize, 8), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 79), managed.total);
+    try std.testing.expectEqual(@as(usize, 8), managed.model_catalog);
+    try std.testing.expectEqual(@as(usize, 87), managed.total);
 
     const without_transport = try calculate(3, 2, 10, 2, false, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
@@ -183,7 +195,8 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     const macos = try calculate(3, 2, 10, 2, true, true, .macos);
     try std.testing.expectEqual(@as(usize, 11), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 10), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 83), macos.total);
+    try std.testing.expectEqual(@as(usize, 10), macos.model_catalog);
+    try std.testing.expectEqual(@as(usize, 93), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {

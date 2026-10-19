@@ -37,7 +37,8 @@ pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_o
     };
 }
 
-/// Local identifier syntax, not a catalog, qualification or account entitlement.
+/// Local identifier syntax only. The Host's Codex model catalog judges
+/// availability separately; see ARCHITECTURE.md "Codex model catalog".
 pub fn validModel(model: []const u8) bool {
     if (model.len == 0 or model.len > protocol.max_model_bytes) return false;
     for (model) |byte| if (byte < 0x21 or byte > 0x7e) return false;

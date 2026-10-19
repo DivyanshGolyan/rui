@@ -126,7 +126,7 @@ Omitting either flag preserves its current setting. Scripts can use the same fla
 
 ## Use Rui from scripts
 
-Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options without a Host or credentials. Metadata goes to stdout as one JSON value. Recovery handles and diagnostics go to stderr. One-shot commands never start a Host or sign in, so start the Host explicitly:
+Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults`, `model` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options without a Host or credentials. Metadata goes to stdout as one JSON value. Recovery handles and diagnostics go to stderr. One-shot commands never start a Host or sign in, so start the Host explicitly:
 
 ```sh
 STORE="$HOME/.local/share/rui/store"
@@ -135,7 +135,7 @@ STORE="$HOME/.local/share/rui/store"
   --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask
 ```
 
-A new named Session needs its Workspace, provider and model; later changes to it keep any settings you omit. Without `--session`, `session configure` instead creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference to use below. Then send the Session a message:
+A new named Session needs its Workspace, provider and model; later changes to it keep any settings you omit. If the Host's Codex model catalog for your account does not list the model, configuration fails, saves nothing and lists the available models; `rui model list --store "$STORE" --refresh` shows them. When the catalog cannot be checked, the receipt's `model_catalog` field explains why and the Session is still created. Without `--session`, `session configure` instead creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference to use below. Then send the Session a message:
 
 ```sh
 "$RUI" session send --store "$STORE" --session my/project "Investigate the failing test"
