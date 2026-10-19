@@ -130,7 +130,9 @@ fn run(case: Case, wire: []const u8, split: usize, choice: bool) !Outcome {
         try std.testing.expectEqual(case.caret, editor.cursor);
     }
     feed(&editor, &input, wire[split..], &result);
-    if (input.pending() == .escape) {
+    const bare_escape = std.mem.eql(u8, wire, "\x1b") or std.mem.eql(u8, wire, "\x1b\x1b");
+    try std.testing.expectEqual(if (bare_escape) Input.Pending.escape else Input.Pending.none, input.pending());
+    if (bare_escape) {
         try std.testing.expect(try input.expire());
         // SessionFrontend translates a successful bare-ESC expiry to close_view.
         result.event = .close_view;
@@ -205,8 +207,13 @@ test "TD2 incomplete prefixes expire fatally without modifying or submitting dra
             var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret };
             var input: Input = .{};
             var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
-            feed(&editor, &input, data[0..split], &outcome);
-            if (input.pending() == .escape) {
+            const prefix = data[0..split];
+            // The fixture, never pending()/expire(), supplies the expectation.
+            // A recognized CSI/SS3/kitty/case27 prefix is not a bare Esc key.
+            const bare_escape = std.mem.eql(u8, prefix, "\x1b") or std.mem.eql(u8, prefix, "\x1b\x1b");
+            feed(&editor, &input, prefix, &outcome);
+            try std.testing.expectEqual(if (bare_escape) Input.Pending.escape else Input.Pending.incomplete, input.pending());
+            if (bare_escape) {
                 try std.testing.expect(try input.expire());
                 try std.testing.expectEqual(Input.Pending.none, input.pending());
             } else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
