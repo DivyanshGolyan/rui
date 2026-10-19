@@ -13,26 +13,27 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Fresh-process first lookups by interpreter
+      - name: Which process property makes the first loopback lookup stall
         run: |
-          clang -O1 -o "$RUNNER_TEMP/lookup" .github/diag/lookup.c
-          ls -d /Users/runner/hostedtoolcache/Python/*/arm64/bin/python3 2>/dev/null || true
-          ls /opt/homebrew/bin/python3* || true
-          code='import socket,sys,time
-          s=time.monotonic(); r=socket.gethostbyaddr("127.0.0.1"); a=time.monotonic()-s
-          s=time.monotonic(); n=socket.getnameinfo(("127.0.0.1",0),0); b=time.monotonic()-s
-          print(f"{sys.executable} {sys.version.split()[0]}: gethostbyaddr {a:.3f}s {r} | getnameinfo-after {b:.3f}s {n}", flush=True)'
-          for round in 1 2; do
-            echo "== round $round $(date -u +%T)"
-            "$RUNNER_TEMP/lookup"; "$RUNNER_TEMP/lookup"
-            for py in /usr/bin/python3 /opt/homebrew/bin/python3 /opt/homebrew/bin/python3.1[0-9] /Users/runner/hostedtoolcache/Python/*/arm64/bin/python3; do
-              [ -x "$py" ] || continue
-              "$py" -c "$code" || echo "$py failed"
-            done
-          done
-          for py in /usr/bin/python3 /opt/homebrew/bin/python3; do
-            "$py" -c 'import socket,time; s=time.monotonic(); print("getnameinfo-first", socket.getnameinfo(("127.0.0.1",0),0), f"{time.monotonic()-s:.3f}s")'
-          done
-          otool -L "$(/opt/homebrew/bin/python3 -c 'import _socket; print(_socket.__file__)')" | head
-          codesign -dv /opt/homebrew/bin/python3 2>&1 | head -5
+          d=.github/diag; o="$RUNNER_TEMP"
+          clang -O1 -o "$o/plain" $d/lookup.c
+          clang -O1 -mmacosx-version-min=10.13 -o "$o/min1013" $d/lookup.c
+          clang -O1 -mmacosx-version-min=11.0 -o "$o/min11" $d/lookup.c
+          clang -O1 -framework CoreFoundation -o "$o/cf" $d/lookup_cf.c
+          vtool -show-build "$o/min1013" | grep -E 'minos|version' | head -2
+          vtool -show-build "$(/opt/homebrew/bin/python3 -c 'import sys; print(sys.executable)')" 2>/dev/null | grep -E 'minos|sdk' | head -2
+          vtool -show-build /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 2>/dev/null | grep -E 'minos|sdk' | head -2
+          ctypes='import ctypes,socket,struct,time
+          libc=ctypes.CDLL(None); libc.gethostbyaddr.restype=ctypes.c_void_p
+          a=socket.inet_aton("127.0.0.1"); s=time.monotonic(); r=libc.gethostbyaddr(a,4,2)
+          print(f"python ctypes libc gethostbyaddr {time.monotonic()-s:.3f}s", flush=True)'
+          (
+            "$o/plain" & "$o/min1013" & "$o/min11" & "$o/cf" &
+            /opt/homebrew/bin/python3 -I -S -c "$ctypes" | sed 's/^/brew -I -S: /' &
+            /opt/homebrew/bin/python3 -I -S -c 'import socket,time; s=time.monotonic(); socket.gethostbyaddr("127.0.0.1"); print(f"brew -I -S socket {time.monotonic()-s:.3f}s")' &
+            /opt/homebrew/bin/python3 -c 'import socket,time; s=time.monotonic(); socket.getaddrinfo("localhost", 0); print(f"brew getaddrinfo(localhost) {time.monotonic()-s:.3f}s")' &
+            /opt/homebrew/bin/python3 -c 'import subprocess,time; s=time.monotonic(); print(subprocess.run([sys.argv[1]] if False else ["'"$o/plain"'"], capture_output=True, text=True).stdout.strip(), "as python child", f"{time.monotonic()-s:.3f}s")' &
+            /usr/bin/python3 -c "$ctypes" | sed 's/^/apple 3.9: /' &
+            wait
+          ) 2>&1
           true
