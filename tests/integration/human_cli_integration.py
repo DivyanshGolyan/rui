@@ -3959,7 +3959,10 @@ def renderer_cases():
             tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("ok", 4))
             assert len(endpoint.requests) == requests, endpoint.requests
             marker = answer("alt chord")
+            # Sent while browsing, the Message returns to the live view.
+            tty.send("\x1b[A", "Browsing · Esc returns")
             tty.send("\r", marker)
+            assert "Browsing · Esc returns" not in tty.capture.completed, tty.capture.completed
             submitted("ok")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
