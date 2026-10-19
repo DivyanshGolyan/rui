@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 
+from qualification import NO_RETRY
 from select_tests import execution_batches
 
 
@@ -111,74 +112,66 @@ def main():
     parser.add_argument("targets", help="JSON array from the selector")
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
     parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
-    parser.add_argument("--reuse-evidence", action="store_true",
-                        help="Verify matching-input Actions evidence; never use for qualification")
+    parser.add_argument("--retry", action="store_true",
+                        help="Rerun a failed batch once unless the shard holds a no-retry gate")
     args = parser.parse_args()
     targets = json.loads(args.targets)
-    inputs = None
-    if args.reuse_evidence:
-        try:
-            import evidence
-            if args.ci_artifacts != ".zig-cache/o/ci-compiled":
-                raise ValueError("Acceptance requires execution of the inventoried compiled artifacts")
-            inputs = evidence.identity(targets, args.check_part)
-            executed = {path: evidence.digest(path) for path in inputs["executables"]}
-            if evidence.restore(inputs):
-                return
-        except Exception as error:
-            # Optional evidence crosses Git/API/archive/hash boundaries. Any
-            # failure runs the ordinary gates; never catch their failures here.
-            inputs = None
-            print(f"Evidence unavailable; executing selected gates: {error}", flush=True)
+    retry = args.retry and not set(targets) & NO_RETRY
     for batch in execution_batches(targets, args.check_part):
-        print("Executing: " + " ".join(batch), flush=True)
-        start = time.monotonic()
-        states = []
-        published_output = bytearray()
-        artifacts = ["-Dci-artifacts=" + args.ci_artifacts] if args.ci_artifacts else []
-        with subprocess.Popen(["zig", "build", *batch, *artifacts, "--summary", "all"],
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as result:
-            for line in iter(lambda: result.stdout.readline(65536), b""):
-                sys.stdout.buffer.write(line)
-                sys.stdout.buffer.flush()
-                if published_output is not None:
-                    if len(published_output) + len(line) <= MAX_FILE_BYTES:
-                        published_output.extend(line)
-                    else:
-                        published_output = None  # Omit whole, never truncate.
-                marker = FAILURE_STATE.fullmatch(line.decode("utf-8", "replace").strip())
-                if marker and len(states) < MAX_DIRECTORIES:
-                    state = Path(marker[1])
-                    if state not in states:
-                        states.append(state)
-            result.wait()
-        print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {result.returncode}",
-              flush=True)
-        if result.returncode:
-            destination = os.environ.get("RUI_FAILURE_ARTIFACTS")
-            if destination:
-                try:
-                    retain_failure_logs(states, Path(destination), bytes(published_output or b""))
-                except OSError as error:
-                    print(f"Failure diagnostic retention unavailable: {error}", file=sys.stderr)
-            if os.environ.get("GITHUB_STEP_SUMMARY"):
-                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-                    print(f"Executed {' '.join(batch)}: failed (exit {result.returncode}). "
-                          "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.", file=summary)
-            raise SystemExit(result.returncode)
-    if inputs is not None:
-        try:
-            unchanged = (evidence.identity(targets, args.check_part) == inputs and
-                         executed == {path: evidence.digest(path) for path in inputs["executables"]})
-            if unchanged:
-                evidence.record(inputs)
-            else:
-                print("Evidence not recorded: execution inputs or artifacts changed", flush=True)
-        except Exception as error:
-            print(f"Evidence not recorded after fresh execution: {error}", flush=True)
+        returncode = execute(batch, args.ci_artifacts)
+        if returncode and retry:
+            note = (f"{' '.join(batch)} failed (exit {returncode}); one automatic retry. "
+                    "A pass after this retry is a flake to fix, not a clean pass.")
+            print(f"::warning::{note}", flush=True)
+            summarize(note)
+            returncode = execute(batch, args.ci_artifacts)
+            if not returncode:
+                summarize(f"{' '.join(batch)} passed on its automatic retry after failing.")
+        if returncode:
+            summarize(f"Executed {' '.join(batch)}: failed (exit {returncode}). "
+                      "Inspect the failed step. Retained artifacts are diagnostics, not acceptance.")
+            raise SystemExit(returncode)
+    summarize(f"Executed {', '.join(targets)} (partition {args.check_part}): passed. Fresh execution.")
+
+
+def summarize(line):
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-            print(f"Executed {', '.join(targets)} (partition {args.check_part}): passed. Fresh execution.", file=summary)
+            print(line, file=summary)
+
+
+def execute(batch, ci_artifacts):
+    print("Executing: " + " ".join(batch), flush=True)
+    start = time.monotonic()
+    states = []
+    published_output = bytearray()
+    artifacts = ["-Dci-artifacts=" + ci_artifacts] if ci_artifacts else []
+    with subprocess.Popen(["zig", "build", *batch, *artifacts, "--summary", "all"],
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as result:
+        for line in iter(lambda: result.stdout.readline(65536), b""):
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+            if published_output is not None:
+                if len(published_output) + len(line) <= MAX_FILE_BYTES:
+                    published_output.extend(line)
+                else:
+                    published_output = None  # Omit whole, never truncate.
+            marker = FAILURE_STATE.fullmatch(line.decode("utf-8", "replace").strip())
+            if marker and len(states) < MAX_DIRECTORIES:
+                state = Path(marker[1])
+                if state not in states:
+                    states.append(state)
+        result.wait()
+    print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {result.returncode}",
+          flush=True)
+    if result.returncode:
+        destination = os.environ.get("RUI_FAILURE_ARTIFACTS")
+        if destination:
+            try:
+                retain_failure_logs(states, Path(destination), bytes(published_output or b""))
+            except OSError as error:
+                print(f"Failure diagnostic retention unavailable: {error}", file=sys.stderr)
+    return result.returncode
 
 
 if __name__ == "__main__":

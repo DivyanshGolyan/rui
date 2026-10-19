@@ -37,4 +37,27 @@ jobs:
     with:
       ref: ${{ github.sha }}
       platform: macos
-      suite: native
+      # Mac check-full, the resource campaign and its memory reruns run here
+      # daily instead of on each candidate.
+      suite: all
+  report:
+    needs: [changed, macos]
+    if: ${{ always() && needs.changed.outputs.changed == 'true' && needs.macos.result != 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: File an issue for the failed daily run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.macos.result }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -B tests/ci/main_health.py report \
+            --title "Daily macOS qualification failed on ${GITHUB_SHA::12}" \
+            --body "Daily macOS qualification (check-full, resources) on main $GITHUB_SHA: $RESULT. $URL"

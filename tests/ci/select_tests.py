@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select existing build targets, not cached acceptance results."""
+"""Select existing build targets for fresh execution."""
 import argparse
 import fnmatch
 import json
@@ -229,12 +229,14 @@ def select(paths, phase, available):
         # Development does not replace final boundary/native acceptance.
         targets = {"test-logic"} if targets else set()
         native_targets = set()
-    cache_execution_checks = any(path == "build.zig" or path.startswith(".github/")
-                                 or path == "tests/ci/cache_execution.py" for path in paths)
-    if cache_execution_checks and phase == "review":
-        # One explicit shard owns auxiliary cache-policy checks on each platform.
-        targets.add("test-logic")
-        native_targets.add("test-logic")
+    if "check-full" in native_targets:
+        # The daily macOS workflow owns Mac check-full; the covered owners above
+        # are not selected separately.
+        native_targets.discard("check-full")
+        reasons.add("Mac check-full: daily macOS qualification")
+    cache_execution_checks = phase == "review" and any(
+        path == "build.zig" or path.startswith(".github/") or path == "tests/ci/cache_execution.py"
+        for path in paths)
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
@@ -242,7 +244,7 @@ def select(paths, phase, available):
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
             "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
-            "reasons": sorted(reasons), "acceptance_reused": False}
+            "reasons": sorted(reasons)}
 
 
 def changed_paths(base, head, fallback_base=None):

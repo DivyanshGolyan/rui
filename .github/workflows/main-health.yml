@@ -1,0 +1,35 @@
+name: Main health
+# After each main push's CI: advance stable when green; revert and freeze on a
+# Store/recovery/upgrade red; otherwise file an issue. See tests/ci/main_health.py.
+on:
+  workflow_run:
+    workflows: [Selected checks, Previous installed-release upgrade]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+
+concurrency:
+  # One decision at a time; never cancel a pending revert or stable push.
+  group: main-health
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    if: ${{ github.event.workflow_run.event == 'push' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Trusted main code decides; the revert, if any, lands on main.
+          ref: main
+          fetch-depth: 0
+      - name: Advance stable, or revert and freeze, or file an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 -B tests/ci/main_health.py check "$SHA"

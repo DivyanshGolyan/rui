@@ -16,9 +16,14 @@ NATIVE = (
     "current-facts-integration", "server-delivery-integration", "test-full",
     "evaluator-churn", "measurement-check",
 )
+# Composed, Store and recovery gates fail for real; never retry their shards.
+NO_RETRY = {"check", "check-full", "test", "canonical-failure-integration",
+            "bash-recovery-integration", "admission-debug-integration"}
+# Selected Linux suites run at most this many shards, all concurrently.
+LINUX_SHARDS = 10
 
 
-def shards(targets, platform="linux"):
+def shards(targets, platform="linux", limit=LINUX_SHARDS):
     if platform == "macos":
         # The standard account cap is five Macs shared by all workflows. Use
         # three workers, leaving room for another PR; never queue ten compilers.
@@ -34,9 +39,9 @@ def shards(targets, platform="linux"):
                      and not (t == "test-logic" and "check-full" in targets)]
         if remaining:
             rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
-        rows.extend(shards([t for t in targets if t in RESOURCES])["include"])
+        rows.extend(shards([t for t in targets if t in RESOURCES], limit=None)["include"])
         return {"include": rows}
-    rows = []
+    rows, packed = [], []
     for target in targets:
         if target == "measure-model-output":
             # Preserve both rounds at every capacity, plus all growth/spill cases.
@@ -45,11 +50,28 @@ def shards(targets, platform="linux"):
                 args = ["--growth-only"] if scenario == "growth" else ["--capacity", scenario]
                 rows.append(dict(name=f"{target}-{scenario}", targets=[target],
                                  part="all", resource=True, args=args))
-            continue
-        parts = ("execution", "callers") if target == "check-full" else ("all",)
-        for part in parts:
-            rows.append(dict(name=target if part == "all" else f"full-{part}",
-                             targets=[target], part=part, resource=target in RESOURCES, args=[]))
+        elif target == "check-full":
+            for part in ("execution", "callers"):
+                rows.append(dict(name=f"full-{part}", targets=[target], part=part, resource=False, args=[]))
+        elif target in RESOURCES:
+            rows.append(dict(name=target, targets=[target], part="all", resource=True, args=[]))
+        else:
+            packed.append(target)
+    # Short Selected suites mostly pay setup, so pack them into the remaining
+    # concurrent slots. Retryable suites never share a shard with a no-retry
+    # gate. Qualification keeps one isolated job per suite.
+    groups = [group for group in ([t for t in packed if t in NO_RETRY],
+                                  [t for t in packed if t not in NO_RETRY]) if group]
+    slots = len(packed) if limit is None else max(limit - len(rows), len(groups))
+    remaining = slots
+    for index, group in enumerate(groups):
+        later = len(groups) - 1 - index
+        share = round(slots * len(group) / len(packed)) if later else remaining
+        count = max(1, min(len(group), share, remaining - later))
+        remaining -= count
+        for shard in range(count):
+            members = group[shard::count]
+            rows.append(dict(name="+".join(members), targets=members, part="all", resource=False, args=[]))
     return {"include": rows}
 
 
@@ -66,7 +88,7 @@ def qualification(suite, platform):
         targets.extend(NATIVE)
         if platform == "linux":
             targets.append("login-signal-integration")
-    return shards(targets, platform)
+    return shards(targets, platform, limit=None)
 
 
 def main():

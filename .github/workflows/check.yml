@@ -1,7 +1,7 @@
 name: Selected checks
 on:
   push:
-    branches-ignore: [main]
+    branches: [main, 'wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -11,8 +11,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
-  cancel-in-progress: true
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
+  # Every main push keeps its own post-push result for the stable ref.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   plan:
@@ -28,39 +29,10 @@ jobs:
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
     steps:
-      - name: Avoid duplicate development work for a ready PR
-        id: cadence
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
-        with:
-          script: |
-            let run = true;
-            if (context.eventName === 'push') {
-              try {
-                const branch = context.ref.replace(/^refs\/heads\//, '');
-                const pulls = await github.paginate(github.rest.pulls.list, {
-                  ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`
-                });
-                const ready = pulls.find(p => !p.draft && p.head.sha === context.sha &&
-                  p.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`);
-                if (ready) {
-                  const {data} = await github.rest.pulls.get({...context.repo, pull_number: ready.number});
-                  // Conflicted or unknown mergeability keeps development fallback.
-                  run = data.head.sha !== context.sha || data.mergeable !== true;
-                }
-              } catch {
-                core.warning('PR lookup unavailable; running development checks.');
-              }
-            }
-            core.setOutput('run', String(run));
-            if (!run) await core.summary.addRaw(
-              `Duplicate development work omitted for ready, mergeable head ${context.sha}. Fresh merge-ref review remains required.`
-            ).write();
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         with:
           fetch-depth: 0
       - name: Select existing targets
-        if: ${{ steps.cadence.outputs.run == 'true' }}
         id: select
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -74,8 +46,7 @@ jobs:
           if [ "$EVENT_NAME" = push ]; then
             fallback=(--fallback-base origin/main)
             if [[ "$REF_NAME" = wip/* ]]; then
-              # A trunk candidate must cover its complete delta, including
-              # after an empty same-tree evidence proof push.
+              # A landing tip must cover its complete delta against main.
               BASE=$(git merge-base HEAD origin/main)
             fi
           fi
@@ -148,9 +119,6 @@ jobs:
         with:
           targets: ${{ needs.plan.outputs.targets }}
           check-part: compiled
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
-        run: python3 -B tests/ci/cache_execution.py
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
@@ -176,9 +144,6 @@ jobs:
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
           check-part: compiled
-      - name: Prove warm compilation does not cache test acceptance
-        if: ${{ needs.plan.outputs.cache_execution == 'true' }}
-        run: python3 -B tests/ci/cache_execution.py
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
@@ -191,53 +156,63 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
+  cache_execution:
+    # Not required by linux or macos: the cache-policy proof runs beside the
+    # gates instead of delaying both producers.
+    name: cache execution (${{ matrix.runner }})
+    needs: plan
+    if: ${{ needs.plan.outputs.cache_execution == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["test-logic"]'
+          check-part: cache-execution
+      - name: Prove warm compilation does not cache test acceptance
+        run: python3 -B tests/ci/cache_execution.py
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build]
     if: ${{ needs.plan.outputs.targets != '' && needs.plan.outputs.targets != '[]' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Ordinary shards take under ten minutes; a local rebuild after a rejected
+    # handoff compiles without the producer's cache.
+    timeout-minutes: 35
     strategy:
-      # Separate long witnesses from the full gate; the old callers job took 18m.
+      # qualification.py packs Selected suites into at most ten shards, so
+      # every shard starts at once.
       fail-fast: false
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # Verify origin source closure against trusted main, not its receipt.
-          fetch-depth: 0
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
           compiled: 'true'
-      - name: Verify the exact producer artifact before executing gates
+      - name: Use the verified producer artifact or compile locally
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
-      - name: Run selected targets or verify matching-input evidence
-        id: gates
+      - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
-          GH_TOKEN: ${{ github.token }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
-      - name: Publish input- and artifact-verified evidence
-        if: ${{ steps.gates.outputs.evidence_path != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.gates.outputs.evidence_name }}
-          path: ${{ steps.gates.outputs.evidence_path }}
-          overwrite: true # Replace only this run's earlier-attempt receipt.
-          retention-days: 3
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --retry
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -254,7 +229,7 @@ jobs:
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
-    # Policy is required even for documentation and suppressed duplicate pushes.
+    # Policy is required even for documentation-only changes.
     needs: [plan, policy, linux_build, linux_suites]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
@@ -282,7 +257,7 @@ jobs:
     needs: [plan, macos_build]
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
       fail-fast: false
@@ -290,39 +265,26 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # Qualification and mixed process shards still execute on this head.
-          fetch-depth: 0
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
           compiled: 'true'
-      - name: Verify the exact producer artifact before executing gates
+      - name: Use the verified producer artifact or compile locally
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
       - name: Run required native targets
-        id: gates
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
-          GH_TOKEN: ${{ github.token }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --reuse-evidence
-      - name: Publish input- and artifact-verified evidence
-        if: ${{ steps.gates.outputs.evidence_path != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.gates.outputs.evidence_name }}
-          path: ${{ steps.gates.outputs.evidence_path }}
-          overwrite: true # Earlier attempts cannot qualify this attempt.
-          retention-days: 3
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --retry
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

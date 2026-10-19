@@ -1,16 +1,31 @@
 name: Previous installed-release upgrade
+# Strict landing paths: tests/ci/strict_paths.py owns this list.
 on:
-  push:
-    branches: ['wip/**', 'main']
+  pull_request:
     paths:
-      - 'src/**'
-      - 'build.zig*'
+      - 'src/store*'
+      - 'src/*schema*'
+      - 'src/server*'
+      - 'src/execution*'
+      - 'src/*recovery*'
+      - 'tests/integration/*recovery*'
+      - 'tests/integration/bash*'
+      - 'build.zig'
+      - 'build.zig.zon'
       - 'install.sh'
-      - 'tests/integration/previous_release_upgrade.py'
-      - 'tests/integration/model_fixture.py'
-      - 'tests/integration/host_process.py'
-      - '.github/actions/setup/**'
-      - '.github/workflows/previous-release-upgrade.yml'
+  push:
+    branches: ['wip/land-*', 'main']
+    paths:
+      - 'src/store*'
+      - 'src/*schema*'
+      - 'src/server*'
+      - 'src/execution*'
+      - 'src/*recovery*'
+      - 'tests/integration/*recovery*'
+      - 'tests/integration/bash*'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - 'install.sh'
   workflow_dispatch:
 
 permissions:
@@ -20,8 +35,9 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}
-  cancel-in-progress: true
+  group: previous-release-upgrade-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
+  # Every main push keeps its own post-push result for the stable ref.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   upgrade:
@@ -48,9 +64,18 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Prior known serving build, not inferred Store-creation provenance.
+          # Cache maintenance publishes its build under the same pinned SHA.
           ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
           path: .amp/previous-release
           persist-credentials: false
+      - run: mv .amp/previous-release "$RUNNER_TEMP/previous-release"
+      - name: Restore the pinned previous release's compilation
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ runner.temp }}/previous-release/.zig-cache
+            ${{ runner.temp }}/previous-release/zig-pkg
+          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Install, save real work, reinstall and restart the same Store
         run: |
           set -euo pipefail
@@ -58,7 +83,6 @@ jobs:
           git rev-parse HEAD
           zig version
           mkdir -p "$RUI_UPGRADE_FAILURES"
-          mv .amp/previous-release "$RUNNER_TEMP/previous-release"
           python3 -B tests/integration/previous_release_upgrade.py . .
           python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .
         env:
