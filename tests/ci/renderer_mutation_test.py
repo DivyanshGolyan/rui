@@ -141,6 +141,13 @@ class MutationGateTests(unittest.TestCase):
             self.assertIn("-guard A; guard B;", (root / "evidence/A.patch").read_text())
             with self.assertRaisesRegex(ValueError, "fresh evidence"):
                 gate.run(source, root / "evidence", mutations, 1)
+            empty = root / "empty"
+            empty.mkdir()
+            result = subprocess.run([sys.executable, gate.__file__, "--source", str(source),
+                                     "--output", str(empty)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("No report was created", result.stdout)
+            self.assertNotIn("Evidence:", result.stdout)
 
     def test_baseline_failure_stops_before_any_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -60,11 +60,11 @@ MUTATIONS = (
              "src/SessionFrontend.zig",
              "self.items[self.count - 1].cursor = cursor;", "// Keep the stale cursor.",
              native("transcript boundaries survive live eviction and bounded recording")),
-    Mutation("mark-eviction-edge", "a boundary exactly at retained origin is usable", "6277744c",
+    Mutation("mark-eviction-edge", "a boundary exactly at retained origin is usable", "4d5cf8ba",
              "src/SessionFrontend.zig", "if (mark.offset >= front) return mark;",
              "if (mark.offset > front) return mark;",
              native("transcript boundaries survive live eviction and bounded recording")),
-    Mutation("conversation-cursor", "Admission rows are not Conversation cursors", "52e9055d",
+    Mutation("conversation-cursor", "Admission rows are not Conversation cursors", "a68b4c76",
              "src/session_reads.zig", "else => if (first.position > 1) .{ .end = first.position - 1 } else null,",
              "else => .{ .end = first.position },",
              native("a live page's beginning precedes its first item, without repeating or skipping one")),
@@ -72,7 +72,7 @@ MUTATIONS = (
              "src/SessionFrontend.zig", "} else if (!self.job.result.settled) {",
              "} else if (false) {",
              native("after three changed reads in a row the newest capture applies")),
-    Mutation("loan-cursor-owner", "releasing submission cannot erase next draft or caret", "359567e6",
+    Mutation("loan-cursor-owner", "releasing submission cannot erase next draft or caret", "1566667d",
              "src/SessionInput.zig",
              "self.editors[submitted.bank] = .{ .buffer = &self.banks[submitted.bank] };",
              "self.editors[self.active] = .{ .buffer = &self.banks[submitted.bank] };",
@@ -84,19 +84,19 @@ MUTATIONS = (
     Mutation("escape-alt", "ESC prefix preserves the key's Alt modifier", "6277744c",
              "src/TerminalInput.zig", "key.mods.alt = true;", "key.mods.alt = false;",
              logic("TD2 binding outcomes across raw ESC-prefix and kitty at every fragmentation boundary")),
-    Mutation("input-expiry-edge", "pending input expires at the inclusive 80ms/2s deadline", "359567e6",
+    Mutation("input-expiry-edge", "pending input expires at the inclusive 80ms/2s deadline", "1566667d",
              "src/SessionTerminal.zig", "now - self.pending_at >= (if (pending == .escape)",
              "now - self.pending_at > (if (pending == .escape)",
              logic("TD2 SessionTerminal expiry boundaries use a controlled clock and retain queued bytes")),
     Mutation("escape-suffix", "an interrupted OSC retains the following sequence", "0e3b44b5",
              "src/TerminalInput.zig", "self.used -= result.n;", "self.used = 0;",
              logic("an interrupted OSC keeps the following sequence and key")),
-    Mutation("approval-contiguity", "only contiguous delivered Action rows permit approval", "41984558",
+    Mutation("approval-contiguity", "only contiguous delivered Action rows permit approval", "4d5cf8ba",
              "src/TerminalFrame.zig",
              "if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt)",
              "if (shown.next.order(input.action_seen) == .gt)",
              logic("Action approval requires contiguous displayed rows and resets after resize")),
-    Mutation("consent-freshness", "a pending decoder never grants fresh permission input", "359567e6",
+    Mutation("consent-freshness", "a pending decoder never grants fresh permission input", "771a8de5",
              "src/session_consent.zig", "service != .empty or decoder_pending or stopped",
              "service != .empty or (decoder_pending and false) or stopped",
              logic("consent requires real emptiness after completed prompt")),
@@ -306,8 +306,12 @@ def main():
         print(f"renderer mutation gate failed: {error}", flush=True)
         return 1
     finally:
-        print(f"Evidence: {args.output.resolve()}/report.json (logs beside it). "
-              "Keep this attempt; any rerun requires a fresh --output directory.", flush=True)
+        report = args.output.resolve() / "report.json"
+        if report.is_file():
+            print(f"Evidence: {report} (logs beside it). Keep this attempt; "
+                  "any rerun requires a fresh --output directory.", flush=True)
+        else:
+            print("No report was created. Use a fresh --output directory.", flush=True)
 
 
 if __name__ == "__main__":

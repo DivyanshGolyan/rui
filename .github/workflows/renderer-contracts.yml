@@ -9,6 +9,7 @@ on:
       - 'build.zig*'
       - 'tests/ci/renderer_mutation*'
       - 'tests/integration/session_sequence_model.py'
+      - 'tests/integration/input_equivalence.py'
       - 'tests/qualification/direct-pty/**'
       - '.github/workflows/renderer-contracts.yml'
 
