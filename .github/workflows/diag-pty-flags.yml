@@ -1,0 +1,21 @@
+name: perf diagnostic PTY flags
+# Temporary diagnostic branch only: Python-only PTY F_GETFL deltas on hosted macOS (no Rui build).
+on:
+  push:
+    branches: ['perf/diag-pty-flags']
+permissions:
+  contents: read
+jobs:
+  flags:
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Probes
+        run: |
+          set -e
+          for p in .github/diag/*.py; do
+            for py in /opt/homebrew/bin/python3 /usr/bin/python3; do echo "== $p with $py"; "$py" -I -B "$p" || echo "exit $?"; done
+          done
