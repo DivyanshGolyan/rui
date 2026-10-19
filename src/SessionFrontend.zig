@@ -803,7 +803,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     if (self.consent.active() and !self.actionVisible() and pending == .none and byte == 18) {
         // Recovery waits for the Action; the paused draft stays as it is.
         self.consent.invalidate();
-        self.notice = "! Action needs a decision; Esc returns to it. Draft retained.";
+        self.notice = self.decisionNotice();
         return .byte;
     }
     // One stream decodes every byte; replies never reach an editor, and an
@@ -839,6 +839,10 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             self.detached = true;
         }
         try self.navigation(event);
+        switch (event) {
+            .invalid, .edit_rejected, .unbound, .overflow => self.notice = choiceRejection(event),
+            else => {},
+        }
         // Only a slash command survives: it can never become a decision.
         const text = self.choice.buffer[0..self.choice.length];
         const command = text.len != 0 and text[0] == '/';
@@ -864,7 +868,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .invalid, .edit_rejected, .unbound, .overflow => {
             self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.consent.invalidate();
-            self.notice = "! Decision input rejected. Type a or d; pasted text cannot authorize.";
+            self.notice = choiceRejection(event);
         },
         .interrupt, .eof => {
             self.consent.interrupt();
@@ -872,6 +876,15 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         },
         else => {},
     }
+}
+
+/// Why a draft waits for the Action: a previewed Action is decided only in the shell.
+fn decisionNotice(self: *const Self) []const u8 {
+    return if (self.consent.presentation == .preview) "! Approval disabled · /help for exact shell commands. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
+}
+
+fn choiceRejection(event: Editor.Event) []const u8 {
+    return if (event == .unbound) "! Key combination not recognized; nothing authorized. Type a or d." else "! Decision input rejected. Type a or d; pasted text cannot authorize.";
 }
 
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
@@ -889,7 +902,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 self.requestHistory(text);
             } else self.admitCommand();
         },
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.consent.active()) "! Action needs a decision; Esc returns to it. Draft retained." else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
             .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
