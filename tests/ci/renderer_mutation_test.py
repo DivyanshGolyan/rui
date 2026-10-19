@@ -82,10 +82,12 @@ class MutationGateTests(unittest.TestCase):
             check = gate.model("pages")
             for status in (0, 1):
                 receipt = {"source": str(root), "selector": "pages", "source_unchanged": True,
+                           "overlay_unchanged": True,
                            "exit": status, "direct_exit": status,
                            "binary": str(binary), "binary_sha256": gate.sha(binary)}
                 for index, alteration in enumerate(({}, {"source": "/wrong-source"}, {"selector": "focus"},
-                                                     {"source_unchanged": False}, {"direct_exit": -9},
+                                                     {"source_unchanged": False}, {"overlay_unchanged": False},
+                                                     {"overlay_unchanged": None}, {"direct_exit": -9},
                                                      {"exit": 1 - status}, {"binary_sha256": "wrong"})):
                     with self.subTest(status=status, alteration=alteration):
                         log = root / f"model-{status}-{index}.log"

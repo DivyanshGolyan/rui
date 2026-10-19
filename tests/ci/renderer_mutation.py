@@ -154,6 +154,11 @@ MUTATIONS = (
              "src/SessionFrontend.zig", "!self.consent.active() and !self.commandActive()",
              "!self.commandActive()",
              model("focus")),
+    Mutation("paused-editor-owner", "paused approval renders the draft and its own caret", "52e9055d",
+             "src/SessionFrontend.zig",
+             "if (self.consent.active() and action_visible) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();",
+             "if (self.consent.active()) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();",
+             model("focus")),
     Mutation("unread-action-decision", "choice submission requires a completely delivered Action", "4d5cf8ba",
              "src/SessionFrontend.zig", "if (self.approvalReady()) self.consent.submit(text) else null",
              "self.consent.submit(text)",
@@ -161,6 +166,10 @@ MUTATIONS = (
     Mutation("frame-publication", "failed frame output cannot advance inspected rows or approval", "4d5cf8ba",
              "src/SessionScreen.zig", "    try out.writeAll(frame.written());",
              "    self.action_seen = layout.action_seen;\n    self.approval_ready = layout.approval_ready;\n    try out.writeAll(frame.written());",
+             model("publication")),
+    Mutation("frame-flush-publication", "accepted writes without successful flush cannot certify a frame", "4d5cf8ba",
+             "src/SessionScreen.zig", "    try out.writeAll(frame.written());\n    try out.flush();",
+             "    try out.writeAll(frame.written());\n    self.action_seen = layout.action_seen;\n    self.approval_ready = layout.approval_ready;\n    try out.flush();",
              model("publication")),
 )
 
@@ -220,7 +229,7 @@ def execute(command, root, log, timeout, environment):
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-    return {"command": command, "returncode": process.returncode,
+    return {"command": command, "cwd": str(root), "returncode": process.returncode,
             "timeout": timed_out, "seconds": round(time.monotonic() - start, 3),
             "log_sha256": sha(log)}
 
@@ -243,6 +252,7 @@ def run_check(check, root, log, timeout, environment):
             valid = (receipt["source"] == str(root) and
                      receipt["selector"] == check.name.removeprefix("TD1 sequence model ") and
                      receipt["source_unchanged"] is True and
+                     receipt["overlay_unchanged"] is True and
                      receipt["exit"] == receipt["direct_exit"] == result["returncode"] and
                      sha(binary) == receipt["binary_sha256"])
         except (OSError, ValueError, KeyError, TypeError):
@@ -331,6 +341,7 @@ def run(source, output, selected, timeout):
     report_path = output / "report.json"
     low, high = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(low, 256), high))
+    report["nofile_soft"] = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
     try:
         with tempfile.TemporaryDirectory(prefix="rui-mutations-") as temporary:
             scratch = Path(temporary)
