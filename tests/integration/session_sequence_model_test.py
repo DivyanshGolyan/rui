@@ -22,6 +22,8 @@ from pathlib import Path
 import signal
 import sys
 
+Path(os.environ["TD1_COMMAND_MARKER"]).write_text("launched")
+
 def drift(stage):
     if os.environ.get("TD1_DRIFT_STAGE") != stage:
         return
@@ -63,13 +65,42 @@ raise SystemExit(code)
 
 
 class ProducerTests(unittest.TestCase):
-    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0):
-        source = root / "supplied"
+    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0, custody=""):
+        source = root / ("source" if custody == "same_root" else "supplied")
         (source / "src").mkdir(parents=True)
         (source / "src/SessionFrontend.zig").write_text(FRONTEND)
         (source / "src/owner.zig").write_text("original supplied source")
+        (source / "src/nested").mkdir()
+        (source / "src/nested/value.zig").write_text("nested supplied source")
         for name in ("build.zig", "build.zig.zon"):
             (source / name).write_text("synthetic build input")
+        cache = root if custody == "same_root" else root / "cache"
+        if custody == "cache_alias":
+            cache.symlink_to(source, target_is_directory=True)
+        elif custody == "root_link":
+            cache.mkdir()
+            (cache / "source").symlink_to(source, target_is_directory=True)
+        elif custody == "parent_link":
+            (cache / "source").mkdir(parents=True)
+            (cache / "source/src").symlink_to(source / "src", target_is_directory=True)
+        elif custody == "nested_link":
+            (cache / "source/src").mkdir(parents=True)
+            (cache / "source/src/nested").symlink_to(source / "src/nested", target_is_directory=True)
+        elif custody in ("lock_link", "build_link"):
+            cache.mkdir()
+            (cache / ("lock" if custody == "lock_link" else "build")).symlink_to(
+                source / ("build.zig" if custody == "lock_link" else "src"))
+        elif custody in ("leaf_link", "hard_link"):
+            (cache / "source/src").mkdir(parents=True)
+            destination = cache / "source/src/SessionFrontend.zig"
+            original = source / "src/SessionFrontend.zig"
+            if custody == "leaf_link":
+                destination.symlink_to(original)
+            else:
+                os.link(original, destination)
+        before = {str(path.relative_to(source)): (path.read_bytes() if path.is_file() else None,
+                                                  path.stat().st_mode)
+                  for path in source.rglob("*")}
         tools = root / "tools"
         tools.mkdir()
         zig = tools / "zig"
@@ -84,15 +115,30 @@ class ProducerTests(unittest.TestCase):
             "TD1_DRIFT_KIND": kind, "TD1_BUILD_EXIT": str(build_exit),
             "TD1_DIRECT_EXIT": str(direct_exit),
             "TD1_LINK_TARGET": str(root / "replacement"),
+            "TD1_COMMAND_MARKER": str(root / "command-ran"),
         }
         result = subprocess.run(
             [sys.executable, str(RUNNER), "--source", str(source), "--output", str(output),
-             "--cache", str(root / "cache"), "--selector", "pages"],
+             "--cache", str(cache), "--selector", "pages"],
             env=environment, capture_output=True, text=True, timeout=10,
         )
         receipt = json.loads((output / "receipt.json").read_text())
-        self.assertEqual((source / "src/owner.zig").read_text(), "original supplied source")
+        after = {str(path.relative_to(source)): (path.read_bytes() if path.is_file() else None,
+                                                 path.stat().st_mode)
+                 for path in source.rglob("*")}
+        self.assertEqual(before, after, result.stdout + result.stderr)
         return result, receipt, marker.exists()
+
+    def test_reused_cache_cannot_alias_supplied_inputs(self):
+        for custody in ("cache_alias", "root_link", "parent_link", "nested_link", "leaf_link",
+                        "hard_link", "same_root", "lock_link", "build_link"):
+            with self.subTest(custody=custody), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result, receipt, replayed = self.invoke(root, custody=custody)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(receipt["source_unchanged"])
+                self.assertFalse(receipt["overlay_unchanged"])
+                self.assertFalse(replayed or (root / "command-ran").exists())
 
     def test_drift_in_executed_overlay_never_qualifies_supplied_source(self):
         for stage in ("build", "direct"):

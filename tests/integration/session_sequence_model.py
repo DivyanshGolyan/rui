@@ -58,12 +58,42 @@ def identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def unsafe_cache(cache, source):
+    overlay = cache / "source"
+    # Default compilation scratch below .zig-cache is allowed. No cache write
+    # may overlap supplied inputs, including an equal/ancestor overlay root.
+    if source.is_relative_to(overlay.resolve()):
+        return f"cache overlaps supplied source: {overlay}"
+    for path in (cache, overlay.resolve()):
+        if path == source or (path.is_relative_to(source) and
+                              path.relative_to(source).parts[0] not in SCRATCH):
+            return f"cache writes supplied inputs: {path}"
+    for path in (cache, overlay, overlay / "src", cache / "build"):
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            return f"unsafe cache directory: {path}"
+    lock = cache / "lock"
+    paths = [lock] if lock.exists() or lock.is_symlink() else []
+    paths.extend((overlay / "src").rglob("*"))
+    for path in paths:
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode) or (not stat.S_ISDIR(mode) and
+                                (not stat.S_ISREG(mode) or path.stat().st_nlink != 1)):
+            return f"unsafe cache entry: {path}"
+    return None
+
+
 @contextmanager
-def source_overlay(cache):
+def source_overlay(cache, source):
     # Stable source paths let Zig reuse compiled dependencies across selectors
     # and mutations. Concurrent invocations never share writable source custody.
+    unsafe = unsafe_cache(cache, source)
+    assert unsafe is None, unsafe
     with (cache / "lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Recheck under custody: a preceding invocation may have retired a
+        # failed, aliased overlay between preflight and lock acquisition.
+        unsafe = unsafe_cache(cache, source)
+        assert unsafe is None, unsafe
         overlay = cache / "source"
         overlay.mkdir(exist_ok=True)
         yield overlay
@@ -200,8 +230,18 @@ test "TD1 sequence model {name}" {{
     # Keep compilation scratch outside the review-artifact directory. The
     # shared cache contains compilation only; Zig's Run step executes afresh.
     cache = cache.resolve() if cache is not None else source / ".zig-cache/td1-model"
+    unsafe = unsafe_cache(cache, source)
+    if unsafe is not None:
+        # Preserve refusal BEFORE root acquisition, copying or chmod. A failed
+        # retained overlay is not authority to dereference a cached alias.
+        receipt = {"source": str(source), "selector": selector, "inputs": inputs,
+                   "exit": None, "direct_exit": None, "binary": None, "binary_sha256": None,
+                   "source_unchanged": manifest(source) == supplied,
+                   "overlay_unchanged": False, "failure": unsafe}
+        (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        raise AssertionError(unsafe)
     cache.mkdir(parents=True, exist_ok=True)
-    with source_overlay(cache) as overlay:
+    with source_overlay(cache, source) as overlay:
         for path in source.iterdir():
             if path.name == "src" or path.name in SCRATCH:
                 continue
