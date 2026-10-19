@@ -3503,7 +3503,8 @@ def renderer_cases():
             current = fixture.command("session", "inspect", "--store", store, "--session", "renderer/oversized")
             action = current["actionable_permissions"][0]["action"]
             records = set((home / ".config/rui/requests").glob("*.json"))
-            tty.send("a\n", "Approval disabled")
+            # A typed decision stays a draft, and the notice names the only way to decide.
+            tty.send("a\n", predicate=lambda: "! Approval disabled · /help for exact shell commands. Draft retained." in tty.capture.completed and tty.capture.draft("a", 3))
             tty.caller.send_signal(signal.SIGINT)
             detached = tty.finish()[0].decode()
             for name in ("inspect", "allow", "deny"):
@@ -3881,7 +3882,8 @@ def renderer_cases():
                 os.write(tty.master, b"\x1b[5~")
                 time.sleep(0.3)
             time.sleep(1)
-            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
+            shown = tty.capture.completed
+            assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
             for frame in frames:
                 assert "Earlier messages unavailable" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
@@ -3903,6 +3905,9 @@ def renderer_cases():
             assert tty.capture.draft("next draft", 12), tty.capture.completed
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("\x1b", "Type a + Enter to allow once · d + Enter to deny")
+            # Alt-Enter at the choice decides nothing and says so.
+            tty.send("\x1b\r", "! Key combination not recognized; nothing authorized. Type a or d.")
+            assert fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]
             tty.send("a\r", marker)
             tty.wait(predicate=lambda: tty.capture.draft("next draft", 12), timeout=10)
             tty.caller.send_signal(signal.SIGINT)
@@ -3949,9 +3954,12 @@ def renderer_cases():
         with terminal(session) as tty:
             requests = len(endpoint.requests)
             tty.send("o\x1b.\x1b ", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("o", 3))
+            tty.send("k", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("ok", 4))
+            # Alt-Enter, as ESC CR, neither sends the draft nor swallows keys.
+            tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized; ignored. Draft unchanged." in tty.capture.completed and tty.capture.draft("ok", 4))
             assert len(endpoint.requests) == requests, endpoint.requests
             marker = answer("alt chord")
-            tty.send("k\r", marker)
+            tty.send("\r", marker)
             submitted("ok")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()

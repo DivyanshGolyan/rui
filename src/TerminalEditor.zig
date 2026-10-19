@@ -341,7 +341,8 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matches('d', .{ .ctrl = true })) return if (self.length == 0) .eof else self.deleteNext();
     if (value.matches(Key.enter, .{}) or value.matches('j', .{ .ctrl = true })) return self.rejected orelse .submit;
     if (self.rejected != null) return .none;
-    if (value.matches(Key.escape, .{})) return .close_view;
+    // A quick double Esc arrives as Alt-Escape; it still means Esc.
+    if (value.matches(Key.escape, .{}) or value.matches(Key.escape, .{ .alt = true })) return .close_view;
     if (value.matches(Key.tab, .{})) return self.insert('\t', false);
     if (value.matches(Key.enter, .{ .shift = true }) or value.matches('j', .{ .alt = true })) return self.insert('\n', true);
     if (value.matches(Key.page_up, .{}) or value.matches(Key.page_up, .{ .shift = true })) return .page_up;
@@ -373,7 +374,9 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     // as one chord.
     // Vaxis represents C0 controls as Ctrl keys or textless Kitty codepoints;
     // those are not text, so they reject the input, with or without Alt.
-    const control = value.codepoint < 0x20 and value.codepoint != Key.enter and value.codepoint != Key.tab and value.codepoint != Key.escape;
+    // LF is Enter here: the terminal keeps ICRNL, so ESC CR (Alt-Enter)
+    // arrives as ESC LF, which vaxis reports as Alt on codepoint LF.
+    const control = value.codepoint < 0x20 and value.codepoint != Key.enter and value.codepoint != '\n' and value.codepoint != Key.tab and value.codepoint != Key.escape;
     if (value.mods.ctrl or control) {
         self.reject(.invalid);
         return .none;
@@ -760,7 +763,7 @@ test "an unbound Alt or Meta chord never inserts its bare character" {
     // Super/Meta bits. Each is dropped as it arrives, keeping the draft
     // around it, rather than adding ".".
     // Alt-Enter, as ESC CR or Kitty, neither sends the draft nor adds a line.
-    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A" }) |chord| {
+    for ([_][]const u8{ "\x1b.", "\x1b ", "\x1bx", "\x1b[46;3u", "\x1b[46;3;46u", "\x1b[32;3u", "\x1b[46;9u", "\x1b[46;33u", "\x1b\r", "\x1b\n", "\x1b[13;3u", "\x1b[13;3;13u", "\x1b[1;3A" }) |chord| {
         for ([_]bool{ true, false }) |allow_paste| {
             var editor: Editor = .{ .buffer = &storage, .allow_paste = allow_paste };
             var stream: Input = .{};
@@ -798,6 +801,10 @@ test "a dropped chord reports itself as it arrives" {
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '.'));
     _ = editor.feed(&stream, 0x1b);
     try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\r'));
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Event.unbound, editor.feed(&stream, '\n'));
+    _ = editor.feed(&stream, 0x1b);
+    try std.testing.expectEqual(Event.close_view, editor.feed(&stream, 0x1b));
     try std.testing.expectEqualStrings("o", storage[0..editor.length]);
 }
 

@@ -1581,6 +1581,10 @@ def command_interruption_cases(state, library):
                 if case.endswith("-stopped-stderr"):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 if route is None:
+                    # kill() returns before delivery. The canonical terminal
+                    # is restored only after the handler sets the command's
+                    # cancellation, so it orders the signal before the release.
+                    fixture.wait_for(lambda: termios.tcgetattr(slave)[3] & termios.ICANON, f"{case} signal restoration")
                     release.touch()  # File custody is nonpreemptible, transport is cancellable.
                 if stopped:  # Never readable: exit cannot depend on stderr credit.
                     caller.stderr = open(os.dup(unread_read), "rb", buffering=0)
