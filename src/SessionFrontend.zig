@@ -851,11 +851,15 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
             .invalid, .edit_rejected, .unbound, .overflow => self.notice = choiceRejection(event, false),
             else => {},
         }
-        // Only a slash command survives: it can never become a decision.
+        // Only a slash command survives, or any text while the Action is
+        // unread: reading its last row clears it, so neither can decide.
         const text = self.choice.buffer[0..self.choice.length];
         const command = text.len != 0 and text[0] == '/';
+        const reading = screen.selected.approval == .reading;
         if (event == .submit and command) self.choiceCommand(text);
-        if (stream.pending() == .none and (event == .submit or !command)) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        // Enter on an unread Action says why nothing was decided.
+        if (event == .submit and !command and reading) self.notice = "! Read the whole Action first; nothing authorized.";
+        if (stream.pending() == .none and (event == .submit or !(command or reading))) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
         return;
     }
     const event = self.choice.apply(decoded);

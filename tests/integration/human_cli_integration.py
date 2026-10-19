@@ -3443,14 +3443,13 @@ def renderer_cases():
                 opened = shown = tty.wait("Action continues · PgDn")
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                tty.ready(ready_read)
+                # An unread Action takes choice text but never opens a fresh
+                # choice: readiness waits for its last row.
                 tty.send("/help\n", "Enter sends")
                 assert "Enter sends" in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", "Action continues · PgDn")
-                tty.ready(ready_read)
                 tty.send("a\n", "Read the whole Action first")
                 assert not (workspace / "renderer-effect").exists(), "unseen Action tail was approved"
-                tty.ready(ready_read)
                 tty.send("a", predicate=lambda: tty.capture.draft("a", 3, prompt="> "))
                 for _ in range(8):
                     tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
