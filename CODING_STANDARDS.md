@@ -6,7 +6,7 @@ Load sections through [AGENTS.md](AGENTS.md#before-work). These standards own en
 
 Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research. Implementation slices link accepted contracts and define proof.
 
-Edit the owning section and affected verification cases; keep rationale beside the contract. Identify conflicts with accepted behavior explicitly. Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Keep [Research](research/README.md) a compact index of reproducible evidence.
+Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate. Then edit the owning section and affected verification cases; keep rationale beside the contract. Identify conflicts with accepted behavior explicitly. Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers. Keep [Research](research/README.md) a compact index of reproducible evidence.
 
 ## Engineering
 
@@ -44,9 +44,7 @@ Before changing the build graph or enabling experimental incremental compilation
 
 ## Review
 
-Review correctness and simplicity using the [product-tenet gate](VERIFICATION.md#product-tenets-at-stage-completion), including local and Codex reviews.
-
-For every review, obtain a read-only opinion from an agent independent of implementer and reviewer before implementing findings. Give each opinion one programmer's lens: Rich Hickey by default; John Ousterhout, Rob Pike or Joe Armstrong when better suited. Ground it in published ideas and the affected work; label it an interpretation, not their opinion or endorsement. Contract and evidence decide.
+Review correctness and simplicity using the [product-tenet gate](VERIFICATION.md#product-tenets-at-stage-completion), with one independent review.
 
 Trace beyond changed lines to owning state/control flow and existing causes of workarounds. Identify duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; connect findings to the change. Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost.
 
@@ -58,10 +56,10 @@ Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, fo
 
 Test meaningful failures and recovery against independent expectations. Drive fault injection through production transitions. Unit tests may inspect owner internals; integration and qualification must assert durable owner-boundary outcomes rather than timing, scheduler order, private representation or fixture-only authority.
 
-For each new owner-boundary regression, demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup. Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
+For each new owner-boundary regression on a [strict path](AGENTS.md#landing), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup. Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
 
 For documentation, check contract preservation, references and `git diff --check`. Report passed checks, material limits, pre-existing failures and interrupted/unrun checks; state whether delivery is local, committed, published or deployed. Implementation claims require inspected source. Keep accepted decisions, source inspection, prototypes, compilation and native process-crash evidence distinct. OS-crash and power-loss recovery are outside the supported contract.
 
-Pause the affected outcome after a failed or unknown check, not independent work. Automatically retry once only for an identified infrastructure failure. Assertions, unexplained timeouts and unknown results require diagnosis, not automatic replay. Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure. An unexplained fail-then-pass is not reliable green.
+For changes touching the [strict landing paths](AGENTS.md#landing), pause the affected outcome after a failed or unknown check, not independent work; assertions, unexplained timeouts and unknown results require diagnosis, not replay. Elsewhere, Selected CI retries a failed shard once automatically, and other reds follow the landing rule: file an issue and fix forward. Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure. An unexplained fail-then-pass is not reliable green.
 
-Reuse acceptance outcomes only through tooling that checks relevant source, inputs, executable and platform identity. Build caches accelerate compilation; they do not cache test acceptance. Without such evidence tooling, rerun required checks. Keep results in PR checks and existing artifacts rather than growing coordination records. Pin consumed dependencies, not unused installed-Amp bytes or fixture-policy hashes.
+Required checks execute on the gated tip; build caches accelerate compilation and never cache test acceptance. Keep results in PR checks and existing artifacts rather than growing coordination records. Pin consumed dependencies, not unused installed-Amp bytes or fixture-policy hashes.

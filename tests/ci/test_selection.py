@@ -30,7 +30,6 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
         self.assertEqual(result["targets"], ["test-logic"])
         self.assertFalse(result["native_required"])
-        self.assertFalse(result["acceptance_reused"])
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
@@ -192,9 +191,12 @@ class SelectionTest(unittest.TestCase):
     def test_build_changes_keep_long_and_debug_checks(self):
         result = select(["build.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertTrue({"admission-debug-integration", "check-full", "evaluator-churn",
+            self.assertTrue({"admission-debug-integration", "evaluator-churn",
                              "test-full", "current-facts-integration", "server-delivery-integration"}
                             <= set(result[family]))
+        # Mac check-full belongs to the daily macOS workflow, not Selected.
+        self.assertIn("check-full", result["targets"])
+        self.assertNotIn("check-full", result["native_targets"])
         self.assertIn("login-signal-integration", result["targets"])
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
@@ -226,9 +228,10 @@ class SelectionTest(unittest.TestCase):
         for path in (".github/actions/setup/action.yml", "install.sh", "src/fetch_dependencies.sh"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
-                self.assertTrue({"check-full", "admission-debug-integration", "test-full",
+                self.assertTrue({"admission-debug-integration", "test-full",
                                  "evaluator-churn", "transport-h2-integration",
                                  "codex-h2-integration"} <= set(result[family]))
+            self.assertIn("check-full", result["targets"])
 
     def test_shared_driver_selects_one_native_inventory(self):
         for paths in (["tests/integration/check.sh"],
@@ -236,8 +239,9 @@ class SelectionTest(unittest.TestCase):
                       ["tests/integration/check.sh", "src/server.zig"],
                       ["tests/integration/check.sh", "tests/integration/terminal_restoration_integration.py"]):
             result = select(paths, "review", AVAILABLE)
+            self.assertIn("check-full", result["targets"])
+            self.assertNotIn("check-full", result["native_targets"])
             for family in ("targets", "native_targets"):
-                self.assertIn("check-full", result[family])
                 self.assertNotIn("check", result[family])
                 self.assertNotIn("terminal-restoration-integration", result[family])
 
@@ -281,8 +285,10 @@ class SelectionTest(unittest.TestCase):
             for composed, paths in (("check", [path]), ("check-full", [path, "build.zig"])):
                 with self.subTest(name=name, composed=composed):
                     result = select(paths, "review", AVAILABLE)
+                    self.assertTrue({composed, *standalone} <= set(result["targets"]))
+                    native = standalone | ({composed} - {"check-full"})
+                    self.assertTrue(native <= set(result["native_targets"]))
                     for family in ("targets", "native_targets"):
-                        self.assertTrue({composed, *standalone} <= set(result[family]))
                         self.assertNotIn("control-integration", result[family])
 
     def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
@@ -391,7 +397,8 @@ class SelectionTest(unittest.TestCase):
                              {"go": True, "h2": True, "terminal": False})
         # Standalone PTY steps decode screens too, including the upgrade workflow's.
         for target in ("host-launch-integration", "terminal-restoration-integration",
-                       "canonical-failure-integration", "bash-recovery-integration"):
+                       "canonical-failure-integration", "bash-recovery-integration",
+                       "current-facts-integration"):
             self.assertTrue(setup_requirements([target])["terminal"], target)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):

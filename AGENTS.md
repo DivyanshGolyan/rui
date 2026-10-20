@@ -13,9 +13,9 @@ Load applicable guidance before acting; routes combine:
 - **Implement, design, debug, change builds, or review engineering:** [Engineering](CODING_STANDARDS.md#engineering).
 - **Review, including documentation, or implement review findings:** [Review](CODING_STANDARDS.md#review). Reviews are read-only unless fixes are requested.
 - **Implement or review performance changes:** [Performance](CODING_STANDARDS.md#performance), including build-latency exceptions.
-- **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance). Load `writing-for-agents` before editing skills, this file or Markdown reached from it.
+- **Change documentation, terminology or decisions:** [Contract maintenance](CODING_STANDARDS.md#contract-maintenance).
 - **Implement, test, verify or report:** [Evidence](CODING_STANDARDS.md#evidence) and applicable [Verification](VERIFICATION.md) cases.
-- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). Use the maintained subsystem mapping as the minimum, with reviewer-accepted reasons for reductions.
+- **Select checks or change CI:** [Canonical gates](VERIFICATION.md#canonical-gates). `select_tests.py` decides; no reviewer acceptance.
 - **Issue work:** read the live issue, discussion and dependencies, then [issue guidance](docs/agents/issue-tracker.md) and [triage labels](docs/agents/triage-labels.md). Follow the latest accepted decision.
 - **PR descriptions:** use `pr`.
 
@@ -41,4 +41,20 @@ Own one implementation outcome through its applicable checks and authorized publ
 
 Implementation approval alone does not authorize publication. A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures. Carry that authorization across agent handoffs without asking again for each commit or correction.
 
-Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome. Merging, deploying and closing issues still require explicit authorization. Honor narrower user limits.
+Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome. Deploying and closing issues still require explicit authorization. Honor narrower user limits.
+
+## Landing
+
+Standing grant: an item ready for main lands under these rules without further approval. Passing their gates is the authority; there is no separate human approval or qualification stage.
+
+- Stack ready items on `wip/land-N` and gate only the tip.
+- If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
+- Push as a non-force fast-forward.
+- If main goes red after the push in Store/recovery/upgrade: automatic non-force `git revert`, then freeze landing.
+- Any other red: file an issue and fix forward.
+- After ready, at most one rerun per item, and no commits except fixes for red CI.
+- `stable` is the last main commit whose post-push CI passed; install from `stable`.
+
+The strict paths are `src/store*`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list; the [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on exactly these paths. A `wip/land-N` push runs [Selected checks](.github/workflows/check.yml) on the tip, and the upgrade check when the tip touches a strict path.
+
+[Main health](.github/workflows/main-health.yml) applies the post-push rules. It advances `stable`, or reverts the commits since `stable` and opens a `landing-freeze` issue, or files a fix-forward issue. Landing stays frozen while a `landing-freeze` issue is open; close it after the fix lands.

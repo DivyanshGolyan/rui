@@ -1,16 +1,39 @@
 """Same-run compiled-output handoff, never a test-acceptance receipt."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import platform
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
 
-import evidence
+
+# Platform floors match build.zig's baseline CI CPU; it rejects a different
+# producer manifest before any gate runs.
+FLOORS = {("Linux", "x86_64"): ("x86_64", "x86_64"), ("Darwin", "arm64"): ("aarch64", "apple_m1")}
+
+
+class Mismatch(ValueError):
+    """The verified producer differs from this worker; rebuild, never execute it."""
+
+
+def digest(path):
+    with open(path, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True).strip()
+
+
+def api(path):
+    return json.loads(subprocess.check_output(["gh", "api", path], stderr=subprocess.PIPE, timeout=90))
 
 
 def roots():
@@ -19,10 +42,30 @@ def roots():
 
 
 def identity(targets):
+    # Everything the transferred executables depend on that can differ inside
+    # one run. Runner image versions and tool listings are logged, not compared:
+    # a rollout that keeps these fields still executes the producer's binaries.
+    system, machine = platform.system(), platform.machine()
+    arch, model = FLOORS[(system, machine)]
     # Go test binaries are not transferred; their target still executes fresh.
-    inputs = evidence.identity([t for t in targets if t != "measurement-check"], "all", compiled=True)
-    inputs["targets"] = targets
-    return inputs
+    return dict(format=3, tree=git("rev-parse", "HEAD^{tree}"),
+                targets=[t for t in targets if t != "measurement-check"],
+                system=system, machine=machine, cpu=dict(policy="baseline", arch=arch, model=model),
+                compiler=digest(shutil.which("zig")))
+
+
+def runner():
+    return [os.environ.get("ImageOS"), os.environ.get("ImageVersion")]
+
+
+def build(targets):
+    prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
+    # A prior failed build must not supply extra or stale installed binaries.
+    if prefix.exists():
+        shutil.rmtree(prefix)
+    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets),
+                    "--prefix", str(prefix), "--summary", "all"], check=True)
+    return prefix / "bin"
 
 
 def package(targets, destination, binaries=None):
@@ -47,28 +90,33 @@ def package(targets, destination, binaries=None):
                     if not stat.S_ISREG(info.st_mode):
                         raise ValueError(f"Unexpected build file: {name}")
                     elif info.st_mode & 0o111:
-                        executables[name] = [evidence.digest(source), stat.S_IMODE(info.st_mode)]
+                        executables[name] = [digest(source), stat.S_IMODE(info.st_mode)]
                     member = output.gettarinfo(source, arcname=name)
                     with source.open('rb') as stream:
                         output.addfile(member, stream)
-    receipt = dict(verdict="compiled-not-tested", inputs=inputs,
-                   source_sha=evidence.git("rev-parse", "HEAD"),
+    receipt = dict(verdict="compiled-not-tested", inputs=inputs, runner=runner(),
+                   source_sha=git("rev-parse", "HEAD"),
                    run_id=int(os.environ["GITHUB_RUN_ID"]),
                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
-                   archive=evidence.digest(archive), executables=executables)
+                   archive=digest(archive), executables=executables)
     (destination / "compiled.json").write_text(json.dumps(receipt, sort_keys=True))
-    print(f"Compiled, not tested: {archive.stat().st_size} compressed bytes; {len(executables)} executable files")
+    print(f"Compiled, not tested, on runner image {runner()}: {archive.stat().st_size} compressed bytes; "
+          f"{len(executables)} executable files")
 
 
 def unpack(archive, receipt, inputs):
-    if receipt["verdict"] != "compiled-not-tested" or receipt["inputs"] != inputs:
-        raise ValueError("Compiled inputs mismatch")
+    if receipt["verdict"] != "compiled-not-tested":
+        raise ValueError("Not a compiled-only receipt")
     if (receipt["run_id"], receipt["run_attempt"], receipt["source_sha"]) != (
             int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
-            evidence.git("rev-parse", "HEAD")):
-        raise ValueError("Compiled origin mismatch")
-    if evidence.digest(archive) != receipt["archive"]:
-        raise ValueError("Compiled archive mismatch")
+            git("rev-parse", "HEAD")):
+        raise Mismatch("Compiled origin differs: run, attempt or source SHA")
+    if receipt["inputs"] != inputs:
+        changed = sorted(key for key in receipt["inputs"].keys() | inputs.keys()
+                         if receipt["inputs"].get(key) != inputs.get(key))
+        raise Mismatch("Compiled identity differs: " + ", ".join(changed))
+    if digest(archive) != receipt["archive"]:
+        raise ValueError("Compiled archive digest mismatch")
     destinations = roots()
     seen = set()
     with tarfile.open(archive, "r:gz") as source:
@@ -107,23 +155,23 @@ def unpack(archive, receipt, inputs):
                 path = Path(directory) / name
                 if not path.is_symlink() and path.stat().st_mode & 0o111:
                     actual[str(PurePosixPath(label, path.relative_to(root)))] = [
-                        evidence.digest(path), stat.S_IMODE(path.stat().st_mode)]
+                        digest(path), stat.S_IMODE(path.stat().st_mode)]
     if not actual or actual != receipt["executables"]:
         raise ValueError("Compiled executable identity mismatch")
 
 
-def restore(artifact_id, targets):
+def fetch(artifact_id, targets):
     repository = os.environ["GITHUB_REPOSITORY"]
-    artifact = evidence.api(f"repos/{repository}/actions/artifacts/{artifact_id}")
+    artifact = api(f"repos/{repository}/actions/artifacts/{artifact_id}")
     if artifact["expired"] or artifact["workflow_run"]["id"] != int(os.environ["GITHUB_RUN_ID"]):
-        raise ValueError("Foreign compiled artifact")
+        raise ValueError("Foreign or expired compiled artifact")
     # Exact immutable ID comes from the successful producer's needs output.
     with tempfile.TemporaryDirectory() as directory:
         download = Path(directory) / "artifact.zip"
         with download.open("wb") as output:
             subprocess.run(["gh", "api", f"repos/{repository}/actions/artifacts/{artifact_id}/zip"],
                            stdout=output, check=True, timeout=180)
-        if artifact.get("digest") != "sha256:" + evidence.digest(download):
+        if artifact.get("digest") != "sha256:" + digest(download):
             raise ValueError("GitHub compiled artifact digest mismatch")
         with zipfile.ZipFile(download) as zipped:
             if sorted(zipped.namelist()) != ["compiled.json", "compiled.tar.gz"]:
@@ -131,11 +179,40 @@ def restore(artifact_id, targets):
             if zipped.getinfo("compiled.json").file_size > 1024 * 1024:
                 raise ValueError("Oversized compiled receipt")
             receipt = json.loads(zipped.read("compiled.json"))
+            print(f"Runner images: producer {receipt.get('runner')}, this worker {runner()}", flush=True)
             archive = Path(directory) / "compiled.tar.gz"
             with zipped.open("compiled.tar.gz") as incoming, archive.open("wb") as outgoing:
                 shutil.copyfileobj(incoming, outgoing)
         unpack(archive, receipt, identity(targets))
-    print(f"Verified compiled artifact {artifact_id}; compiled only, gate acceptance not yet established", flush=True)
+
+
+def rebuild(targets):
+    # Downloaded bytes are discarded whole, including package sources; compile
+    # this worker's own checkout from freshly fetched, hash-pinned packages.
+    for root in roots().values():
+        if root.is_symlink():
+            root.unlink()
+        elif root.exists():
+            shutil.rmtree(root)
+    subprocess.run(["bash", "src/fetch_dependencies.sh"], check=True)
+    shutil.copytree(build(targets), roots()["binaries"])
+
+
+def restore(artifact_id, targets):
+    try:
+        fetch(artifact_id, targets)
+        message = f"Using verified producer artifact {artifact_id}; compiled only, gate acceptance not yet established"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError,
+            zipfile.BadZipFile, tarfile.TarError) as error:
+        kind = "differs from this worker" if isinstance(error, Mismatch) else "was rejected"
+        print(f"Producer artifact {artifact_id} {kind}: {error}. Its bytes are not executed; "
+              "compiling this checkout locally before gates.", flush=True)
+        rebuild(targets)
+        message = f"Compiled locally because producer artifact {artifact_id} {kind}: {error}"
+    print(message, flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            print(message, file=summary)
 
 
 def main():
@@ -145,17 +222,16 @@ def main():
     parser.add_argument("--artifact-id")
     args = parser.parse_args()
     targets = json.loads(args.targets)
-    if args.operation == "build":
-        prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
-        subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets),
-                        "--prefix", str(prefix), "--summary", "all"], check=True)
-        package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", prefix / "bin")
-    else:
-        try:
+    try:
+        if args.operation == "build":
+            package(targets, Path(os.environ["RUNNER_TEMP"]) / "rui-compiled", build(targets))
+        else:
             restore(args.artifact_id, targets)
-        except (OSError, ValueError, KeyError, subprocess.SubprocessError, zipfile.BadZipFile, tarfile.TarError) as error:
-            raise SystemExit(f"Compiled artifact {args.artifact_id} rejected: {error}. "
-                             "No gates executed; inspect the producer and artifact identity.") from error
+    except subprocess.CalledProcessError as error:
+        # A failed local fetch or compile stops before gates with its own status.
+        print(f"{' '.join(map(str, error.cmd))} failed with exit {error.returncode}; no gates executed.",
+              file=sys.stderr)
+        raise SystemExit(error.returncode) from error
 
 
 if __name__ == "__main__":
