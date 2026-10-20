@@ -1329,18 +1329,26 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     }
     if ((location.record.len == 0) != !key_seen) return usage();
     if (input.session == .named and input.session.named.len == 0) return usage();
-    var defaults: preferences.Values = .{};
+    var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    // Only fresh creation resolves defaults, once, into the capture. Addressed
+    // Only fresh creation resolves defaults, once, into the capture, through
+    // the same prospective selection as a new interactive Session. Addressed
     // input remains sparse for the canonical create-or-update owner, without a
     // probe; an unknown address needs its complete first configuration.
     if (input.session == .from_capture_key) {
-        if (!input.provider.present or !input.model.present) {
+        const intent: new_session_selection.Intent = .{
+            .provider = if (input.provider.present) input.provider.value else null,
+            .model = if (input.model.present) input.model.value else null,
+        };
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
-            defaults = try preferences.load(home);
-        }
-        if (!input.provider.present) input.provider = .{ .present = true, .value = if (defaults.provider.len != 0) defaults.provider.slice() else model_adapter.provider_label };
-        if (!input.model.present) input.model = .{ .present = true, .value = if (defaults.model.len != 0 and defaults.provider.eql(input.provider.value)) defaults.model.slice() else product_defaults.recommended_model };
+            break :blk try preferences.load(home);
+        } else .{} };
+        // Credential readiness belongs to the serving Host, not this peer
+        // caller: select as if usable and let the Host answer for credentials.
+        binding = (try snapshot.resolve(.configured)).?;
+        input.provider = .{ .present = true, .value = binding.provider.slice() };
+        input.model = .{ .present = true, .value = binding.model.slice() };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1557,13 +1565,12 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
 fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var reference: ?[]const u8 = null;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var last = false;
     var literal = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session") and reference == null) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session-hex") and reference == null) reference = try decodeHexIdentity(try takeValue(args, &index), &session_hex) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
+        if (!literal and std.mem.eql(u8, arg, "--store")) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session")) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--last")) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (literal or !std.mem.startsWith(u8, arg, "-")) reference = arg else return usage();
     }
     if (last == (reference != null)) return usage();
     try requireInteractiveTerminal(init, "to resume a Session");
@@ -1872,19 +1879,13 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
     var key_seen = false;
     var action_seen = false;
     var session: ?[]const u8 = null;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             location.key = try takeValue(args, &index);
             key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
-            if (session != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--action")) {
-            if (action_seen) return error.DuplicateArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
             input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             action_seen = true;
         } else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
@@ -1994,22 +1995,12 @@ fn inspect(init: std.process.Init, args: []const []const u8) !void {
 fn readConversation(init: std.process.Init, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
-    var store_hex: [protocol.max_store_bytes]u8 = undefined;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var position: ?u64 = null;
     var ordinal: ?u64 = null;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store") or std.mem.eql(u8, arg, "--store-hex")) {
-            if (store_path != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            store_path = if (std.mem.eql(u8, arg, "--store-hex")) try decodeHexIdentity(value, &store_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
-            if (session != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
         index += 1;
     }
     const reference = session orelse return usage();
@@ -2395,17 +2386,6 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
-    if (value != .object) return error.InvalidObservation;
-    return value.object.get(name) orelse error.InvalidObservation;
-}
-
-fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
-    const field = try objectField(value, name);
-    if (field != .string) return error.InvalidObservation;
-    return field.string;
-}
-
 const SavedRequest = client.CapturedIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
@@ -2456,15 +2436,10 @@ fn sessions(init: std.process.Init, args: []const []const u8) !void {
     var all = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store") and explicit == null) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all") and !all) all = true else return usage();
+        if (std.mem.eql(u8, args[index], "--store")) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all")) all = true else return error.UnknownArgument;
     }
-    var saved: preferences.Values = .{};
-    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = if (explicit) |value| value else blk: {
-        const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
-        saved = try preferences.load(home);
-        break :blk if (saved.store.len != 0) saved.store.slice() else try preferences.defaultStore(home, &fallback);
-    };
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, explicit, &selected_buffer);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace: ?[]const u8 = if (all) null else blk: {
         var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -2576,18 +2551,6 @@ fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.F
     if (fail_unlink) return error.RenderScratchCleanupFailed;
     dir.deleteFile(io, name) catch return error.RenderScratchCleanupFailed;
     return file;
-}
-
-fn tokenString(token: std.json.Token) ![]const u8 {
-    return switch (token) {
-        .string => |s| s,
-        .allocated_string => |s| s,
-        else => error.InvalidObservation,
-    };
-}
-
-fn freeToken(token: std.json.Token) void {
-    if (token == .allocated_string) std.heap.c_allocator.free(token.allocated_string);
 }
 
 const SessionObservation = struct {
