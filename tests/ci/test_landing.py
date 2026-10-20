@@ -1,9 +1,15 @@
 """Landing-rule wiring: strict paths, post-push decisions and CI triggers."""
+import contextlib
+import io
+import json
+import os
 from pathlib import Path
 import re
 import unittest
+from unittest import mock
 
 import auto_land
+import main_health
 from main_health import decide
 from select_tests import select
 from strict_paths import STRICT, strict
@@ -77,6 +83,35 @@ class LandingTest(unittest.TestCase):
         self.assertEqual(decide_tip(changed=('.github/workflows/check.yml',)), 'manual')
         self.assertEqual(decide_tip(selected=run(conclusion='failure'), changed=('.github/workflows/check.yml',)),
                          'red')
+
+    def test_post_push_dispatch_requires_the_exact_pushed_sha(self):
+        pushed, before, newer = 'a' * 40, 'b' * 40, 'c' * 40
+
+        def run_dispatch(head, changed):
+            calls = []
+
+            def gh(*args):
+                calls.append(args)
+                if 'POST' in args:
+                    return '{"workflow_run_id": 7, "html_url": "https://example/run/7"}'
+                return json.dumps({'head_sha': head})
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                    mock.patch.object(main_health, 'gh', gh), \
+                    mock.patch.object(main_health, 'git', lambda *args: changed), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main_health.dispatch(pushed, before)
+            return [call[3].rsplit('/', 2)[1] for call in calls if 'POST' in call], calls
+
+        workflows, calls = run_dispatch(pushed, 'src/cli.zig')
+        self.assertEqual(workflows, ['check.yml'])
+        self.assertIn(f'inputs[base]={before}', calls[0])
+        self.assertEqual(run_dispatch(pushed, 'src/store.zig')[0], ['check.yml', 'previous-release-upgrade.yml'])
+        # A run GitHub started on a newer main is not the pushed commit's post-push run.
+        with self.assertRaises(SystemExit) as failure:
+            run_dispatch(newer, 'src/store.zig')
+        self.assertIn(pushed, str(failure.exception))
+        self.assertIn(f'check.yml ran on {newer}', str(failure.exception))
+        self.assertIn(f'previous-release-upgrade.yml ran on {newer}', str(failure.exception))
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.
