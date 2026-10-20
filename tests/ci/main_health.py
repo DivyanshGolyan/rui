@@ -91,11 +91,13 @@ def dispatch(sha, before):
     """Start main's post-push CI for a GITHUB_TOKEN push of before..sha.
 
     Selected diffs from before like a push; the upgrade check runs on strict
-    paths only, like its push filter. A run that GitHub started on a newer
-    main is reported; that commit's own run then also covers sha.
+    paths only, like its push filter. A dispatch runs on main's head, so if
+    main moved first the run is kept but sha has no exact post-push run, and
+    this fails instead of claiming one.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
     changed = git("diff", "--no-renames", "--name-only", before, sha).splitlines()
+    moved = []
     for workflow in WORKFLOWS:
         if workflow == UPGRADE and not strict(changed):
             continue
@@ -113,7 +115,11 @@ def dispatch(sha, before):
         head = json.loads(gh("api", f"repos/{repository}/actions/runs/{run['workflow_run_id']}"))["head_sha"]
         print(f"Dispatched {workflow} on main {head}: {run['html_url']}")
         if head != sha:
-            print(f"main moved past {sha} before dispatch; {head}'s post-push CI covers it")
+            moved.append(f"{workflow} ran on {head}: {run['html_url']}")
+    if moved:
+        raise SystemExit(f"main {sha} landed, but main moved before its post-push CI was dispatched, so {sha} "
+                         f"has no exact post-push run:\n" + "\n".join(moved) + "\nThose runs stay; they are not "
+                         f"{sha}'s. Inspect what moved main; revert {sha} by hand if it must not stay unqualified.")
 
 
 def decide(results, changed):
