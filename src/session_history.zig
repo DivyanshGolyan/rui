@@ -25,6 +25,14 @@ pub const Prepared = struct {
             if (item.content.bytes > item_bytes) {
                 compact = false;
                 var buffer: [192]u8 = undefined;
+                if (item.sender) |sender| {
+                    // Its first line is not staged; the margin still says its size.
+                    var line: View.PeerLine(@TypeOf(sink)) = undefined;
+                    try line.init(sink, .inbound, sender, item.content.bytes);
+                    line.received = item.content.bytes;
+                    try line.finish(item.admitted_at.?);
+                    continue;
+                }
                 if (item.kind == .user) {
                     // Its line count is unknown without reading it.
                     var size: [24]u8 = undefined;
@@ -74,7 +82,13 @@ pub const Prepared = struct {
                     try escaped.finish();
                     try indented.finish();
                 },
-                .user => {
+                .user => if (item.sender) |sender| {
+                    var line: View.PeerLine(@TypeOf(sink)) = undefined;
+                    try line.init(sink, .inbound, sender, item.content.bytes);
+                    try staged.read(&line);
+                    try line.finish(item.admitted_at.?);
+                    continue;
+                } else {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
                     try body.init(sink, item.content.bytes, mode == .details);

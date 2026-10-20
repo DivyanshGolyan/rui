@@ -104,6 +104,9 @@ const summary_bit: u8 = 1 << 7;
 pub const sidenote_width = 60;
 const sidenote_margin = 7;
 const sidenote_cells = 5;
+/// From this width a peer line's `size · time` sidenote shows its size too.
+pub const size_sidenote_width = 72;
+const sidenote_cells_wide = 16;
 
 fn isSidenote(value: u8) bool {
     return value & (user_bit | summary_bit) == summary_bit;
@@ -294,19 +297,41 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
             const end = self.lineEnd(offset);
             var user = false;
+            // A line of summary text alone (a peer Message's line) keeps one
+            // row, ending in `…` when it does not fit.
+            var single = styled and end != offset;
             var note: ?struct { start: usize, end: usize } = null;
             if (styled) for (self.styles[offset..end], offset..) |value, index| {
                 if (value & user_bit != 0) user = true;
-                if (!isSidenote(value)) continue;
+                if (!isSidenote(value)) {
+                    if (value & (user_bit | summary_bit) != user_bit | summary_bit) single = false;
+                    continue;
+                }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
+            // A `size · time` sidenote shows whole from `size_sidenote_width`;
+            // narrower, its size goes first and the time alone remains.
+            var cells: u16 = sidenote_cells;
+            if (note) |*range| if (std.mem.lastIndexOf(u8, self.bytes[range.start..range.end], " · ")) |dot| {
+                if (window.width >= size_sidenote_width) {
+                    cells = @intCast(@min(gwidth.gwidth(self.bytes[range.start..range.end], self.width_method), sidenote_cells_wide));
+                } else range.start += dot + " · ".len;
+            };
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) cells + sidenote_margin - sidenote_cells else 0;
             const body = window.child(.{ .width = window.width - margin });
+            if (commit and margin != 0) if (note) |range| {
+                _ = self.printRange(window.child(.{ .x_off = window.width - cells, .y_off = row, .width = cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
+            };
+            if (single) {
+                if (commit) {
+                    const line = body.child(.{ .y_off = row, .height = 1 });
+                    if (self.printRange(line, offset, end, .none, false, true, colour, plain).overflow and line.width != 0)
+                        _ = line.child(.{ .x_off = line.width - 1, .width = 1 }).print(&.{.{ .text = "…", .style = self.segmentStyle(offset, colour, plain) }}, .{ .wrap = .none });
+                }
+                return 1;
+            }
             const split = hanging(self.bytes[offset..end], body.width, user);
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
-            if (commit and margin != 0) if (note) |range| {
-                _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
-            };
             return rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
         }
 
@@ -714,6 +739,33 @@ test "a sidenote shows in the right margin of its line's first row from 60 colum
     try std.testing.expect(note.dim and !note.italic);
     _ = view.draw(test_screen.window(64, 4), .{}, true, false, .{});
     try std.testing.expectEqual(vaxis.Style{}, test_screen.screen.readCell(59, 0).?.style);
+}
+
+test "a peer line keeps one row and drops its size before its time as the view narrows" {
+    const line = "← 9f8e7d · Please review";
+    const outbound = "→ 9f8e7d · " ++ @as([40]u8, @splat('x'));
+    var view: Sized(256, true) = .{ .sidenotes = true };
+    try view.append("\x1b[2;8m" ++ line ++ "\x1b[8m0.3 KB · 08:00\x1b[0m\n\x1b[2;8m" ++ outbound ++ "\x1b[0m");
+    var test_screen: TestScreen = undefined;
+    var storage: [256]u8 = undefined;
+    const Case = struct { width: u16, rows: [2][]const u8 };
+    for ([_]Case{
+        .{ .width = 80, .rows = .{ line ++ @as([66 - 24]u8, @splat(' ')) ++ "0.3 KB · 08:00", outbound } },
+        .{ .width = 72, .rows = .{ line ++ @as([58 - 24]u8, @splat(' ')) ++ "0.3 KB · 08:00", outbound } },
+        // Below 72 columns the size goes first; the time remains.
+        .{ .width = 64, .rows = .{ line ++ @as([59 - 24]u8, @splat(' ')) ++ "08:00", outbound } },
+        // Below 60 no margin shows, and a long line ends in `…` on its one row.
+        .{ .width = 40, .rows = .{ line, "→ 9f8e7d · " ++ @as([28]u8, @splat('x')) ++ "…" } },
+    }) |case| {
+        const drawn = view.draw(test_screen.window(case.width, 2), .{}, true, false, .{});
+        try std.testing.expectEqual(@as(u16, 2), drawn.rows);
+        try std.testing.expectEqual(@as(u16, 2), view.measure(.{ .width = case.width, .method = .unicode }, .{}, 99).rows);
+        for (case.rows, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
+    }
+    // Upright: the line is dim with colour, never italic.
+    _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{});
+    const style = test_screen.screen.readCell(0, 0).?.style;
+    try std.testing.expect(style.dim and !style.italic);
 }
 
 test "retention never starts inside an extended grapheme across append windows" {

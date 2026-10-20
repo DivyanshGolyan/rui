@@ -13,7 +13,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 28;
+pub const schema_version: u32 = 29;
 pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
@@ -27,10 +27,13 @@ const public_tool_groups_sql = "WITH groups AS (SELECT op.operation_id,max(coale
 const activity_sql = public_tool_groups_sql ++
     "entries AS (SELECT admission_position AS position,0 AS ordinal,1 AS kind,admission_id AS id FROM message_admission WHERE session_ref=?1 " ++
     "UNION ALL SELECT session_position,0,CASE entry_kind WHEN 1 THEN 2 ELSE 3 END,source_admission_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind IN (1,3) " ++
-    "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3), " ++
+    "UNION ALL SELECT session_position,0,4,NULL FROM model_output_item WHERE session_ref=?1 AND item_kind=3 " ++
+    "UNION ALL SELECT sender_position,0,8,admission_id FROM message_admission WHERE sender_session_ref=?1), " ++
     "completions AS (SELECT groups.position AS position,call.call_ordinal+1 AS ordinal,5 AS kind,NULL AS id FROM groups JOIN model_tool_call call ON call.operation_id=groups.operation_id " ++
     "UNION ALL SELECT outcome_position,0,6,turn_id FROM turn WHERE session_ref=?1 AND outcome_code IS NOT NULL " ++
-    "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1), " ++
+    "UNION ALL SELECT position,0,7,NULL FROM session_stop WHERE session_ref=?1 " ++
+    // Each compound keeps within the Store's four-term limit.
+    "UNION ALL SELECT sender_position,0,9,NULL FROM sent_rejection WHERE sender_session_ref=?1), " ++
     "activity AS (SELECT * FROM entries UNION ALL SELECT * FROM completions) ";
 const complete_tool_results_sql =
     "current.resolution_code='tool_proposals' AND EXISTS(" ++
@@ -165,9 +168,23 @@ pub const ConfigureReply = union(enum) {
     infrastructure_failure,
 };
 
+/// `session configure` without a name generates `rui/` and a lowercase
+/// hyphenated UUID.
+const generated_session_prefix = "rui/";
+
+fn generatedSessionRef(ref: []const u8) bool {
+    if (ref.len != generated_session_prefix.len + 36 or !std.mem.startsWith(u8, ref, generated_session_prefix)) return false;
+    for (ref[generated_session_prefix.len..], 0..) |byte, index| switch (index) {
+        8, 13, 18, 23 => if (byte != '-') return false,
+        else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
+    };
+    return true;
+}
+
 pub const MessageRejection = enum {
     invalid_session_reference,
     unknown_session,
+    unknown_sender_session,
 };
 
 pub const AcceptedMessage = struct {
@@ -305,6 +322,7 @@ pub const ActionSettlement = enum { effect, session_stop };
 pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
 pub const BashExecutionInput = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     arguments: ContentReference,
     timeout_ms: u64,
@@ -322,6 +340,7 @@ pub const PublicConversationItem = struct {
     content: ContentReference,
     presentation: ?protocol.ToolPresentation = null,
     admitted_at: ?u64 = null, // The Host wall-clock second a User item was admitted.
+    sender: ?protocol.Peer = null, // A User item's sending peer Session.
 };
 
 pub const PublicConversationPage = struct {
@@ -512,6 +531,8 @@ pub const HistoricalEntry = struct {
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
     requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null,
+    // A User entry's peer sender, in this view's Store.
+    sender: ?protocol.Bounded(protocol.max_session_bytes) = null,
 };
 
 pub const HistoricalToolResult = struct {
@@ -1758,8 +1779,12 @@ pub const Store = struct {
                 return error.CorruptStore;
             return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } };
         }
+        // An unknown sender has no sequence to record a failed send in; a
+        // known one sees its own rejected send.
         const code: ?MessageRejection = if (command.session.len == 0)
             .invalid_session_reference
+        else if (command.sender != null and try self.readSession(command.sender.?.slice()) == null)
+            .unknown_sender_session
         else if (try self.readSession(command.session.slice()) == null)
             .unknown_session
         else
@@ -1776,6 +1801,14 @@ pub const Store = struct {
                 null,
                 answer,
             );
+            if (rejection != .unknown_sender_session) if (command.sender) |sender| {
+                const statement = try prepare(self.database, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position) VALUES(?1,?2,?3)");
+                defer _ = c.sqlite3_finalize(statement);
+                try bindText(statement, 1, command.key.slice());
+                try bindText(statement, 2, sender.slice());
+                try bindU64(statement, 3, try self.claimSessionPosition(sender.slice()));
+                try expectDone(statement);
+            };
             if (faults.before_commit) return error.InjectedCommitFailure;
             try exec(self.database, "COMMIT");
             return .{ .rejected = .{ .replayed = false, .code = rejection, .content = supplied_content } };
@@ -1795,6 +1828,7 @@ pub const Store = struct {
             command.session.slice(),
             command.key.slice(),
             text_id,
+            if (command.sender) |*sender| sender.slice() else null,
         );
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -2573,7 +2607,7 @@ pub const Store = struct {
                 3 => .assistant,
                 4 => .tool_result,
                 else => unreachable,
-            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| try self.peerLocked(sender) else null, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
         return page;
@@ -2597,7 +2631,7 @@ pub const Store = struct {
 
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
-    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64 } {
+    fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, sender: ?protocol.Bounded(protocol.max_session_bytes) = null } {
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
         const statement = try prepare(self.database, if (ordinal == 0)
@@ -2605,7 +2639,7 @@ pub const Store = struct {
                 "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
                 "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id AND o.resolution_content_id=e.content_id " ++
                 "AND o.resolution_code IN ('answer','compacted','tool_proposals'))) THEN 1 ELSE 0 END," ++
-                "CASE WHEN e.entry_kind=1 THEN m.admitted_at END FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
+                "CASE WHEN e.entry_kind=1 THEN m.admitted_at END,CASE WHEN e.entry_kind=1 THEN m.sender_session_ref END FROM conversation_entry e LEFT JOIN turn t ON t.turn_id=e.turn_id " ++
                 "LEFT JOIN message_admission m ON m.admission_id=e.source_admission_id " ++
                 "LEFT JOIN model_operation o ON o.operation_id=e.source_operation_id " ++
                 "LEFT JOIN content c ON c.content_id=e.content_id " ++
@@ -2644,7 +2678,12 @@ pub const Store = struct {
         const operation: ?u64 = if (ordinal == 0) null else @intCast(try readNullablePositiveI64(statement, 2) orelse return error.CorruptStore);
         if (operation) |op| _ = try self.readToolOutcomeFacts(op, true, false);
         const admitted_at: ?u64 = if (ordinal == 0) if (try readNullablePositiveI64(statement, 2)) |second| @intCast(second) else null else null;
-        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at };
+        var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
+        if (ordinal == 0 and c.sqlite3_column_type(statement, 3) != c.SQLITE_NULL) {
+            sender = .{};
+            try readText(statement, 3, &sender.?);
+        }
+        return .{ .id = content_id, .metadata = try self.readPublicContentMetadata(content_id), .tool_operation = operation, .admitted_at = admitted_at, .sender = sender };
     }
 
     const ContentSource = struct {
@@ -2854,7 +2893,7 @@ pub const Store = struct {
             "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2)," ++
             "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
             "AND (m.turn_id IS NULL OR (t.session_ref=m.session_ref AND EXISTS(SELECT 1 FROM conversation_entry e " ++
-            "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))),m.admitted_at FROM message_admission m " ++
+            "WHERE e.source_admission_id=m.admission_id AND e.session_ref=m.session_ref AND e.turn_id=m.turn_id AND e.content_id=m.content_id))),m.admitted_at,m.sender_session_ref FROM message_admission m " ++
             "LEFT JOIN core_command c ON c.command_key=m.command_key LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
             "WHERE m.session_ref=?1 AND m.admission_id=?3");
         defer _ = c.sqlite3_finalize(statement);
@@ -2868,7 +2907,39 @@ pub const Store = struct {
         var message: protocol.ActivityItem.Message = .{ .admission = admission, .key = .{}, .turn = null, .state = if (applied) .applied else if (c.sqlite3_column_int(statement, 4) == 1) .excluded else .queued, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = @intCast(try readNullablePositiveI64(statement, 6) orelse return error.CorruptStore) };
         try readText(statement, 0, &message.key);
         if (applied) message.turn = @intCast(try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore);
+        message.sender = try self.readPeer(statement, 7);
         return .{ .message = message, .content_id = content_id };
+    }
+
+    fn readPeer(self: *Store, statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
+        if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
+        var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, column, &sender);
+        return try self.peerLocked(sender);
+    }
+
+    /// A Session named on a Message, with the shortest prefix of a generated
+    /// reference's ID, of at least six characters, that no other Session
+    /// reference in this Store shares. Its sorted neighbours decide it.
+    fn peerLocked(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.Peer {
+        var peer: protocol.Peer = .{ .session = session };
+        const ref = session.slice();
+        if (!generatedSessionRef(ref)) return peer;
+        var shared: usize = 0;
+        inline for (.{ "SELECT session_ref FROM session WHERE session_ref<?1 ORDER BY session_ref DESC LIMIT 1", "SELECT session_ref FROM session WHERE session_ref>?1 ORDER BY session_ref LIMIT 1" }) |sql| {
+            const statement = try prepare(self.database, sql);
+            defer _ = c.sqlite3_finalize(statement);
+            try bindText(statement, 1, ref);
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_ROW) {
+                var neighbour: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(statement, 0, &neighbour);
+                const length = std.mem.indexOfDiff(u8, ref, neighbour.slice()) orelse @min(ref.len, neighbour.len);
+                shared = @max(shared, length);
+            } else if (step != c.SQLITE_DONE) return error.SessionReadFailed;
+        }
+        peer.prefix = @intCast(std.math.clamp(shared + 1 -| generated_session_prefix.len, 6, ref.len - generated_session_prefix.len));
+        return peer;
     }
 
     const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
@@ -2900,6 +2971,42 @@ pub const Store = struct {
                 result.content_id = content.id;
             },
             4 => result.item.value = .{ .call = (try self.proposalLocked(session, position, false)).metadata },
+            8 => {
+                const admission = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
+                const select = try prepare(self.database, "SELECT m.session_ref,m.content_id,m.admitted_at,c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
+                    "FROM message_admission m LEFT JOIN core_command c ON c.command_key=m.command_key WHERE m.admission_id=?1 AND m.sender_session_ref=?2 AND m.sender_position=?3");
+                defer _ = c.sqlite3_finalize(select);
+                try bindI64(select, 1, admission);
+                try bindText(select, 2, session);
+                try bindU64(select, 3, position);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW or c.sqlite3_column_int(select, 3) != 1) return error.CorruptStore;
+                var target: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(select, 0, &target);
+                const content_id = try readNullablePositiveI64(select, 1) orelse return error.CorruptStore;
+                const metadata = try self.readPublicContentMetadata(content_id);
+                result.item.value = .{ .sent = .{
+                    .admission = @intCast(admission),
+                    .target = try self.peerLocked(target),
+                    .content = .{ .length = metadata.length, .digest = metadata.digest },
+                    .admitted_at = @intCast(try readNullablePositiveI64(select, 2) orelse return error.CorruptStore),
+                } };
+                result.content_id = content_id;
+            },
+            9 => {
+                const select = try prepare(self.database, "SELECT s.command_key,c.target,c.code,c.kind=2 AND c.accepted=0 FROM sent_rejection s " ++
+                    "LEFT JOIN core_command c ON c.command_key=s.command_key WHERE s.sender_session_ref=?1 AND s.sender_position=?2");
+                defer _ = c.sqlite3_finalize(select);
+                try bindText(select, 1, session);
+                try bindU64(select, 2, position);
+                if (c.sqlite3_step(select) != c.SQLITE_ROW or c.sqlite3_column_int(select, 3) != 1) return error.CorruptStore;
+                var failed: protocol.ActivityItem.SendFailed = .{ .key = .{}, .target = undefined, .code = .{} };
+                try readText(select, 0, &failed.key);
+                var target: protocol.Bounded(protocol.max_session_bytes) = .{};
+                try readText(select, 1, &target);
+                failed.target = try self.peerLocked(target);
+                try readText(select, 2, &failed.code);
+                result.item.value = .{ .send_failed = failed };
+            },
             6 => {
                 const select = try prepare(self.database, "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
                     "AND o.resolution_code IS NOT NULL AND ((t.outcome_code='completed' AND t.outcome_content_id=o.resolution_content_id) OR " ++
@@ -4332,6 +4439,7 @@ pub const Store = struct {
         try readText(statement, 4, &session);
         const arguments = try self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id");
         return .{
+            .session = session,
             .workspace = workspace,
             .arguments = arguments,
             .timeout_ms = @intCast(timeout_ms),
@@ -5217,8 +5325,9 @@ pub const Store = struct {
         view.tool_group_scan_after = after_position;
         const statement = try prepare(
             self.database,
-            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner FROM (" ++
-                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner " ++
+            "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner,sender FROM (" ++
+                "SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner," ++
+                "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender " ++
                 "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
                 "WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position " ++
                 "AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL " ++
@@ -5228,7 +5337,7 @@ pub const Store = struct {
                 "AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position " ++
                 "AND owner.admission_position<current.admission_position AND " ++
                 "(item.item_kind!=3 OR owner.resolution_code='tool_proposals') AND " ++
-                "((owner.resolution_code='tool_proposals')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner " ++
+                "((owner.resolution_code='tool_proposals')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner,NULL AS sender " ++
                 "FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref " ++
                 "LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id " ++
                 "LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id " ++
@@ -5265,10 +5374,16 @@ pub const Store = struct {
             _ = try readProvider(statement, 4);
             requested_model = model;
         }
+        var sender: ?protocol.Bounded(protocol.max_session_bytes) = null;
+        if (c.sqlite3_column_type(statement, 8) != c.SQLITE_NULL) {
+            sender = .{};
+            try readText(statement, 8, &sender.?);
+        }
         const ordinary = HistoricalEntry{
             .position = @intCast(position),
             .kind = kind,
             .requested_model = requested_model,
+            .sender = sender,
             .content = .{
                 .view = view,
                 .length = metadata.length,
@@ -6664,6 +6779,7 @@ pub const Store = struct {
         session_ref: []const u8,
         command_key: []const u8,
         content_id: i64,
+        sender: ?[]const u8,
     ) !u64 {
         const latest = try prepare(self.database, "SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1");
         defer _ = c.sqlite3_finalize(latest);
@@ -6678,13 +6794,17 @@ pub const Store = struct {
             break :blk @intCast(prior + 1);
         } else return error.MessageAdmissionReadFailed;
         const position = try self.claimSessionPosition(session_ref);
-        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at) VALUES(?1,?2,?3,?4,?5,unixepoch())");
+        // The sender's own sequence orders the send among its other facts.
+        const sender_position: ?u64 = if (sender) |ref| try self.claimSessionPosition(ref) else null;
+        const statement = try prepare(self.database, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,admitted_at,sender_session_ref,sender_position) VALUES(?1,?2,?3,?4,?5,unixepoch(),?6,?7)");
         defer _ = c.sqlite3_finalize(statement);
         try bindU64(statement, 1, admission_id);
         try bindText(statement, 2, session_ref);
         try bindText(statement, 3, command_key);
         try bindI64(statement, 4, content_id);
         try bindU64(statement, 5, position);
+        if (sender) |ref| try bindText(statement, 6, ref) else try bindNullableI64(statement, 6, null);
+        try bindNullableU64(statement, 7, sender_position);
         try expectDone(statement);
         return admission_id;
     }
@@ -6972,8 +7092,18 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ admission_position INTEGER CHECK(admission_position>0),
         \\ turn_id INTEGER REFERENCES turn(turn_id) DEFERRABLE INITIALLY DEFERRED,
-        \\ admitted_at INTEGER NOT NULL CHECK(admitted_at>0)
+        \\ admitted_at INTEGER NOT NULL CHECK(admitted_at>0),
+        \\ sender_session_ref TEXT REFERENCES session(session_ref),
+        \\ sender_position INTEGER CHECK(sender_position>0),
+        \\ CHECK((sender_session_ref IS NULL)=(sender_position IS NULL))
         \\) STRICT;
+        \\CREATE UNIQUE INDEX message_admission_sent ON message_admission(sender_session_ref,sender_position) WHERE sender_session_ref IS NOT NULL;
+        \\CREATE TABLE sent_rejection(
+        \\ command_key TEXT PRIMARY KEY REFERENCES core_command(command_key) DEFERRABLE INITIALLY DEFERRED,
+        \\ sender_session_ref TEXT NOT NULL REFERENCES session(session_ref),
+        \\ sender_position INTEGER NOT NULL CHECK(sender_position>0),
+        \\ UNIQUE(sender_session_ref,sender_position)
+        \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE turn(
         \\ turn_id INTEGER PRIMARY KEY CHECK(turn_id>0),
         \\ session_ref TEXT NOT NULL REFERENCES session(session_ref),
@@ -7156,9 +7286,9 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
         const statement = try prepare(
             database,
             "SELECT count(*) FROM sqlite_schema WHERE " ++
-                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','session_stop_exclusion','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
+                "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
+                "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -12148,6 +12278,86 @@ test "message rejections replay before current Session checks without retained i
     const observed = try storage.observeCommand("rejected-message");
     try std.testing.expect(observed.status == .rejected);
     try std.testing.expect(observed.message == null);
+}
+
+test "a peer sender is recorded, ordered in its own sequence and rejected when unknown" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const sender = "rui/1a2b3c4d-0000-4000-8000-000000000001";
+    // A neighbour sharing seven ID characters makes the sender's prefix eight.
+    try configureTestSession(&storage, "configure-sender", sender);
+    try configureTestSession(&storage, "configure-neighbour", "rui/1a2b3c49-0000-4000-8000-000000000002");
+    try configureTestSession(&storage, "configure-receiver", "direct/receiver");
+    const Send = struct {
+        fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !protocol.MessageCommand {
+            const file = try dir.createFile(std.testing.io, key, .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, text);
+            try file.sync(std.testing.io);
+            var command = try completeMessage(key, target, file, text);
+            if (from) |ref| {
+                command.sender = .{};
+                try command.sender.?.set(ref);
+            }
+            return command;
+        }
+    };
+
+    var sent = try Send.make(tmp.dir, "peer-send", "direct/receiver", sender, "look at this\nsecond line");
+    defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
+    const accepted = storage.submitMessage(&sent, .{});
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(storage.submitMessage(&sent, .{}).accepted.replayed);
+    // The sender is part of the request: the same key without it conflicts.
+    var anonymous = try Send.make(tmp.dir, "peer-send-anonymous", "direct/receiver", null, "look at this\nsecond line");
+    defer anonymous.removeTemporaryContent(std.testing.io) catch unreachable;
+    try anonymous.key.set("peer-send");
+    try std.testing.expect(storage.submitMessage(&anonymous, .{}) == .conflict);
+
+    var refused = try Send.make(tmp.dir, "peer-refused", "direct/absent", sender, "lost");
+    defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expectEqual(MessageRejection.unknown_session, storage.submitMessage(&refused, .{}).rejected.code);
+
+    var forged = try Send.make(tmp.dir, "peer-forged", "direct/receiver", "rui/ffffffff-0000-4000-8000-000000000003", "forged");
+    defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
+    try std.testing.expectEqual(MessageRejection.unknown_sender_session, storage.submitMessage(&forged, .{}).rejected.code);
+    const forged_replay = storage.submitMessage(&forged, .{});
+    try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .unknown_sender_session);
+    // An unknown sender has no sequence: only the known sender's refusal is kept.
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM sent_rejection"));
+    try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/receiver")).pending_messages);
+
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try session.set("direct/receiver");
+    const received = try storage.activityPage(.{ .session = session });
+    try std.testing.expectEqual(@as(usize, 1), received.count);
+    const peer = received.items[0].value.admission.sender.?;
+    try std.testing.expectEqualStrings(sender, peer.session.slice());
+    try std.testing.expectEqual(@as(u8, 8), peer.prefix);
+
+    try session.set(sender);
+    const own = try storage.activityPage(.{ .session = session });
+    try std.testing.expectEqual(@as(usize, 2), own.count);
+    const out = own.items[0].value.sent;
+    try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
+    try std.testing.expectEqualStrings("direct/receiver", out.target.session.slice());
+    try std.testing.expectEqual(@as(u8, 0), out.target.prefix);
+    const failed = own.items[1].value.send_failed;
+    try std.testing.expectEqualStrings("direct/absent", failed.target.session.slice());
+    try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
+    try std.testing.expect(own.items[0].position < own.items[1].position);
+    // The sent row's bytes are the Message's, read through the sender.
+    var reader = try storage.openActivityContent(.{ .session = session, .position = own.items[0].position });
+    reader.close();
+
+    // The model's historical view carries the recorded sender, not text.
+    var admitted = (try storage.admitNextModelAttempt(.{})).?;
+    var view = try storage.openHistoricalView(try admitted.permit.consume());
+    defer view.close();
+    const entry = (try view.nextEntry(0)).?;
+    try std.testing.expect(entry.kind == .user);
+    try std.testing.expectEqualStrings(sender, entry.sender.?.slice());
 }
 
 test "message observation validates accepted admission references independently" {

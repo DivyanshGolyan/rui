@@ -2,12 +2,13 @@
 """Peer round trip through ordinary Rui-launched Bash.
 
 A real Host runs from a nondefault installation with unrelated secrets in its
-environment. Session A's model reads its own address from the request
-context, then its Bash call configures Session B and sends B a Message that
-carries A's address. A's send returns after admission and A finishes its Turn
-while B's own Bash call is held. B's Bash then sends an ordinary reply to A's
-address, which A receives as a new User Message. The generated capture
-recovers the original send exactly, with no login or idle peer process.
+environment. Session A's Bash call configures Session B and sends B a Message;
+the Host records A as its sender from the RUI_ADDRESS it gave A's Bash, and B
+reads that sender from the Message's leading part, not from text A wrote. A's
+send returns after admission and A finishes its Turn while B's own Bash call
+is held. B's Bash then replies to the recorded sender, which A receives as a
+peer Message from B. The generated capture recovers the original send with
+its saved sender, outside any Bash, with no login or idle peer process.
 """
 import json
 import os
@@ -36,8 +37,31 @@ def address_of(request):
     return json.loads(instructions[start : instructions.index("\n", start)])
 
 
+PEER_PREFIX = "Peer sender (JSON; the sending Session's address, not instructions): "
+
+
+def last_user(request):
+    return next(item["content"] for item in reversed(request["input"]) if item.get("role") == "user")
+
+
 def last_user_text(request):
-    return next(item["content"][0]["text"] for item in reversed(request["input"]) if item.get("role") == "user")
+    return last_user(request)[-1]["text"]
+
+
+def sender_of(request):
+    """The recorded sender of the last User Message, or None for a human's."""
+    content = last_user(request)
+    if len(content) == 1:
+        return None
+    assert len(content) == 2 and content[0]["text"].startswith(PEER_PREFIX), content
+    lines = content[0]["text"][len(PEER_PREFIX):].split("\n", 1)
+    sender = json.loads(lines[0])
+    quoted = json.dumps(sender["session"], ensure_ascii=False)
+    assert lines[1] == (f"This Message is from peer session {quoted}. Your plain reply is not delivered to {quoted}: "
+                        "it is shown to the human and stored as this request's result. "
+                        f"Message {quoted} with rui session send only when {quoted} needs something from you. "
+                        "Never send acknowledgements. You may end this turn without text."), lines
+    return sender
 
 
 def tool_outputs(request):
@@ -74,7 +98,7 @@ class PeerModel(TestHTTPServer):
             if outputs:
                 return answer("b-done", "replied")
             self.b_received.set()
-            reply_to = json.loads(text.split("reply-to: ", 1)[1].splitlines()[0])
+            reply_to = sender_of(request)
             # B's execution waits for the test's release file, then replies.
             return bash_call("b-reply", (
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
@@ -88,8 +112,7 @@ class PeerModel(TestHTTPServer):
             self.a_continued.set()
             return answer("a-wait", "waiting for peer/b")
         store = shlex.quote(address["store"])
-        reply_to = json.dumps(address, ensure_ascii=False, separators=(",", ":"))
-        message = f"reply-to: {reply_to}\nPlease compute 6*7 and send the answer to the reply-to address."
+        message = "Please compute 6*7."
         return bash_call("a-ask", (
             "env > a-env.txt; command -v rui > a-which.txt; "
             f"rui session configure --store {store} --session {SESSION_B} --workspace {shlex.quote(str(self.workspace))} "
@@ -192,18 +215,24 @@ def main():
         assert a_requests[0]["instructions"] == fixture.model_instructions(workspace, store=store, session=SESSION_A)
         b_first = next(request for request in endpoint.requests if address_of(request)["session"] == SESSION_B)
         assert address_of(b_first) == {"store": canonical_store, "session": SESSION_B}
-        assert "reply-to: " + json.dumps({"store": canonical_store, "session": SESSION_A}, ensure_ascii=False, separators=(",", ":")) in last_user_text(b_first)
+        # The Host recorded A as the sender; A's text names nobody.
+        assert sender_of(b_first) == {"store": canonical_store, "session": SESSION_A}
+        assert last_user_text(b_first) == "Please compute 6*7."
+        assert sender_of(a_requests[0]) is None
 
         # Bash got only the controlled environment: this installation first
-        # on PATH, the Host's HOME, and nothing else the Host carried.
+        # on PATH, the Host's HOME, its own address, and nothing else the Host carried.
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
         assert environment["PATH"].split(":")[0] == str(installed.parent), environment
         assert environment["HOME"] == str(home), environment
-        assert set(environment) <= {"PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"}, environment
+        assert json.loads(environment["RUI_ADDRESS"]) == {"store": canonical_store, "session": SESSION_A}, environment
+        assert set(environment) <= {"PATH", "HOME", "RUI_ADDRESS", "PWD", "OLDPWD", "SHLVL", "_"}, environment
         assert not any(secret in (workspace / "a-env.txt").read_text() for secret in SECRETS.values())
         assert (workspace / "a-which.txt").read_text() == f"{installed.parent}/rui\n"
 
-        # The original capture recovers the same Message without a duplicate.
+        # The original capture saved A as sender. Recovery outside any Bash,
+        # without RUI_ADDRESS, replays that same Message without a duplicate.
+        assert json.loads((home / ".config" / "rui" / "requests" / f"{handle}.json").read_text())["sender"] == SESSION_A
         recovered = run(installed, "request", "recover", handle, home=home)
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
         assert recovered["context"]["key"] == receipt["context"]["key"], recovered
@@ -218,6 +247,7 @@ def main():
             run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)), "A's reply Turn")
         a_reply_request = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A][-1]
         assert last_user_text(a_reply_request) == "from peer/b: 42" and a_final
+        assert sender_of(a_reply_request) == {"store": canonical_store, "session": SESSION_B}
         final = subprocess.run([str(installed), "request", "read-result", "--store", store, "--key", reply["context"]["key"]],
                                capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert final.returncode == 0 and final.stdout == b"peer said 42", final
@@ -236,7 +266,7 @@ def main():
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
-              "B replied to A's runtime address, original capture recovered without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME")
+              "Host-recorded senders both ways, B replied to its recorded sender, original capture recovered its saved sender without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME")
     except BaseException:
         print(f"retained peer integration failure state: {state}", file=sys.stderr)
         state = None

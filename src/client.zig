@@ -302,6 +302,7 @@ pub const ConversationPage = struct {
         content: CommandObservation.ContentReference,
         presentation: ?protocol.ToolPresentation = null,
         admitted_at: ?u64 = null, // Host wall-clock second; User items only.
+        sender: ?protocol.Peer = null, // A User item's peer sender.
     };
     end: u64,
     items: [protocol.public_conversation_page_items]Item = undefined,
@@ -321,6 +322,7 @@ pub const ConversationPage = struct {
             content: struct { bytes: JsonString(20), sha256: JsonString(64), display: JsonString(16) },
             presentation: ?JsonToolPresentation = null,
             admitted_at: ?JsonString(20) = null,
+            sender: ?JsonPeer = null, // User items only.
         };
         const Rows = struct {
             values: [protocol.public_conversation_page_items]Row = undefined,
@@ -359,7 +361,9 @@ pub const ConversationPage = struct {
             item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = try mutationId(row.content.bytes, true), .digest = undefined } };
             item.presentation = if (row.presentation) |p| p.value else null;
             item.admitted_at = if (row.admitted_at) |second| try mutationId(second, false) else null;
+            item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
             if ((item.kind == .tool_result) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
+                (item.kind != .user and item.sender != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position) return error.InvalidConversationPage;
             if (item.position > page.end or item.ordinal > std.math.maxInt(i64) or item.content.bytes > protocol.max_sqlite_content_bytes or
@@ -481,11 +485,13 @@ pub const ActivityPage = struct {
         if (bytes.len > protocol.max_activity_page_response_bytes) return error.InvalidActivityPage;
         const Ref = struct { bytes: JsonString(20), sha256: JsonString(64) };
         const Fact = protocol.ActivityItem;
-        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), content: Ref };
+        const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonPeer, content: Ref };
+        const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonPeer, content: Ref };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonPeer, code: JsonString(96) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [4]Ref };
         const Outcome = struct { turn: JsonString(20), operation: JsonString(20), code: JsonString(96), content: ?Ref };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: Ref, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -535,9 +541,14 @@ pub const ActivityPage = struct {
                 ((item.value == .tool_result) != (fact.ordinal != 0))) return error.InvalidActivityPage;
             switch (item.value) {
                 .admission, .user => |message| {
-                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false) };
+                    const value: Fact.Message = .{ .admission = try id(message.admission, false), .key = message.key.value, .turn = if (message.turn) |turn| try id(turn, false) else null, .state = message.state.value, .content = try content(message.content), .admitted_at = try id(message.admitted_at, false), .sender = if (message.sender) |sender| try sender.peer() else null };
                     if ((value.state == .applied) != (value.turn != null) or (item.value == .user and value.state != .applied)) return error.InvalidActivityPage;
                     fact.value = if (item.value == .user) .{ .user = value } else .{ .admission = value };
+                },
+                .sent => |sent| fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } },
+                .send_failed => |failed| {
+                    if (failed.code.slice().len == 0) return error.InvalidActivityPage;
+                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
                 },
                 .assistant => |reference| fact.value = .{ .assistant = try content(reference) },
                 .tool_result => |result| {
@@ -634,6 +645,24 @@ pub const MessageInput = struct {
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
+    // The sending Session from a tool process's RUI_ADDRESS. Its Store must
+    // be the destination Store; the capture records only its Session.
+    sender: ?Address = null,
+};
+
+/// A Session's address: its canonical Store selector and exact reference.
+pub const Address = struct {
+    store: []const u8,
+    session: []const u8,
+
+    /// Decodes RUI_ADDRESS (`{"store":…,"session":…}`, no other members)
+    /// into caller-owned storage.
+    pub fn parse(text: []const u8, storage: *[2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8) !Address {
+        var fixed = std.heap.FixedBufferAllocator.init(storage);
+        const value = std.json.parseFromSliceLeaky(struct { store: []const u8, session: []const u8 }, fixed.allocator(), text, .{ .max_value_len = protocol.max_store_bytes }) catch return error.InvalidRuiAddress;
+        if (value.store.len == 0 or value.store.len > protocol.max_store_bytes or value.session.len == 0 or value.session.len > protocol.max_session_bytes) return error.InvalidRuiAddress;
+        return .{ .store = value.store, .session = value.session };
+    }
 };
 
 pub const SessionStopInput = struct {
@@ -2083,6 +2112,19 @@ fn JsonString(comptime limit: usize) type {
     };
 }
 
+/// A peer as pages carry it; `peer` rejects a prefix that no generated
+/// reference could have.
+const JsonPeer = struct {
+    session: JsonString(protocol.max_session_bytes),
+    prefix: JsonString(3),
+
+    fn peer(self: *const JsonPeer) !protocol.Peer {
+        const prefix = std.fmt.parseInt(u8, self.prefix.slice(), 10) catch return error.InvalidActivityPage;
+        if (prefix != 0 and (prefix < 6 or prefix > 36 or !std.mem.startsWith(u8, self.session.slice(), "rui/") or self.session.slice().len != 40)) return error.InvalidActivityPage;
+        return .{ .session = self.session.value, .prefix = prefix };
+    }
+};
+
 // The stdlib also accepts numeric enum tags. Host facts require named strings;
 // their closed vocabulary derives the token bound, with JsonString's lifetime.
 pub const JsonToolPresentation = struct {
@@ -2648,6 +2690,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         session: ?JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
+        sender: ?JsonString(protocol.max_session_bytes) = null,
         text: ?struct { state: JsonString(8), value: CapturedText } = null,
         action: ?JsonString(20) = null,
         decision: ?JsonString(16) = null,
@@ -2690,7 +2733,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         } },
     };
     if ((kind != .configure and (fields.configuration != null or fields.require_model != null)) or
-        (kind != .message and fields.text != null) or (kind != .model_interruption and fields.target != null) or
+        (kind != .message and (fields.text != null or fields.sender != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -2778,6 +2821,8 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
+    // A peer names itself only within its own Store; refuse before capture.
+    if (input.sender) |sender| if (!std.mem.eql(u8, sender.store, paths.store.slice())) return error.CrossStoreSend;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -2789,6 +2834,8 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
+    try capture.write(",\"sender\":");
+    if (input.sender) |sender| try capture.writeJsonString(sender.session) else try capture.write("null");
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
@@ -3998,6 +4045,32 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectError(error.FileNotFound, retry(io, root, message_record, "message", &reply));
 }
 
+test "a peer send captures its sender and refuses another Store before capture" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var storage: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
+    for ([_][]const u8{ "", "{}", "{\"store\":\"s\"}", "{\"store\":\"\",\"session\":\"p\"}", "{\"store\":\"s\",\"session\":\"p\",\"extra\":1}", "[]" }) |invalid|
+        try std.testing.expectError(error.InvalidRuiAddress, Address.parse(invalid, &storage));
+    var address_text: [1024]u8 = undefined;
+    const own = try Address.parse(try std.fmt.bufPrint(&address_text, "{{\"store\":\"{s}\",\"session\":\"peer/\\\"a\\\"\"}}", .{root}), &storage);
+    try std.testing.expectEqualStrings("peer/\"a\"", own.session);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/record.json", .{root});
+    const other: Address = .{ .store = "/elsewhere", .session = "peer" };
+    try std.testing.expectError(error.CrossStoreSend, captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = other }, .{ .explicit = .{ .record = path, .key = "k" } }));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
+    var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own }, .{ .explicit = .{ .record = path, .key = "k" } });
+    defer captured.close(io);
+    var expected_buffer: [1024]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":\"peer/\\\"a\\\"\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    var bytes: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
+}
+
 test "capture returns original identity before send and preserves empty explicit keys" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -4106,7 +4179,7 @@ test "capture retransmits complete original bytes after a lost reply" {
     var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"sender\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
@@ -4157,7 +4230,7 @@ test "capture publication transfers original inode across pathname replacement" 
     var captured = try captureMessage(replaced_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
     defer captured.close(io);
     var expected_buffer: [2048]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"sender\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
     var bytes: [2048]u8 = undefined;
     const count = try captured.file.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings(expected, bytes[0..count]);
