@@ -10,6 +10,7 @@ on:
       - 'src/*.patch'
       - '.github/actions/setup/**'
       - '.github/workflows/cache-maintenance.yml'
+      - '.github/previous-release'
       - '.github/scripts/prune-caches.cjs'
   schedule:
     - cron: '43 5 * * *'
@@ -95,11 +96,16 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           check-part: previous-release
+      - name: Read the pinned previous release
+        id: previous
+        run: |
+          sha=$(cat .github/previous-release)
+          [[ $sha =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the pinned previous release
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          # Keep in step with previous-release-upgrade.yml.
-          ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
+          ref: ${{ steps.previous.outputs.sha }}
           path: .amp/previous-release
           persist-credentials: false
       - run: mv .amp/previous-release "$RUNNER_TEMP/previous-release"
@@ -110,7 +116,7 @@ jobs:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
             ${{ runner.temp }}/previous-release/zig-pkg
-          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-0e4b2225d106dd63fa9c38801188facb5e9c6335
+          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.previous.outputs.sha }}
       - name: Build the previous release as its installer does
         if: ${{ steps.restore.outputs.cache-hit != 'true' }}
         working-directory: ${{ runner.temp }}/previous-release

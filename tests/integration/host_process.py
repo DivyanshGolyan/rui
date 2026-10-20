@@ -349,6 +349,10 @@ def preserve_failure_metadata(path, collect):
         return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
 
 
+# The Store format fixtures expect, stated independently of src/store.zig so a
+# format change must update its fixtures deliberately.
+STORE_SCHEMA = 28
+
 MAX_RETAINED_ROOTS = 16
 MAX_RETAINED_FILES = 128
 MAX_RETAINED_FILE_BYTES = 1024 * 1024
@@ -368,7 +372,9 @@ def copy_failure_diagnostics(state, destination):
     state = pathlib.Path(state)
     if state.is_symlink() or not state.is_dir() or len(os.listdir(destination)) >= MAX_RETAINED_ROOTS:
         return
-    target, files, remaining = None, 0, MAX_RETAINED_BYTES
+    # Job-wide caps count earlier copies; concurrent fixtures add at most one root each.
+    earlier = [path.lstat().st_size for path in pathlib.Path(destination).rglob("*") if path.is_file()]
+    target, files, remaining = None, len(earlier), MAX_RETAINED_BYTES - sum(earlier)
     for directory, children, names in os.walk(state, followlinks=False):
         children[:] = sorted(name for name in children if not (
             name.startswith(".") or any(word in name.lower() for word in _PRIVATE_WORDS)
@@ -381,7 +387,7 @@ def copy_failure_diagnostics(state, destination):
             if files >= MAX_RETAINED_FILES:
                 return
             source = pathlib.Path(directory) / name
-            limit = min(MAX_RETAINED_FILE_BYTES, remaining)
+            limit = max(0, min(MAX_RETAINED_FILE_BYTES, remaining))
             try:
                 with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
                     if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):

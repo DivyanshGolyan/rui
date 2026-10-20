@@ -60,6 +60,11 @@ class FailureArtifactsTest(unittest.TestCase):
             copied, = destination.iterdir()
             self.assertEqual(sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*.log")),
                              ["a/probe.log", "c/probe.log"])
+            # Byte and file caps span roots: a later root cannot reset them.
+            with patch.multiple(host_process, MAX_RETAINED_FILE_BYTES=4, MAX_RETAINED_BYTES=8,
+                                MAX_RETAINED_FILES=4, MAX_RETAINED_ROOTS=16):
+                host_process.copy_failure_diagnostics(state, destination)
+            self.assertEqual(len(list(destination.iterdir())), 1)
 
     def test_native_workflow_uploads_each_failed_part_with_short_retention(self):
         for name, parts in (("check.yml", 2), ("previous-release-upgrade.yml", 1)):

@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import pathlib
-import re
 import select
 import shutil
 import socket
@@ -20,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for_execution_release
+from host_process import STORE_SCHEMA, HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -683,9 +682,7 @@ def maximum_body(kind):
 def check_schema(database_path):
     database = sqlite3.connect(database_path)
     try:
-        source = (pathlib.Path(__file__).resolve().parents[2] / "src/store.zig").read_text()
-        schema = int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
-        assert database.execute("PRAGMA user_version").fetchone()[0] == schema
+        assert database.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA
         stop_columns = [
             row[1] for row in database.execute("PRAGMA table_info(session_stop)")
         ]
