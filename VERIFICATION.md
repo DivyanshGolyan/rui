@@ -19,8 +19,8 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using tar
 | Subsystem | Review-ready minimum | Exceptions and notes |
 | --- | --- | --- |
 | Portable turn, request encoding, answer rendering | `test-logic` | Value transitions do not change native adapters |
-| CLI, client, terminal, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
-| Frontend consent, departure and submission recovery | `test-logic`, `check`, `admission-debug-integration` on both systems | Native checks establish restoration, original identity, borrower retirement and signal delivery |
+| CLI, client, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
+| Frontend consent, departure and submission recovery | `test-logic`, `test`, `admission-debug-integration`, `terminal-restoration-integration`, `canonical-failure-integration` | `Terminal*` owners omit `test`; the selector owns their exact mapping. Mixed strict or non-frontend code retains `check` |
 | Store SQL owners | Linux `check`, Mac `test`, `dispatch-debug-integration` on both systems, changed owning integration targets | The Debug failure-correlation subset checks saved provider bytes through reopen |
 | Proposal and activity fixtures, typed read clients | `proposal-integration` or `activity-integration` on both systems | Both run in `check` and `check-full`; select separately only without a composed gate |
 | Preference privacy fixture and native actor | `preference-policy-integration` on both systems | Runs in `check` and `check-full` |
@@ -49,7 +49,7 @@ Qualification Go changes select `measurement-check`. Linux-memory Python or C ch
 
 [AGENTS.md](AGENTS.md#landing) owns the landing rule. Stack ready items on `wip/land-N` and gate only the tip; focused checks on changed layers are development feedback. Daily suites do not qualify intermediate merges.
 
-Selected CI runs on pull requests, `wip/land-*` pushes and main pushes, using the affected-owner mapping on Linux and macOS. Other branch pushes run nothing. Draft PRs keep cheap `test-logic` feedback. Review-ready PRs test the actual merge ref. Report actual native architecture, platform skips and unrun cases; cross-compilation or a skipped required assertion is not a native pass. Keep sensible test and job timeouts and cleanup and resource guards.
+Selected CI uses affected-owner targets on Linux and macOS for PRs, `wip/land-*` and main. Main pushes always add Store-native `check` (or retain `check-full`), not every target. Renderer-only prelanding omits `check`; strict mixed changes retain it. Other branches run nothing. Draft PRs keep `test-logic`; ready PRs test the merge ref. Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes. Keep sensible timeouts and cleanup and resource guards.
 
 ### Composed gates
 
