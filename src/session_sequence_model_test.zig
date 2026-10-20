@@ -193,6 +193,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var alive = seed == 1 or seed == 2 or seed == 4 or unread;
         var visible = alive;
         var fresh = false;
+        // A choice line keeps its editor through Enter even if a page hides
+        // the Action. Discarding stale text does not transfer the line.
+        var choice_line = false;
         var submitted: usize = 0;
         var decision = false;
         var sealed: Text = .{};
@@ -217,14 +220,17 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 std.debug.print("TD1 focus seed={d} sequence={d} prefix={d}\n", .{ seed, sequence, prefix + 1 });
                 printPrefix(Event, sequence, prefix + 1);
             }
-            const choosing = alive and visible and seed != 2;
+            const choosing = choice_line or (alive and visible and seed != 2);
             switch (event) {
                 .unicode => {
                     // Observe the incomplete UTF-8 prefix before completing it.
                     try fixture.byte(0xc3);
                     try fixture.checkText(&draft, &choice, choosing);
                     try fixture.byte(0xa9);
-                    if (!choosing) draft.insert("é") else if (fresh) choice.insert("é");
+                    if (!choosing) draft.insert("é") else {
+                        choice_line = true;
+                        if (fresh) choice.insert("é");
+                    }
                 },
                 .paste => {
                     // Marked paste cannot authorize even beside a fresh Action.
@@ -234,6 +240,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                         // not while the stream still owns paste custody.
                         try fixture.byte(13);
                         choice = .{};
+                        choice_line = false;
                         fresh = false;
                     }
                 },
@@ -252,6 +259,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                         visible = false;
                     } else if (choosing) {
                         choice = .{};
+                        choice_line = false;
                         fresh = false;
                     }
                 },
@@ -269,7 +277,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     try ops.draw(front);
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
-                    if (choosing and !blocked) fresh = true;
+                    if (alive and visible and seed != 2 and !blocked) fresh = true;
                 },
                 .allow => {
                     try fixture.bytes("a\r");
@@ -281,6 +289,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                             try std.testing.expectEqual(@as(u64, 913), front.submission.intent.?.decision.action);
                         }
                         choice = .{};
+                        choice_line = false;
                         fresh = false;
                     } else {
                         draft.insert("a");
@@ -301,7 +310,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
             try std.testing.expectEqual(fresh, front.consent.acceptsInput());
-            try fixture.checkText(&draft, &choice, alive and visible and seed != 2);
+            try fixture.checkText(&draft, &choice, choice_line or (alive and visible and seed != 2));
         }
     };
 }

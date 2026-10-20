@@ -397,7 +397,8 @@ class SelectionTest(unittest.TestCase):
                              {"go": True, "h2": True, "terminal": False})
         # Standalone PTY steps decode screens too, including the upgrade workflow's.
         for target in ("host-launch-integration", "terminal-restoration-integration",
-                       "canonical-failure-integration", "bash-recovery-integration"):
+                       "canonical-failure-integration", "bash-recovery-integration",
+                       "current-facts-integration"):
             self.assertTrue(setup_requirements([target])["terminal"], target)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):

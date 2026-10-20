@@ -142,7 +142,7 @@ CHECK_COVERS = {
 # Targets whose PTY oracles decode screens with pyte (tests/integration/terminal_screen.py).
 TERMINAL_TARGETS = {"check", "check-full", "terminal-restoration-integration",
                     "canonical-failure-integration", "host-launch-integration",
-                    "bash-recovery-integration"}
+                    "bash-recovery-integration", "current-facts-integration"}
 
 
 def setup_requirements(targets):
