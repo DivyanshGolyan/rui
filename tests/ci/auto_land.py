@@ -119,7 +119,7 @@ def repair(main_sha):
                             capture_output=True, text=True).stdout.strip() or None
     if stable and subprocess.run(["git", "merge-base", "--is-ancestor", main_sha, stable]).returncode == 0:
         return
-    # An unseen push falls back to stable: a wider base selects more, never less.
+    # Fails, so nothing lands, until GitHub's activity shows every push since stable.
     before = pushes(stable, main_sha)[main_sha]
     missing = [workflow for workflow in required(before, main_sha) if latest(workflow, main_sha, "main") is None]
     if missing:

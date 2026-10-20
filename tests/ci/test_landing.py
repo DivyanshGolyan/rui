@@ -131,35 +131,59 @@ class LandingTest(unittest.TestCase):
             stable = commit('README.md')
             # Git quotes non-ASCII names by default; a strict path must stay strict.
             store = commit('src/store_é.zig')
+            git('rm', '-q', 'src/store_é.zig')
+            git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'Revert store')
+            revert = git('rev-parse', 'HEAD')
             cli = commit('src/cli.zig')
             git('push', '-q', 'origin', f'{stable}:refs/heads/stable', f'{cli}:refs/heads/main')
             self.assertEqual(main_health.required(stable, store), ['check.yml', 'previous-release-upgrade.yml'])
             green = dict(status='completed', conclusion='success', macos='success', html_url='u')
+            red = dict(green, conclusion='failure')
             self.assertEqual(auto_land.decide(False, True, green, None, main_health.changed(stable, store)),
                              'pending')
 
-            # Two pushes: stable..store, then store..cli. Only cli has post-push runs.
-            activity = [[dict(before=store, after=cli), dict(before=stable, after=store)]]
-            exact = {('check.yml', cli): green, ('previous-release-upgrade.yml', cli): green}
-            reports = []
+            def stable_ref():
+                return git('ls-remote', 'origin', 'refs/heads/stable').split()[0]
+            # Three pushes, newest first: store (red, already reverted and frozen), its revert, then cli.
+            complete = [dict(before=revert, after=cli), dict(before=store, after=revert),
+                        dict(before=stable, after=store)]
+            activity = []
+            exact = {('check.yml', store): red, ('previous-release-upgrade.yml', store): green,
+                     ('check.yml', revert): green, ('check.yml', cli): green}
+            reports, dispatched = [], []
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
-                    mock.patch.object(main_health, 'gh', lambda *args: json.dumps(activity)), \
+                    mock.patch.object(main_health, 'gh', lambda *args: json.dumps([activity])), \
                     mock.patch.object(main_health, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
-                    mock.patch.object(main_health, 'filed', lambda title: False), \
+                    mock.patch.object(auto_land, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
+                    mock.patch.object(auto_land, 'dispatch', lambda *args: dispatched.append(args)), \
+                    mock.patch.object(main_health, 'filed', lambda title: title.startswith('Landing frozen')), \
                     mock.patch.object(main_health, 'report', lambda title, body, label=None: reports.append(title)), \
                     mock.patch.object(sys, 'argv', ['main_health.py', 'check']), \
                     contextlib.redirect_stdout(io.StringIO()):
+                # Missing or partial push history never stands in for a push boundary.
+                for seen in ([], complete[:1], complete[:2]):
+                    activity[:] = seen
+                    with self.assertRaises(SystemExit):
+                        main_health.main()
+                    with self.assertRaises(SystemExit):
+                        auto_land.repair(cli)
+                    self.assertEqual((stable_ref(), dispatched), (stable, []))
+                activity[:] = complete
                 main_health.main()
-                # The store push never got its own runs: stable holds and the user is told.
-                self.assertEqual(git('ls-remote', 'origin', 'refs/heads/stable').split()[0], stable)
-                self.assertEqual(reports, [f'Main push {store[:12]} has no post-push CI'])
+                # The revert is clean against stable but undid a strict change, so it needs its
+                # own upgrade run; once cli follows, that run can never exist.
+                self.assertEqual(stable_ref(), stable)
+                self.assertEqual(reports, [f'Main push {revert[:12]} has no post-push CI'])
                 # An older strict push's upgrade run does not cover a newer strict push.
-                exact[('previous-release-upgrade.yml', 'older')] = green
                 self.assertNotIn('previous-release-upgrade.yml',
-                                 main_health.runs(store, [(store, stable), ('older', None)]))
-                exact.update({('check.yml', store): green, ('previous-release-upgrade.yml', store): green})
+                                 main_health.runs(revert, [(revert, store), (store, stable)]))
+                # Before landing on a main head without its own runs, auto-land starts them.
+                exact[('check.yml', cli)] = None
+                auto_land.repair(cli)
+                self.assertEqual(dispatched, [(cli, revert, ['check.yml'])])
+                exact.update({('previous-release-upgrade.yml', revert): green, ('check.yml', cli): green})
                 main_health.main()
-                self.assertEqual(git('ls-remote', 'origin', 'refs/heads/stable').split()[0], cli)
+                self.assertEqual(stable_ref(), cli)
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.

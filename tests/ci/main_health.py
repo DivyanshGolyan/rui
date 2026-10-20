@@ -46,20 +46,29 @@ def latest(workflow, sha, branch):
 
 
 def pushes(stable, head):
-    """{after: before} for every push that moved main within stable..head.
+    """{after: before} for each push that moved main from stable to head, oldest first.
 
     Push boundaries come from GitHub's ref activity, never from which commits
     happen to have runs: a push whose post-push CI is missing must hold stable,
-    not pass as an inner commit of a later push. head is always a boundary.
+    not pass as an inner commit of a later push. Unless the activity chains
+    head back to stable push by push, this fails and stable holds. Without
+    stable, only head's own push is known.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
-    commits = set(git("rev-list", f"{stable}..{head}").split()) if stable else {head}
     activity = [row for page in json.loads(gh("api", "--paginate", "--slurp",
                                               f"repos/{repository}/activity?ref=refs/heads/main&per_page=100"))
                 for row in page]
-    result = {row["after"]: row["before"] for row in reversed(activity) if row["after"] in commits}
-    result.setdefault(head, stable or f"{head}~1")
-    return result
+    moves = {row["after"]: row["before"] for row in reversed(activity)}
+    chain, sha = {}, head
+    while sha != stable:
+        if sha not in moves or sha in chain:
+            raise SystemExit(f"GitHub's push activity for main does not chain {head} back to "
+                             f"{stable or 'its previous main'}; stable holds until it does.")
+        chain[sha] = moves[sha]
+        sha = moves[sha]
+        if stable is None:
+            break
+    return dict(reversed(chain.items()))
 
 
 def required(before, sha):
@@ -70,7 +79,7 @@ def required(before, sha):
 def runs(sha, earlier):
     """Selected for this exact push; the upgrade run of the newest strict push.
 
-    earlier lists (push, before) since stable, newest first, ending with sha.
+    earlier lists (push, before) since stable, newest first, starting with sha.
     A push that misses the upgrade path filter has no upgrade run of its own,
     so the newest strict push's run (or a later push's) decides; an older
     strict push's run does not cover a newer strict change.
@@ -144,14 +153,20 @@ def dispatch(sha, before, workflows):
                          f"{sha}'s. stable holds before {sha}; main health files an issue for a user decision.")
 
 
-def decide(results, changed):
-    """Return 'pending', 'green', 'revert' or 'issue' for one main commit."""
-    required = {"check.yml"} | ({UPGRADE} if strict(changed) else set())
-    if required - results.keys() or any(run["status"] != "completed" for run in results.values()):
+def decide(results, changed, own=()):
+    """Return 'pending', 'green', 'revert' or 'issue' for one main push.
+
+    changed spans everything since stable; own lists the workflows this push
+    itself needs, so a push that undoes a strict change (a revert) still
+    waits for its own upgrade run although the span since stable is clean.
+    """
+    needed = {"check.yml", *own} | ({UPGRADE} if strict(changed) else set())
+    if needed - results.keys() or any(run["status"] != "completed" for run in results.values()):
         return "pending"
     red = {name for name, run in results.items() if run["conclusion"] != "success"}
     if not red:
         return "green"
+    # Revert scope stays the span since stable; a clean span has nothing to revert.
     return "revert" if strict(changed) or UPGRADE in red else "issue"
 
 
@@ -177,8 +192,7 @@ def main():
     # GitHub drops a pending run when a newer one queues in this concurrency
     # group, so every run decides each main push since stable, oldest first,
     # and never relies on its own triggering event.
-    order = [sha for sha in git("rev-list", "--reverse", f"{stable}..{head}").split()
-             if sha in boundaries] if stable else [head]
+    order = list(boundaries)
     start = 0
     for index, sha in enumerate(order):
         earlier = [(push, boundaries[push]) for push in reversed(order[start:index + 1])]
@@ -207,9 +221,9 @@ def stranded(sha, later):
 
 def decide_push(stable, sha, earlier):
     # Everything since the last green commit is suspect, not only this push.
-    base = stable or f"{sha}~1"
+    base = stable or earlier[-1][1]
     results = runs(sha, earlier)
-    verdict = decide(results, changed(base, sha))
+    verdict = decide(results, changed(base, sha), required(earlier[0][1], sha))
     links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
                       for name, run in sorted(results.items()))
     print(f"{sha}: {verdict}\n{links}")
