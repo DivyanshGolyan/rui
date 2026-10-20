@@ -29,6 +29,7 @@ pub const Prepared = struct {
                     // Its line count is unknown without reading it.
                     var size: [24]u8 = undefined;
                     try View.userPrefix(sink, colour, item.admitted_at.?);
+                    try View.noteCollapsed(sink, collapsed(item));
                     try sink.feed(View.Mark.summary ++ "┄ ");
                     try sink.feed(View.kilobytes(item.content.bytes, &size));
                     try sink.feed(View.Mark.reset ++ "\n  " ++ View.Mark.summary);
@@ -36,11 +37,7 @@ pub const Prepared = struct {
                     if (item.kind == .tool_result) try View.toolHeading(item.presentation.?, sink, colour, true) else try sink.feed("\n");
                     try sink.feed(try std.fmt.bufPrint(&buffer, "Rui: Historical item omitted: position {d}, ordinal {d}, {d} raw bytes.\n", .{ item.position, item.ordinal, item.content.bytes }));
                 }
-                try sink.feed("Raw export: rui session read-conversation --store-hex ");
-                try writeHex(sink, store);
-                try sink.feed(" --session-hex ");
-                try writeHex(sink, session);
-                try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ item.position, item.ordinal }));
+                try writeExport(sink, store, session, item.position, item.ordinal);
                 if (item.kind == .user) try sink.feed(View.Mark.reset);
                 try sink.feed("\n");
                 continue;
@@ -82,7 +79,7 @@ pub const Prepared = struct {
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
                     try body.init(sink, item.content.bytes, mode == .details);
                     try staged.read(&body);
-                    try body.finish();
+                    if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
                 },
                 .assistant => {
                     try sink.feed("\n");
@@ -96,6 +93,20 @@ pub const Prepared = struct {
         }
     }
 };
+
+fn collapsed(item: client.ConversationPage.Item) View.Collapsed {
+    return .{ .source = .conversation, .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest }, .row = true };
+}
+
+/// The command that exports one conversation row's exact bytes.
+pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, position: u64, ordinal: u64) !void {
+    var buffer: [64]u8 = undefined;
+    try sink.feed("Raw export: rui session read-conversation --store-hex ");
+    try writeHex(sink, store);
+    try sink.feed(" --session-hex ");
+    try writeHex(sink, session);
+    try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ position, ordinal }));
+}
 
 pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: client.ConversationCursor, scratch: std.Io.File) !Prepared {
     const page = switch (try requests.conversationPage(store, session, cursor)) {

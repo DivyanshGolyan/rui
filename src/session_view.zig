@@ -72,6 +72,45 @@ pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
 }
 
+/// The Message behind a collapsed user block, for its Ctrl-O page: which
+/// read returns its bytes, and whether a conversation row exports them.
+pub const Collapsed = struct {
+    source: enum { activity, conversation },
+    position: u64,
+    ordinal: u64,
+    content: protocol.ActivityItem.Content,
+    row: bool,
+};
+
+/// The Messages of one Document's collapsed blocks in order, newest last.
+/// Each block draws exactly one summary run starting `┄`; the Document's
+/// k-th such run from its end is the k-th entry from the end.
+pub const Blocks = struct {
+    pub const capacity = 1024;
+    // Null keeps the count of a block whose Message is no longer known.
+    items: [capacity]?Collapsed = undefined,
+    total: u64 = 0,
+
+    pub fn add(self: *Blocks, value: ?Collapsed) void {
+        self.items[@intCast(self.total % capacity)] = value;
+        self.total += 1;
+    }
+
+    /// Entry `index` of the newest `count`, if still kept.
+    pub fn recent(self: *const Blocks, count: u64, index: u64) ?Collapsed {
+        if (count > self.total or index >= count) return null;
+        const at = self.total - count + index;
+        if (self.total - at > capacity) return null;
+        return self.items[@intCast(at % capacity)];
+    }
+};
+
+/// Tells a sink that records collapsed blocks which Message the one just
+/// written shows.
+pub fn noteCollapsed(sink: anytype, value: Collapsed) !void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsed")) try sink.collapsed(value);
+}
+
 /// A Message longer than any of these shows a preview and a summary row.
 pub const collapse_bytes = 1024;
 const collapse_nonblank = 4;
@@ -120,8 +159,10 @@ pub fn UserBody(comptime Sink: type) type {
             try self.scan(bytes);
         }
 
-        pub fn finish(self: *Self) anyerror!void {
+        /// Returns whether the body collapsed.
+        pub fn finish(self: *Self) anyerror!bool {
             if (self.received != self.length) return error.ContentLengthMismatch;
+            var collapsed = false;
             if (self.whole) {
                 try self.escaped.finish();
             } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
@@ -141,9 +182,11 @@ pub fn UserBody(comptime Sink: type) type {
                     else => std.fmt.bufPrint(&count, "┄ {d} more lines · ", .{hidden}) catch unreachable,
                 });
                 try self.out.feed(kilobytes(self.length, &size));
+                collapsed = true;
             }
             try self.out.feed(Mark.reset);
             try self.out.finish();
+            return collapsed;
         }
 
         fn scan(self: *Self, bytes: []const u8) !void {
@@ -319,7 +362,7 @@ test "a long user Message shows two non-blank lines and what it hides" {
             try body.init(&sink, case.input.len, case.whole);
             try body.feed(case.input[0..split]);
             try body.feed(case.input[split..]);
-            try body.finish();
+            try std.testing.expectEqual(std.mem.indexOf(u8, case.output, "┄") != null, try body.finish());
             try std.testing.expectEqualStrings(case.output, sink.bytes[0..sink.length]);
         }
     }
@@ -690,7 +733,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    try body.finish();
+    if (try body.finish()) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user });
     try sink.feed("\n");
 }
 

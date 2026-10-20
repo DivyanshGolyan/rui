@@ -12,6 +12,7 @@ const View = @import("session_view.zig");
 const History = @import("session_history.zig");
 const departure = @import("session_departure.zig");
 const TerminalText = @import("TerminalText.zig");
+const Viewport = @import("ConversationViewport.zig");
 const ReadPhase = departure.ReadPhase;
 
 pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
@@ -42,6 +43,8 @@ pub const Job = struct {
     older: ?client.ConversationCursor = null,
     // A history read renders this part of a transcript's listing instead.
     listing: ?Listing = null,
+    // A message read shows this collapsed block's Message in full.
+    message_target: ?View.Collapsed = null,
     // Messages shown in live output before this read.
     messages: Messages = .{},
     transcript: u64 = 0,
@@ -74,6 +77,8 @@ pub const Job = struct {
         boundaries: Boundaries = .{},
         // Each Message this read's output shows, in order, as output offsets.
         echoes: Echoes = .{},
+        // The Messages of the collapsed blocks in this read's output, in order.
+        collapsed: Collected = .{},
         // The opening's lowest unapplied position (see View.Pending).
         lowest: ?u64 = null,
         // The job's Messages after this read.
@@ -199,6 +204,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
+    job.result.collapsed = output.blocks;
     if (!job.opening) {
         job.result.boundaries = output.boundaries;
         if (readEnd(job.result.messages, page.facts.more, page.facts.end, output.offset)) |end| job.result.boundaries.add(end);
@@ -243,6 +249,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
+    job.result.collapsed = output.blocks;
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
@@ -252,6 +259,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
     try job.inspection_file.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.inspection_file };
+    defer job.result.collapsed = output.blocks;
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .value = .{ .admission = echo.message } };
@@ -288,10 +296,21 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
     }
 }
 
+/// The collapsed blocks one read writes: a page shows each item at most once.
+pub const Collected = struct {
+    items: [@typeInfo(@FieldType(protocol.ActivityFacts, "items")).array.len]View.Collapsed = undefined,
+    count: usize = 0,
+
+    pub fn slice(self: *const Collected) []const View.Collapsed {
+        return self.items[0..self.count];
+    }
+};
+
 const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
+    blocks: Collected = .{},
     /// The page's end, for boundary cursors.
     end: u64 = 0,
     /// Messages shown before the current item.
@@ -308,6 +327,12 @@ const DisplayCapture = struct {
         _ = self.finish();
         self.current = value;
         self.current_start = self.offset;
+    }
+
+    pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
+        if (self.blocks.count == self.blocks.items.len) return error.TooManyCollapsedBlocks;
+        self.blocks.items[self.blocks.count] = value;
+        self.blocks.count += 1;
     }
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
@@ -739,6 +764,105 @@ test "a transcript joins at the first retained boundary or shows the gap after t
     try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
 }
 
+/// The Ctrl-O page. The Message's length, digest and end are validated
+/// before anything shows; its full text then follows at column 0.
+pub fn message(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const target = job.message_target.?;
+    const Staging = struct {
+        io: std.Io,
+        file: std.Io.File,
+        offset: u64 = 0,
+        newlines: u64 = 0,
+        last: u8 = '\n',
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(self.io, bytes, self.offset);
+            self.offset += bytes.len;
+            self.newlines += std.mem.count(u8, bytes, "\n");
+            if (bytes.len != 0) self.last = bytes[bytes.len - 1];
+        }
+    };
+    try job.scratch.setLength(task.io, 0);
+    var staging: Staging = .{ .io = task.io, .file = job.scratch };
+    const reference: client.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+    const failure = switch (target.source) {
+        .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
+        .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
+    };
+    if (failure) |value| return requests.failRead(value);
+    if (staging.offset != target.content.length) return error.ContentLengthMismatch;
+    const lines = staging.newlines + @intFromBool(staging.last != '\n');
+
+    try job.inspection_file.setLength(task.io, 0);
+    var page: MessagePage = .{ .io = task.io, .file = job.inspection_file };
+    var size: [24]u8 = undefined;
+    var heading: [96]u8 = undefined;
+    try page.feed(View.Mark.summary);
+    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", View.kilobytes(target.content.length, &size) }));
+    try page.feed(View.Mark.reset ++ "\n");
+    if (target.row) {
+        try History.writeExport(&page, "Exact bytes", job.store, job.session, target.position, target.ordinal);
+        try page.feed("\n");
+    }
+    try page.feed("\n");
+    // Room for the heading again covers the notice and its command.
+    page.limit = Viewport.capacity - 2 * page.offset - 128;
+    page.body = page.offset;
+    var escaped: View.Escaped(*MessagePage) = .{ .sink = &page, .text = .{ .mode = .multiline } };
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < staging.offset and !page.full) {
+        const wanted: usize = @intCast(@min(window.len, staging.offset - offset));
+        if (try job.scratch.readPositionalAll(task.io, window[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
+        try escaped.feed(window[0..wanted]);
+        offset += wanted;
+    }
+    if (!page.full) try escaped.finish();
+    if (!page.full) return;
+    // Escaped controls and invalid bytes can outgrow the view: keep whole
+    // lines and say how many follow, never cut silently.
+    try job.inspection_file.setLength(task.io, page.line_end);
+    page.offset = page.line_end;
+    page.limit = std.math.maxInt(u64);
+    var notice: [96]u8 = undefined;
+    const hidden = lines - page.lines;
+    try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} not shown\n", .{ hidden, if (hidden == 1) "" else "s" }));
+    if (target.row) {
+        try History.writeExport(&page, "Exact bytes", job.store, job.session, target.position, target.ordinal);
+        try page.feed("\n");
+    }
+}
+
+/// A Message page's file. Body bytes stop at `limit`; `line_end` is where
+/// the last whole body line written ends.
+const MessagePage = struct {
+    io: std.Io,
+    file: std.Io.File,
+    offset: u64 = 0,
+    limit: u64 = std.math.maxInt(u64),
+    body: u64 = 0,
+    line_end: u64 = 0,
+    lines: u64 = 0,
+    full: bool = false,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (self.full) return;
+        const fit = bytes[0..@intCast(@min(bytes.len, self.limit -| self.offset))];
+        try self.file.writePositionalAll(self.io, fit, self.offset);
+        for (fit, 0..) |byte, index| if (byte == '\n') {
+            self.lines += 1;
+            self.line_end = self.offset + index + 1;
+        };
+        self.offset += fit.len;
+        if (fit.len != bytes.len) {
+            self.full = true;
+            // Only body lines count; the heading's are before `body`.
+            self.lines -= std.mem.count(u8, "", "");
+        }
+    }
+};
+
 pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try job.inspection_file.setLength(task.io, 0);
@@ -756,7 +880,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\n/status shows whether Bash asks first · an Action takes a or d + Enter\n/status settings and work · /requests recovery handles\n/details saved tool output · /history older conversation\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\n/result KEY saved answer · /recover KEY original request\n/discard releases rejected input, retaining the draft\n/setup future defaults · /configure this Session\n/inspect-action exact one-shot diagnostics\n/exit detaches; Host work continues, unsent draft is lost\nLogin: rui auth login codex in your shell.\n");
     } else {
         std.debug.assert(job.inspection_kind == .requests);
         try job.requests(job.init, task.requests(), job.store, job.session, &output.interface);
