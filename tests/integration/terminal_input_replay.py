@@ -153,12 +153,12 @@ def input_replay_cases():
         (b"\x1b[201~\r", [event("paste_end", pasted=True), submit])])
     replay(actor, "unmatched paste end rejects submission", [(b"\x1b[201~", [event("paste_end")]),
         (b"\r", [event("key_press", 106, 4, outcome="invalid")])])
-    # Doubling ESC is not a quoting mechanism inside paste. It rejects the
-    # draft and keeps paste provenance until a genuine exact end delimiter.
-    replay(actor, "double-ESC end marker cannot release paste custody", [(b"\x1b[200~", [start]),
-        (b"\x1b\x1b[201~", [event("invalid", pasted=True),
-            *[event("key_press", point, pasted=True) for point in b"[201~"]])],
-        error="IncompleteTerminalInput")
+    # Doubling ESC is not a quoting mechanism inside paste. The stray ESC
+    # alone rejects the draft; the exact end delimiter after it still ends
+    # the paste, so the next keystroke is the user's and Enter sends nothing.
+    replay(actor, "stray ESC before a paste end rejects the paste and still ends it", [(b"\x1b[200~", [start]),
+        (b"\x1b\x1b[201~", [event("invalid", pasted=True), event("paste_end", pasted=True)]),
+        (b"\r", [event("key_press", 106, 4, outcome="invalid")])])
     # A backslash-spelled delimiter is literal text, never a paste end.
     literal = b"\\x1b[201~"
     lines = [event("key_press", point, pasted=True, outcome="redraw",
