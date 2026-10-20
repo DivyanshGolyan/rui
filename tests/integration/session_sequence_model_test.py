@@ -11,10 +11,10 @@ import unittest
 
 RUNNER = Path(__file__).with_name("session_sequence_model.py")
 FRONTEND = """
-            const action_visible = self.actionVisible();
-            self.dirty = false;
-            if (!approval_ready and self.approvalReady()) {
-if (self.consent.promptCompleted(service, false, false)) {
+    const projection = screen.select(self.commandActive(), self.choice_line);
+    self.dirty = false;
+    if (!self.dirty and screen.decisionPromptDelivered() and true) {
+if (screen.promptCompleted(service, false, false)) {
 """
 COMMAND = r'''
 import os

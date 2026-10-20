@@ -4615,7 +4615,10 @@ def renderer_cases():
         endpoint.responses.append(fixture.sse_answer("asked-final", "reason", "message", "ASKED-DONE")[0])
         ready_read, ready_write = os.pipe()
         try:
-            with terminal(session, ready_write) as tty:
+            # The whole transcript must fit one screen; each raw export wraps
+            # with the Store path's length, which is far longer on macOS.
+            with terminal(session, ready_write, rows=40) as tty:
+                tty.capture.resize(80, 40)
                 requests = len(endpoint.requests)
                 tty.send("DRIVER-QUESTION\n", predicate=lambda: "› DRIVER-QUESTION" in tty.capture.completed)
                 fixture.wait_for(lambda: len(endpoint.requests) > requests, "first model request", timeout=20)
