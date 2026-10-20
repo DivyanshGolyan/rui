@@ -123,6 +123,9 @@ pub fn cellStyle(value: u8, colour: bool) CellStyle {
     };
 }
 
+/// Collapsed blocks' summaries in a range of text: see `collapsed`.
+pub const Summaries = struct { count: usize = 0, last: ?usize = null };
+
 pub fn Sized(comptime limit: usize, comptime styled: bool) type {
     return struct {
         const Self = @This();
@@ -438,6 +441,26 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub fn atBottom(self: *const Self, layout: Layout, height: usize) bool {
             return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
+        }
+
+        /// Where each collapsed user block's summary (`┄`, drawn dim and
+        /// quiet) starts within text bytes `[from, to)`: their count, and the
+        /// last one's offset.
+        pub fn collapsed(self: *const Self, from: usize, to: usize) Summaries {
+            comptime std.debug.assert(styled);
+            const marker = "┄";
+            const bytes = self.text();
+            var result: Summaries = .{};
+            var index = from;
+            const end = @min(to, bytes.len);
+            while (std.mem.indexOfPos(u8, bytes[0..end], index, marker)) |found| : (index = found + marker.len) {
+                const run = user_bit | summary_bit;
+                if (self.styles[found] & run != run) continue;
+                if (found != 0 and self.styles[found - 1] & run == run) continue;
+                result.count += 1;
+                result.last = found;
+            }
+            return result;
         }
 
         /// Drops retained bytes before `position` (an absolute offset that

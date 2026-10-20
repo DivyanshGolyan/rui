@@ -72,6 +72,117 @@ pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
 }
 
+/// The Message behind a collapsed user block, for its Ctrl-O page: which
+/// read returns its bytes, and whether a conversation row exports them.
+pub const Collapsed = struct {
+    source: enum { activity, conversation },
+    position: u64,
+    ordinal: u64,
+    content: protocol.ActivityItem.Content,
+    row: bool,
+};
+
+/// The Messages of one Document's collapsed blocks in order. Each block
+/// draws exactly one summary run starting `┄`, so the Document's k-th such
+/// run from its end is the k-th entry from the end. Live output appends and
+/// evicts from the front; a transcript also gains older pages at the front
+/// and loses newer rows from the end. Beyond capacity the oldest entries
+/// are only counted.
+pub const Blocks = struct {
+    pub const capacity = 1024;
+    items: [capacity]?Collapsed = undefined,
+    start: usize = 0,
+    count: usize = 0,
+    // Blocks before `items`, oldest first, whose Messages are not kept.
+    unknown: u64 = 0,
+
+    fn at(self: *const Blocks, index: usize) usize {
+        return (self.start + index) % capacity;
+    }
+
+    pub fn append(self: *Blocks, value: ?Collapsed) void {
+        if (self.count == capacity) {
+            self.start = self.at(1);
+            self.count -= 1;
+            self.unknown += 1;
+        }
+        self.items[self.at(self.count)] = value;
+        self.count += 1;
+    }
+
+    /// Places an older page's blocks, oldest first, before every other.
+    pub fn prepend(self: *Blocks, older: []const ?Collapsed) void {
+        var index = older.len;
+        while (index > 0) : (index -= 1) {
+            if (self.count == capacity) {
+                self.unknown += index;
+                return;
+            }
+            self.start = (self.start + capacity - 1) % capacity;
+            self.items[self.start] = older[index - 1];
+            self.count += 1;
+        }
+    }
+
+    /// Forgets the newest `count` blocks, which left the Document's end.
+    pub fn dropNewest(self: *Blocks, count: u64) void {
+        const kept: usize = @intCast(@min(count, self.count));
+        self.count -= kept;
+        self.unknown -|= count - kept;
+    }
+
+    /// The block `index` from the end (0 is the newest), if kept.
+    pub fn fromEnd(self: *const Blocks, index: u64) ?Collapsed {
+        if (index >= self.count) return null;
+        return self.items[self.at(self.count - 1 - @as(usize, @intCast(index)))];
+    }
+
+    /// A copy holding only the newest `count` blocks.
+    pub fn newest(self: *const Blocks, count: u64) Blocks {
+        var copy = self.*;
+        const kept: usize = @intCast(@min(count, self.count));
+        copy.start = self.at(self.count - kept);
+        copy.count = kept;
+        copy.unknown = count - kept;
+        return copy;
+    }
+};
+
+test "collapsed blocks keep their order from the end as pages join and leave" {
+    var blocks: Blocks = .{};
+    const body_ref: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    const at = struct {
+        fn f(position: u64, c: protocol.ActivityItem.Content) ?Collapsed {
+            return .{ .source = .activity, .position = position, .ordinal = 0, .content = c, .row = false };
+        }
+    }.f;
+    for (0..Blocks.capacity + 3) |index| blocks.append(at(index + 10, body_ref));
+    try std.testing.expectEqual(@as(u64, 3), blocks.unknown);
+    try std.testing.expectEqual(@as(u64, Blocks.capacity + 12), blocks.fromEnd(0).?.position);
+    try std.testing.expectEqual(@as(u64, 13), blocks.fromEnd(Blocks.capacity - 1).?.position);
+    try std.testing.expect(blocks.fromEnd(Blocks.capacity) == null);
+    var copy = blocks.newest(5);
+    try std.testing.expectEqual(@as(u64, Blocks.capacity + 8), copy.fromEnd(4).?.position);
+    copy.prepend(&.{ at(1, body_ref), null, at(3, body_ref) });
+    try std.testing.expectEqual(@as(u64, 3), copy.fromEnd(5).?.position);
+    try std.testing.expect(copy.fromEnd(6) == null);
+    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(7).?.position);
+    copy.dropNewest(6);
+    try std.testing.expect(copy.fromEnd(0) == null and copy.fromEnd(2) == null);
+    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(1).?.position);
+    // An older page beyond capacity counts its oldest blocks only.
+    var full = blocks.newest(Blocks.capacity - 1);
+    full.prepend(&.{ at(1, body_ref), at(2, body_ref) });
+    try std.testing.expectEqual(@as(u64, 2), full.fromEnd(Blocks.capacity - 1).?.position);
+    try std.testing.expectEqual(@as(u64, 1), full.unknown);
+}
+
+/// Tells a sink that records collapsed blocks which Message the one just
+/// written shows.
+pub fn noteCollapsed(sink: anytype, value: Collapsed) !void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsed")) try sink.collapsed(value);
+}
+
 /// A Message longer than any of these shows a preview and a summary row.
 pub const collapse_bytes = 1024;
 const collapse_nonblank = 4;
@@ -120,8 +231,10 @@ pub fn UserBody(comptime Sink: type) type {
             try self.scan(bytes);
         }
 
-        pub fn finish(self: *Self) anyerror!void {
+        /// Returns whether the body collapsed.
+        pub fn finish(self: *Self) anyerror!bool {
             if (self.received != self.length) return error.ContentLengthMismatch;
+            var collapsed = false;
             if (self.whole) {
                 try self.escaped.finish();
             } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
@@ -141,9 +254,11 @@ pub fn UserBody(comptime Sink: type) type {
                     else => std.fmt.bufPrint(&count, "┄ {d} more lines · ", .{hidden}) catch unreachable,
                 });
                 try self.out.feed(kilobytes(self.length, &size));
+                collapsed = true;
             }
             try self.out.feed(Mark.reset);
             try self.out.finish();
+            return collapsed;
         }
 
         fn scan(self: *Self, bytes: []const u8) !void {
@@ -319,7 +434,7 @@ test "a long user Message shows two non-blank lines and what it hides" {
             try body.init(&sink, case.input.len, case.whole);
             try body.feed(case.input[0..split]);
             try body.feed(case.input[split..]);
-            try body.finish();
+            try std.testing.expectEqual(std.mem.indexOf(u8, case.output, "┄") != null, try body.finish());
             try std.testing.expectEqualStrings(case.output, sink.bytes[0..sink.length]);
         }
     }
@@ -690,7 +805,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    try body.finish();
+    if (try body.finish()) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user });
     try sink.feed("\n");
 }
 

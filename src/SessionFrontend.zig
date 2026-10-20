@@ -95,6 +95,14 @@ transcript: u64 = 0,
 // A failed older load waits for the next scroll rather than retrying at once.
 older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
+// The Messages of collapsed blocks in live output and in the transcript.
+live_blocks: View.Blocks = .{},
+transcript_blocks: View.Blocks = .{},
+// Ctrl-O waits for the frame it names a block in; the read then waits for
+// the reader, and its page shows only over the view it was asked from.
+expand_pending: bool = false,
+message_requested: ?View.Collapsed = null,
+message_origin: struct { view: Screen.ViewKind = .live, transcript: u64 = 0 } = .{},
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
 marks: reads.Marks = .{},
@@ -505,6 +513,12 @@ fn driveActive(self: *Self) !void {
                     self.dirty = true;
                 }
             }
+            if (self.reader.thread == null) if (self.message_requested) |target| {
+                self.message_requested = null;
+                var job = self.freeze(.message);
+                job.message_target = target;
+                try self.launch(job, reads.fullMessage);
+            };
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
                 self.notice = "Loading earlier messages…";
                 try self.launch(self.freeze(.history), reads.history);
@@ -537,6 +551,7 @@ fn driveActive(self: *Self) !void {
         }
         self.withdrawDecided();
         if (self.dirty) if (try self.draw()) break;
+        if (self.expand_pending) try self.expand();
         _ = try self.step(16);
     }
 }
@@ -766,9 +781,36 @@ fn navigation(self: *Self, event: Editor.Event) !void {
             self.older_failed = false; // A new scroll may retry a failed load.
             if (screen.browse(down, event == .page_up or event == .page_down)) try screen.latest();
         },
-        .latest, .close_view => try screen.latest(),
+        .latest => try screen.latest(),
+        .close_view => if (screen.view == .message) try screen.leaveMessage() else try screen.latest(),
+        .expand => if (screen.view == .message) try screen.leaveMessage() else {
+            self.expand_pending = true;
+        },
         else => {},
     }
+    self.dirty = true;
+}
+
+/// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
+fn expand(self: *Self) !void {
+    self.expand_pending = false;
+    self.dirty = true;
+    const screen = self.terminal.screen;
+    if (screen.view != .live and screen.view != .transcript) {
+        self.notice = "! Ctrl-O opens a collapsed message from the conversation.";
+        return;
+    }
+    const index = screen.collapsedInView() orelse {
+        self.notice = "No collapsed message in view; scroll to one, then Ctrl-O.";
+        return;
+    };
+    const blocks = if (screen.view == .live) &self.live_blocks else &self.transcript_blocks;
+    self.message_requested = blocks.fromEnd(index) orelse {
+        self.notice = "! That message's full text is no longer held here; /history shows it again.";
+        return;
+    };
+    self.message_origin = .{ .view = screen.view, .transcript = self.transcript };
+    self.notice = "Opening message…";
 }
 
 /// Freezes live output for scrolling. The copy starts at a recorded read
@@ -781,6 +823,7 @@ fn beginTranscript(self: *Self) !void {
     const front = try screen.liveStart();
     self.transcript_plan = reads.plan(&self.marks, &self.echoes, front, self.lowest);
     try screen.beginTranscript(self.transcript_plan.start);
+    self.transcript_blocks = self.live_blocks.newest(screen.transcriptCollapsed());
     self.transcript_older = self.transcript_plan.older;
     // Without any boundary, where the conversation starts is unknown.
     self.transcript_beginning = self.transcript_older == null and !(self.transcript_plan.gap and self.marks.count == 0);
@@ -969,7 +1012,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
-            .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => try self.navigation(event),
+            .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => try self.navigation(event),
             .interrupt, .eof => self.detached = true,
             .invalid, .edit_rejected => self.notice = "! Input rejected; nothing sent. Enter plain text or paste again.",
             .unbound => self.notice = "! Key combination not recognized; ignored. Draft unchanged.",
@@ -1023,13 +1066,27 @@ fn settleReader(self: *Self) !void {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
         if (screen.view == .transcript and self.job.transcript == self.transcript) {
-            try screen.prependFile(self.init.io, self.inspection_file);
+            const prepended = try screen.prependFile(self.init.io, self.inspection_file);
+            // The page's newest blocks are those its kept rows show.
+            const collapsed = self.job.result.collapsed.slice();
+            var older: [@typeInfo(@FieldType(reads.Collected, "items")).array.len]?View.Collapsed = @splat(null);
+            const kept = @min(prepended.older, older.len);
+            for (0..kept) |index| {
+                const from_end = kept - index;
+                older[index] = if (from_end <= collapsed.len) collapsed[collapsed.len - from_end] else null;
+            }
+            self.transcript_blocks.prepend(older[0..kept]);
+            self.transcript_blocks.dropNewest(prepended.trimmed);
             if (self.job.listing) |listed| self.transcript_plan.listed(listed, self.job.result.listing) else {
                 self.transcript_older = self.job.result.history_cursor;
                 self.transcript_beginning = self.transcript_older == null;
             }
             try self.showOlderLabels();
         }
+    } else if (end == .complete and self.read_phase == .message) {
+        const screen = self.terminal.screen;
+        if (screen.view == self.message_origin.view and (screen.view == .live or self.message_origin.transcript == self.transcript))
+            try screen.showMessage(self.init.io, self.inspection_file);
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
@@ -1087,6 +1144,7 @@ fn showStaged(self: *Self) !void {
         }
     }
     _ = try staged.to(staged.length);
+    for (result.collapsed.slice()) |block| self.live_blocks.append(block);
     if (staged.length != 0) self.reader_output_started = true;
 }
 
@@ -1216,6 +1274,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         if (self.pending_diagnostic == null)
             self.notice = switch (self.read_phase) {
                 .details => "! Details unavailable; draft retained.",
+                .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
                 .inspection => "! Inspection unavailable; draft retained.",
                 else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
@@ -1225,8 +1284,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end != .complete) return;
     if (self.reader_output_started)
         self.compact_tools = if (self.read_phase == .activity or self.read_phase == .permission) self.job.result.compact_tools else false;
-    if (self.read_phase == .history) {
-        self.notice = null; // Clears "Loading earlier messages…".
+    if (self.read_phase == .history or self.read_phase == .message) {
+        self.notice = null; // Clears "Loading earlier messages…" or "Opening message…".
     } else if (self.read_phase == .details or self.read_phase == .inspection) {
         // showInspection selected the notice.
     } else if (!self.job.result.settled) {

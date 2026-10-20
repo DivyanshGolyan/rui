@@ -62,6 +62,7 @@ const cases = [_]Case{
     .{ .name = "Shift-Down", .event = .scroll_down, .wires = .{ bytes("\x1b[1;2B"), bytes("\x1b[1;2B"), no_case27, no_raw } },
     .{ .name = "Ctrl-End", .event = .latest, .wires = .{ bytes("\x1b[1;5F"), bytes("\x1b[8;5~"), no_case27, no_raw } },
     .{ .name = "Ctrl-G", .event = .close_view, .wires = .{ no_alt, bytes("\x1b[103;5u"), bytes("\x1b[27;5;103~"), bytes("\x07") } },
+    .{ .name = "Ctrl-O", .event = .expand, .wires = .{ no_alt, bytes("\x1b[111;5u"), bytes("\x1b[27;5;111~"), bytes("\x0f") } },
     .{ .name = "Left", .event = .redraw, .cursor = 4, .wires = .{ bytes("\x1bOD"), bytes("\x1b[D"), no_case27, no_raw } },
     .{ .name = "Right", .event = .redraw, .cursor = 6, .wires = .{ bytes("\x1bOC"), bytes("\x1b[C"), no_case27, no_raw } },
     .{ .name = "Up scrolls at first line", .event = .scroll_up, .wires = .{ bytes("\x1bOA"), bytes("\x1b[A"), no_case27, no_raw } },

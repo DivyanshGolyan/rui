@@ -24,7 +24,7 @@ pasting: bool = false,
 /// Navigation events leave the draft unchanged. Up/Down beyond the draft's
 /// first/last line scroll the transcript; terminals in the alternate screen
 /// also deliver mouse wheel and trackpad scrolling as these arrow keys.
-pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, unbound, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view };
+pub const Event = enum { none, append, redraw, submit, eof, interrupt, invalid, edit_rejected, unbound, overflow, page_up, page_down, scroll_up, scroll_down, latest, close_view, expand };
 
 /// Enter ends a line as `submit`, or as the rejection that withheld it;
 /// end of input and interrupt end it too.
@@ -202,7 +202,7 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         const event = editor.feed(&input, byte[0]);
         switch (event) {
             // The prompt is a one-letter choice; a dropped chord leaves it as typed.
-            .none, .unbound, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view => {},
+            .none, .unbound, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => {},
             .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
             .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
             .submit => {
@@ -366,6 +366,7 @@ fn key(self: *Editor, value: vaxis.Key, pasted_input: bool) Event {
     if (value.matchExact(Key.down, .{ .shift = true })) return .scroll_down;
     if (value.matchExact(Key.end, .{ .ctrl = true })) return .latest;
     if (value.matchExact('g', .{ .ctrl = true })) return .close_view;
+    if (value.matchExact('o', .{ .ctrl = true })) return .expand;
     if (value.matchExact(Key.left, .{})) return self.move(self.previous(self.cursor));
     if (value.matchExact(Key.right, .{})) return self.move(self.next(self.cursor));
     if (value.matchExact(Key.up, .{})) return self.vertical(false) orelse .scroll_up;

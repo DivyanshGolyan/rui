@@ -73,6 +73,8 @@ frames: u64 = 0,
 // The view a Message page returns to. A transcript keeps its rows and
 // position in `browsing` meanwhile: the page is shown from `staging`.
 message_return: ViewKind = .live,
+// The rows of the shown document the latest frame drew.
+drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 height: u16 = 1,
 colour: bool,
 
@@ -275,7 +277,7 @@ pub fn transcriptAtTop(self: *const Self) bool {
 
 /// Prepends one older canonical page, rendered to `file`, above the
 /// transcript without moving the rows in view.
-pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
+pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
     std.debug.assert(self.view == .transcript);
     try self.load(&self.staging, io, file, false);
     if (self.staging.origin != 0) {
@@ -291,10 +293,22 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !void {
         try marker.append(View.Style.normal.code(self.colour));
         _ = try self.staging.prepend(&marker, self.textLayout(), 1);
     }
+    const before = self.browsing.collapsed(0, self.browsing.text().len).count;
+    const older = self.staging.collapsed(0, self.staging.text().len).count;
     if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
     const first = self.browsing.first(self.textLayout(), self.height);
     self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
     self.overscroll = 0;
+    return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
+}
+
+/// Collapsed blocks an older page kept, its newest, and those newer rows
+/// lost from the transcript's end.
+pub const Prepended = struct { older: usize, trimmed: usize };
+
+/// Collapsed blocks in the transcript.
+pub fn transcriptCollapsed(self: *const Self) usize {
+    return self.browsing.collapsed(0, self.browsing.text().len).count;
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
@@ -315,6 +329,20 @@ fn boundary(self: *Self, text: []const u8) !void {
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
     if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+}
+
+/// The lowest collapsed user block the latest frame drew in the live view
+/// or transcript, as how many collapsed blocks follow it in that document.
+/// Call right after drawing: later text moves what the frame drew.
+pub fn collapsedInView(self: *Self) ?usize {
+    if (self.view != .live and self.view != .transcript) return null;
+    const document = self.viewed();
+    const text = document.text().len;
+    const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
+    // A line cut at the bottom shows its first rows, which hold the mark.
+    const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
+    const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return null;
+    return document.collapsed(last + 1, text).count;
 }
 
 /// Shows one Message's full text over the live view or the transcript.
@@ -498,6 +526,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     });
     self.height = layout.height;
     self.browsing_height = layout.browsing_height;
+    self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
     _ = document.draw(window.child(.{ .y_off = layout.navigation_height, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
     const failure = std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected");
@@ -957,7 +986,7 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     const older = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer older.close(io);
     try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
-    try screen.prependFile(io, older);
+    _ = try screen.prependFile(io, older);
     _ = try screen.render(&out.writer, size, "", 0, "", &.{});
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
     // Resize keeps the first browsed line in view.
@@ -1047,6 +1076,57 @@ test "a Message page returns to the view and position it came from" {
     try std.testing.expectEqual(ViewKind.message, screen.view);
     try screen.leaveMessage();
     try std.testing.expectEqual(ViewKind.action, screen.view);
+}
+
+test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(io, &environ, false);
+    defer screen.deinit();
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    // A ┄ the user typed is body text, not a block's summary.
+    try screen.append("\n› " ++ View.Mark.body ++ "typed ┄ 3" ++ View.Mark.reset ++ "\n");
+    for (0..3) |block| {
+        var line: [64]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines · 2.0 KB" ++ View.Mark.reset ++ "\n", .{block}));
+        for (0..12) |row| try screen.append(try std.fmt.bufPrint(&line, "answer {d} row {d}\n", .{ block, row }));
+    }
+    _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+    // The newest block scrolled off with its answer's rows below it.
+    try std.testing.expectEqual(@as(?usize, null), screen.collapsedInView());
+    try screen.beginTranscript(0);
+    for (0..10) |_| _ = screen.browse(false, true);
+    // Line by line down from the top, the lowest block drawn names each
+    // block in turn, oldest (two newer follow it) first, and only those.
+    var seen: [8]?usize = undefined;
+    var count: usize = 0;
+    while (true) {
+        _ = try screen.render(&out.writer, size, "", 0, "", &.{});
+        const index = screen.collapsedInView();
+        if (count == 0 or !std.meta.eql(seen[count - 1], index)) {
+            seen[count] = index;
+            count += 1;
+        }
+        if (screen.browse(true, false)) break;
+    }
+    try std.testing.expectEqualSlices(?usize, &.{ 2, null, 1, null, 0, null }, seen[0..count]);
+    try screen.latest();
+    try screen.beginTranscript(0);
+    try std.testing.expectEqual(@as(usize, 3), screen.transcriptCollapsed());
+    // An older page keeps its newest block; its own count says so.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const older = try tmp.dir.createFile(io, "older", .{ .read = true });
+    defer older.close(io);
+    try older.writePositionalAll(io, "\n› " ++ View.Mark.summary ++ "┄ 59 KB" ++ View.Mark.reset ++ "\n", 0);
+    const prepended = try screen.prependFile(io, older);
+    try std.testing.expectEqual(Prepended{ .older = 1, .trimmed = 0 }, prepended);
+    try std.testing.expectEqual(@as(usize, 4), screen.transcriptCollapsed());
 }
 
 test "browsing up then down by the same rows returns to the latest view" {
