@@ -1,6 +1,7 @@
 //! Persistent terminal custody, separate from the fresh one-shot choice owner.
 const std = @import("std");
 const Editor = @import("TerminalEditor.zig");
+const Input = @import("TerminalInput.zig");
 const Text = @import("TerminalText.zig");
 const View = @import("session_view.zig");
 const Screen = @import("SessionScreen.zig");
@@ -17,7 +18,6 @@ screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},
 size: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 },
-pending_at: i96 = 0,
 /// Set only after the terminal reported mode 1007 reset and Rui enabled it.
 alternate_scroll: bool = false,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
@@ -198,13 +198,17 @@ test "detached notice restores flags and requires one complete nonblocking write
         "rui action deny --store $'/tmp/store' --session-hex 41005a --action 913\n", output.bytes[0..output.len]);
 }
 
-pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {
-    const now = std.Io.Clock.awake.now(io).nanoseconds;
-    if (self.pending_at == 0) self.pending_at = now;
-    if (pending != .none and now - self.pending_at >= (if (pending == .escape) @as(i96, 80_000_000) else 2_000_000_000))
-        return error.InputDeadline;
+pub const Read = struct { byte: u8, at: i96 };
+
+/// One byte, read within `wait` milliseconds, or null. The input stream owns
+/// when its pending input expires; InputDeadline asks the caller to expire it.
+pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
+    const timeout = switch (input.wait(std.Io.Clock.awake.now(io).nanoseconds, wait)) {
+        .expire => return error.InputDeadline,
+        .poll => |milliseconds| milliseconds,
+    };
     var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-    if (try std.posix.poll(&fds, wait) == 0) return null;
+    if (try std.posix.poll(&fds, timeout) == 0) return null;
     var byte: [1]u8 = undefined;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     const enabled = self.active or std.c.fcntl(0, std.c.F.SETFL, self.flags[0] | nonblock) == 0;
@@ -215,8 +219,7 @@ pub fn next(self: *Self, io: std.Io, pending: Editor.Pending, wait: i32) !?u8 {
         else => return err,
     };
     if (count == 0) return error.IncompleteTerminalLine;
-    self.pending_at = std.Io.Clock.awake.now(io).nanoseconds;
-    return byte[0];
+    return .{ .byte = byte[0], .at = std.Io.Clock.awake.now(io).nanoseconds };
 }
 
 fn write(self: *Self, bytes: []const u8) !void {

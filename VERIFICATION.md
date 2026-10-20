@@ -163,7 +163,7 @@ These rules define the workload behind the [Host targets](#resources-and-accepte
 Model-output runners keep JSON evidence and exit nonzero for failed, incomplete or target-miss verdicts. A miss needs an implementation or product decision; adding pools or rerunning until green does not satisfy it. Measure the Rui CLI and helpers separately from the Host target.
 ## Contract index
 
-Each row maps an accepted contract to the checks that enforce it and the limits a pass does not cover. ARCHITECTURE owns the behavior; the test source owns the cases. A quoted name such as `'immutable binding'` is a Zig test filter: run `zig build test -Dtest-filter='immutable binding'`. Other identifiers are build targets, fixture files under `tests/integration/` and their modes or functions. `none located` means no enforcing check exists yet; `planned` means the contract targets accepted but unimplemented behavior. Neither is coverage. When a change adds or removes a check, update its row in the same change.
+ARCHITECTURE owns behavior; tests own cases. Quoted names are Zig filters: `zig build test -Dtest-filter='immutable binding'`. Other identifiers name targets, `tests/integration/` fixtures, modes or functions. `none located` means no check; `planned` means unimplemented behavior. Neither is coverage. Update rows with checks.
 
 ## Asynchronous peer collaboration
 
@@ -315,9 +315,9 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | [Saved defaults](ARCHITECTURE.md#store-selection-and-defaults) | `'preference edits'`, `human_cli_integration.py` | Not credential, launch, Mac or power-loss |
 | Preference publication faults | `preference-policy-integration`, `zig test -lc src/preferences.zig --test-filter 'directory sync'` | Linux and macOS in `check`. No crash or power-loss durability |
 | Provider selection, credential status | `'installed local credential status'` | Selection does not prove remote acceptance |
-| Login chooser and SIGINT race | `'login owner'`, `codex_token_wire` tests | Synthetic exchange. Full chooser exchange and Mac PTY still required |
+| Login chooser, keys and SIGINT | `'login owner'`, `codex_token_wire` tests, `human_cli_integration.py` | DEL, BS and Kitty Backspace edit. Unbound Alt and lone combining marks leave the choice with a notice; malformed keys reject at Enter. Restore saved termios. Full synthetic exchange and Mac PTY remain required |
 | Masked login signal installation | `login-signal-integration` | Linux only. Unfixed owner must fail |
-| [Bounded editor](ARCHITECTURE.md#staged-persistent-input) | `test-logic -Dtest-filter=TerminalEditor`, `human_cli_integration.py long-input` | 65,536 bytes accept, 65,537 reject; non-sticky overflow must fail it. Linux PTY not Mac display or Option/Command keys |
+| [Bounded editor](ARCHITECTURE.md#staged-persistent-input) | `test-logic -Dtest-filter=TerminalEditor`, `'malformed keyboard values'`, `human_cli_integration.py long-input` and `renderer` | 65,536 bytes accept; 65,537 reject even after Backspace. Malformed keys reject Action choices; modifier 256 is valid, unknown keys are ignored. ESC ESC `[201~` rejects and ends paste; later input is draft text. Linux PTY is not Mac display or physical keys |
 | [Lost-reply recovery](ARCHITECTURE.md#recovering-a-submission-after-a-lost-reply) in the composer | `human_cli_integration.py`, `zig test src/SessionSubmission.zig -lc --test-filter 'submission bounded'` | Count mutation exchanges, not only provider runs. Removing digest check must fail |
 | Tool activity presentation | `human_cli_integration.py` | Native Linux and macOS visual qualification required |
 | Departure and consent values | `session_departure`, `session_consent` in `test-logic` | Not native consent evidence |
