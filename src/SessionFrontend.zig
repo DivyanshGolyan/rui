@@ -14,6 +14,7 @@ const Editor = @import("TerminalEditor.zig");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const ChoiceLine = @import("ChoiceLine.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const Self = @This();
@@ -94,7 +95,7 @@ lowest: ?u64 = null,
 transcript: u64 = 0,
 // A failed older load waits for the next scroll rather than retrying at once.
 older_failed: bool = false,
-history_requested: ?enum { older, latest } = null,
+history_requested: ?History = null,
 // The Messages of collapsed blocks in live output and in the transcript.
 live_blocks: View.Blocks = .{},
 transcript_blocks: View.Blocks = .{},
@@ -116,13 +117,10 @@ prepared_action: ?u64 = null,
 prepared_summary: View.ActionSummary = .{},
 action_summary: View.ActionSummary = .{},
 reader_output_started: bool = false,
-choice_buffer: [64]u8 = undefined,
-choice: Editor = undefined,
-// A line typed at the choice keeps the keyboard through its Enter, even once
-// the Action leaves or a page hides it, so none of it reaches the draft.
-choice_line: bool = false,
 opening: bool = true,
 poll_at: i96 = 0,
+// A frontend-owned change the next frame must show: input, notices, status,
+// live text or scrolling. The Screen's own changes make it stale() instead.
 dirty: bool = true,
 detached: bool = false,
 notice: ?[]const u8 = null,
@@ -298,69 +296,91 @@ fn drive(self: *Self, initial_text: ?[]const u8) !void {
     try self.driveActive();
 }
 
-fn inspection(text: []const u8) ?Inspection {
-    if (std.mem.eql(u8, text, "/status")) return .status;
-    if (std.mem.eql(u8, text, "/requests")) return .requests;
-    if (std.mem.eql(u8, text, "/help")) return .help;
-    for ([_][]const u8{ "/inspect-action", "/setup", "/configure" }) |name| {
-        if (std.mem.eql(u8, text, name)) return .command;
-    }
+const History = enum { older, latest };
+
+/// Every slash command the draft or the choice accepts.
+const Slash = union(enum) {
+    exit,
+    history: History,
+    /// Waits for the reader, then shows its page; Host commands included.
+    inspection: Inspection,
+    discard,
+    recover: []const u8,
+    wait,
+    login,
+    unknown,
+};
+
+fn parse(text: []const u8) Slash {
+    const exact = [_]struct { []const u8, Slash }{
+        .{ "/exit", .exit },
+        .{ "/history", .{ .history = .older } },
+        .{ "/details", .{ .history = .latest } },
+        .{ "/status", .{ .inspection = .status } },
+        .{ "/requests", .{ .inspection = .requests } },
+        .{ "/help", .{ .inspection = .help } },
+        .{ "/inspect-action", .{ .inspection = .command } },
+        .{ "/setup", .{ .inspection = .command } },
+        .{ "/configure", .{ .inspection = .command } },
+        .{ "/discard", .discard },
+        .{ "/wait", .wait },
+        .{ "/login", .login },
+    };
+    for (exact) |entry| if (std.mem.eql(u8, text, entry[0])) return entry[1];
     for ([_][]const u8{ "/setup ", "/configure ", "/result " }) |prefix| {
-        if (std.mem.startsWith(u8, text, prefix)) return .command;
+        if (std.mem.startsWith(u8, text, prefix)) return .{ .inspection = .command };
     }
-    return null;
+    if (std.mem.startsWith(u8, text, "/recover ")) return .{ .recover = text["/recover ".len..] };
+    return .unknown;
 }
 
 /// The page asked for last is the one shown: a /status not yet rendered
 /// yields to a later /history or /details.
-fn requestHistory(self: *Self, text: []const u8) void {
-    self.history_requested = if (std.mem.eql(u8, text, "/details")) .latest else .older;
+fn requestHistory(self: *Self, history: History) void {
+    self.history_requested = history;
     self.status_requested = false;
 }
 
-/// A slash command typed in the choice field, which never decides.
-fn choiceCommand(self: *Self, text: []const u8) void {
-    if (std.mem.eql(u8, text, "/exit")) {
-        self.detached = true;
-    } else if (std.mem.eql(u8, text, "/details") or std.mem.eql(u8, text, "/history")) {
-        self.requestHistory(text);
-    } else if (self.command_running) {
-        self.notice = "! Command still running. Try again when it finishes.";
-    } else if (self.input.command_length == null) {
-        @memcpy(self.input.command_buffer[0..text.len], text);
-        self.input.command_length = text.len;
-        self.admitCommand();
-    } else self.notice = "! Preparing inspection; try again when it finishes.";
+/// Runs one slash command typed in the draft or the choice, which never
+/// decides. Local commands answer at once. An inspection waits for any
+/// command still active rather than queueing behind it or replacing its
+/// page: then nothing runs and this returns false.
+fn slashCommand(self: *Self, text: []const u8) bool {
+    switch (parse(text)) {
+        .exit => self.detached = true,
+        .history => |history| self.requestHistory(history),
+        .inspection => if (self.commandActive() or !self.input.queueCommand(text)) return false,
+        .discard => {
+            self.submission.discardRejected() catch {
+                self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
+            };
+            if (self.submission.view() == null) self.poll_at = 0;
+        },
+        .recover => |key| if (self.submission.view() != null) {
+            self.submission.requestRecovery(key) catch {
+                self.notice = "! Recovery key does not match this original submission; nothing sent.";
+            };
+        } else self.unknownCommand(text),
+        .wait => self.notice = "Work continues while you compose.",
+        .login => self.notice = "Login uses rui auth login codex in your shell.",
+        .unknown => self.unknownCommand(text),
+    }
+    return true;
 }
 
-/// Answers local commands at once. Inspections, including Host commands,
-/// wait for the reader and then show their page.
-fn admitCommand(self: *Self) void {
-    const text = self.input.command_buffer[0..self.input.command_length.?];
-    if (inspection(text) != null) return;
-    self.input.command_length = null;
-    if (std.mem.eql(u8, text, "/discard")) {
-        self.submission.discardRejected() catch {
-            self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
-        };
-        if (self.submission.view() == null) self.poll_at = 0;
-    } else if (std.mem.startsWith(u8, text, "/recover ") and self.submission.view() != null) {
-        self.submission.requestRecovery(text[9..]) catch {
-            self.notice = "! Recovery key does not match this original submission; nothing sent.";
-        };
-    } else if (std.mem.eql(u8, text, "/wait")) {
-        self.notice = "Work continues while you compose.";
-    } else if (std.mem.eql(u8, text, "/login")) {
-        self.notice = "Login uses rui auth login codex in your shell.";
-    } else {
-        // Name the command only when it is short printable ASCII.
-        const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
-        var shown = name.len <= 32;
-        for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-        var writer = std.Io.Writer.fixed(&self.notice_buffer);
-        writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
-        self.notice = writer.buffered();
-    }
+/// The choice ends its line at Enter, so a command it cannot run is lost.
+fn choiceCommand(self: *Self, text: []const u8) void {
+    if (!self.slashCommand(text)) self.notice = if (self.command_running) "! Command still running. Try again when it finishes." else "! Preparing inspection; try again when it finishes.";
+}
+
+fn unknownCommand(self: *Self, text: []const u8) void {
+    // Name the command only when it is short printable ASCII.
+    const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+    var shown = name.len <= 32;
+    for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
+    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+    writer.print("! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+    self.notice = writer.buffered();
 }
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
@@ -371,6 +391,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/foo bar", "! Unknown command /foo · /help" },
         .{ "/\x1b[2J", "! Unknown command · /help" },
         .{ "/result", "! Unknown command /result · /help" },
+        .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
         .{ "/wait", "Work continues while you compose." },
         .{ "/configure --permission-mode ask", "" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
@@ -379,17 +400,27 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     };
     inline for (cases) |case| {
         self.notice = null;
-        @memcpy(self.input.command_buffer[0..case[0].len], case[0]);
-        self.input.command_length = case[0].len;
-        self.admitCommand();
+        try std.testing.expect(self.slashCommand(case[0]));
         if (case[1].len != 0) {
             try std.testing.expectEqualStrings(case[1], self.notice.?);
-            try std.testing.expect(self.input.command_length == null);
+            try std.testing.expect(self.input.queuedCommand() == null);
         } else {
             try std.testing.expect(self.notice == null);
-            try std.testing.expectEqual(@as(?usize, case[0].len), self.input.command_length);
+            try std.testing.expectEqualStrings(case[0], self.input.queuedCommand().?);
+            // A second inspection waits for the first; a local command does not.
+            try std.testing.expect(!self.slashCommand("/help"));
+            try std.testing.expect(self.slashCommand("/wait"));
+            try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
     }
+    // A running command holds inspections too, but not page requests or exit.
+    self.command_running = true;
+    try std.testing.expect(!self.slashCommand("/requests"));
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.slashCommand("/details"));
+    try std.testing.expectEqual(@as(?History, .latest), self.history_requested);
+    try std.testing.expect(self.slashCommand("/exit"));
+    try std.testing.expect(self.detached);
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -454,15 +485,15 @@ fn driveActive(self: *Self) !void {
         const admission = try self.submission.advance();
         try self.presentAdmission(admission);
         if (admission.failure()) |err| if (err == error.CanonicalStoreFailure) return err;
-        if (self.input.command_length) |length| if (inspection(self.input.command_buffer[0..length]) == .status) {
+        if (self.input.queuedCommand()) |text| if (parse(text).inspection == .status) {
             // /status is the next scan's: one capture for the page, the
             // history and the composer status.
-            self.input.command_length = null;
+            _ = self.input.takeCommand();
             try self.terminal.screen.latest();
             self.status_requested = true;
             self.poll_at = 0;
         };
-        if (self.input.command_length != null and self.reader.thread != null and !self.reader.completed()) {
+        if (self.input.queuedCommand() != null and self.reader.thread != null and !self.reader.completed()) {
             // No read shows anything before it joins, so an inspection
             // supersedes it. Keep servicing input until completion; never join
             // unfinished work in raw mode.
@@ -477,13 +508,11 @@ fn driveActive(self: *Self) !void {
         if (self.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(&self.terminal);
         }
-        if (self.reader.thread == null and self.input.command_length != null) {
-            const text = self.input.command_buffer[0..self.input.command_length.?];
-            const kind = inspection(text).?;
-            // Input goes to the editor the latest frame shows, so draw the
-            // view returned to while the inspection runs.
+        if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
+            const kind = parse(text).inspection;
+            // Input goes to the editor the latest frame shows; this stales
+            // it, so the view returned to is drawn while the inspection runs.
             try self.terminal.screen.latest();
-            self.dirty = true;
             self.inspection_kind = kind;
             // The worker borrows its own copy; the editor may queue another.
             var job = self.freeze(.inspection);
@@ -496,8 +525,7 @@ fn driveActive(self: *Self) !void {
             self.status_requested = false;
             try self.launch(job, if (kind == .command) reads.runCommand else reads.inspectPage);
             self.command_running = true;
-            self.input.command_length = null;
-        }
+        };
         // Scans continue during consent, so an Action decided elsewhere leaves.
         if (self.reader.thread == null and self.prepared_action == null) {
             if (self.history_requested != null and !self.opening) {
@@ -505,7 +533,6 @@ fn driveActive(self: *Self) !void {
                 self.history_requested = null;
                 if (requested == .latest) {
                     try self.terminal.screen.latest();
-                    self.dirty = true;
                     self.details_sent = self.sent;
                     try self.launch(self.freeze(.details), reads.history);
                 } else {
@@ -532,7 +559,7 @@ fn driveActive(self: *Self) !void {
                 try self.launch(self.freeze(.history), reads.history);
             } else if (std.Io.Clock.awake.now(self.init.io).nanoseconds >= self.poll_at) {
                 try self.launch(self.freeze(.activity), reads.scan);
-            } else if (!self.terminal.screen.consent.active() and !self.choice_line and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
+            } else if (!self.terminal.screen.consent.active() and !self.terminal.screen.choice_line.open and !self.opening and self.submission.view() == null and self.current.first_action != null and self.input.pending() == .none) {
                 // A line begun at an earlier choice ends before the next
                 // Action is presented, so it never decides that one.
                 try self.launch(self.freeze(.permission), reads.permission);
@@ -540,10 +567,9 @@ fn driveActive(self: *Self) !void {
         }
         // Input routes by the latest frame's editor. Once a transition revokes
         // that frame, draw its replacement before reading further input.
-        const scope = self.terminal.screen.scope;
         for (0..1024) |_| {
             if (try self.step(0) != .byte) break;
-            if (self.detached or self.terminal.screen.scope != scope) break;
+            if (self.detached or self.terminal.screen.stale()) break;
         }
         if (self.detached) break;
         // Finish chat paste/UTF-8 under its original decoder before consent.
@@ -553,12 +579,10 @@ fn driveActive(self: *Self) !void {
             try self.terminal.screen.adopt(self.init.io, self.action_file, self.prepared_action.?);
             self.action_summary = self.prepared_summary;
             self.prepared_action = null;
-            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             self.read_phase = .activity;
-            self.dirty = true;
         }
         self.withdrawDecided();
-        if (self.dirty) if (try self.draw()) break;
+        if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
         if (self.expand_pending) try self.expand();
         _ = try self.step(16);
     }
@@ -569,9 +593,37 @@ fn driveActive(self: *Self) !void {
 /// Returns true when that service detached the caller.
 fn draw(self: *Self) !bool {
     const screen = self.terminal.screen;
-    const projection = screen.select(self.commandActive(), self.choice_line);
+    try self.drawFrame();
+    if (!self.dirty and screen.decisionPromptDelivered() and !screen.consent.acceptsInput() and self.input.pending() == .none) {
+        // Every prompt byte was accepted by stdout. Discard input through
+        // its decoder, not tcflush: a paste prefix or Ctrl-C arriving
+        // during the final write must retain its meaning.
+        var service: ConsentPolicy.Service = .budget_exhausted;
+        for (0..1024) |_| {
+            service = try self.step(0);
+            if (service != .byte) break;
+            service = .budget_exhausted;
+            if (self.detached) break;
+        }
+        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
+        if (self.detached) return true;
+        if (self.consentReceipt(service)) try Editor.testChoiceReady(self.init.io);
+    }
+    return false;
+}
+
+/// The post-write consent observation: input serviced after a delivered
+/// decision prompt opens freshness only when nothing arrived or remains.
+fn consentReceipt(self: *Self, service: ConsentPolicy.Service) bool {
+    return self.terminal.screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty);
+}
+
+/// Writes one frame of the selected projection and applies its receipt.
+fn drawFrame(self: *Self) !void {
+    const screen = self.terminal.screen;
+    const projection = screen.select(self.commandActive());
     const choosing = projection.editor == .choice;
-    const view: Input.View = if (choosing) .{ .bytes = self.choice.buffer[0..self.choice.length], .cursor = self.choice.cursor } else self.input.composition();
+    const view: Input.View = if (choosing) .{ .bytes = screen.choiceText(), .cursor = screen.choice.cursor } else self.input.composition();
     const base_status = if (self.opening) "Opening…" else switch (projection.approval) {
         .preview => "Approval disabled · /help for exact shell commands",
         .paused => "Approval paused · Esc returns to Action",
@@ -594,33 +646,8 @@ fn draw(self: *Self) !bool {
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, self.notice orelse "", context.buffered(), base_status);
     self.dirty = false;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, status, &self.live);
-    if (screen.presented(delivered).read_completed) {
-        // Reading completes only after delivery. Old choice text must not
-        // become a decision, but a slash command and fragmented decoder/paste
-        // custody survive until the existing empty-input freshness gate.
-        self.retainChoiceCommand();
-        screen.invalidateChoice();
-        self.dirty = true;
-    }
-    if (!self.dirty and screen.decisionPromptDelivered() and !screen.consent.acceptsInput() and self.input.pending() == .none) {
-        // Every prompt byte was accepted by stdout. Discard input through
-        // its decoder, not tcflush: a paste prefix or Ctrl-C arriving
-        // during the final write must retain its meaning.
-        var service: ConsentPolicy.Service = .budget_exhausted;
-        for (0..1024) |_| {
-            service = try self.step(0);
-            if (service != .byte) break;
-            service = .budget_exhausted;
-            if (self.detached) break;
-        }
-        if (interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.detached) return true;
-        if (screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty)) {
-            try Editor.testChoiceReady(self.init.io);
-        }
-    }
-    return false;
+    // Reading completes only after delivery; the receipt stales the frame.
+    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, status, &self.live));
 }
 
 // Every notice and instruction line fits beside a shortened context line.
@@ -672,17 +699,6 @@ fn withdrawDecided(self: *Self) void {
     const consent = self.terminal.screen.consent;
     if (!consent.active() or self.current.first_action == consent.action or self.input.pending() != .none) return;
     self.terminal.screen.withdrawAction();
-    self.retainChoiceCommand();
-    self.dirty = true;
-}
-
-/// A change the choice did not see keeps only a slash command, which can
-/// never decide; other text could become a stale decision. Either way the
-/// line, its rejection and its paste custody stay the choice's until Enter.
-fn retainChoiceCommand(self: *Self) void {
-    if (std.mem.startsWith(u8, self.choice.buffer[0..self.choice.length], "/")) return;
-    self.choice.length = 0;
-    self.choice.cursor = 0;
 }
 
 /// The choice keeps the Action's heading lines beside it once paging hides
@@ -767,7 +783,7 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
 
 /// A queued or running command ends consent freshness until it completes.
 fn commandActive(self: *const Self) bool {
-    return self.input.command_length != null or self.command_running;
+    return self.input.queuedCommand() != null or self.command_running;
 }
 
 /// The choice shows decision instructions: its rows were all delivered and no
@@ -928,11 +944,8 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         else => if (self.terminal.screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
             const screen = self.terminal.screen;
             if (screen.consent.active()) {
-                // Only a fresh choice has freshness to revoke. Revoking it
-                // again changes no editor, so it must not force a frame per
-                // byte typed or pasted while approval is paused.
-                if (screen.consent.acceptsInput()) screen.invalidateChoice();
-                self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+                screen.invalidateChoice();
+                screen.restartChoice();
             }
             try self.draftEvent(decoded);
             if (self.detached) screen.interruptConsent();
@@ -943,10 +956,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
 fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const stream = &self.input.stream;
     const screen = self.terminal.screen;
-    const event = self.choice.apply(decoded);
-    // Typed, rejected or dropped input begins a line; only Enter ends it.
-    const typed = self.choice.length != 0 or self.choice.rejected != null or event == .unbound or event == .edit_rejected;
-    self.choice_line = !Editor.endsLine(event) and (self.choice_line or typed);
+    const event = screen.applyChoice(decoded);
     if (!screen.consent.acceptsInput()) {
         // Discard text; the stream keeps any fragmented sequence.
         if (event == .interrupt or event == .eof) {
@@ -960,19 +970,19 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         }
         // Only a slash command survives, or any text while the Action is
         // unread: reading its last row clears it, so neither can decide.
-        const text = self.choice.buffer[0..self.choice.length];
-        const command = text.len != 0 and text[0] == '/';
+        const text = screen.choiceText();
+        const command = std.mem.startsWith(u8, text, "/");
         const reading = screen.selected.approval == .reading;
         if (event == .submit and command) self.choiceCommand(text);
         // Enter on an unread Action says why nothing was decided.
         if (event == .submit and !command and reading) self.notice = "! Read the whole Action first; nothing authorized.";
-        if (stream.pending() == .none and (Editor.endsLine(event) or !(command or reading))) self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        if (ChoiceLine.end(Editor.endsLine(event), text, reading, stream.pending() != .none)) screen.restartChoice();
         return;
     }
     try self.navigation(event);
     switch (event) {
         .submit => {
-            const text = self.choice.buffer[0..self.choice.length];
+            const text = screen.choiceText();
             // Probe current geometry, command and selection; never the
             // readiness of the frame that drew the prompt.
             switch (screen.submitChoice(text, self.terminal.geometry(), self.commandActive())) {
@@ -989,10 +999,10 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 },
             }
             screen.invalidateChoice();
-            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            screen.restartChoice();
         },
         .invalid, .edit_rejected, .unbound, .overflow => {
-            self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+            screen.restartChoice();
             screen.invalidateChoice();
             self.notice = choiceRejection(event, self.decisionShown() and !self.commandActive());
         },
@@ -1030,13 +1040,8 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
-        .command => {
-            const text = self.input.command_buffer[0..self.input.command_length.?];
-            if (std.mem.eql(u8, text, "/exit")) self.detached = true else if (std.mem.eql(u8, text, "/history") or std.mem.eql(u8, text, "/details")) {
-                // Local read work never cancels the independent Admission owner.
-                self.input.command_length = null;
-                self.requestHistory(text);
-            } else self.admitCommand();
+        .command => if (self.slashCommand(self.input.composition().bytes)) self.input.clear() else {
+            self.notice = "! Command still running. Draft retained.";
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
@@ -1082,7 +1087,7 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     // A pending inspection supersedes a silent read it cancelled.
-    const mode: departure.Mode = if (self.input.command_length != null) .inspection else .active;
+    const mode: departure.Mode = if (self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
     if (end != .complete and self.command_running) {
@@ -1408,7 +1413,6 @@ fn showInspection(self: *Self) !void {
     // Any completed inspection or command requires a fresh choice afterwards.
     self.terminal.screen.invalidateChoice();
     self.status_page = false;
-    if (self.terminal.screen.consent.active()) self.retainChoiceCommand();
     const size = (try self.inspection_file.stat(self.init.io)).size;
     if (size == 0) {
         self.notice = "Command finished with no output.";
@@ -1443,7 +1447,6 @@ fn applyStatus(self: *Self) !void {
     if (self.job.open_status and self.status_requested) {
         self.status_requested = false;
         screen.invalidateChoice();
-        if (screen.consent.active()) self.retainChoiceCommand();
         try screen.showFile(self.init.io, self.status_file, false);
         self.notice = null;
     } else if (self.status_page and screen.view == .inspection) {
@@ -1483,7 +1486,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
             }
         };
         try Keys.send(&self, "kept");
-        self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+        screen.restartChoice();
         self.current.first_action = 7;
         screen.consent = .{};
         screen.consent.adopt(7, .complete);
@@ -1492,7 +1495,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         screen.action_seen = .end;
         try std.testing.expect(screen.consent.promptCompleted(.empty, false, false));
         // Each change is followed by the frame that shows it.
-        _ = screen.select(self.commandActive(), self.choice_line);
+        _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Approval.ready, screen.selected.approval);
         try Keys.send(&self, line[0]);
         switch (change) {
@@ -1514,7 +1517,7 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         }
         try std.testing.expect(!screen.actionVisible());
         // The open line keeps the choice editor, with no decision prompt.
-        _ = screen.select(self.commandActive(), self.choice_line);
+        _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Editor.choice, screen.selected.editor);
         try std.testing.expect(screen.selected.approval != .ready and screen.selected.approval != .draining);
         try Keys.send(&self, line[1]);
@@ -1525,10 +1528,10 @@ test "a line begun at the choice ends there when the Action leaves or a page ope
         try std.testing.expect(self.submission.view() == null);
         if (change != .decided_elsewhere) try std.testing.expectEqual(@as(?u64, 7), screen.consent.action);
         // A slash command still runs as typed.
-        const command: ?[]const u8 = if (self.input.command_length) |length| self.input.command_buffer[0..length] else null;
+        const command = self.input.queuedCommand();
         if (line[0][0] == '/') try std.testing.expectEqualStrings("/status", command orelse "") else try std.testing.expect(command == null);
         // The next line is the draft's again.
-        _ = screen.select(self.commandActive(), self.choice_line);
+        _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Editor.draft, screen.selected.editor);
         try Keys.send(&self, "!");
         try std.testing.expectEqualStrings("kept!", self.input.composition().bytes);
@@ -1625,7 +1628,7 @@ const HeldFrontend = struct {
     /// Delivers frames until the draw loop settles, without held output.
     fn settle(held: *HeldFrontend) !void {
         for (0..8) |_| {
-            if (!held.self.dirty) return;
+            if (!held.self.dirty and !held.screen.stale()) return;
             _ = try held.self.draw();
         }
         return error.TestUnexpectedResult;
@@ -1638,8 +1641,6 @@ const HeldFrontend = struct {
         held.self.action_file = file;
         try held.screen.adopt(std.testing.io, file, 0xa);
         held.self.current.first_action = 0xa;
-        held.self.choice = .{ .buffer = &held.self.choice_buffer, .allow_paste = false };
-        held.self.dirty = true;
         return file;
     }
 };
@@ -1655,7 +1656,7 @@ test "a command queued during a held draft frame blocks the later Message Enter"
     _ = try self.draw();
     try std.testing.expect(held.pumps != 0);
     // The command waits for the reader; the Message Enter after it sealed nothing.
-    try std.testing.expectEqualStrings("/configure --permission-mode ask", self.input.command_buffer[0..self.input.command_length.?]);
+    try std.testing.expectEqualStrings("/configure --permission-mode ask", self.input.queuedCommand().?);
     try std.testing.expect(self.submission.view() == null);
     try std.testing.expect(self.input.submitted == null);
     try std.testing.expectEqualStrings("next\xc3\xa9Z", self.input.composition().bytes);
@@ -1680,7 +1681,7 @@ test "a held ready choice decides nothing after a command queued in the same fra
     try std.testing.expect(held.pumps != 0);
     try std.testing.expectEqual(@as(?u64, 0xa), held.screen.consent.action);
     try std.testing.expect(self.submission.view() == null);
-    try std.testing.expectEqualStrings("/status", self.input.command_buffer[0..self.input.command_length.?]);
+    try std.testing.expectEqualStrings("/status", self.input.queuedCommand().?);
 }
 
 test "a transition inside a held frame leaves its remaining input with the frame's editor" {

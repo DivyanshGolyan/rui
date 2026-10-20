@@ -12,7 +12,7 @@ from strict_paths import strict
 
 # Renderer, terminal and frontend owners select the roots that run their unit
 # tests and PTY callers, not the Store-native check, unless a strict path changes.
-FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
+FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig")
@@ -31,7 +31,7 @@ RULES = (
     (("src/new_session_selection.zig", "src/preference_values.zig",
       "src/provider_selection.zig", "src/model_capability.zig"),
      ("test-logic",), ("test-logic",), "Prospective selection policy and owned values"),
-    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
+    (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/ChoiceLine.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),

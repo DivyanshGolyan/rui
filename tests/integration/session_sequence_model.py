@@ -3,8 +3,8 @@
 
 Only test declarations are injected. No transition is replaced, no downloaded
 artifact is used, and the supplied source (including a TD3 mutant) is not edited.
-The draw adapter is extracted from the production redraw block, so editor
-selection is tested rather than reimplemented by the fixture.
+The model draws through the production drawFrame and consentReceipt, so
+editor selection is tested rather than reimplemented by the fixture.
 """
 import argparse
 from contextlib import contextmanager
@@ -104,11 +104,6 @@ def source_overlay(cache, source):
         yield overlay
 
 
-def unique_slice(text, start, stop):
-    assert text.count(start) == text.count(stop) == 1, "renderer adapter anchors changed"
-    return text[text.index(start):text.index(stop)]
-
-
 @contextmanager
 def retention_root(log):
     root = Path(tempfile.mkdtemp(prefix="td1-retention-"))
@@ -205,24 +200,20 @@ def run(source, output, selector, cache):
     output.mkdir(parents=True, exist_ok=True)
     frontend = source / "src/SessionFrontend.zig"
     original = frontend.read_text()
-    # draw() writes one frame, then makes the post-write consent observation.
-    # The model drives the frame alone; its receipt event is that observation.
-    drawing = unique_slice(original, "    const projection = screen.select(self.commandActive(), self.choice_line);",
-                           "    if (!self.dirty and screen.decisionPromptDelivered()")
-    bridge = "\nfn td1Draw(self: *Self) !void {\nconst screen = self.terminal.screen;\n" + drawing + "\n}\n"
-    receipts = re.findall(r"if \((screen\.promptCompleted\(service, [^\n]+\))\) \{", original)
-    assert len(receipts) == 1, "post-write consent adapter anchor changed"
-    bridge += "\nfn td1Receipt(self: *Self, service: ConsentPolicy.Service) bool {\n    const screen = self.terminal.screen;\n    return " + receipts[0] + ";\n}\n"
+    # draw() is drawFrame() then the post-write consent observation,
+    # consentReceipt(). The model drives the frame alone; its receipt event
+    # is that observation.
+    bridge = ""
     for name in SELECTORS:
         bridge += f'''
 test "TD1 sequence model {name}" {{
     try @import("session_sequence_model_test.zig").run(Self, .{{
-        .step = step, .draw = td1Draw, .navigation = navigation,
+        .step = step, .draw = drawFrame, .navigation = navigation,
         .beginTranscript = beginTranscript, .settleReader = settleReader,
         .olderWanted = olderWanted,
         .showStaged = showStaged, .applyReader = applyReader,
         .presentAdmission = presentAdmission, .freeze = freeze,
-        .receipt = td1Receipt, .showInspection = showInspection,
+        .receipt = consentReceipt, .showInspection = showInspection,
         .scan = reads.scan,
     }}, .{name});
 }}
