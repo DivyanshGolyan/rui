@@ -209,6 +209,9 @@ pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
     };
     var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
     if (try std.posix.poll(&fds, timeout) == 0) return null;
+    // Poll rounds up and the scheduler may run late: a byte that became
+    // readable after the deadline stays queued until pending input expires.
+    if (input.wait(std.Io.Clock.awake.now(io).nanoseconds, 0) == .expire) return error.InputDeadline;
     var byte: [1]u8 = undefined;
     const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
     const enabled = self.active or std.c.fcntl(0, std.c.F.SETFL, self.flags[0] | nonblock) == 0;

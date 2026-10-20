@@ -150,6 +150,8 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
         };
         var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&fds, timeout) == 0) continue;
+        // A byte readable only after the deadline waits until expiry.
+        if (input.wait(std.Io.Clock.awake.now(io).nanoseconds, 0) == .expire) continue;
         var byte: [1]u8 = undefined;
         if (try std.posix.read(0, &byte) == 0) return if (editor.length == 0) null else error.IncompleteTerminalLine;
         var decoded = input.feed(byte[0], std.Io.Clock.awake.now(io).nanoseconds);
