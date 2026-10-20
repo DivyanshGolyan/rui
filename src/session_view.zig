@@ -80,13 +80,15 @@ pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8
     text.feed(&out, shown) catch unreachable;
     text.finish(&out) catch unreachable;
     const bytes = out.buffered();
-    // Columns, not clusters: a wide cluster takes two. The cut keeps whole
-    // clusters and leaves one column for `…`.
+    // Columns, not clusters. The terminal's width method is not known here,
+    // so each cluster counts its widest under any method: the cap holds in
+    // every mode. The cut keeps whole clusters and leaves one column for `…`.
     var clusters = unicode.graphemeIterator(bytes);
     var columns: usize = 0;
     var cut: usize = 0;
     while (clusters.next()) |cluster| {
-        const width = gwidth.gwidth(cluster.bytes(bytes), .unicode);
+        var width: u16 = 0;
+        inline for (comptime std.enums.values(gwidth.Method)) |method| width = @max(width, gwidth.gwidth(cluster.bytes(bytes), method));
         if (columns + width < peer_ref_columns) cut = cluster.start + cluster.len;
         columns += width;
     }
@@ -121,6 +123,13 @@ test "a peer reference shows a generated ID's distinguishing prefix and caps at 
     try std.testing.expectEqualStrings("雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
     try exact.session.set("a雪雪雪雪雪雪雪雪");
     try std.testing.expectEqualStrings("a雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
+    // A ZWJ family is two columns by Unicode but eight by wcwidth; the cap
+    // counts the wider, so three never pass whole.
+    const family = "👨‍👩‍👧‍👦";
+    try exact.session.set(family ++ family ++ family);
+    try std.testing.expectEqualStrings(family ++ "…", peerRef(exact, &buffer));
+    try exact.session.set(family ++ family);
+    try std.testing.expectEqualStrings(family ++ family, peerRef(exact, &buffer));
 }
 
 test "peer Messages render as one dim line each, with size and time in the margin" {

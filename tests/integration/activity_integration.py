@@ -235,7 +235,8 @@ def main():
                 wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
             # A peer prefix exists only for a generated reference, from six characters.
-            for session, prefix, ok in (("rui/" + "a" * 36, "6", True), ("rui/" + "a" * 36, "5", False), ("reviewer", "0", True), ("reviewer", "6", False)):
+            generated = "rui/1a2b3c4d-0000-4000-8000-000000000001"
+            for session, prefix, ok in ((generated, "6", True), (generated, "5", False), ("rui/" + "a" * 36, "6", False), ("reviewer", "0", True), ("reviewer", "6", False)):
                 wire = copy.deepcopy(valid)
                 wire["items"][0]["value"]["admission"]["sender"] = {"session": session, "prefix": prefix}
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)

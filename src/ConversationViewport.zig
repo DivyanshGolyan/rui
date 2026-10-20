@@ -309,6 +309,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
+            // A single row's text ends where its trailing sidenote begins.
+            const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
             // A `size · time` sidenote shows whole from `size_sidenote_width`;
             // narrower, its size goes first and the time alone remains.
             var cells: u16 = sidenote_cells;
@@ -324,9 +326,25 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             if (single) {
                 if (commit) {
+                    // Whole clusters measured by this view's width method:
+                    // a wide last cluster never crosses the body's edge.
                     const line = body.child(.{ .y_off = row, .height = 1 });
-                    if (self.printRange(line, offset, end, .none, false, true, colour, plain).overflow and line.width != 0)
-                        _ = line.child(.{ .x_off = line.width - 1, .width = 1 }).print(&.{.{ .text = "…", .style = self.segmentStyle(offset, colour, plain) }}, .{ .wrap = .none });
+                    const text_bytes = self.bytes[offset..shown];
+                    if (gwidth.gwidth(text_bytes, self.width_method) <= line.width) {
+                        _ = self.printRange(line, offset, shown, .none, false, true, colour, plain);
+                    } else if (line.width != 0) {
+                        var clusters = unicode.graphemeIterator(text_bytes);
+                        var used: u16 = 0;
+                        var cut = offset;
+                        while (clusters.next()) |cluster| {
+                            const width = gwidth.gwidth(cluster.bytes(text_bytes), self.width_method);
+                            if (used + width > line.width - 1) break;
+                            used += width;
+                            cut = offset + cluster.start + cluster.len;
+                        }
+                        _ = self.printRange(line, offset, cut, .none, false, true, colour, plain);
+                        _ = line.child(.{ .x_off = used, .width = 1 }).print(&.{.{ .text = "…", .style = self.segmentStyle(offset, colour, plain) }}, .{ .wrap = .none });
+                    }
                 }
                 return 1;
             }
@@ -766,6 +784,21 @@ test "a peer line keeps one row and drops its size before its time as the view n
     _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{});
     const style = test_screen.screen.readCell(0, 0).?.style;
     try std.testing.expect(style.dim and !style.italic);
+}
+
+test "a peer line's wide last cluster yields to the ellipsis instead of crossing the edge" {
+    // 39 cells of text, then a two-cell cluster that would end at 41.
+    const kept = "→ 9f8e7d · " ++ @as([28]u8, @splat('x'));
+    var test_screen: TestScreen = undefined;
+    var storage: [256]u8 = undefined;
+    for ([_]gwidth.Method{ .unicode, .wcwidth }) |method| {
+        var view: Sized(256, true) = .{ .sidenotes = true, .width_method = method };
+        try view.append("\x1b[2;8m" ++ kept ++ "雪\x1b[0m");
+        const window = test_screen.window(40, 1);
+        test_screen.screen.width_method = method;
+        _ = view.draw(window, .{}, true, false, .{});
+        try std.testing.expectEqualStrings(kept ++ "…", test_screen.row(0, &storage));
+    }
 }
 
 test "retention never starts inside an extended grapheme across append windows" {
