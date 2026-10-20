@@ -791,6 +791,9 @@ fn navigation(self: *Self, event: Editor.Event) !void {
             if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
         },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
+            // A newer Ctrl-O replaces any page asked for before it, even
+            // before its own target is found, or if none is.
+            self.dropMessageRequest();
             self.expand_pending = true;
         },
         // Every other event reaches here unhandled, and must not redraw.
@@ -826,8 +829,6 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    // A newer Ctrl-O replaces any page asked for before it.
-    self.message_generation += 1;
     self.message_requested = .{ .target = target, .view = screen.view, .transcript = self.transcript, .sent = self.sent, .generation = self.message_generation };
     self.notice = "Opening message…";
 }

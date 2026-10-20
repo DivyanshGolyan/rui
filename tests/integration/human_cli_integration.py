@@ -4365,6 +4365,37 @@ def renderer_cases():
             # With no collapsed block in view, Ctrl-O says so and opens nothing.
             tty.send("\x0f", "No collapsed message in view")
             assert "Message ·" not in tty.capture.completed
+            # A newer Ctrl-O that finds nothing still replaces a loading page.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            for _ in range(10):
+                if "┄ 299 more lines" in tty.capture.completed:
+                    break
+                tty.send("\x1b[5~", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+            assert "┄ 299 more lines" in tty.capture.completed, tty.capture.completed
+            holding.set()
+            held.clear()
+            release.clear()
+            proxy = canonical.ReplyProxy(host, "/v1/activity-content", lambda response: response, before_forward=hold_content)
+            try:
+                tty.send("\x0f", "Opening message…")
+                assert held.wait(10), "the second content read was never held"
+                for _ in range(20):
+                    if "┄ 299 more lines" not in tty.capture.completed:
+                        break
+                    tty.send("\x1b[B", predicate=lambda: True)
+                assert "┄ 299 more lines" not in tty.capture.completed and "Browsing" in tty.capture.completed, tty.capture.completed
+                tty.send("\x0f", "No collapsed message in view")
+                holding.clear()
+                release.set()
+                fixture.wait_for(lambda: proxy.exchanges, "the superseded content read", timeout=20)
+                time.sleep(1)  # Its settlement would draw the page now.
+                tty.send("\x1b[A", predicate=lambda: True)  # Reads what was drawn.
+                shown = tty.capture.completed
+                assert "Message ·" not in shown and "Browsing" in shown, shown
+            finally:
+                release.set()
+                proxy.close()
+                proxy = None
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows", flush=True)
