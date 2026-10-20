@@ -480,7 +480,10 @@ fn driveActive(self: *Self) !void {
         if (self.reader.thread == null and self.input.command_length != null) {
             const text = self.input.command_buffer[0..self.input.command_length.?];
             const kind = inspection(text).?;
+            // Input goes to the editor the latest frame shows, so draw the
+            // view returned to while the inspection runs.
             try self.terminal.screen.latest();
+            self.dirty = true;
             self.inspection_kind = kind;
             // The worker borrows its own copy; the editor may queue another.
             var job = self.freeze(.inspection);
@@ -502,6 +505,7 @@ fn driveActive(self: *Self) !void {
                 self.history_requested = null;
                 if (requested == .latest) {
                     try self.terminal.screen.latest();
+                    self.dirty = true;
                     self.details_sent = self.sent;
                     try self.launch(self.freeze(.details), reads.history);
                 } else {
@@ -924,7 +928,10 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         else => if (self.terminal.screen.selected.editor == .choice) try self.choiceEvent(decoded) else {
             const screen = self.terminal.screen;
             if (screen.consent.active()) {
-                screen.invalidateChoice();
+                // Only a fresh choice has freshness to revoke. Revoking it
+                // again changes no editor, so it must not force a frame per
+                // byte typed or pasted while approval is paused.
+                if (screen.consent.acceptsInput()) screen.invalidateChoice();
                 self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
             }
             try self.draftEvent(decoded);

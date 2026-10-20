@@ -3912,10 +3912,17 @@ def renderer_cases():
                 reading.set()
                 return release_read.wait(10)
             proxy = canonical.ReplyProxy(host, "/v1/observe-command", lambda response: response, before_forward=hold_read)
-            # Nothing redraws while the command is held: wait for the hold.
+            # Typing while approval is paused draws no frame per byte, which
+            # could fill a small terminal buffer before the line is read.
+            frames = tty.every_frame()
             os.write(tty.master, b"/result " + missing + b"\n")
             assert reading.wait(10), tty.capture.completed
+            # Input goes to the editor the latest frame shows: type the next
+            # command once the held command has returned to the choice.
+            tty.wait(predicate=lambda: "then a/d + Enter" in tty.capture.completed)
             tty.send("/requests\n", "! Command still running. Try again when it finishes.")
+            partial = [frame for frame in frames if "/result" in frame.rstrip("\n").split("\n")[-1]]
+            assert len(partial) <= 1, (len(partial), partial[:2])
             release_read.set()
             tty.wait(predicate=lambda: "Command still running" not in tty.capture.completed, timeout=10)
             tty.caller.send_signal(signal.SIGINT)
