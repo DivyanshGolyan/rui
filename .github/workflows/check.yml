@@ -4,6 +4,12 @@ on:
     branches: [main, 'wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Post-push runs for GITHUB_TOKEN pushes to main, which start no push runs.
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Previous main commit; selection covers base..main like a push
+        required: true
 
 permissions:
   contents: read
@@ -35,7 +41,7 @@ jobs:
       - name: Select existing targets
         id: select
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
@@ -43,8 +49,9 @@ jobs:
         run: |
           set -euo pipefail
           fallback=()
-          if [ "$EVENT_NAME" = push ]; then
-            fallback=(--fallback-base origin/main)
+          if [ "$EVENT_NAME" != pull_request ]; then
+            # A dispatched base must resolve; only pushes may lose their predecessor.
+            if [ "$EVENT_NAME" = push ]; then fallback=(--fallback-base origin/main); fi
             # Landing tips may skip check; every main push always runs it.
             if [ "$REF_NAME" = main ]; then fallback+=(--main-push); fi
             if [[ "$REF_NAME" = wip/* ]]; then
