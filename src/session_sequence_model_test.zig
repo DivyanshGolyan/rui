@@ -199,7 +199,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var decision = false;
         var sealed: Text = .{};
         if (blocked) {
-            try std.testing.expect(front.input.queueCommand("x"));
+            front.input.queueCommand("x");
         }
         if (alive) {
             if (unread) {

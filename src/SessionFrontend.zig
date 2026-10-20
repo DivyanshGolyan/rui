@@ -341,15 +341,14 @@ fn requestHistory(self: *Self, history: History) void {
     self.status_requested = false;
 }
 
-/// Runs one slash command typed in the draft or the choice, which never
-/// decides. Local commands answer at once. An inspection waits for any
-/// command still active rather than queueing behind it or replacing its
-/// page: then nothing runs and this returns false.
-fn slashCommand(self: *Self, text: []const u8) bool {
+/// Runs one slash command its source admitted from the draft or the choice,
+/// which never decides. Local commands answer at once; an inspection
+/// queues for the reader.
+fn slashCommand(self: *Self, text: []const u8) void {
     switch (parse(text)) {
         .exit => self.detached = true,
         .history => |history| self.requestHistory(history),
-        .inspection => if (self.commandActive() or !self.input.queueCommand(text)) return false,
+        .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
                 self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
@@ -365,12 +364,23 @@ fn slashCommand(self: *Self, text: []const u8) bool {
         .login => self.notice = "Login uses rui auth login codex in your shell.",
         .unknown => self.unknownCommand(text),
     }
-    return true;
 }
 
 /// The choice ends its line at Enter, so a command it cannot run is lost.
+/// Exit and page requests always run; others wait for any active command
+/// rather than queueing behind it or replacing its page.
 fn choiceCommand(self: *Self, text: []const u8) void {
-    if (!self.slashCommand(text)) self.notice = if (self.command_running) "! Command still running. Try again when it finishes." else "! Preparing inspection; try again when it finishes.";
+    switch (parse(text)) {
+        .exit, .history => {},
+        else => if (self.command_running) {
+            self.notice = "! Command still running. Try again when it finishes.";
+            return;
+        } else if (self.input.queuedCommand() != null) {
+            self.notice = "! Preparing inspection; try again when it finishes.";
+            return;
+        },
+    }
+    self.slashCommand(text);
 }
 
 fn unknownCommand(self: *Self, text: []const u8) void {
@@ -400,27 +410,15 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     };
     inline for (cases) |case| {
         self.notice = null;
-        try std.testing.expect(self.slashCommand(case[0]));
+        self.slashCommand(case[0]);
         if (case[1].len != 0) {
             try std.testing.expectEqualStrings(case[1], self.notice.?);
             try std.testing.expect(self.input.queuedCommand() == null);
         } else {
             try std.testing.expect(self.notice == null);
-            try std.testing.expectEqualStrings(case[0], self.input.queuedCommand().?);
-            // A second inspection waits for the first; a local command does not.
-            try std.testing.expect(!self.slashCommand("/help"));
-            try std.testing.expect(self.slashCommand("/wait"));
             try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
     }
-    // A running command holds inspections too, but not page requests or exit.
-    self.command_running = true;
-    try std.testing.expect(!self.slashCommand("/requests"));
-    try std.testing.expect(self.input.queuedCommand() == null);
-    try std.testing.expect(self.slashCommand("/details"));
-    try std.testing.expectEqual(@as(?History, .latest), self.history_requested);
-    try std.testing.expect(self.slashCommand("/exit"));
-    try std.testing.expect(self.detached);
 }
 
 test "frontend consumed canonical reader and admission failures survive external interruption" {
@@ -1040,8 +1038,9 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         .message => |ticket| {
             try self.beginMessage(ticket);
         },
-        .command => if (self.slashCommand(self.input.composition().bytes)) self.input.clear() else {
-            self.notice = "! Command still running. Draft retained.";
+        .command => {
+            self.slashCommand(self.input.composition().bytes);
+            self.input.clear();
         },
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.read_phase == .permission) "! Action needs a decision. Draft retained." else if (self.terminal.screen.consent.active()) self.decisionNotice() else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |event| switch (event) {
@@ -1662,6 +1661,53 @@ test "a command queued during a held draft frame blocks the later Message Enter"
     try std.testing.expectEqualStrings("next\xc3\xa9Z", self.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
     try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.notice.?);
+}
+
+test "each source admits a slash command while another is active as it always did" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Keys = struct {
+        fn send(frontend: *Self, bytes: []const u8) !void {
+            for (bytes) |byte| {
+                var decoded = frontend.input.stream.feed(byte, 0);
+                while (decoded != .none) : (decoded = frontend.input.stream.next()) try frontend.inputEvent(decoded);
+            }
+        }
+    };
+    // A running command: a draft inspection queues behind it.
+    self.command_running = true;
+    try Keys.send(self, "/requests\r");
+    try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    // A queued one: every draft command waits, local ones too, and keeps the draft.
+    for ([_][]const u8{ "/wait", "/exit", "/help" }) |text| {
+        self.notice = null;
+        try Keys.send(self, text);
+        try Keys.send(self, "\r");
+        try std.testing.expectEqualStrings(text, self.input.composition().bytes);
+        try std.testing.expectEqualStrings("! Command still running. Draft retained.", self.notice.?);
+        try std.testing.expect(!self.detached);
+        try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+        self.input.clear();
+    }
+    // The choice runs nothing but exit and page requests meanwhile, and says why.
+    for ([_]struct { bool, []const u8 }{
+        .{ true, "! Command still running. Try again when it finishes." },
+        .{ false, "! Preparing inspection; try again when it finishes." },
+    }) |case| {
+        self.command_running = case[0];
+        for ([_][]const u8{ "/wait", "/recover 01234567-89ab-4cde-8012-0123456789ab", "/help" }) |text| {
+            self.notice = null;
+            self.choiceCommand(text);
+            try std.testing.expectEqualStrings(case[1], self.notice.?);
+            try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
+        }
+    }
+    self.choiceCommand("/details");
+    try std.testing.expectEqual(@as(?History, .latest), self.history_requested);
+    self.choiceCommand("/exit");
+    try std.testing.expect(self.detached);
 }
 
 test "a held ready choice decides nothing after a command queued in the same frame" {

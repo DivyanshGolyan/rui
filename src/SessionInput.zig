@@ -54,18 +54,18 @@ pub fn applySelected(self: *Self, decoded: TerminalInput.Decoded, selected: bool
     const bytes = self.composition().bytes;
     if (bytes.len == 0) return .{ .editor = .none };
     // A slash command stays in the draft; the caller clears it once it runs.
-    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return .command;
+    // While another waits, every draft command waits too, local ones included.
+    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.command_length != null) .busy else .command;
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false) };
 }
 
 /// Queues one inspection command for the reader, from the draft or the
-/// choice. Returns false while another waits.
-pub fn queueCommand(self: *Self, text: []const u8) bool {
-    if (self.command_length != null) return false;
+/// choice. Each source admits a command only while none waits.
+pub fn queueCommand(self: *Self, text: []const u8) void {
+    std.debug.assert(self.command_length == null);
     @memcpy(self.command_buffer[0..text.len], text);
     self.command_length = text.len;
-    return true;
 }
 
 pub fn queuedCommand(self: *const Self) ?[]const u8 {
