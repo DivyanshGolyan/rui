@@ -10,9 +10,9 @@ import subprocess
 from strict_paths import strict
 
 
-# Renderer, terminal and frontend owners select their logic root and PTY
-# callers, not the Store-native check, unless the change has a strict path.
-FRONTEND = ("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
+# Renderer, terminal and frontend owners select the roots that run their unit
+# tests and PTY callers, not the Store-native check, unless a strict path changes.
+FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*")
@@ -34,14 +34,14 @@ RULES = (
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig"),
-     ("test-logic", "admission-debug-integration", *PTY_TARGETS),
-     ("test-logic", "admission-debug-integration", *PTY_TARGETS),
+     ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
+     ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
      "Frontend value decisions and native terminal/borrower handoffs"),
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
-    (("src/Terminal*",), ("admission-debug-integration", *PTY_TARGETS),
-     ("admission-debug-integration", *PTY_TARGETS), "Native terminal callers"),
+    (("src/Terminal*",), ("test-logic", "admission-debug-integration", *PTY_TARGETS),
+     ("test-logic", "admission-debug-integration", *PTY_TARGETS), "Terminal values and native callers"),
     (("src/cli_args.zig", "src/json_ascii.zig"), ("test-logic",), ("test-logic",),
      "Portable CLI grammar, validation and terminal-safe JSON; native callers follow below"),
     (("src/cli.zig", "src/cli_args.zig", "src/json_ascii.zig", "src/client.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/provider_selection.zig",
