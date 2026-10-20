@@ -312,23 +312,26 @@ pub fn transcriptCollapsed(self: *const Self) usize {
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
-pub fn markBeginning(self: *Self) !void {
-    try self.boundary("Start of conversation\n");
+/// Returns the collapsed blocks newer rows lost from the transcript's end.
+pub fn markBeginning(self: *Self) !usize {
+    return self.boundary("Start of conversation\n");
 }
 
 /// Shows that live rows above this point left the view and older saved
-/// pages cannot join here without a gap.
-pub fn markGap(self: *Self) !void {
-    try self.boundary("Earlier rows left this view.\n");
+/// pages cannot join here without a gap. Returns as markBeginning does.
+pub fn markGap(self: *Self) !usize {
+    return self.boundary("Earlier rows left this view.\n");
 }
 
-fn boundary(self: *Self, text: []const u8) !void {
+fn boundary(self: *Self, text: []const u8) !usize {
     std.debug.assert(self.view == .transcript);
     var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
     try marker.append(View.Style.quiet.code(self.colour));
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
+    const before = self.transcriptCollapsed();
     if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+    return before - self.transcriptCollapsed();
 }
 
 /// The lowest collapsed user block the latest frame drew in the live view
@@ -1127,6 +1130,18 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     const prepended = try screen.prependFile(io, older);
     try std.testing.expectEqual(Prepended{ .older = 1, .trimmed = 0 }, prepended);
     try std.testing.expectEqual(@as(usize, 4), screen.transcriptCollapsed());
+    // A full transcript ending in a block: either label pushes that block
+    // off the end and says so, so its Message leaves the map with it.
+    for (0..2) |label| {
+        try screen.latest();
+        var line: [64]u8 = undefined;
+        for (0..Viewport.capacity / 32) |row| try screen.append(try std.fmt.bufPrint(&line, "filler row {d:0>20}\n", .{row}));
+        try screen.append("\n› " ++ View.Mark.summary ++ "┄ 9 more lines · 2.0 KB" ++ View.Mark.reset ++ "\n");
+        try screen.beginTranscript(try screen.liveStart());
+        try std.testing.expectEqual(@as(usize, 1), screen.transcriptCollapsed());
+        try std.testing.expectEqual(@as(usize, 1), if (label == 0) try screen.markBeginning() else try screen.markGap());
+        try std.testing.expectEqual(@as(usize, 0), screen.transcriptCollapsed());
+    }
 }
 
 test "browsing up then down by the same rows returns to the latest view" {

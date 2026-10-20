@@ -793,16 +793,20 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     if (failure) |value| return requests.failRead(value);
     if (staging.offset != target.content.length) return error.ContentLengthMismatch;
     const lines = staging.newlines + @intFromBool(staging.last != '\n');
+    try writeMessagePage(task.io, job.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.inspection_file);
+}
 
-    try job.inspection_file.setLength(task.io, 0);
-    var page: MessagePage = .{ .io = task.io, .file = job.inspection_file };
+/// Writes the Message page for the `length` validated bytes in `scratch`.
+fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, last: u8, target: View.Collapsed, store: []const u8, session: []const u8, file: std.Io.File) !void {
+    try file.setLength(io, 0);
+    var page: MessagePage = .{ .io = io, .file = file };
     var size: [24]u8 = undefined;
     var heading: [96]u8 = undefined;
     try page.feed(View.Mark.summary);
     try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", View.kilobytes(target.content.length, &size) }));
     try page.feed(View.Mark.reset ++ "\n");
     if (target.row) {
-        try History.writeExport(&page, job.store, job.session, target.position, target.ordinal);
+        try History.writeExport(&page, store, session, target.position, target.ordinal);
         try page.feed("\n");
     }
     try page.feed("\n");
@@ -812,25 +816,68 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     var escaped: View.Escaped(*MessagePage) = .{ .sink = &page, .text = .{ .mode = .multiline } };
     var window: [protocol.content_window_bytes]u8 = undefined;
     var offset: u64 = 0;
-    while (offset < staging.offset and !page.full) {
-        const wanted: usize = @intCast(@min(window.len, staging.offset - offset));
-        if (try job.scratch.readPositionalAll(task.io, window[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
+    while (offset < length and !page.full) {
+        const wanted: usize = @intCast(@min(window.len, length - offset));
+        if (try scratch.readPositionalAll(io, window[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
         try escaped.feed(window[0..wanted]);
         offset += wanted;
     }
     if (!page.full) try escaped.finish();
-    if (!page.full) return if (staging.last != '\n') page.feed("\n");
+    if (!page.full) return if (last != '\n') page.feed("\n");
     // Escaped controls and invalid bytes can outgrow the view: keep whole
-    // lines and say how many follow, never cut silently.
-    try job.inspection_file.setLength(task.io, page.line_end);
-    page.offset = page.line_end;
+    // lines, or the first line's start when none fits whole, and say how
+    // many lines are not shown in full, never cut silently.
+    const whole = page.lines - page.heading_lines;
+    const end = if (whole != 0) page.line_end else page.boundary;
+    try file.setLength(io, end);
+    page.offset = end;
     page.limit = std.math.maxInt(u64);
+    page.full = false;
     var notice: [96]u8 = undefined;
-    const hidden = lines - (page.lines - page.heading_lines);
-    try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} not shown\n", .{ hidden, if (hidden == 1) "" else "s" }));
+    const hidden = lines - whole;
+    try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} not shown in full\n", .{ hidden, if (hidden == 1) "" else "s" }));
     if (target.row) {
-        try History.writeExport(&page, job.store, job.session, target.position, target.ordinal);
+        try History.writeExport(&page, store, session, target.position, target.ordinal);
         try page.feed("\n");
+    }
+}
+
+test "a Message page past the display limit keeps what fits and says what it cut" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "scratch", .{ .read = true });
+    defer scratch.close(io);
+    const file = try tmp.dir.createFile(io, "page", .{ .read = true });
+    defer file.close(io);
+    const target: View.Collapsed = .{ .source = .conversation, .position = 7, .ordinal = 0, .content = .{ .length = 0, .digest = @splat(0) }, .row = true };
+    const page = try std.testing.allocator.alloc(u8, Viewport.capacity + 4096);
+    defer std.testing.allocator.free(page);
+    // One line wider than the view, ending in é so a cut could split it;
+    // then lines of controls that escaping grows fourfold.
+    const Case = struct { body: []const u8, lines: u64, kept: []const u8, notice: []const u8 };
+    const wide = try std.testing.allocator.alloc(u8, Viewport.capacity + 5);
+    defer std.testing.allocator.free(wide);
+    @memset(wide[0 .. Viewport.capacity - 3], 'w');
+    for (0..4) |index| @memcpy(wide[Viewport.capacity - 3 + 2 * index ..][0..2], "é");
+    const controls = try std.testing.allocator.alloc(u8, 100 * 1000);
+    defer std.testing.allocator.free(controls);
+    @memset(controls, 0x01);
+    for (0..1000) |index| controls[index * 100 + 99] = '\n';
+    for ([_]Case{
+        .{ .body = wide, .lines = 1, .kept = "wwww", .notice = "\n! Display limit reached; 1 line not shown in full\n" },
+        .{ .body = controls, .lines = 1000, .kept = "\\x01\\x01", .notice = "lines not shown in full\n" },
+    }) |case| {
+        try scratch.setLength(io, 0);
+        try scratch.writePositionalAll(io, case.body, 0);
+        try writeMessagePage(io, scratch, case.body.len, case.lines, case.body[case.body.len - 1], target, "/s", "a", file);
+        const text = page[0..try file.readPositionalAll(io, page, 0)];
+        try std.testing.expect(text.len <= Viewport.capacity);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+        try std.testing.expect(std.mem.indexOf(u8, text, case.kept) != null);
+        const notice = std.mem.indexOf(u8, text, case.notice).?;
+        // The export command follows the notice, so the bytes stay reachable.
+        try std.testing.expect(std.mem.indexOfPos(u8, text, notice, "--position 7 --ordinal 0") != null);
     }
 }
 
@@ -845,16 +892,24 @@ const MessagePage = struct {
     // Whole lines written, and how many of them are the heading's.
     lines: u64 = 0,
     heading_lines: u64 = 0,
+    // Where the last character written that started before the limit ends:
+    // the page never cuts inside a UTF-8 sequence.
+    boundary: u64 = 0,
     full: bool = false,
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.full) return;
         const fit = bytes[0..@intCast(@min(bytes.len, self.limit -| self.offset))];
         try self.file.writePositionalAll(self.io, fit, self.offset);
-        for (fit, 0..) |byte, index| if (byte == '\n') {
-            self.lines += 1;
-            self.line_end = self.offset + index + 1;
-        };
+        for (fit, 0..) |byte, index| {
+            if (byte & 0xc0 != 0x80) self.boundary = self.offset + index;
+            if (byte == '\n') {
+                self.lines += 1;
+                self.line_end = self.offset + index + 1;
+            }
+        }
+        // A sequence that ended within what fit ends the cut there too.
+        if (fit.len == bytes.len) self.boundary = self.offset + fit.len;
         self.offset += fit.len;
         self.full = fit.len != bytes.len;
     }

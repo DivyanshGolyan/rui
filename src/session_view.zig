@@ -111,7 +111,13 @@ pub const Blocks = struct {
     }
 
     /// Places an older page's blocks, oldest first, before every other.
+    /// Behind blocks already unknown they are unknown too: placing them
+    /// next to the kept ones would shift every older index.
     pub fn prepend(self: *Blocks, older: []const ?Collapsed) void {
+        if (self.unknown != 0) {
+            self.unknown += older.len;
+            return;
+        }
         var index = older.len;
         while (index > 0) : (index -= 1) {
             if (self.count == capacity) {
@@ -175,6 +181,16 @@ test "collapsed blocks keep their order from the end as pages join and leave" {
     full.prepend(&.{ at(1, body_ref), at(2, body_ref) });
     try std.testing.expectEqual(@as(u64, 2), full.fromEnd(Blocks.capacity - 1).?.position);
     try std.testing.expectEqual(@as(u64, 1), full.unknown);
+    // Behind an unknown block, slots freed at the end never let an older
+    // page's Message take a kept index: the oldest kept block stays 13 and
+    // every index past it stays unknown.
+    var gap = blocks.newest(Blocks.capacity + 1);
+    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 1).?.position);
+    gap.prepend(&.{at(2, body_ref)});
+    gap.dropNewest(1);
+    gap.prepend(&.{at(1, body_ref)});
+    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 2).?.position);
+    for (Blocks.capacity - 1..Blocks.capacity + 3) |index| try std.testing.expect(gap.fromEnd(index) == null);
 }
 
 /// Tells a sink that records collapsed blocks which Message the one just

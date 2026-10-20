@@ -101,8 +101,11 @@ transcript_blocks: View.Blocks = .{},
 // Ctrl-O waits for the frame it names a block in; the read then waits for
 // the reader, and its page shows only over the view it was asked from.
 expand_pending: bool = false,
-message_requested: ?View.Collapsed = null,
-message_origin: struct { view: Screen.ViewKind = .live, transcript: u64 = 0 } = .{},
+// A Message page asked for, and the one being read. Each holds where it was
+// asked from; Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
+message_requested: ?MessageRequest = null,
+message_reading: ?MessageRequest = null,
+message_generation: u64 = 0,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
 marks: reads.Marks = .{},
@@ -513,10 +516,11 @@ fn driveActive(self: *Self) !void {
                     self.dirty = true;
                 }
             }
-            if (self.reader.thread == null) if (self.message_requested) |target| {
+            if (self.reader.thread == null) if (self.message_requested) |request| {
                 self.message_requested = null;
+                self.message_reading = request;
                 var job = self.freeze(.message);
-                job.message_target = target;
+                job.message_target = request.target;
                 try self.launch(job, reads.fullMessage);
             };
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
@@ -753,6 +757,7 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     self.sent += 1;
     self.status_requested = false;
     self.history_requested = null;
+    self.dropMessageRequest();
     try self.terminal.screen.latest();
 }
 
@@ -780,14 +785,27 @@ fn navigation(self: *Self, event: Editor.Event) !void {
             self.older_failed = false; // A new scroll may retry a failed load.
             if (screen.browse(down, event == .page_up or event == .page_down)) try screen.latest();
         },
-        .latest => try screen.latest(),
-        .close_view => if (screen.view == .message) try screen.leaveMessage() else try screen.latest(),
+        .latest, .close_view => {
+            // Leaving also abandons a Message page not yet shown.
+            self.dropMessageRequest();
+            if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
+        },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
             self.expand_pending = true;
         },
-        else => {},
+        // Every other event reaches here unhandled, and must not redraw.
+        else => return,
     }
     self.dirty = true;
+}
+
+const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
+
+/// No Message page asked for so far opens.
+fn dropMessageRequest(self: *Self) void {
+    self.message_generation += 1;
+    self.message_requested = null;
+    self.expand_pending = false;
 }
 
 /// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
@@ -804,11 +822,13 @@ fn expand(self: *Self) !void {
         return;
     };
     const blocks = if (screen.view == .live) &self.live_blocks else &self.transcript_blocks;
-    self.message_requested = blocks.fromEnd(index) orelse {
+    const target = blocks.fromEnd(index) orelse {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.message_origin = .{ .view = screen.view, .transcript = self.transcript };
+    // A newer Ctrl-O replaces any page asked for before it.
+    self.message_generation += 1;
+    self.message_requested = .{ .target = target, .view = screen.view, .transcript = self.transcript, .sent = self.sent, .generation = self.message_generation };
     self.notice = "Opening message…";
 }
 
@@ -835,11 +855,12 @@ fn showOlderLabels(self: *Self) !void {
     const screen = self.terminal.screen;
     const plan = &self.transcript_plan;
     if (plan.gap and plan.echo_count == 0 and plan.dropped == null) {
-        try screen.markGap();
+        // A label can push newer rows, and their blocks, off the end.
+        self.transcript_blocks.dropNewest(try screen.markGap());
         plan.gap = false;
     }
     if (self.transcript_beginning and self.transcript_plan.next() == null and self.transcript_older == null) {
-        try screen.markBeginning();
+        self.transcript_blocks.dropNewest(try screen.markBeginning());
         self.transcript_beginning = false;
     }
 }
@@ -1084,7 +1105,12 @@ fn settleReader(self: *Self) !void {
         }
     } else if (end == .complete and self.read_phase == .message) {
         const screen = self.terminal.screen;
-        if (screen.view == self.message_origin.view and (screen.view == .live or self.message_origin.transcript == self.transcript))
+        const request = self.message_reading.?;
+        self.message_reading = null;
+        // Only over the unchanged view it was asked from, before any send,
+        // dismissal or newer Ctrl-O.
+        if (request.generation == self.message_generation and request.sent == self.sent and screen.view == request.view and
+            (request.view == .live or request.transcript == self.transcript))
             try screen.showMessage(self.init.io, self.inspection_file);
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();

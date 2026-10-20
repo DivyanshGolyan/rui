@@ -4334,9 +4334,35 @@ def renderer_cases():
             tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
             assert tty.capture.completed == browsing, (browsing, tty.capture.completed)
             tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+            # A page still loading when a Message is sent never opens over it.
+            holding, release, held = threading.Event(), threading.Event(), threading.Event()
+            holding.set()
+            def hold_content(_):
+                if holding.is_set():
+                    held.set()
+                    release.wait(20)
+                return True
+            proxy = canonical.ReplyProxy(host, "/v1/activity-content", lambda response: response, before_forward=hold_content)
+            try:
+                tty.send("\x0f", "Opening message…")
+                assert held.wait(10), "the Message's content read was never held"
+                endpoint.responses.append(fixture.sse_answer("expand-filler", "reason", "message", "\n".join(f"FILLER-{index:02d}" for index in range(60)))[0])
+                requests = len(endpoint.requests)
+                # Its row waits for a scan, which waits for the held read.
+                tty.send("SHORT\r", "Sent")
+                fixture.wait_for(lambda: len(endpoint.requests) > requests, "SHORT's model request", timeout=20)
+                holding.clear()
+                release.set()
+                tty.wait("FILLER-59", timeout=30)
+                # One reader: the held read settled before the scan that
+                # brought the answer's last row.
+                shown = tty.capture.completed
+                assert "Opening message…" not in shown and "Message ·" not in shown, shown
+            finally:
+                release.set()
+                proxy.close()
+                proxy = None
             # With no collapsed block in view, Ctrl-O says so and opens nothing.
-            endpoint.responses.append(fixture.sse_answer("expand-filler", "reason", "message", "\n".join(f"FILLER-{index:02d}" for index in range(60)))[0])
-            tty.send("SHORT\r", "FILLER-59")
             tty.send("\x0f", "No collapsed message in view")
             assert "Message ·" not in tty.capture.completed
             tty.caller.send_signal(signal.SIGINT)
