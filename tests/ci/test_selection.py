@@ -125,8 +125,24 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(strict=strict_path):
                 result = select(["src/SessionTerminal.zig", strict_path], "review", AVAILABLE)
                 self.assertIn("check-full", result["targets"])
-        result = select(["src/SessionFrontend.zig", "src/provider.zig"], "review", AVAILABLE)
-        self.assertNotIn("check", result["targets"])
+
+    def test_frontend_beside_other_executable_change_keeps_check(self):
+        for frontend in ("src/SessionFrontend.zig", "src/TerminalText.zig", "src/ConversationViewport.zig",
+                         "src/session_sequence_model_test.zig"):
+            for other in ("src/provider.zig", "src/request_encoding.zig", "tests/ci/select_tests.py"):
+                with self.subTest(frontend=frontend, other=other):
+                    result = select([frontend, other], "review", AVAILABLE)
+                    for family in ("targets", "native_targets"):
+                        self.assertIn("check", result[family])
+        # Renderer and documentation together are still renderer-only.
+        for paths in (["src/SessionFrontend.zig", "src/TerminalText.zig", "README.md", "docs/x.md"],
+                      ["src/AnswerRenderer.zig", "src/ConversationViewport.zig", "research/notes.md"]):
+            with self.subTest(paths=paths):
+                result = select(paths, "review", AVAILABLE)
+                self.assertNotIn("check", result["targets"] + result["native_targets"])
+        # AnswerRenderer never selected check; its ordinary union stays as before.
+        self.assertEqual(select(["src/AnswerRenderer.zig", "src/request_encoding.zig"], "review",
+                                AVAILABLE)["targets"], ["test-logic"])
 
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",

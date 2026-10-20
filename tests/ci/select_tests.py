@@ -234,10 +234,15 @@ def select(paths, phase, available, main_push=False):
         if "evaluator_string" in path:
             targets.add("evaluator-string-sanitizer")
             native_targets.add("evaluator-string-sanitizer")
-    if strict(paths) and any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in FRONTEND):
+    frontend = {path for path in paths if any(fnmatch.fnmatchcase(path, pattern) for pattern in FRONTEND)}
+    others = [path for path in paths if path not in frontend
+              and not (path.endswith(".md") or path.startswith(("docs/", "research/")))]
+    # Only renderer-only diffs skip check. Beside other executable changes, frontend
+    # owners that selected check keep it; AnswerRenderer never did unless strict.
+    if frontend and (strict(paths) or others and frontend - {"src/AnswerRenderer.zig"}):
         targets.add("check")
         native_targets.add("check")
-        reasons.add("Frontend change beside a strict path keeps check")
+        reasons.add("Frontend change beside a strict path or other executable change keeps check")
     if main_push:
         # Pre-landing tips may skip check; post-push main always runs it before stable advances.
         targets.add("check")
