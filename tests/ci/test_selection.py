@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import execution_batches, select, setup_requirements
+from select_tests import CHECK_COVERS, execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -62,23 +62,87 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result[family], ["admission-debug-integration", "check", "test-full", "test-logic"])
         self.assertTrue(result["native_required"])
 
-    def test_frontend_policy_keeps_value_and_native_handoff_checks(self):
-        for path in ("src/SessionFrontend.zig", "src/SessionSubmission.zig",
-                     "src/session_consent.zig", "src/session_departure.zig"):
-            result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
-
-    def test_terminal_values_keep_logic_and_native_checks(self):
-        for path in ("src/ConversationViewport.zig", "src/TerminalFrame.zig",
-                     "src/TerminalInput.zig", "src/TerminalEditor.zig"):
+    def test_frontend_alone_selects_logic_and_pty_callers_not_check(self):
+        pty = ["canonical-failure-integration", "terminal-restoration-integration"]
+        for path, expected in (
+                # src/tests.zig, not the logic root, runs these owners' unit tests.
+                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/ConversationViewport.zig", [*pty, "test-logic"]),
+                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/session_sequence_model_test.zig", ["test-logic"])):
             with self.subTest(path=path):
-                result = select([path], "review", AVAILABLE)
+                result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
-                    self.assertIn("test-logic", result[family])
-                    self.assertIn("check", result[family])
-                    if path != "src/ConversationViewport.zig":
-                        self.assertIn("admission-debug-integration", result[family])
+                    self.assertEqual(result[family], expected)
+                self.assertEqual(setup_requirements(result["targets"])["terminal"], bool(set(pty) & set(expected)))
+        result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
+                        "review", AVAILABLE)
+        self.assertNotIn("check", result["targets"] + result["native_targets"])
+
+    def test_renderer_diff_skips_check_before_landing_but_not_on_main_push(self):
+        for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
+                      ["src/ConversationViewport.zig"], ["src/session_sequence_model_test.zig"],
+                      ["src/request_encoding.zig"], ["README.md"]):
+            with self.subTest(paths=paths):
+                landing = select(paths, "review", AVAILABLE)
+                main = select(paths, "review", AVAILABLE, main_push=True)
+                for family in ("targets", "native_targets"):
+                    self.assertNotIn("check", landing[family])
+                    self.assertIn("check", main[family])
+                    # Only check is added; targets it does not cover stay as selected.
+                    self.assertEqual(set(main[family]) - {"check"},
+                                     set(landing[family]) - CHECK_COVERS)
+        # check-full already covers check on a main push.
+        main = select(["build.zig"], "review", AVAILABLE, main_push=True)
+        self.assertIn("check-full", main["targets"])
+        self.assertNotIn("check", main["targets"])
+        workflow = Path(".github/workflows/check.yml").read_text()
+        script = dedent(workflow.split("        run: |\n", 1)[1]).split("python3 tests/ci/select_tests.py", 1)[0]
+        for event, ref, expected in (("push", "main", True), ("push", "wip/land-9", False),
+                                     ("pull_request", "main", False)):
+            with self.subTest(event=event, ref=ref):
+                result = subprocess.run(["bash", "-c", script + 'echo "${fallback[@]}"'], capture_output=True,
+                                        text=True, check=True, env={**os.environ, "EVENT_NAME": event,
+                                                                    "REF_NAME": ref, "BASE": "HEAD"})
+                self.assertEqual("--main-push" in result.stdout.split(), expected)
+
+    def test_strict_path_beside_frontend_keeps_check(self):
+        # execution_turn.zig is strict but alone selects only its logic root.
+        self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["test-logic"])
+        for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
+                            "tests/integration/bash_integration.py", "src/store_recovery.zig"):
+            for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
+                             "src/TerminalText.zig", "src/AnswerRenderer.zig",
+                             "src/session_sequence_model_test.zig"):
+                with self.subTest(strict=strict_path, frontend=frontend):
+                    result = select([frontend, strict_path], "review", AVAILABLE)
+                    for family in ("targets", "native_targets"):
+                        self.assertIn("check", result[family])
+        for strict_path in ("build.zig", "install.sh"):
+            with self.subTest(strict=strict_path):
+                result = select(["src/SessionTerminal.zig", strict_path], "review", AVAILABLE)
+                self.assertIn("check-full", result["targets"])
+
+    def test_frontend_beside_other_executable_change_keeps_check(self):
+        for frontend in ("src/SessionFrontend.zig", "src/TerminalText.zig", "src/ConversationViewport.zig",
+                         "src/session_sequence_model_test.zig"):
+            for other in ("src/provider.zig", "src/request_encoding.zig", "tests/ci/select_tests.py"):
+                with self.subTest(frontend=frontend, other=other):
+                    result = select([frontend, other], "review", AVAILABLE)
+                    for family in ("targets", "native_targets"):
+                        self.assertIn("check", result[family])
+        # Renderer and documentation together are still renderer-only.
+        for paths in (["src/SessionFrontend.zig", "src/TerminalText.zig", "README.md", "docs/x.md"],
+                      ["src/AnswerRenderer.zig", "src/ConversationViewport.zig", "research/notes.md"]):
+            with self.subTest(paths=paths):
+                result = select(paths, "review", AVAILABLE)
+                self.assertNotIn("check", result["targets"] + result["native_targets"])
+        # AnswerRenderer never selected check; its ordinary union stays as before.
+        self.assertEqual(select(["src/AnswerRenderer.zig", "src/request_encoding.zig"], "review",
+                                AVAILABLE)["targets"], ["test-logic"])
 
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",

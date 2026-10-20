@@ -15,8 +15,7 @@ partial_length: u3 = 0,
 partial_need: u3 = 0,
 allow_paste: bool = true,
 rejected: ?Event = null,
-plain_ascii: bool = true,
-paste_start: struct { cursor: usize = 0, length: usize = 0, plain_ascii: bool = true } = .{},
+paste_start: struct { cursor: usize = 0, length: usize = 0 } = .{},
 /// This editor saw the current marked paste begin. A replacement editor
 /// receiving the rest of a paste rejects it rather than adopting it.
 pasting: bool = false,
@@ -136,104 +135,60 @@ fn drive(io: std.Io, buffer: []u8, prompt: []const u8, allow_paste: bool) !?[]co
     }
     var editor: Editor = .{ .buffer = buffer, .allow_paste = allow_paste };
     var input: Input = .{};
-    const initial_size = windowSize();
-    var plain_prompt = true;
-    for (prompt) |char| {
-        if (char < 32 or char > 126) plain_prompt = false;
-    }
-    var backspaces: usize = 0;
-    var repaint_deadline: i96 = 0;
+    const size = windowSize();
     while (true) {
-        if (backspaces != 0) {
-            const remaining = repaint_deadline - std.Io.Clock.awake.now(io).nanoseconds;
-            if (remaining <= 0 or backspaces == editor.length) {
-                try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-                backspaces = 0;
-                continue;
-            }
-            var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, @intCast(@divTrunc(remaining + 999_999, 1_000_000))) == 0) {
-                try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-                backspaces = 0;
-                continue;
-            }
-        }
-        if (input.pending() != .none) {
-            var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
-            // Only bare ESC is ambiguous with a standalone key. A recognized
-            // sequence, scalar or marked paste may arrive fragmented.
-            if (try std.posix.poll(&fds, if (input.pending() == .escape) 80 else 2000) == 0) {
+        // The stream decides when pending input expires, as for a Session.
+        const timeout = switch (input.wait(std.Io.Clock.awake.now(io).nanoseconds, -1)) {
+            .expire => {
                 _ = input.expire() catch |err| {
                     try output.writeStreamingAll(io, "\n");
                     return err;
                 };
                 continue;
-            }
-        }
+            },
+            .poll => |milliseconds| milliseconds,
+        };
+        var fds = [_]std.posix.pollfd{.{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&fds, timeout) == 0) continue;
         var byte: [1]u8 = undefined;
-        if (try std.posix.read(0, &byte) == 0) {
-            if (backspaces != 0) try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-            return if (editor.length == 0) null else error.IncompleteTerminalLine;
-        }
-        if ((byte[0] == 8 or byte[0] == 127) and input.pending() == .none and editor.rejected == null and editor.cursor == editor.length and editor.length != 0) {
-            // The last printable ASCII cell has a known width. Clear it in
-            // place even when key repeats arrive slower than the batch window.
-            const current_size = windowSize();
-            if (backspaces == 0 and plain_prompt and editor.plain_ascii and initial_size.row >= 2 and
-                prompt.len + editor.length < initial_size.col and
-                current_size.col == initial_size.col and current_size.row == initial_size.row)
-            {
-                editor.deleteTail(1);
-                try output.writeStreamingAll(io, "\x08\x1b[0K");
-                continue;
+        if (try std.posix.read(0, &byte) == 0) return if (editor.length == 0) null else error.IncompleteTerminalLine;
+        var decoded = input.feed(byte[0], std.Io.Clock.awake.now(io).nanoseconds);
+        while (decoded != .none) : (decoded = input.next()) {
+            const old_row = visibleRow(&editor, prompt.len, size);
+            const old_length = editor.length;
+            switch (editor.apply(decoded)) {
+                .none, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => {},
+                // A dropped chord or a declined edit leaves the choice as
+                // typed. Say so, then show the prompt and that text again.
+                .unbound, .edit_rejected => |event| {
+                    try output.writeStreamingAll(io, if (event == .unbound) "\nRui: Key combination not recognized; choice unchanged.\n" else "\nRui: Character not accepted; choice unchanged.\n");
+                    try redraw(io, &editor, prompt, size, 0);
+                },
+                .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
+                .redraw => try redraw(io, &editor, prompt, size, old_row),
+                .submit => {
+                    try output.writeStreamingAll(io, "\n");
+                    return editor.buffer[0..editor.length];
+                },
+                .eof => {
+                    try output.writeStreamingAll(io, "\n");
+                    return null;
+                },
+                .interrupt => {
+                    try output.writeStreamingAll(io, "^C\n");
+                    return error.InteractiveInterrupted;
+                },
+                .invalid => {
+                    try output.writeStreamingAll(io, "\n");
+                    return error.InvalidTerminalInput;
+                },
+                .overflow => {
+                    try output.writeStreamingAll(io, "\n");
+                    return error.StreamTooLong;
+                },
             }
-            if (backspaces == 0) repaint_deadline = std.Io.Clock.awake.now(io).nanoseconds + 16_000_000;
-            backspaces += 1;
-            continue;
-        }
-        if (backspaces != 0) {
-            try paintTailDeletion(io, &editor, backspaces, prompt, initial_size);
-            backspaces = 0;
-        }
-        const may_edit = editor.cursor != editor.length or input.pending() != .none or byte[0] == 0x1b or
-            std.mem.indexOfScalar(u8, "\x01\x04\x05\x08\x0b\x15\x17\x7f", byte[0]) != null;
-        const old_row = if (may_edit) visibleRow(&editor, prompt.len, initial_size) else null;
-        const old_length = editor.length;
-        const event = editor.feed(&input, byte[0]);
-        switch (event) {
-            // The prompt is a one-letter choice; a dropped chord leaves it as typed.
-            .none, .unbound, .page_up, .page_down, .scroll_up, .scroll_down, .latest, .close_view, .expand => {},
-            .append => try output.writeStreamingAll(io, editor.buffer[old_length..editor.length]),
-            .redraw => try redraw(io, &editor, prompt, initial_size, old_row),
-            .submit => {
-                try output.writeStreamingAll(io, "\n");
-                return editor.buffer[0..editor.length];
-            },
-            .eof => {
-                try output.writeStreamingAll(io, "\n");
-                return null;
-            },
-            .interrupt => {
-                try output.writeStreamingAll(io, "^C\n");
-                return error.InteractiveInterrupted;
-            },
-            .invalid => {
-                try output.writeStreamingAll(io, "\n");
-                return error.InvalidTerminalInput;
-            },
-            .edit_rejected => unreachable, // The inline editor does not decline renderer-only edits.
-            .overflow => {
-                try output.writeStreamingAll(io, "\n");
-                return error.StreamTooLong;
-            },
         }
     }
-}
-
-fn paintTailDeletion(io: std.Io, editor: *Editor, count: usize, prompt: []const u8, size: std.posix.winsize) !void {
-    const old_row = visibleRow(editor, prompt.len, size);
-    editor.deleteTail(count);
-    try redraw(io, editor, prompt, size, old_row);
 }
 
 fn redraw(io: std.Io, editor: *const Editor, prompt: []const u8, size: std.posix.winsize, old_row: ?usize) !void {
@@ -299,7 +254,7 @@ pub fn apply(self: *Editor, decoded: Input.Decoded) Event {
     return switch (value.event) {
         .paste_start => blk: {
             if (value.pasted or !self.allow_paste) self.reject(.invalid);
-            if (!value.pasted) self.paste_start = .{ .cursor = self.cursor, .length = self.length, .plain_ascii = self.plain_ascii };
+            if (!value.pasted) self.paste_start = .{ .cursor = self.cursor, .length = self.length };
             self.pasting = true;
             break :blk .none;
         },
@@ -317,11 +272,11 @@ pub fn apply(self: *Editor, decoded: Input.Decoded) Event {
     };
 }
 
-/// One byte through `input` and every event it completes, for a lone editor
-/// (line prompts and tests). Returns the last event that is not `.none`.
+/// One byte through `input` and every event it completes, for tests of a
+/// lone editor clear of input deadlines. Returns the last event that is not `.none`.
 pub fn feed(self: *Editor, input: *Input, byte: u8) Event {
     var last: Event = .none;
-    var decoded = input.feed(byte);
+    var decoded = input.feed(byte, 0);
     while (decoded != .none) : (decoded = input.next()) {
         const event = self.apply(decoded);
         if (event != .none) last = event;
@@ -418,6 +373,16 @@ test "modified kitty text cannot become an ordinary permission choice" {
             try std.testing.expectEqual(@as(usize, 0), editor.length);
             try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
         }
+    }
+    // A malformed key fails closed even where its damaged number would name
+    // Enter or a function key: the choice is rejected at its line end, never
+    // submitted early or left standing as typed.
+    for ([_][]const u8{ "\x1b[+27;1;13~", "\x1b[1:999;1P", "\x1b[+11;1~", "\x1b[114;999u", "\x1b[13;0u" }) |malformed| {
+        var editor: Editor = .{ .buffer = &storage, .allow_paste = false };
+        var stream: Input = .{};
+        _ = editor.feed(&stream, 'a');
+        for (malformed) |byte| try std.testing.expect(editor.feed(&stream, byte) != .submit);
+        try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
     }
     for ([_]u8{ 1, 2, 65, 129 }) |modifier| {
         var sequence: [32]u8 = undefined;
@@ -533,14 +498,12 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) Event {
                 std.mem.copyForwards(u8, self.buffer[self.paste_start.cursor..], self.buffer[suffix..self.length]);
                 self.length = self.paste_start.length;
                 self.cursor = self.paste_start.cursor;
-                self.plain_ascii = self.paste_start.plain_ascii;
                 self.reject(.edit_rejected);
                 return .none;
             }
             return .edit_rejected;
         }
     }
-    if (codepoint < 32 or codepoint > 126) self.plain_ascii = false;
     const at_end = self.cursor == self.length;
     std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
     @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
@@ -616,50 +579,6 @@ fn deleteTo(self: *Editor, position: usize) Event {
 
 fn deletePrevious(self: *Editor) Event {
     return self.erase(self.previous(self.cursor), self.cursor);
-}
-
-// Consecutive tail deletions cannot change the segmentation of the retained
-// prefix. Count clusters, then find the retained boundary in one forward scan.
-fn deleteTail(self: *Editor, count: usize) void {
-    std.debug.assert(self.cursor == self.length and count != 0);
-    if (self.plain_ascii) {
-        self.length -|= count;
-        self.cursor = self.length;
-        return;
-    }
-    var offset: usize = 0;
-    var prior: ?c_int = null;
-    var state: c_int = 0;
-    var clusters: usize = 0;
-    while (offset < self.length) {
-        const scalar = self.decodeScalar(&offset);
-        if (prior == null or utf8proc_grapheme_break_stateful(prior.?, scalar, &state) != 0) clusters += 1;
-        prior = scalar;
-    }
-    const keep = clusters -| count;
-    if (keep == 0) {
-        self.length = 0;
-        self.cursor = 0;
-        return;
-    }
-    offset = 0;
-    prior = null;
-    state = 0;
-    clusters = 0;
-    while (offset < self.length) {
-        const start = offset;
-        const scalar = self.decodeScalar(&offset);
-        if (prior == null or utf8proc_grapheme_break_stateful(prior.?, scalar, &state) != 0) {
-            if (clusters == keep) {
-                self.length = start;
-                self.cursor = start;
-                return;
-            }
-            clusters += 1;
-        }
-        prior = scalar;
-    }
-    unreachable;
 }
 
 fn deleteNext(self: *Editor) Event {
@@ -822,8 +741,10 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
             try std.testing.expect(sent);
         }
     }
-    // Malformed forms decode nothing: no line, no dropped-chord notice.
-    for ([_][]const u8{ "\x1b[27;2~", "\x1b[27;;13~", "\x1b[27;2;~", "\x1b[27;2;13;1~", "\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;2:3;13~" }) |malformed| {
+    // A malformed form is a key the user pressed whose meaning was lost. It
+    // adds no line and drops no chord, and it fails closed: the attempt is
+    // rejected at its line end rather than letting the text around it stand.
+    for ([_][]const u8{ "\x1b[27;2~", "\x1b[27;;13~", "\x1b[27;2;~", "\x1b[27;2;13;1~", "\x1b[27;0;13~", "\x1b[27;17;13~", "\x1b[27;2:3;13~", "\x1b[27;2;1114112~", "\x1b[27;2;55296~", "\x1b[27;+2;13~" }) |malformed| {
         var editor: Editor = .{ .buffer = &storage };
         var stream: Input = .{};
         for ("ok") |byte| _ = editor.feed(&stream, byte);
@@ -831,8 +752,7 @@ test "xterm modifyOtherKeys bindings mean what the same Kitty keys mean" {
             const event = editor.feed(&stream, byte);
             try std.testing.expect(event != .submit and event != .unbound);
         }
-        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\r'));
-        try std.testing.expectEqualStrings("ok", storage[0..editor.length]);
+        try std.testing.expectEqual(Event.invalid, editor.feed(&stream, '\r'));
     }
 }
 
@@ -925,33 +845,6 @@ test "grapheme deletion, distinct word bindings and multiline paste" {
     for ("left\x1b[27uright") |byte| _ = editor.feed(&stream, byte);
     try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\n'));
     try std.testing.expectEqualStrings("leftright", storage[0..editor.length]);
-}
-
-test "batched tail deletion retains exact Unicode clusters and following input" {
-    const cases = .{
-        .{ "abc", 1, "ab" },
-        .{ "abc", 3, "" },
-        .{ "abc", 5, "" },
-        .{ "first second", 6, "first " },
-        .{ "éa", 2, "" },
-        .{ "A中e\u{301}🧑‍🌾", 1, "A中e\u{301}" },
-        .{ "A中e\u{301}🧑‍🌾", 2, "A中" },
-        .{ "🇺🇸🇨🇦", 1, "🇺🇸" },
-        .{ "⌚\u{fe0f}🇺🇸", 2, "" },
-        .{ "a\u{301}", 9, "" },
-    };
-    inline for (cases) |case| {
-        var storage: [100]u8 = undefined;
-        var editor: Editor = .{ .buffer = &storage };
-        var stream: Input = .{};
-        for (case[0]) |byte| _ = editor.feed(&stream, byte);
-        editor.deleteTail(case[1]);
-        try std.testing.expectEqualStrings(case[2], storage[0..editor.length]);
-        try std.testing.expectEqual(editor.length, editor.cursor);
-        try std.testing.expectEqual(Event.append, editor.feed(&stream, 'Z'));
-        try std.testing.expectEqual(Event.submit, editor.feed(&stream, '\n'));
-        try std.testing.expectEqualStrings(case[2] ++ "Z", storage[0..editor.length]);
-    }
 }
 
 test "exact UTF-8 bound and sticky rejection after backspace" {

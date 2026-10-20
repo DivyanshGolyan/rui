@@ -45,6 +45,8 @@ jobs:
           fallback=()
           if [ "$EVENT_NAME" = push ]; then
             fallback=(--fallback-base origin/main)
+            # Landing tips may skip check; every main push always runs it.
+            if [ "$REF_NAME" = main ]; then fallback+=(--main-push); fi
             if [[ "$REF_NAME" = wip/* ]]; then
               # A landing tip must cover its complete delta against main.
               BASE=$(git merge-base HEAD origin/main)

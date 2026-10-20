@@ -109,7 +109,7 @@ const Outcome = struct {
 
 fn feed(editor: *Editor, input: *Input, data: []const u8, outcome: *Outcome) void {
     for (data) |byte| {
-        var decoded = input.feed(byte);
+        var decoded = input.feed(byte, 0);
         while (decoded != .none) : (decoded = input.next()) {
             const event = editor.apply(decoded);
             if (event != .none) outcome.event = event;
@@ -132,9 +132,7 @@ fn run(comptime route: Route, case: Case, wire: []const u8, split: usize, choice
     const deliver = if (route == .inline_editor) inlineFeed else feed;
     var storage: [128]u8 = undefined;
     @memcpy(storage[0..case.before.len], case.before);
-    var ascii = true;
-    for (case.before) |byte| ascii = ascii and byte >= 32 and byte <= 126;
-    var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice, .plain_ascii = ascii };
+    var editor: Editor = .{ .buffer = &storage, .length = case.before.len, .cursor = case.caret, .allow_paste = !choice };
     var input: Input = .{};
     var result: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
     deliver(&editor, &input, wire[0..split], &result);
@@ -335,7 +333,7 @@ test "TD2 Ghostty modifier nine is Super distinct from Kitty Hyper and Meta" {
         var input: Input = .{};
         var presses: usize = 0;
         for ([_][]const u8{ vector.data[0..split], vector.data[split..] }) |chunk| for (chunk) |byte| {
-            var decoded = input.feed(byte);
+            var decoded = input.feed(byte, 0);
             while (decoded != .none) : (decoded = input.next()) {
                 try std.testing.expect(decoded == .event);
                 try std.testing.expect(!decoded.event.pasted);
@@ -453,68 +451,87 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
     defer std.debug.assert(std.c.dup2(saved, 0) == 0);
     for ([_]Input.Pending{ .escape, .incomplete }) |pending| {
         const duration: i96 = if (pending == .escape) 80_000_000 else 2_000_000_000;
+        // A byte that leaves the input exactly as pending as before.
+        const prefix: []const u8 = if (pending == .escape) "\x1b" else "\x1b[";
+        const more: u8 = if (pending == .escape) 0x1b else '1';
         for ([_]i96{ -1, 0, 1 }) |offset| {
             var pipe: [2]c_int = undefined;
             if (std.c.pipe(&pipe) != 0) return error.TestPipeFailed;
             defer _ = std.c.close(pipe[0]);
             defer _ = std.c.close(pipe[1]);
             if (std.c.dup2(pipe[0], 0) != 0) return error.TestDupFailed;
-            var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined, .pending_at = 1_000_000_000 };
+            var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
+            var input: Input = .{};
+            for (prefix) |byte| _ = input.feed(byte, 1_000_000_000);
+            try std.testing.expectEqual(pending, input.pending());
             clock.at = 1_000_000_000 + duration + offset;
-            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "X", 1));
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{more}, 1));
             if (offset < 0) {
-                try std.testing.expectEqual(@as(?u8, 'X'), try terminal.next(io, pending, 0));
-                // A positive read, not an empty poll, renews the idle clock.
+                const read = (try terminal.next(io, &input, 0)).?;
+                try std.testing.expectEqual(more, read.byte);
+                try std.testing.expectEqual(clock.at, read.at);
+                try std.testing.expect(input.feed(read.byte, read.at) == .none);
+                try std.testing.expectEqual(pending, input.pending());
+                // A fed byte, not an empty poll, renews the inactivity clock.
                 clock.at += duration - 1;
-                try std.testing.expectEqual(@as(?u8, null), try terminal.next(io, pending, 0));
+                try std.testing.expectEqual(@as(?Terminal.Read, null), try terminal.next(io, &input, 0));
                 clock.at += 1;
-                try std.testing.expectError(error.InputDeadline, terminal.next(io, pending, 0));
+                try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
             } else {
-                try std.testing.expectError(error.InputDeadline, terminal.next(io, pending, 0));
+                try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
+                if (pending == .escape) try std.testing.expect(try input.expire()) else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
                 // Expiry did not consume ready input. It remains for the next
-                // nonpending read, not swallowed as part of a rejected prefix.
-                try std.testing.expectEqual(@as(?u8, 'X'), try terminal.next(io, .none, 0));
+                // read, not swallowed as part of an expired prefix. (Incomplete
+                // expiry ends the caller; read as its successor would.)
+                const idle: Input = .{};
+                try std.testing.expectEqual(more, (try terminal.next(io, if (pending == .escape) &input else &idle, 0)).?.byte);
             }
         }
     }
     // Use the actual reader's deadline before feeding the next byte. Queued
     // CR/LF joins ESC only before expiry; expiry leaves it for ordinary Enter.
     for ([_]u8{ '\r', '\n' }) |enter| for ([_]i96{ 0, 1, -1 }) |offset| {
-        inline for (.{ Route.events, Route.inline_editor }) |route| {
-            const deliver = if (route == .inline_editor) inlineFeed else feed;
-            var pipe: [2]c_int = undefined;
-            if (std.c.pipe(&pipe) != 0) return error.TestPipeFailed;
-            defer _ = std.c.close(pipe[0]);
-            defer _ = std.c.close(pipe[1]);
-            if (std.c.dup2(pipe[0], 0) != 0) return error.TestDupFailed;
-            var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
-            clock.at = 1_000_000_000;
-            var storage: [128]u8 = undefined;
-            @memcpy(storage[0..8], "headTAIL");
-            var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
-            var input: Input = .{};
-            var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
-            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "\x1b", 1));
-            const escape = (try terminal.next(io, .none, 0)).?;
-            deliver(&editor, &input, &.{escape}, &outcome);
-            try std.testing.expectEqual(Input.Pending.escape, input.pending());
-            try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{enter}, 1));
-            clock.at += 80_000_000 + offset;
-            if (offset >= 0) {
-                try std.testing.expectError(error.InputDeadline, terminal.next(io, input.pending(), 0));
-                try std.testing.expect(try input.expire());
-                try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
-                try std.testing.expectEqual(@as(usize, 4), editor.cursor);
-                try std.testing.expectEqual(@as(usize, 0), outcome.submits);
-            }
-            const byte = (try terminal.next(io, input.pending(), 0)).?;
-            try std.testing.expectEqual(enter, byte);
-            deliver(&editor, &input, &.{byte}, &outcome);
-            try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
-            try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
-            try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
-            try std.testing.expectEqual(if (offset < 0) Editor.Event.redraw else Editor.Event.submit, outcome.event);
-            try std.testing.expectEqual(Input.Pending.none, input.pending());
+        var pipe: [2]c_int = undefined;
+        if (std.c.pipe(&pipe) != 0) return error.TestPipeFailed;
+        defer _ = std.c.close(pipe[0]);
+        defer _ = std.c.close(pipe[1]);
+        if (std.c.dup2(pipe[0], 0) != 0) return error.TestDupFailed;
+        var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
+        clock.at = 1_000_000_000;
+        var storage: [128]u8 = undefined;
+        @memcpy(storage[0..8], "headTAIL");
+        var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
+        var input: Input = .{};
+        var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = null };
+        try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "\x1b", 1));
+        const escape = (try terminal.next(io, &input, 0)).?;
+        feedAt(&editor, &input, escape, &outcome);
+        try std.testing.expectEqual(Input.Pending.escape, input.pending());
+        try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{enter}, 1));
+        clock.at += 80_000_000 + offset;
+        if (offset >= 0) {
+            try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
+            try std.testing.expect(try input.expire());
+            try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
+            try std.testing.expectEqual(@as(usize, 4), editor.cursor);
+            try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         }
+        const read = (try terminal.next(io, &input, 0)).?;
+        try std.testing.expectEqual(enter, read.byte);
+        feedAt(&editor, &input, read, &outcome);
+        try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
+        try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
+        try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);
+        try std.testing.expectEqual(if (offset < 0) Editor.Event.redraw else Editor.Event.submit, outcome.event);
+        try std.testing.expectEqual(Input.Pending.none, input.pending());
     };
+}
+
+fn feedAt(editor: *Editor, input: *Input, read: @import("SessionTerminal.zig").Read, outcome: *Outcome) void {
+    var decoded = input.feed(read.byte, read.at);
+    while (decoded != .none) : (decoded = input.next()) {
+        const event = editor.apply(decoded);
+        if (event != .none) outcome.event = event;
+        if (event == .submit) outcome.submits += 1;
+    }
 }
