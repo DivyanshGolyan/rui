@@ -225,6 +225,42 @@ pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
     return .{ .byte = byte[0], .at = std.Io.Clock.awake.now(io).nanoseconds };
 }
 
+test "a byte readable only after the Escape deadline is not read into the Escape" {
+    // A real pipe on stdin and a real poll; only the clock is scripted. The
+    // first reading is 1 ms short of the deadline, every later one past it,
+    // as when poll rounds up or the scheduler runs late.
+    const Clock = struct {
+        var calls: usize = 0;
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            calls += 1;
+            return .{ .nanoseconds = if (calls == 1) 79 * std.time.ns_per_ms else 81 * std.time.ns_per_ms };
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    const saved = std.c.dup(0);
+    try std.testing.expect(saved >= 0);
+    defer {
+        _ = std.c.dup2(saved, 0);
+        _ = std.c.close(saved);
+    }
+    var pipe: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipe));
+    defer _ = std.c.close(pipe[1]);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.dup2(pipe[0], 0));
+    _ = std.c.close(pipe[0]);
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "x", 1));
+
+    var terminal: Self = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
+    var input: Input = .{};
+    try std.testing.expect(input.feed(0x1b, 0) == .none);
+    try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 10));
+    try std.testing.expect(try input.expire());
+    const read = (try terminal.next(io, &input, 10)).?;
+    try std.testing.expectEqual(@as(u8, 'x'), read.byte);
+}
+
 fn write(self: *Self, bytes: []const u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
