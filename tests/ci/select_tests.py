@@ -15,7 +15,7 @@ from strict_paths import strict
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
-            "src/ConversationViewport.zig", "src/Terminal*")
+            "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 
 # Paths sharing an owner select its maintained boundary checks. Unknown code
@@ -40,6 +40,8 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
+     "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
     (("src/Terminal*",), ("test-logic", "admission-debug-integration", *PTY_TARGETS),
      ("test-logic", "admission-debug-integration", *PTY_TARGETS), "Terminal values and native callers"),
     (("src/cli_args.zig", "src/json_ascii.zig"), ("test-logic",), ("test-logic",),
