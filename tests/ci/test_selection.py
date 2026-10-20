@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import execution_batches, select, setup_requirements
+from select_tests import CHECK_COVERS, execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -81,6 +81,33 @@ class SelectionTest(unittest.TestCase):
         result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
                         "review", AVAILABLE)
         self.assertNotIn("check", result["targets"] + result["native_targets"])
+
+    def test_renderer_diff_skips_check_before_landing_but_not_on_main_push(self):
+        for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
+                      ["src/ConversationViewport.zig"], ["src/session_sequence_model_test.zig"],
+                      ["src/request_encoding.zig"], ["README.md"]):
+            with self.subTest(paths=paths):
+                landing = select(paths, "review", AVAILABLE)
+                main = select(paths, "review", AVAILABLE, main_push=True)
+                for family in ("targets", "native_targets"):
+                    self.assertNotIn("check", landing[family])
+                    self.assertIn("check", main[family])
+                    # Only check is added; targets it does not cover stay as selected.
+                    self.assertEqual(set(main[family]) - {"check"},
+                                     set(landing[family]) - CHECK_COVERS)
+        # check-full already covers check on a main push.
+        main = select(["build.zig"], "review", AVAILABLE, main_push=True)
+        self.assertIn("check-full", main["targets"])
+        self.assertNotIn("check", main["targets"])
+        workflow = Path(".github/workflows/check.yml").read_text()
+        script = dedent(workflow.split("        run: |\n", 1)[1]).split("python3 tests/ci/select_tests.py", 1)[0]
+        for event, ref, expected in (("push", "main", True), ("push", "wip/land-9", False),
+                                     ("pull_request", "main", False)):
+            with self.subTest(event=event, ref=ref):
+                result = subprocess.run(["bash", "-c", script + 'echo "${fallback[@]}"'], capture_output=True,
+                                        text=True, check=True, env={**os.environ, "EVENT_NAME": event,
+                                                                    "REF_NAME": ref, "BASE": "HEAD"})
+                self.assertEqual("--main-push" in result.stdout.split(), expected)
 
     def test_strict_path_beside_frontend_keeps_check(self):
         # execution_turn.zig is strict but alone selects only its logic root.

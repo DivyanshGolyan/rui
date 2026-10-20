@@ -186,7 +186,7 @@ def execution_batches(targets, check_part="all"):
                else [target] for target in targets if target in isolated])
 
 
-def select(paths, phase, available):
+def select(paths, phase, available, main_push=False):
     targets, native_targets, reasons = set(), set(), set()
     manual_checks = set()
     linux_memory_checks = False
@@ -238,6 +238,11 @@ def select(paths, phase, available):
         targets.add("check")
         native_targets.add("check")
         reasons.add("Frontend change beside a strict path keeps check")
+    if main_push:
+        # Pre-landing tips may skip check; post-push main always runs it before stable advances.
+        targets.add("check")
+        native_targets.add("check")
+        reasons.add("Main push: Store-native check always runs")
     for checks in (targets, native_targets):
         if "check-full" in checks:
             checks.discard("check")
@@ -292,10 +297,11 @@ def main():
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--fallback-base", help="Push-only fallback ancestor when the before commit is unavailable")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
+    parser.add_argument("--main-push", action="store_true", help="Post-push main selection always includes check")
     args = parser.parse_args()
     available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
     paths, base = changed_paths(args.base, args.head, args.fallback_base)
-    result = select(paths, args.phase, available)
+    result = select(paths, args.phase, available, args.main_push)
     result["base"] = base
     result["head"] = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     print(json.dumps(result, indent=2))
