@@ -62,23 +62,41 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result[family], ["admission-debug-integration", "check", "test-full", "test-logic"])
         self.assertTrue(result["native_required"])
 
-    def test_frontend_policy_keeps_value_and_native_handoff_checks(self):
-        for path in ("src/SessionFrontend.zig", "src/SessionSubmission.zig",
-                     "src/session_consent.zig", "src/session_departure.zig"):
-            result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], ["admission-debug-integration", "check", "test-logic"])
-
-    def test_terminal_values_keep_logic_and_native_checks(self):
-        for path in ("src/ConversationViewport.zig", "src/TerminalFrame.zig",
-                     "src/TerminalInput.zig", "src/TerminalEditor.zig"):
+    def test_frontend_alone_selects_logic_and_pty_callers_not_check(self):
+        pty = ["canonical-failure-integration", "terminal-restoration-integration"]
+        for path, expected in (
+                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/ConversationViewport.zig", [*pty, "test-logic"]),
+                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/TerminalText.zig", ["admission-debug-integration", *pty])):
             with self.subTest(path=path):
-                result = select([path], "review", AVAILABLE)
+                result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
-                    self.assertIn("test-logic", result[family])
-                    self.assertIn("check", result[family])
-                    if path != "src/ConversationViewport.zig":
-                        self.assertIn("admission-debug-integration", result[family])
+                    self.assertEqual(result[family], expected)
+                self.assertTrue(setup_requirements(result["targets"])["terminal"])
+        result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
+                        "review", AVAILABLE)
+        self.assertNotIn("check", result["targets"] + result["native_targets"])
+
+    def test_strict_path_beside_frontend_keeps_check(self):
+        # execution_turn.zig is strict but alone selects only its logic root.
+        self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["test-logic"])
+        for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
+                            "tests/integration/bash_integration.py", "src/store_recovery.zig"):
+            for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
+                             "src/TerminalText.zig"):
+                with self.subTest(strict=strict_path, frontend=frontend):
+                    result = select([frontend, strict_path], "review", AVAILABLE)
+                    for family in ("targets", "native_targets"):
+                        self.assertIn("check", result[family])
+        for strict_path in ("build.zig", "install.sh"):
+            with self.subTest(strict=strict_path):
+                result = select(["src/SessionTerminal.zig", strict_path], "review", AVAILABLE)
+                self.assertIn("check-full", result["targets"])
+        result = select(["src/SessionFrontend.zig", "src/provider.zig"], "review", AVAILABLE)
+        self.assertNotIn("check", result["targets"])
 
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",

@@ -7,6 +7,16 @@ from pathlib import Path
 import re
 import subprocess
 
+from strict_paths import strict
+
+
+# Renderer, terminal and frontend owners select their logic root and PTY
+# callers, not the Store-native check, unless the change has a strict path.
+FRONTEND = ("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
+            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
+            "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
+            "src/ConversationViewport.zig", "src/Terminal*")
+PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
@@ -24,19 +34,21 @@ RULES = (
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
       "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig"),
-     ("test-logic", "check", "admission-debug-integration"),
-     ("test-logic", "check", "admission-debug-integration"),
+     ("test-logic", "admission-debug-integration", *PTY_TARGETS),
+     ("test-logic", "admission-debug-integration", *PTY_TARGETS),
      "Frontend value decisions and native terminal/borrower handoffs"),
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
-     ("test-logic", "check"), ("test-logic", "check"),
+     ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/Terminal*",), ("admission-debug-integration", *PTY_TARGETS),
+     ("admission-debug-integration", *PTY_TARGETS), "Native terminal callers"),
     (("src/cli_args.zig", "src/json_ascii.zig"), ("test-logic",), ("test-logic",),
      "Portable CLI grammar, validation and terminal-safe JSON; native callers follow below"),
-    (("src/cli.zig", "src/cli_args.zig", "src/json_ascii.zig", "src/client.zig", "src/ResponseTiming.zig", "src/Terminal*", "src/preferences.zig", "src/provider_selection.zig",
+    (("src/cli.zig", "src/cli_args.zig", "src/json_ascii.zig", "src/client.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/provider_selection.zig",
       "src/new_session_selection.zig", "src/preference_values.zig", "src/product_defaults.zig",
       "tests/integration/product_defaults.py"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
-     "CLI selection and otherwise unnamed native terminal/caller checks"),
+     "CLI selection and otherwise unnamed native caller checks"),
     (("src/store.zig",), ("check", "dispatch-debug-integration"), ("test", "dispatch-debug-integration"),
      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"),
     (("tests/integration/peer_integration.py",), ("check",), ("check",),
@@ -220,6 +232,10 @@ def select(paths, phase, available):
         if "evaluator_string" in path:
             targets.add("evaluator-string-sanitizer")
             native_targets.add("evaluator-string-sanitizer")
+    if strict(paths) and any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in FRONTEND):
+        targets.add("check")
+        native_targets.add("check")
+        reasons.add("Frontend change beside a strict path keeps check")
     for checks in (targets, native_targets):
         if "check-full" in checks:
             checks.discard("check")
