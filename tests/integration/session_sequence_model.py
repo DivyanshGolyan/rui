@@ -140,7 +140,9 @@ def execute(command, overlay, log, retention, cache):
         store, workspace = root / "store", root / "workspace"
         workspace.mkdir()
         release = threading.Event()
-        answer = "\n".join(f"ANSWER-{index:05d} " + "y" * 50 for index in range(3700))
+        # The queued Message shows collapsed, so the answer alone must outgrow
+        # the live view for eviction to cut its echo.
+        answer = "\n".join(f"ANSWER-{index:05d} " + "y" * 50 for index in range(4400))
         response = fixture.ResponseSpec(fixture.sse_answer("held", "reason", "message", answer)[0], {}, gate_timeout=600)
         endpoint = fixture.SuccessEndpoint([(response, release), fixture.sse_answer("next", "reason2", "message2", "TD1 DONE")[0]])
         thread = threading.Thread(target=endpoint.serve_forever)
@@ -203,12 +205,14 @@ def run(source, output, selector, cache):
     output.mkdir(parents=True, exist_ok=True)
     frontend = source / "src/SessionFrontend.zig"
     original = frontend.read_text()
-    drawing = unique_slice(original, "            const action_visible = self.actionVisible();",
-                           "            if (!approval_ready and self.approvalReady()) {")
+    # draw() writes one frame, then makes the post-write consent observation.
+    # The model drives the frame alone; its receipt event is that observation.
+    drawing = unique_slice(original, "    const projection = screen.select(self.commandActive(), self.choice_line);",
+                           "    if (!self.dirty and screen.decisionPromptDelivered()")
     bridge = "\nfn td1Draw(self: *Self) !void {\nconst screen = self.terminal.screen;\n" + drawing + "\n}\n"
-    receipts = re.findall(r"if \((self\.consent\.promptCompleted\(service, [^\n]+\))\) \{", original)
+    receipts = re.findall(r"if \((screen\.promptCompleted\(service, [^\n]+\))\) \{", original)
     assert len(receipts) == 1, "post-write consent adapter anchor changed"
-    bridge += "\nfn td1Receipt(self: *Self, service: ConsentPolicy.Service) bool { return " + receipts[0] + "; }\n"
+    bridge += "\nfn td1Receipt(self: *Self, service: ConsentPolicy.Service) bool {\n    const screen = self.terminal.screen;\n    return " + receipts[0] + ";\n}\n"
     for name in SELECTORS:
         bridge += f'''
 test "TD1 sequence model {name}" {{

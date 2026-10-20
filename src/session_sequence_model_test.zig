@@ -208,8 +208,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 const line = "UNREAD ACTION ROW\n";
                 for (0..100) |row| try fixture.action.writePositionalAll(std.testing.io, line, row * line.len);
             }
-            try fixture.screen.prepareAction(std.testing.io, fixture.action);
-            front.consent.adopt(913, if (seed == 2) .preview else .complete);
+            try fixture.screen.adopt(std.testing.io, fixture.action, 913);
+            // Seed 2 is an Action too large to approve here: export-only.
+            if (seed == 2) fixture.screen.consent.presentation = .preview;
             try ops.draw(front);
         }
         var index = sequence;
@@ -221,6 +222,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 printPrefix(Event, sequence, prefix + 1);
             }
             const choosing = choice_line or (alive and visible and seed != 2);
+            // Text typed while an Action is still unread stays in its line;
+            // it cannot decide, and reading the Action clears it.
+            const keeps = fresh or (unread and alive and visible);
             switch (event) {
                 .unicode => {
                     // Observe the incomplete UTF-8 prefix before completing it.
@@ -229,7 +233,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     try fixture.byte(0xa9);
                     if (!choosing) draft.insert("é") else {
                         choice_line = true;
-                        if (fresh) choice.insert("é");
+                        if (keeps) choice.insert("é");
                     }
                 },
                 .paste => {
@@ -246,7 +250,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 },
                 .left => {
                     try fixture.bytes("\x1b[D");
-                    if (!choosing) draft.left() else if (fresh) choice.left();
+                    if (!choosing) draft.left() else if (keeps) choice.left();
                 },
                 .enter => {
                     const send = !blocked and !alive and !decision and draft.len != 0 and submitted == 0;
@@ -277,7 +281,8 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     try ops.draw(front);
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
-                    if (alive and visible and seed != 2 and !blocked) fresh = true;
+                    // An Action taller than the view stays unread: no prompt.
+                    if (alive and visible and seed != 2 and !blocked and !unread) fresh = true;
                 },
                 .allow => {
                     try fixture.bytes("a\r");
@@ -309,7 +314,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             try std.testing.expectEqual(submitted, front.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
-            try std.testing.expectEqual(fresh, front.consent.acceptsInput());
+            try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
             try fixture.checkText(&draft, &choice, choice_line or (alive and visible and seed != 2));
         }
     };
@@ -544,8 +549,9 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     var reachable: [2]bool = undefined;
     var digests: [2][32]u8 = undefined;
     for (messages, 0..) |text, index| {
-        // A suffix is not a reachable Message: either every byte remains in
-        // the frozen transcript or its exact canonical User identity is older.
+        // A suffix is not a reachable Message: every byte remains in the
+        // frozen transcript, a collapsed block there names its exact identity,
+        // or its exact canonical User identity is older.
         reachable[index] = std.mem.indexOf(u8, front.terminal.screen.browsing.text(), text) != null;
         // Independently encode the public content identity domain, not raw
         // SHA-256 and not the production contentDigest implementation.
@@ -554,6 +560,15 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         hash.update("rui/content/v1");
         hash.update(text);
         hash.final(&digests[index]);
+    }
+    // A long Message shows collapsed: its block's Ctrl-O page reads exactly
+    // that identity, so the block reaches it.
+    const screen = front.terminal.screen;
+    for (0..screen.transcriptCollapsed()) |block| {
+        const shown = front.transcript_blocks.fromEnd(block) orelse continue;
+        for (messages, 0..) |text, index| {
+            if (shown.content.length == text.len and std.mem.eql(u8, &shown.content.digest, &digests[index])) reachable[index] = true;
+        }
     }
     var cursor = front.transcript_older;
     const requests: client.Requests = .{ .io = std.testing.io };
@@ -602,32 +617,36 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var fixture: Fixture(Frontend, ops) = undefined;
         try fixture.init();
         defer fixture.deinit();
-        try fixture.screen.prepareAction(std.testing.io, fixture.action);
-        fixture.front.consent.adopt(913, .complete);
+        try fixture.screen.adopt(std.testing.io, fixture.action, 913);
         if (mode == 2) {
             // Success is distinct from both failed invocations and still
             // requires a post-write empty-input observation.
             try ops.draw(fixture.front);
-            try std.testing.expect(fixture.screen.approvalReady());
-            try std.testing.expect(!fixture.front.consent.acceptsInput());
-            try std.testing.expect(fixture.front.consent.promptCompleted(try ops.step(fixture.front, 0), false, false));
-            try std.testing.expect(fixture.front.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.actionRead());
+            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            // Reading completed after that frame; the decision prompt is the
+            // next one, and only its delivery can open freshness.
+            try std.testing.expect(!fixture.screen.decisionPromptDelivered());
+            try ops.draw(fixture.front);
+            try std.testing.expect(!fixture.screen.consent.acceptsInput());
+            try std.testing.expect(fixture.screen.promptCompleted(try ops.step(fixture.front, 0), false, false));
+            try std.testing.expect(fixture.screen.consent.acceptsInput());
             continue;
         }
         const before = fixture.screen.action_seen;
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, "", "> ", &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, "", &.{}));
         } else {
             // Every frame byte is accepted before flush fails. Publishing
             // between writeAll and flush must fail this independent control.
             var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, "", "> ", &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, "", &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);
-        try std.testing.expect(!fixture.screen.approvalReady());
-        try std.testing.expect(!fixture.front.consent.acceptsInput());
+        try std.testing.expect(!fixture.screen.actionRead());
+        try std.testing.expect(!fixture.screen.consent.acceptsInput());
     }
 }

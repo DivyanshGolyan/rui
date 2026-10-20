@@ -4283,6 +4283,46 @@ def renderer_cases():
             proxy = None
         print("renderer: an evicted Message stays in the transcript, alone or with its reply", flush=True)
 
+        # Ctrl-O opens the lowest collapsed Message in view, live or in the
+        # transcript, with every line; Esc, Ctrl-G or Ctrl-O returns to the
+        # same rows.
+        session = "renderer/expand-message"
+        configure(session)
+        pasted = "".join(f"PASTE-{index:04d} " + "p" * 40 + "\n" for index in range(300)) + "PASTE-END"
+        # 15,609 bytes in 301 lines: two preview lines show, 299 are hidden.
+        assert len(pasted.encode()) == 15609
+        heading = "Message · 301 lines · 16 KB"
+        endpoint.responses.append(fixture.sse_answer("expand-answer", "reason", "message", "EXPAND-ANSWER")[0])
+        with terminal(session, rows=40) as tty:
+            tty.capture.resize(80, 40)
+            tty.send("\x1b[200~" + pasted + "\x1b[201~\r", "EXPAND-ANSWER")
+            shown = tty.capture.completed
+            assert "PASTE-0001" in shown and "PASTE-0002" not in shown and "┄ 299 more lines · 16 KB" in shown, shown
+            for return_key in ("\x1b", "\x07", "\x0f"):
+                before = tty.capture.completed
+                tty.send("\x0f", heading)
+                page = tty.capture.completed
+                assert "PASTE-0000" in page and "PASTE-END" not in page, page
+                end = tty.send("\x1b[6~" * 20, "PASTE-END")
+                assert "PASTE-END" in end and "PASTE-0299" in end, end
+                tty.send(return_key, predicate=lambda: "Message ·" not in tty.capture.completed)
+                assert tty.capture.completed == before, (return_key, before, tty.capture.completed)
+            # In the transcript the same block opens and returns to its rows.
+            tty.send("\x1b[A", "Browsing · Esc returns")
+            browsing = tty.capture.completed
+            tty.send("\x0f", heading)
+            tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
+            assert tty.capture.completed == browsing, (browsing, tty.capture.completed)
+            tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+            # With no collapsed block in view, Ctrl-O says so and opens nothing.
+            endpoint.responses.append(fixture.sse_answer("expand-filler", "reason", "message", "\n".join(f"FILLER-{index:02d}" for index in range(60)))[0])
+            tty.send("SHORT\r", "FILLER-59")
+            tty.send("\x0f", "No collapsed message in view")
+            assert "Message ·" not in tty.capture.completed
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows", flush=True)
+
         def traverse(tty, steps=10):
             tty.send("\x1b[A", "Browsing · Esc returns")
             # Each step loads one older page or one listed Message.
