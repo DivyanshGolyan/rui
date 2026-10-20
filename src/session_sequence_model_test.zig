@@ -335,7 +335,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         var older: ?client.ConversationCursor = null;
         // Seed a real retained boundary. History is launched only from the
         // transcript, including A -> launch -> new B -> delayed completion.
-        front.job.result.boundary = .{ .output = 0, .cursor = first_cursor };
+        front.job.result.boundaries.add(.{ .output = 0, .cursor = first_cursor, .admitted = first_cursor.before_position });
         try ops.showStaged(front);
         if (seed % 2 == 1) {
             try ops.beginTranscript(front);
