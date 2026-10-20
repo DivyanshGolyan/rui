@@ -71,12 +71,13 @@ class SelectionTest(unittest.TestCase):
                 ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ConversationViewport.zig", [*pty, "test-logic"]),
                 ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
-                ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"])):
+                ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/session_sequence_model_test.zig", ["test-logic"])):
             with self.subTest(path=path):
                 result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertEqual(result[family], expected)
-                self.assertTrue(setup_requirements(result["targets"])["terminal"])
+                self.assertEqual(setup_requirements(result["targets"])["terminal"], bool(set(pty) & set(expected)))
         result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
                         "review", AVAILABLE)
         self.assertNotIn("check", result["targets"] + result["native_targets"])
@@ -87,7 +88,8 @@ class SelectionTest(unittest.TestCase):
         for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
                             "tests/integration/bash_integration.py", "src/store_recovery.zig"):
             for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
-                             "src/TerminalText.zig", "src/AnswerRenderer.zig"):
+                             "src/TerminalText.zig", "src/AnswerRenderer.zig",
+                             "src/session_sequence_model_test.zig"):
                 with self.subTest(strict=strict_path, frontend=frontend):
                     result = select([frontend, strict_path], "review", AVAILABLE)
                     for family in ("targets", "native_targets"):
