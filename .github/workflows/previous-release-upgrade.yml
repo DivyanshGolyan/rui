@@ -60,18 +60,12 @@ jobs:
         env:
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: zig build host-launch-integration -j2 --summary all
-      - name: Read the pinned previous release
-        id: previous
-        # Prior known serving build, not inferred Store-creation provenance.
-        # Cache maintenance publishes its build under the same pin.
-        run: |
-          sha=$(cat .github/previous-release)
-          [[ $sha =~ ^[0-9a-f]{40}$ ]]
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the previous known installed build
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ steps.previous.outputs.sha }}
+          # Prior known serving build, not inferred Store-creation provenance.
+          # Cache maintenance publishes its build under the same pinned SHA.
+          ref: 0e4b2225d106dd63fa9c38801188facb5e9c6335
           path: .amp/previous-release
           persist-credentials: false
       - run: mv .amp/previous-release "$RUNNER_TEMP/previous-release"
@@ -81,7 +75,7 @@ jobs:
           path: |
             ${{ runner.temp }}/previous-release/.zig-cache
             ${{ runner.temp }}/previous-release/zig-pkg
-          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.previous.outputs.sha }}
+          key: rui-previous-release-${{ runner.os }}-${{ runner.arch }}-0.17.0-0e4b2225d106dd63fa9c38801188facb5e9c6335
       - name: Install, save real work, reinstall and restart the same Store
         run: |
           set -euo pipefail
