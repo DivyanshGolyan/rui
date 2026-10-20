@@ -318,14 +318,7 @@ class _Observations:
             destination = getattr(self.process, "rui_failure_destination", None)
             if destination is None:
                 destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
-            # Same existing job-wide helper/caps, while root still exists.
-            ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
-            sys.path.insert(0, ci)
-            try:
-                from run_selected import retain_failure_logs
-                retain_failure_logs([root], destination)
-            finally:
-                sys.path.remove(ci)
+            copy_failure_diagnostics(root, destination)  # While root still exists.
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
         except Exception as error:
             try:
@@ -354,6 +347,68 @@ def preserve_failure_metadata(path, collect):
         except Exception:
             pass
         return False  # Evidence is unavailable, not grounds to skip mandatory cleanup.
+
+
+MAX_RETAINED_ROOTS = 16
+MAX_RETAINED_FILES = 128
+MAX_RETAINED_FILE_BYTES = 1024 * 1024
+MAX_RETAINED_BYTES = 16 * 1024 * 1024
+_PRIVATE_WORDS = ("store", "home", "credential", "auth", "scratch", "request", "provider")
+
+
+def copy_failure_diagnostics(state, destination):
+    """Copy one fixture root's labelled diagnostics; never open or query a Store.
+
+    Only probe.log, pty-failure.json and observation-failure-N.json, never
+    SQLite, HOME, credentials, request records, provider capture or scratch.
+    Symlinks and special files are not followed. Oversized files are omitted
+    whole, not truncated. Each call copies into its own directory under
+    destination, so concurrent fixtures never share or replace one.
+    """
+    state = pathlib.Path(state)
+    if state.is_symlink() or not state.is_dir() or len(os.listdir(destination)) >= MAX_RETAINED_ROOTS:
+        return
+    target, files, remaining = None, 0, MAX_RETAINED_BYTES
+    for directory, children, names in os.walk(state, followlinks=False):
+        children[:] = sorted(name for name in children if not (
+            name.startswith(".") or any(word in name.lower() for word in _PRIVATE_WORDS)
+            or (pathlib.Path(directory) / name).is_symlink()))
+        for name in sorted(names):
+            numbered = name.removeprefix("observation-failure-").removesuffix(".json")
+            if name not in ("probe.log", "pty-failure.json") and not (
+                    name != numbered and numbered.isdigit() and not numbered.startswith("0")):
+                continue
+            if files >= MAX_RETAINED_FILES:
+                return
+            source = pathlib.Path(directory) / name
+            limit = min(MAX_RETAINED_FILE_BYTES, remaining)
+            try:
+                with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                        continue
+                    data = stream.read(limit + 1)
+            except OSError as error:
+                print(f"Failure diagnostic copy unavailable: {error}", file=sys.stderr, flush=True)
+                continue
+            if len(data) > limit:
+                continue
+            if target is None:
+                target = pathlib.Path(tempfile.mkdtemp(prefix=state.name + "-", dir=destination))
+            output = target / source.relative_to(state)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(data)
+            remaining -= len(data)
+            files += 1
+
+
+def retain_failure_state(label, state):
+    """Report a retained fixture root; in CI also copy its labelled diagnostics."""
+    print(f"retained {label}: {state}", file=sys.stderr, flush=True)
+    if os.environ.get("RUI_FAILURE_ARTIFACTS"):
+        try:
+            copy_failure_diagnostics(state, _failure_destination(os.environ["RUI_FAILURE_ARTIFACTS"]))
+        except OSError as error:
+            print(f"Failure diagnostic retention unavailable: {error}", file=sys.stderr, flush=True)
 
 
 def canonical_fixture_root(path):

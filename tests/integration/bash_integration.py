@@ -16,7 +16,7 @@ import time
 from collections import Counter
 
 import model_fixture as fixture
-from host_process import HostDiagnostics, ReleaseGate
+from host_process import HostDiagnostics, ReleaseGate, retain_failure_state
 
 
 def assert_cleanup_population(diagnostics, *, actions, models, model_releases, inspection_limit):
@@ -873,7 +873,7 @@ def walkthrough():
             shutil.rmtree(state)
             show_observation("owned Host, provider, Store, Workspace, and caller records cleaned up")
         else:
-            print(f"retained Bash walkthrough failure state: {state}", file=sys.stderr)
+            retain_failure_state("Bash walkthrough failure state", state)
 
 
 def main():
@@ -2106,7 +2106,7 @@ def main():
             shutil.rmtree(state)
         else:
             try:
-                print(f"retained Bash integration failure state: {state}", file=sys.stderr)
+                retain_failure_state("Bash integration failure state", state)
             except Exception:
                 pass  # Reporting cannot replace the original failure.
         if cleanup_errors:

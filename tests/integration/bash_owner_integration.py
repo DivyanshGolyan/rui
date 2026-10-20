@@ -9,7 +9,7 @@ import threading
 import bash_integration as bash_fixture
 import model_fixture as fixture
 from control_integration import raw_request
-from host_process import canonical_fixture_root, dispose_all, start_ready_process
+from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process
 
 
 def dispose_owner_case(host, endpoint, thread):
@@ -388,7 +388,7 @@ def main():
     finally:
         dispose_all(
             lambda: dispose_owner_case(host, endpoint, endpoint_thread),
-            lambda: shutil.rmtree(root) if completed else print(f"retained Bash owner failure state: {root}"),
+            lambda: shutil.rmtree(root) if completed else retain_failure_state("Bash owner failure state", root),
         )
 
 

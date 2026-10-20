@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, start_ready_process, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, TestHTTPServer, canonical_fixture_root, is_peer_disconnect, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process, wait_for_execution_release
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -2040,7 +2040,7 @@ def main():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained control integration failure state: {state}", file=sys.stderr)
+            retain_failure_state("control integration failure state", state)
 
 
 if __name__ == "__main__":
