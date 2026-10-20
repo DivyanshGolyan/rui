@@ -19,23 +19,26 @@ import model_fixture as fixture
 from host_process import HostDiagnostics, ReleaseGate
 
 
-def assert_cleanup_population(diagnostics, *, actions, models, model_releases, inspection_limit):
+def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
     # Reap/drain validates final native loss and sequence first. Endpoints cannot
     # be supplied by this census after their original waits have expired.
     def owners(phase):
         return Counter((r.get("turn"), r.get("operation"), r.get("attempt"), r.get("action"))
                        for r in diagnostics.matching(phase))
 
+    # Only Bash delivery closure starts delayed, gated cleanup; a model
+    # Attempt releases custody when it completes.
     started = owners("cleanup_started")
     assert all(count == 1 for count in started.values()), started
-    assert len(started) == len(actions) + models, started
-    assert Counter(owner[3] for owner in started if owner[3] is not None) == Counter(map(str, actions)), started
-    assert owners("cleanup_completed") == started, diagnostics.records
-    releases = started if model_releases else Counter({owner: count for owner, count in started.items() if owner[3] is not None})
-    assert owners("cleanup_release_observed") == releases, diagnostics.records
+    assert Counter(owner[3] for owner in started) == Counter(map(str, actions)), started
+    completed = owners("cleanup_completed")
+    assert all(count == 1 for count in completed.values()), completed
+    assert Counter({owner: count for owner, count in completed.items() if owner[3] is not None}) == started, diagnostics.records
+    assert sum(1 for owner in completed if owner[3] is None) == models, completed
+    assert owners("cleanup_release_observed") == started, diagnostics.records
     inspections = diagnostics.matching("inspection_captured")
     assert len(inspections) <= inspection_limit, inspections
-    assert len(diagnostics.records) == sum(started.values()) * 2 + sum(releases.values()) + len(inspections), diagnostics.records
+    assert len(diagnostics.records) == sum(started.values()) * 2 + sum(completed.values()) + len(inspections), diagnostics.records
 
 
 def detached_shell(command):
@@ -216,7 +219,6 @@ def prove_reused_session(state):
     workspace.mkdir()
     cleanup_gate = workspace / "cleanup-gate"
     cleanup_gate.write_text("blocked")
-    model_cleanup_gate = workspace / "model-cleanup-gate"
     retry_wait_ms = 500
     slow_release = workspace / "slow-release"
     settlement_order = workspace / "settlement-order"
@@ -277,8 +279,6 @@ def prove_reused_session(state):
             f"{retry_wait_ms},{retry_wait_ms},{retry_wait_ms}",
             "--test-bash-cleanup-gate-path",
             cleanup_gate,
-            "--test-model-cleanup-gate-path",
-            model_cleanup_gate,
             "--test-phase-trace",
             accelerated_retries=False,
             active_capacity=5,
@@ -460,47 +460,20 @@ def prove_reused_session(state):
         second_live_custody = int(second_live["custody_occupied"])
         assert second_live_custody >= 2, second_live
         second_processing = fixture.observe(store, "reuse-second")["processing"]
-        model_cleanup_gate.write_text("blocked")
+        assert second_processing["turn"] != first_processing["turn"], second_processing
         retry_failure_release.set()
+        # The failed Attempt releases its own custody at settlement, while
+        # delayed Bash cleanup still holds the earlier Actions' custody.
         milestones.wait(
-            "cleanup_started",
-            operation=str(second_processing["operation"]),
-        )
-        time.sleep(retry_wait_ms / 1000 + 0.25)
-        retry_wait = fixture.observe(store, "reuse-second")
-        retry_execution = fixture.command(
-            "session", "inspect", "--store", store, "--session", "direct/reuse"
-        )["execution"]
-        assert retry_wait["processing"] == second_processing, retry_wait
-        assert retry_wait["processing"]["attempt"] == "1", retry_wait
-        assert "result" not in retry_wait, retry_wait
-        assert len(endpoint.requests) == 3, endpoint.requests
-        assert int(retry_execution["custody_occupied"]) >= len(actions_by_ordinal) + 1
-        assert int(retry_execution["scratch_used_bytes"]) > 0
-        assert retry_execution["dispatch_fenced"] is False, retry_execution
-        assert second_processing["turn"] != first_processing["turn"], retry_wait
-        assert milestones.matching(
             "cleanup_completed",
             operation=str(second_processing["operation"]),
             attempt="1",
-        ) == [], milestones.records
+        )
         for action in actions_by_ordinal.values():
             assert milestones.matching(
                 "cleanup_completed",
                 action=str(action["action"]),
             ) == [], milestones.records
-        model_cleanup_gate.unlink()
-        model_release = milestones.wait(
-            "cleanup_release_observed",
-            operation=str(second_processing["operation"]),
-            attempt="1",
-        )[0]
-        model_completion = milestones.wait(
-            "cleanup_completed",
-            operation=str(second_processing["operation"]),
-            attempt="1",
-        )[0]
-        assert int(model_release["at_ns"]) <= int(model_completion["at_ns"])
         fixture.wait_for(
             lambda: fixture.completed_observation(store, "reuse-second"),
             "second reused-Session Turn",
@@ -606,7 +579,6 @@ def prove_reused_session(state):
         retry_failure_release.set()
         slow_release.touch(exist_ok=True)
         cleanup_gate.unlink(missing_ok=True)
-        model_cleanup_gate.unlink(missing_ok=True)
         if host is not None and reuse_submitted:
             try:
                 fixture.wait_for(
@@ -624,7 +596,7 @@ def prove_reused_session(state):
         endpoint_thread.join(timeout=5)
         if host is not None and active_failure is None:
             assert_cleanup_population(milestones, actions=[a["action"] for a in actions_by_ordinal.values()],
-                                      models=4, model_releases=True,
+                                      models=4,
                                       inspection_limit=3 * 321 + 601 + 201 + 6)
 
 
@@ -1262,7 +1234,7 @@ def main():
         fixture.stop_host(host)
         host = None
         assert_cleanup_population(success_milestones, actions=[success_action["action"]],
-                                  models=2, model_releases=False, inspection_limit=321 + 2)
+                                  models=2, inspection_limit=321 + 2)
         success_milestones = None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
         configure(state, store, "rollback-config", "direct/rollback")
@@ -1275,7 +1247,9 @@ def main():
         fixture.stop_host(host)
         host = fixture.start_host(store, endpoint_url, "--fault", "attempt-before-commit")
         allow(state, store, "rollback-allow", "direct/rollback", rollback_action["action"])
-        time.sleep(0.2)
+        # The failed Attempt commit rolls back and fences; the Host exits.
+        host.wait(timeout=10)
+        assert host.returncode != 0, host.returncode
         assert not rollback_marker.exists()
         fixture.stop_host(host)
         assert rows(
@@ -1963,11 +1937,13 @@ def main():
             fixture.stop_host(host)
             host = None
 
+        post_resolution_gate = state / "post-resolution-cleanup-gate"
+        post_resolution_gate.write_text("blocked")
         host = fixture.start_host(
             store,
             endpoint_url,
-            "--test-cleanup-delay-ms",
-            "1000",
+            "--test-bash-cleanup-gate-path",
+            post_resolution_gate,
         )
         configure(state, store, "post-resolution-config", "direct/post-resolution", "bypass")
         fixture.message(state, store, "post-resolution-message", "direct/post-resolution", "execute")
@@ -1975,10 +1951,13 @@ def main():
             lambda: resolution(store, "direct/post-resolution") == "succeeded",
             "post-Resolution Bash result",
         )
-        delayed = fixture.command(
-            "session", "inspect", "--store", store, "--session", "direct/post-resolution"
+        fixture.wait_for(
+            lambda: fixture.command(
+                "session", "inspect", "--store", store, "--session", "direct/post-resolution"
+            )["execution"]["custody_occupied"]
+            == "1",
+            "post-Resolution held Bash cleanup",
         )
-        assert delayed["execution"]["custody_occupied"] == "1", delayed
         fixture.command(
             "session", "stop",
             "--store",
@@ -1990,6 +1969,8 @@ def main():
             "--session",
             "direct/post-resolution",
         )
+        assert resolution(store, "direct/post-resolution") == "succeeded"
+        post_resolution_gate.unlink()
         fixture.wait_for(
             lambda: fixture.command(
                 "session", "inspect", "--store", store, "--session", "direct/post-resolution"
