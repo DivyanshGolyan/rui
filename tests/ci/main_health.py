@@ -12,10 +12,9 @@ import os
 import subprocess
 import time
 
+from select_tests import changed_paths
 from strict_paths import strict
 
-# Post-push workflows whose results decide main's health.
-WORKFLOWS = ("check.yml", "previous-release-upgrade.yml")
 UPGRADE = "previous-release-upgrade.yml"
 FREEZE = "landing-freeze"
 # GITHUB_TOKEN pushes start no workflows, so its pushes dispatch main's CI.
@@ -30,31 +29,58 @@ def gh(*args):
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
 
 
-def post_push_runs():
-    """Recent pushed or dispatched runs of each post-push workflow on main."""
+def changed(base, sha):
+    # NUL-delimited, so Git never quotes a strict path out of recognition.
+    return changed_paths(base, sha)[0]
+
+
+def latest(workflow, sha, branch):
+    """The newest run of workflow on this exact commit and branch; reruns keep the run."""
     repository = os.environ["GITHUB_REPOSITORY"]
-    return {workflow: [row for event in EVENTS for row in json.loads(gh(
+    rows = [row for event in EVENTS for row in json.loads(gh(
         "api", f"repos/{repository}/actions/workflows/{workflow}/runs"
-               f"?event={event}&branch=main&per_page=100"))["workflow_runs"]
-        if row["head_branch"] == "main" and row["head_repository"]["full_name"] == repository]
-        for workflow in WORKFLOWS}
+               f"?head_sha={sha}&branch={branch}&event={event}&per_page=100"))["workflow_runs"]]
+    rows = [row for row in rows if row["head_sha"] == sha and row["head_branch"] == branch
+            and row["head_repository"]["full_name"] == repository]
+    return max(rows, key=lambda row: row["id"], default=None)
 
 
-def runs(rows, sha, commits):
-    """Selected for this commit; the upgrade check's newest run since stable.
+def pushes(stable, head):
+    """{after: before} for every push that moved main within stable..head.
 
-    A push that misses the upgrade path filter has no upgrade run of its own,
-    so an earlier strict commit's run since stable still decides.
+    Push boundaries come from GitHub's ref activity, never from which commits
+    happen to have runs: a push whose post-push CI is missing must hold stable,
+    not pass as an inner commit of a later push. head is always a boundary.
     """
-    result = {}
-    for workflow, candidates in (("check.yml", [sha]), (UPGRADE, commits)):
-        for commit in candidates:
-            matching = [row for row in rows[workflow] if row["head_sha"] == commit]
-            if matching:
-                # Reruns keep the run; its latest attempt is the result.
-                result[workflow] = max(matching, key=lambda row: row["id"])
-                break
+    repository = os.environ["GITHUB_REPOSITORY"]
+    commits = set(git("rev-list", f"{stable}..{head}").split()) if stable else {head}
+    activity = [row for page in json.loads(gh("api", "--paginate", "--slurp",
+                                              f"repos/{repository}/activity?ref=refs/heads/main&per_page=100"))
+                for row in page]
+    result = {row["after"]: row["before"] for row in reversed(activity) if row["after"] in commits}
+    result.setdefault(head, stable or f"{head}~1")
     return result
+
+
+def required(before, sha):
+    """Post-push workflows one push needs, as its push triggers would start them."""
+    return ["check.yml", *([UPGRADE] if strict(changed(before, sha)) else [])]
+
+
+def runs(sha, earlier):
+    """Selected for this exact push; the upgrade run of the newest strict push.
+
+    earlier lists (push, before) since stable, newest first, ending with sha.
+    A push that misses the upgrade path filter has no upgrade run of its own,
+    so the newest strict push's run (or a later push's) decides; an older
+    strict push's run does not cover a newer strict change.
+    """
+    result = {"check.yml": latest("check.yml", sha, "main")}
+    for push, before in earlier:
+        result[UPGRADE] = latest(UPGRADE, push, "main")
+        if result[UPGRADE] or UPGRADE in required(before, push):
+            break
+    return {workflow: run for workflow, run in result.items() if run}
 
 
 def open_issue(title):
@@ -87,20 +113,16 @@ def report(title, body, label=None):
               *(["--label", label] if label else [])).strip()
 
 
-def dispatch(sha, before):
-    """Start main's post-push CI for a GITHUB_TOKEN push of before..sha.
+def dispatch(sha, before, workflows):
+    """Start main's post-push workflows for a GITHUB_TOKEN push of before..sha.
 
-    Selected diffs from before like a push; the upgrade check runs on strict
-    paths only, like its push filter. A dispatch runs on main's head, so if
-    main moved first the run is kept but sha has no exact post-push run, and
-    this fails instead of claiming one.
+    Selected diffs from before like a push. A dispatch runs on main's head, so
+    if main moved first the run is kept but sha has no exact post-push run,
+    and this fails instead of claiming one.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
-    changed = git("diff", "--no-renames", "--name-only", before, sha).splitlines()
     moved = []
-    for workflow in WORKFLOWS:
-        if workflow == UPGRADE and not strict(changed):
-            continue
+    for workflow in workflows:
         base = ["-f", f"inputs[base]={before}"] if workflow == "check.yml" else []
         for attempt in range(3):
             try:
@@ -109,8 +131,8 @@ def dispatch(sha, before):
                 break
             except subprocess.CalledProcessError as error:
                 if attempt == 2:
-                    raise SystemExit(f"main {sha} landed, but dispatching {workflow} failed; dispatch it on main "
-                                     f"by hand or stable cannot advance:\n{error.stderr}") from error
+                    raise SystemExit(f"main {sha} landed, but dispatching {workflow} failed; the next auto-land "
+                                     f"run dispatches it while main is still {sha}:\n{error.stderr}") from error
                 time.sleep(10)
         head = json.loads(gh("api", f"repos/{repository}/actions/runs/{run['workflow_run_id']}"))["head_sha"]
         print(f"Dispatched {workflow} on main {head}: {run['html_url']}")
@@ -119,7 +141,7 @@ def dispatch(sha, before):
     if moved:
         raise SystemExit(f"main {sha} landed, but main moved before its post-push CI was dispatched, so {sha} "
                          f"has no exact post-push run:\n" + "\n".join(moved) + "\nThose runs stay; they are not "
-                         f"{sha}'s. Inspect what moved main; revert {sha} by hand if it must not stay unqualified.")
+                         f"{sha}'s. stable holds before {sha}; main health files an issue for a user decision.")
 
 
 def decide(results, changed):
@@ -151,27 +173,43 @@ def main():
     stable = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "origin/stable"],
                             capture_output=True, text=True).stdout.strip() or None
     head = git("rev-parse", "origin/main")
-    rows = post_push_runs()
-    tested = {row["head_sha"] for row in rows["check.yml"]}
+    boundaries = pushes(stable, head)
     # GitHub drops a pending run when a newer one queues in this concurrency
     # group, so every run decides each main push since stable, oldest first,
     # and never relies on its own triggering event.
-    for sha in git("rev-list", "--reverse", f"{stable}..{head}").split() if stable else [head]:
-        if sha != head and sha not in tested:
-            continue  # An inner commit of one push; the push's tip decides it.
-        if (verdict := decide_push(rows, stable, sha)) == "pending":
-            # stable never passes a push whose post-push CI is still running.
+    order = [sha for sha in git("rev-list", "--reverse", f"{stable}..{head}").split()
+             if sha in boundaries] if stable else [head]
+    start = 0
+    for index, sha in enumerate(order):
+        earlier = [(push, boundaries[push]) for push in reversed(order[start:index + 1])]
+        if (verdict := decide_push(stable, sha, earlier)) == "pending":
+            # stable never passes a push without its own finished post-push CI.
+            if index + 1 < len(order) and any(latest(workflow, sha, "main") is None
+                                              for workflow in required(boundaries[sha], sha)):
+                stranded(sha, order[index + 1:])
             return
         if verdict == "green":
-            stable = sha
+            stable, start = sha, index + 1
 
 
-def decide_push(rows, stable, sha):
+def stranded(sha, later):
+    """Report a push whose exact post-push CI can no longer start.
+
+    A dispatch runs on main's head, so once a later push exists nothing can
+    start sha's own runs; stable stays held for a user decision.
+    """
+    title = f"Main push {sha[:12]} has no post-push CI"
+    if not filed(title):
+        report(title, f"main {sha} was followed by {', '.join(push[:12] for push in later)} before its own "
+                      "post-push CI started, so no exact run can exist and stable stays before it. "
+                      "Decide by hand whether to revert it; agents never move stable.")
+
+
+def decide_push(stable, sha, earlier):
     # Everything since the last green commit is suspect, not only this push.
     base = stable or f"{sha}~1"
-    changed = git("diff", "--no-renames", "--name-only", base, sha).splitlines()
-    results = runs(rows, sha, git("rev-list", f"{base}..{sha}").split())
-    verdict = decide(results, changed)
+    results = runs(sha, earlier)
+    verdict = decide(results, changed(base, sha))
     links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
                       for name, run in sorted(results.items()))
     print(f"{sha}: {verdict}\n{links}")
@@ -197,7 +235,8 @@ def decide_push(rows, stable, sha):
             outcome = f"Reverted {base[:12]}..{sha[:12]} with a non-force commit {git('rev-parse', 'HEAD')}."
             try:
                 # The revert push, like the auto-lander's, starts no workflows itself.
-                dispatch(git("rev-parse", "HEAD"), before)
+                reverted = git("rev-parse", "HEAD")
+                dispatch(reverted, before, required(before, reverted))
             except (SystemExit, subprocess.CalledProcessError) as error:
                 outcome += f"\n\nDispatching main's post-push CI failed; dispatch it by hand.\n\n{error}"
         except subprocess.CalledProcessError as error:

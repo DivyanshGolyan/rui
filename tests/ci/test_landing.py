@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -86,8 +89,9 @@ class LandingTest(unittest.TestCase):
 
     def test_post_push_dispatch_requires_the_exact_pushed_sha(self):
         pushed, before, newer = 'a' * 40, 'b' * 40, 'c' * 40
+        both = ['check.yml', 'previous-release-upgrade.yml']
 
-        def run_dispatch(head, changed):
+        def run_dispatch(head):
             calls = []
 
             def gh(*args):
@@ -96,22 +100,66 @@ class LandingTest(unittest.TestCase):
                     return '{"workflow_run_id": 7, "html_url": "https://example/run/7"}'
                 return json.dumps({'head_sha': head})
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
-                    mock.patch.object(main_health, 'gh', gh), \
-                    mock.patch.object(main_health, 'git', lambda *args: changed), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                main_health.dispatch(pushed, before)
+                    mock.patch.object(main_health, 'gh', gh), contextlib.redirect_stdout(io.StringIO()):
+                main_health.dispatch(pushed, before, both)
             return [call[3].rsplit('/', 2)[1] for call in calls if 'POST' in call], calls
 
-        workflows, calls = run_dispatch(pushed, 'src/cli.zig')
-        self.assertEqual(workflows, ['check.yml'])
+        workflows, calls = run_dispatch(pushed)
+        self.assertEqual(workflows, both)
         self.assertIn(f'inputs[base]={before}', calls[0])
-        self.assertEqual(run_dispatch(pushed, 'src/store.zig')[0], ['check.yml', 'previous-release-upgrade.yml'])
         # A run GitHub started on a newer main is not the pushed commit's post-push run.
         with self.assertRaises(SystemExit) as failure:
-            run_dispatch(newer, 'src/store.zig')
+            run_dispatch(newer)
         self.assertIn(pushed, str(failure.exception))
         self.assertIn(f'check.yml ran on {newer}', str(failure.exception))
         self.assertIn(f'previous-release-upgrade.yml ran on {newer}', str(failure.exception))
+
+    def test_landing_and_post_push_follow_actual_pushes_and_paths(self):
+        with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
+            def git(*args):
+                return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def commit(path):
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(path)
+                git('add', '-A')
+                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', path)
+                return git('rev-parse', 'HEAD')
+            git('init', '-q', '--bare', '-b', 'main', 'remote.git')
+            git('clone', '-q', 'remote.git', 'work')
+            os.chdir('work')
+            stable = commit('README.md')
+            # Git quotes non-ASCII names by default; a strict path must stay strict.
+            store = commit('src/store_é.zig')
+            cli = commit('src/cli.zig')
+            git('push', '-q', 'origin', f'{stable}:refs/heads/stable', f'{cli}:refs/heads/main')
+            self.assertEqual(main_health.required(stable, store), ['check.yml', 'previous-release-upgrade.yml'])
+            green = dict(status='completed', conclusion='success', macos='success', html_url='u')
+            self.assertEqual(auto_land.decide(False, True, green, None, main_health.changed(stable, store)),
+                             'pending')
+
+            # Two pushes: stable..store, then store..cli. Only cli has post-push runs.
+            activity = [[dict(before=store, after=cli), dict(before=stable, after=store)]]
+            exact = {('check.yml', cli): green, ('previous-release-upgrade.yml', cli): green}
+            reports = []
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                    mock.patch.object(main_health, 'gh', lambda *args: json.dumps(activity)), \
+                    mock.patch.object(main_health, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
+                    mock.patch.object(main_health, 'filed', lambda title: False), \
+                    mock.patch.object(main_health, 'report', lambda title, body, label=None: reports.append(title)), \
+                    mock.patch.object(sys, 'argv', ['main_health.py', 'check']), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main_health.main()
+                # The store push never got its own runs: stable holds and the user is told.
+                self.assertEqual(git('ls-remote', 'origin', 'refs/heads/stable').split()[0], stable)
+                self.assertEqual(reports, [f'Main push {store[:12]} has no post-push CI'])
+                # An older strict push's upgrade run does not cover a newer strict push.
+                exact[('previous-release-upgrade.yml', 'older')] = green
+                self.assertNotIn('previous-release-upgrade.yml',
+                                 main_health.runs(store, [(store, stable), ('older', None)]))
+                exact.update({('check.yml', store): green, ('previous-release-upgrade.yml', store): green})
+                main_health.main()
+                self.assertEqual(git('ls-remote', 'origin', 'refs/heads/stable').split()[0], cli)
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.
