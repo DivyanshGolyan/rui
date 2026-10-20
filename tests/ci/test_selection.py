@@ -65,12 +65,13 @@ class SelectionTest(unittest.TestCase):
     def test_frontend_alone_selects_logic_and_pty_callers_not_check(self):
         pty = ["canonical-failure-integration", "terminal-restoration-integration"]
         for path, expected in (
-                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test-logic"]),
-                ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test-logic"]),
-                ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                # src/tests.zig, not the logic root, runs these owners' unit tests.
+                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ConversationViewport.zig", [*pty, "test-logic"]),
                 ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
-                ("src/TerminalText.zig", ["admission-debug-integration", *pty])):
+                ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"])):
             with self.subTest(path=path):
                 result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
@@ -86,7 +87,7 @@ class SelectionTest(unittest.TestCase):
         for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
                             "tests/integration/bash_integration.py", "src/store_recovery.zig"):
             for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
-                             "src/TerminalText.zig"):
+                             "src/TerminalText.zig", "src/AnswerRenderer.zig"):
                 with self.subTest(strict=strict_path, frontend=frontend):
                     result = select([frontend, strict_path], "review", AVAILABLE)
                     for family in ("targets", "native_targets"):
