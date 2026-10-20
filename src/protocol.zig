@@ -361,6 +361,19 @@ pub const Peer = struct {
     session: Bounded(max_session_bytes),
     prefix: u8 = 0,
 
+    /// `session configure` without a name generates `rui/` and a lowercase
+    /// hyphenated UUID; only such a reference has an ID prefix.
+    pub const generated_prefix = "rui/";
+
+    pub fn generated(ref: []const u8) bool {
+        if (ref.len != generated_prefix.len + 36 or !std.mem.startsWith(u8, ref, generated_prefix)) return false;
+        for (ref[generated_prefix.len..], 0..) |byte, index| switch (index) {
+            8, 13, 18, 23 => if (byte != '-') return false,
+            else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
+        };
+        return true;
+    }
+
     pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
         try out.writeAll("{\"session\":");
         try std.json.Stringify.value(self.session.slice(), .{}, out);

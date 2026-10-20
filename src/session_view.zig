@@ -7,6 +7,7 @@ const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const unicode = @import("terminal_unicode");
+const gwidth = @import("terminal_width");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -69,7 +70,7 @@ pub const peer_ref_columns = 16;
 
 /// A peer reference as its line names it: a generated `rui/` reference by
 /// the shortest prefix of its ID that tells it apart in its Store, any other
-/// exactly, escaped; past `peer_ref_columns` characters it ends with `…`.
+/// exactly, escaped; past `peer_ref_columns` columns it ends with `…`.
 pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8]u8) []const u8 {
     const session = peer.session.slice();
     const shown = if (peer.prefix != 0) session[4..][0..peer.prefix] else session;
@@ -79,14 +80,17 @@ pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8
     text.feed(&out, shown) catch unreachable;
     text.finish(&out) catch unreachable;
     const bytes = out.buffered();
+    // Columns, not clusters: a wide cluster takes two. The cut keeps whole
+    // clusters and leaves one column for `…`.
     var clusters = unicode.graphemeIterator(bytes);
-    var count: usize = 0;
+    var columns: usize = 0;
     var cut: usize = 0;
     while (clusters.next()) |cluster| {
-        count += 1;
-        if (count == peer_ref_columns) cut = cluster.start;
+        const width = gwidth.gwidth(cluster.bytes(bytes), .unicode);
+        if (columns + width < peer_ref_columns) cut = cluster.start + cluster.len;
+        columns += width;
     }
-    if (count <= peer_ref_columns) {
+    if (columns <= peer_ref_columns) {
         @memcpy(buffer[0..bytes.len], bytes);
         return buffer[0..bytes.len];
     }
@@ -110,6 +114,13 @@ test "a peer reference shows a generated ID's distinguishing prefix and caps at 
     // Controls stay visible as escapes, and count where they show.
     try exact.session.set("a\nb");
     try std.testing.expectEqualStrings("a\\nb", peerRef(exact, &buffer));
+    // Wide characters count two columns: eight fit, nine do not.
+    try exact.session.set("雪雪雪雪雪雪雪雪");
+    try std.testing.expectEqualStrings("雪雪雪雪雪雪雪雪", peerRef(exact, &buffer));
+    try exact.session.set("雪雪雪雪雪雪雪雪雪");
+    try std.testing.expectEqualStrings("雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
+    try exact.session.set("a雪雪雪雪雪雪雪雪");
+    try std.testing.expectEqualStrings("a雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
 }
 
 test "peer Messages render as one dim line each, with size and time in the margin" {
@@ -140,6 +151,7 @@ test "peer Messages render as one dim line each, with size and time in the margi
     const S = Mark.summary;
     const N = Mark.sidenote;
     const R = Mark.reset;
+    const just_under_kb: [999]u8 = @splat('x');
     // Leading blank lines and trailing blanks never show; later lines never do.
     inline for (.{
         .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← 9f8e7d · Please review" ++ N ++ "31 B · 08:00" ++ R ++ "\n" },
@@ -148,7 +160,7 @@ test "peer Messages render as one dim line each, with size and time in the margi
         // Peer text cannot draw controls or styles.
         .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ 9f8e7d · \\x1b[2mx" ++ N ++ "5 B · 08:00" ++ R ++ "\n" },
         // Under 1000 bytes the size is exact; from there it is in KB.
-        .{ .inbound, comptime repeat("x", 999), "\n" ++ S ++ "← 9f8e7d · " ++ comptime repeat("x", 200) ++ "…" ++ N ++ "999 B · 08:00" ++ R ++ "\n" },
+        .{ .inbound, &just_under_kb, "\n" ++ S ++ "← 9f8e7d · " ++ just_under_kb[0..200] ++ "…" ++ N ++ "999 B · 08:00" ++ R ++ "\n" },
     }) |case| {
         var sink: Sink = .{};
         var line: PeerLine(*Sink) = undefined;

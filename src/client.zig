@@ -2120,10 +2120,29 @@ const JsonPeer = struct {
 
     fn peer(self: *const JsonPeer) !protocol.Peer {
         const prefix = std.fmt.parseInt(u8, self.prefix.slice(), 10) catch return error.InvalidActivityPage;
-        if (prefix != 0 and (prefix < 6 or prefix > 36 or !std.mem.startsWith(u8, self.session.slice(), "rui/") or self.session.slice().len != 40)) return error.InvalidActivityPage;
+        if (prefix != 0 and (prefix < 6 or prefix > 36 or !protocol.Peer.generated(self.session.slice()))) return error.InvalidActivityPage;
         return .{ .session = self.session.value, .prefix = prefix };
     }
 };
+
+test "a page peer has an ID prefix only on a generated reference" {
+    const Case = struct { session: []const u8, prefix: []const u8, valid: bool };
+    for ([_]Case{
+        .{ .session = "rui/1a2b3c4d-0000-4000-8000-000000000001", .prefix = "6", .valid = true },
+        .{ .session = "rui/1a2b3c4d-0000-4000-8000-000000000001", .prefix = "36", .valid = true },
+        .{ .session = "rui/1a2b3c4d-0000-4000-8000-000000000001", .prefix = "5", .valid = false },
+        .{ .session = "rui/1a2b3c4d-0000-4000-8000-000000000001", .prefix = "37", .valid = false },
+        // Same length and prefix, but not a lowercase hyphenated UUID.
+        .{ .session = "rui/gggggggggggggggggggggggggggggggggggg", .prefix = "6", .valid = false },
+        .{ .session = "rui/1A2B3C4D-0000-4000-8000-000000000001", .prefix = "6", .valid = false },
+        .{ .session = "rui/gggggggggggggggggggggggggggggggggggg", .prefix = "0", .valid = true },
+    }) |case| {
+        var peer: JsonPeer = .{ .session = .{}, .prefix = .{} };
+        try peer.session.value.set(case.session);
+        try peer.prefix.value.set(case.prefix);
+        if (case.valid) _ = try peer.peer() else try std.testing.expectError(error.InvalidActivityPage, peer.peer());
+    }
+}
 
 // The stdlib also accepts numeric enum tags. Host facts require named strings;
 // their closed vocabulary derives the token bound, with JsonString's lifetime.

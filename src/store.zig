@@ -168,19 +168,6 @@ pub const ConfigureReply = union(enum) {
     infrastructure_failure,
 };
 
-/// `session configure` without a name generates `rui/` and a lowercase
-/// hyphenated UUID.
-const generated_session_prefix = "rui/";
-
-fn generatedSessionRef(ref: []const u8) bool {
-    if (ref.len != generated_session_prefix.len + 36 or !std.mem.startsWith(u8, ref, generated_session_prefix)) return false;
-    for (ref[generated_session_prefix.len..], 0..) |byte, index| switch (index) {
-        8, 13, 18, 23 => if (byte != '-') return false,
-        else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
-    };
-    return true;
-}
-
 pub const MessageRejection = enum {
     invalid_session_reference,
     unknown_session,
@@ -1781,9 +1768,10 @@ pub const Store = struct {
         }
         // An unknown sender has no sequence to record a failed send in; a
         // known one sees its own rejected send.
+        const sender_known = if (command.sender) |sender| try self.readSession(sender.slice()) != null else false;
         const code: ?MessageRejection = if (command.session.len == 0)
             .invalid_session_reference
-        else if (command.sender != null and try self.readSession(command.sender.?.slice()) == null)
+        else if (command.sender != null and !sender_known)
             .unknown_sender_session
         else if (try self.readSession(command.session.slice()) == null)
             .unknown_session
@@ -1801,7 +1789,7 @@ pub const Store = struct {
                 null,
                 answer,
             );
-            if (rejection != .unknown_sender_session) if (command.sender) |sender| {
+            if (sender_known) if (command.sender) |sender| {
                 const statement = try prepare(self.database, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position) VALUES(?1,?2,?3)");
                 defer _ = c.sqlite3_finalize(statement);
                 try bindText(statement, 1, command.key.slice());
@@ -2924,7 +2912,7 @@ pub const Store = struct {
     fn peerLocked(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.Peer {
         var peer: protocol.Peer = .{ .session = session };
         const ref = session.slice();
-        if (!generatedSessionRef(ref)) return peer;
+        if (!protocol.Peer.generated(ref)) return peer;
         var shared: usize = 0;
         inline for (.{ "SELECT session_ref FROM session WHERE session_ref<?1 ORDER BY session_ref DESC LIMIT 1", "SELECT session_ref FROM session WHERE session_ref>?1 ORDER BY session_ref LIMIT 1" }) |sql| {
             const statement = try prepare(self.database, sql);
@@ -2938,7 +2926,8 @@ pub const Store = struct {
                 shared = @max(shared, length);
             } else if (step != c.SQLITE_DONE) return error.SessionReadFailed;
         }
-        peer.prefix = @intCast(std.math.clamp(shared + 1 -| generated_session_prefix.len, 6, ref.len - generated_session_prefix.len));
+        const id = protocol.Peer.generated_prefix.len;
+        peer.prefix = @intCast(std.math.clamp(shared + 1 -| id, 6, ref.len - id));
         return peer;
     }
 
@@ -12324,8 +12313,18 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try std.testing.expectEqual(MessageRejection.unknown_sender_session, storage.submitMessage(&forged, .{}).rejected.code);
     const forged_replay = storage.submitMessage(&forged, .{});
     try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .unknown_sender_session);
-    // An unknown sender has no sequence: only the known sender's refusal is kept.
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM sent_rejection"));
+    // An invalid target is refused first, whichever sender: an unknown one
+    // claims no sequence position, and the Store stays open.
+    for ([_]struct { key: []const u8, from: []const u8 }{
+        .{ .key = "peer-empty-forged", .from = "rui/ffffffff-0000-4000-8000-000000000003" },
+        .{ .key = "peer-empty-known", .from = sender },
+    }) |case| {
+        var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
+        defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expectEqual(MessageRejection.invalid_session_reference, storage.submitMessage(&empty, .{}).rejected.code);
+    }
+    // An unknown sender has no sequence: only the known sender's refusals are kept.
+    try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM sent_rejection"));
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/receiver")).pending_messages);
 
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -12338,7 +12337,8 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
 
     try session.set(sender);
     const own = try storage.activityPage(.{ .session = session });
-    try std.testing.expectEqual(@as(usize, 2), own.count);
+    try std.testing.expectEqual(@as(usize, 3), own.count);
+    try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
     const out = own.items[0].value.sent;
     try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
     try std.testing.expectEqualStrings("direct/receiver", out.target.session.slice());
