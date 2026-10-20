@@ -1097,10 +1097,10 @@ def prove_execution_release_oracles():
 def prove_bash_cleanup_population():
     from bash_integration import assert_cleanup_population
 
-    records = []
-    for action in (None, "19"):
-        for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
-            records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action=action))
+    # A model owner completes once; the Bash owner starts, releases and completes.
+    records = [dict(rui_test_phase="cleanup_completed", turn="7", operation="11", attempt="1", action=None)]
+    for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
+        records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action="19"))
     records.append(dict(rui_test_phase="inspection_captured"))
     for case in ("normal", "missing", "duplicate", "wrong-owner", "extra-phase", "inspection-overflow"):
         values = [dict(r) for r in records]
@@ -1118,7 +1118,7 @@ def prove_bash_cleanup_population():
         diagnostics = HostDiagnostics(SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0, rui_observations=observations))
         diagnostics.close()
         try:
-            assert_cleanup_population(diagnostics, actions=[19], models=1, model_releases=True, inspection_limit=1)
+            assert_cleanup_population(diagnostics, actions=[19], models=1, inspection_limit=1)
         except AssertionError:
             assert case != "normal", case
         else:

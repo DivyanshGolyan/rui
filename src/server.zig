@@ -78,7 +78,6 @@ pub const Faults = struct {
     bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
     retention_entry_capacity: ?usize = null,
     retention_removal: bool = false,
-    cleanup_delay_ms: i64 = 0,
     provider_inactivity_seconds: i64 = 5 * 60,
     retry_waits_ms: [3]u64 = default_retry_waits_ms,
     before_launch_delay_ms: i64 = 0,
@@ -94,7 +93,6 @@ pub const Faults = struct {
     test_observation_plan: ?TestObservation.Plan = null,
     test_transition: ?TestTransition = null,
     test_transition_gate_path: ?[]const u8 = null,
-    model_cleanup_gate_path: ?[]const u8 = null,
     bash_observed_exit_gate_path: ?[]const u8 = null,
     bash_cleanup_gate_path: ?[]const u8 = null,
     control_gate_keys: ?[]const u8 = null,
@@ -1071,11 +1069,6 @@ const ProviderSlot = struct {
     transfer: provider.Transfer = undefined,
 };
 
-const CleanupSlot = struct {
-    owner: AttemptOwner,
-    cleanup_deadline: std.Io.Clock.Timestamp,
-};
-
 const NamedScratchSlot = struct {
     token: execution.CustodyToken,
     owner: named_scratch.Owner,
@@ -1124,7 +1117,6 @@ const ExecutionSlot = union(enum) {
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
     bash_prepared_cleanup: BashPreparedCleanupSlot,
-    cleanup: CleanupSlot,
     named_scratch: NamedScratchSlot,
 };
 
@@ -1145,7 +1137,6 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
         .bash_preparing => |*active| active.token,
         .bash => |*active| active.token,
         .bash_prepared_cleanup => |*retained| retained.token,
-        .cleanup => |*cleanup| cleanup.owner.token,
         .named_scratch => |*retained| retained.token,
     };
 }
@@ -1169,7 +1160,6 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
                 .closed => try custody.checkDetachedAction(active.token, active.binding),
             },
             .bash_prepared_cleanup => |*retained| try custody.checkDetached(retained.token),
-            .cleanup => |*cleanup| try custody.checkDetachedModel(cleanup.owner.token, cleanup.owner.binding),
             .named_scratch => |*retained| try custody.checkDetached(retained.token),
         }
         const token = slotToken(slot) orelse continue;
@@ -1494,10 +1484,6 @@ const NativeTurn = struct {
         return advanceBash(self.host, self.slots, self.bash_window);
     }
 
-    pub fn advanceOrdinaryCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp) bool {
-        return advanceCleanupAt(self.host, self.slots, observed);
-    }
-
     pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
         return callAdvanceRetainedCleanup(self.host, self.slots, observed, retry_at);
     }
@@ -1763,9 +1749,9 @@ fn advanceModelFinalization(host: *Host, slot: *ExecutionSlot, fail_seal: bool) 
     switch (active.transfer.advanceFinalization(fail_seal)) {
         .pending => return false,
         .discarded => {
-            const owner = active.owner;
+            const token = active.owner.token;
             active.transfer.deinit();
-            beginCleanup(host, slot, owner);
+            finishCustodyNow(host, slot, token);
         },
         .ready => |finished| completeTransfer(host, slot, finished),
     }
@@ -1812,7 +1798,7 @@ fn cancelSupersededTransfers(
             reactor.?.discard(&active.transfer);
             _ = advanceModelFinalization(host, slot, false);
         },
-        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .cleanup, .named_scratch => {},
+        .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
 }
 
@@ -1838,7 +1824,6 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
         .model_authenticating => |value| if (value.owner.binding.operation_id == operation_id) return true,
-        .cleanup => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
     return false;
@@ -1898,7 +1883,7 @@ fn admitBashAttempt(
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
-        if (err != error.InjectedAttemptCommitFailure) fenceDispatch(host, "Bash Attempt admission", err);
+        fenceDispatch(host, "Bash Attempt admission", err);
         return .retry_later;
     } orelse {
         host.custody.releaseUnused(token) catch unreachable;
@@ -2190,13 +2175,7 @@ fn closeBashDelivery(host: *Host, active: *BashSlot) void {
     std.debug.assert(active.delivery == .open);
     host.custody.detach(active.token) catch unreachable;
     traceAction(host, "cleanup_started", active.binding);
-    const started = std.Io.Clock.Timestamp.now(host.io, .awake);
-    active.delivery = .{ .closed = .{
-        .reclaim_at = started.addDuration(.{
-            .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
-            .clock = .awake,
-        }),
-    } };
+    active.delivery = .{ .closed = .{ .reclaim_at = .now(host.io, .awake) } };
 }
 
 fn reclaimBash(host: *Host, slot: *ExecutionSlot, now: std.Io.Clock.Timestamp) bool {
@@ -2289,11 +2268,7 @@ fn admitNewAttempt(
         .attempt_before_commit = host.faults.attempt_before_commit,
     }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
-        if (err == error.InjectedAttemptCommitFailure) {
-            traceAttemptRollback(host);
-        } else {
-            fenceDispatch(host, "Attempt admission", err);
-        }
+        fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
     } orelse {
         host.custody.releaseUnused(token) catch unreachable;
@@ -2314,9 +2289,7 @@ fn admitRetryAttempt(
         .{ .attempt_before_commit = host.faults.attempt_before_commit },
     ) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
-        if (err != error.InjectedAttemptCommitFailure) {
-            fenceDispatch(host, "retry Attempt admission", err);
-        }
+        fenceDispatch(host, "retry Attempt admission", err);
         return .retry_later;
     } orelse {
         host.custody.releaseUnused(token) catch unreachable;
@@ -2649,7 +2622,7 @@ fn completeTransfer(
     })) {
         .interpret_output => {
             switch (completeSuccessfulTransfer(host, active)) {
-                .cleanup => beginCleanup(host, slot, owner),
+                .cleanup => finishCustodyNow(host, slot, owner.token),
                 .named_scratch => |scratch| {
                     host.custody.detach(owner.token) catch unreachable;
                     slot.* = .{ .named_scratch = .{
@@ -2682,7 +2655,7 @@ fn completeTransfer(
         },
     }
     active.transfer.deinit();
-    beginCleanup(host, slot, owner);
+    finishCustodyNow(host, slot, owner.token);
 }
 
 const SuccessfulCompletion = union(enum) {
@@ -2801,74 +2774,6 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     return .cleanup;
 }
 
-fn beginCleanup(host: *Host, slot: *ExecutionSlot, owner: AttemptOwner) void {
-    beginCleanupAt(host, slot, owner, .now(host.io, .awake));
-}
-
-fn beginCleanupAt(
-    host: *Host,
-    slot: *ExecutionSlot,
-    owner: AttemptOwner,
-    now: std.Io.Clock.Timestamp,
-) void {
-    host.custody.detach(owner.token) catch unreachable;
-    traceOperation(host, "cleanup_started", owner.binding);
-    slot.* = .{ .cleanup = .{
-        .owner = owner,
-        .cleanup_deadline = now.addDuration(.{
-            .raw = .fromMilliseconds(host.faults.cleanup_delay_ms),
-            .clock = .awake,
-        }),
-    } };
-    if (host.faults.cleanup_delay_ms == 0) finishSlotCleanupIfReleased(host, slot, now);
-}
-
-fn advanceCleanupAt(
-    host: *Host,
-    slots: []ExecutionSlot,
-    now: std.Io.Clock.Timestamp,
-) bool {
-    var made_progress = false;
-    for (slots) |*slot| {
-        switch (slot.*) {
-            .cleanup => |cleanup| {
-                if (cleanup.cleanup_deadline.compare(.lte, now)) {
-                    finishSlotCleanupIfReleased(host, slot, now);
-                    if (slot.* == .free) made_progress = true;
-                }
-            },
-            else => {},
-        }
-    }
-    return made_progress;
-}
-
-fn finishSlotCleanupIfReleased(
-    host: *Host,
-    slot: *ExecutionSlot,
-    now: std.Io.Clock.Timestamp,
-) void {
-    if (host.faults.model_cleanup_gate_path) |path| {
-        if (testGateActive(host, path)) {
-            slot.cleanup.cleanup_deadline = now.addDuration(.{
-                .raw = .fromMilliseconds(100),
-                .clock = .awake,
-            });
-            return;
-        }
-        traceOperation(host, "cleanup_release_observed", slot.cleanup.owner.binding);
-    }
-    finishSlotCleanup(host, slot);
-}
-
-fn finishSlotCleanup(host: *Host, slot: *ExecutionSlot) void {
-    const owner = slot.cleanup.owner;
-    const token = owner.token;
-    host.custody.cleanupComplete(token) catch unreachable;
-    slot.* = .free;
-    traceOperation(host, "cleanup_completed", owner.binding);
-}
-
 fn advanceRetainedCleanup(
     host: *Host,
     slots: []ExecutionSlot,
@@ -2922,7 +2827,7 @@ fn shutdownExecution(
             discardBashResources(host, slot, active.token, cleanup);
         },
         .bash => |*active| active.execution.requestInfrastructureShutdown(.now(host.io, .awake)),
-        .bash_prepared_cleanup, .named_scratch, .cleanup => {},
+        .bash_prepared_cleanup, .named_scratch => {},
         .provider => |*active| reactor.?.discard(&active.transfer),
     };
     var bash_window: [bash.copy_window_bytes]u8 = undefined;
@@ -2939,7 +2844,6 @@ fn shutdownExecution(
         };
         made_progress = advanceBash(host, slots, &bash_window) or made_progress;
         const now = std.Io.Clock.Timestamp.now(host.io, .awake);
-        made_progress = advanceCleanupAt(host, slots, now) or made_progress;
         made_progress = advanceRetainedCleanup(host, slots, now, &retained_cleanup_at) or made_progress;
         if (!made_progress) _ = host.io.sleep(.fromMilliseconds(100), .awake) catch {};
     }
@@ -3139,20 +3043,6 @@ fn executionFacts(host: *Host) store_module.SessionReportExecution {
         .custody_occupied = host.custody.held(),
         .scratch_used_bytes = host.scratch_used.load(.acquire),
     };
-}
-
-fn traceAttemptRollback(host: *Host) void {
-    if (!host.faults.test_phase_trace) return;
-    var publication = beginTestObservation(host, "attempt_admission_rolled_back", null);
-    defer if (publication) |*value| value.finish();
-    // Sample after this reservation is released, before another owner turn
-    // can reserve it again. A later inspection is not this boundary's state.
-    var trace: protocol.ResponseBuffer = .{};
-    trace.appendFmt(
-        "{{\"rui_test_phase\":\"attempt_admission_rolled_back\",\"at_ns\":\"{d}\",\"subject_kind\":\"attempt_kind\",\"subject\":\"model\",\"custody_occupied\":\"{d}\"}}",
-        .{ nowNs(host), host.custody.occupied() },
-    ) catch return;
-    writeTestTrace(host, &trace, &publication);
 }
 
 fn traceServiceBoundary(host: *Host, start_ns: u64, end_ns: u64, wait_ns: u64) void {
@@ -3701,8 +3591,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) deliverResponse(host.io, fd, 200, protocol.host_stop_ack);
         },
         .configure => |*command| {
-            const result = host.store.configure(command, .{
-                .model_available = host.provider_endpoint != null,
+            const result = host.store.configure(command, host.provider_endpoint != null, .{
                 .content_read = host.faults.content_read,
                 .content_import = host.faults.content_import,
                 .before_commit = host.faults.before_commit,
@@ -5275,68 +5164,6 @@ test "inspection counts held custody, not an in-flight admission reservation" {
     try std.testing.expectEqual(@as(usize, 0), executionFacts(&host).custody_occupied);
 }
 
-test "cleanup delay follows elapsed time and preserves custody reuse" {
-    var records: [1]execution.CustodyRecord = undefined;
-    var host = Host{
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .lease = undefined,
-        .store = undefined,
-        .faults = .{ .cleanup_delay_ms = 1_500 },
-        .custody = execution.CustodyPool.initialize(&records),
-    };
-    var slots = [_]ExecutionSlot{.free};
-    const start = std.Io.Timestamp.fromNanoseconds(std.time.ns_per_s).withClock(.awake);
-    const before_deadline = start.addDuration(.{
-        .raw = .fromMilliseconds(1_499),
-        .clock = .awake,
-    });
-    const deadline = start.addDuration(.{
-        .raw = .fromMilliseconds(1_500),
-        .clock = .awake,
-    });
-    const far_after_deadline = start.addDuration(.{
-        .raw = .fromSeconds(10),
-        .clock = .awake,
-    });
-    const Attach = struct {
-        fn run(custody: *execution.CustodyPool, turn: u64) !AttemptOwner {
-            const token = custody.reserve().?;
-            var permit = store_module.DispatchPermit{ .binding = .{
-                .turn_id = turn,
-                .operation_id = turn,
-                .attempt_ordinal = 1,
-            } };
-            return .{ .token = token, .binding = try custody.attach(token, &permit) };
-        }
-    };
-
-    const first = try Attach.run(&host.custody, 1);
-    beginCleanupAt(&host, &slots[0], first, start);
-    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    for (0..100) |_| _ = advanceCleanupAt(&host, &slots, before_deadline);
-    try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
-    _ = advanceCleanupAt(&host, &slots, deadline);
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    try std.testing.expect(slots[0] == .free);
-    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
-
-    const second = try Attach.run(&host.custody, 2);
-    try std.testing.expectEqual(first.token.index, second.token.index);
-    try std.testing.expect(first.token.generation != second.token.generation);
-    try std.testing.expectError(error.StaleCustody, host.custody.binding(first.token));
-    beginCleanupAt(&host, &slots[0], second, start);
-    _ = advanceCleanupAt(&host, &slots, far_after_deadline);
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    try std.testing.expect(slots[0] == .free);
-
-    host.faults.cleanup_delay_ms = 0;
-    const third = try Attach.run(&host.custody, 3);
-    beginCleanupAt(&host, &slots[0], third, start);
-    try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
-    try std.testing.expect(slots[0] == .free);
-}
-
 test "delayed control replies retain command identity after request storage reuse" {
     const native = @import("posix");
     inline for (.{ "session_stop", "model_interruption", "permission_decision" }) |kind| {
@@ -5595,30 +5422,21 @@ test "cleanup publication follows complete execution retirement" {
     var slot: ExecutionSlot = .free;
     boundary.slot = &slot;
     boundary.custody = &host.custody;
-    // Both typed owners, delayed model retirement, and admission-local Action
-    // custody before an execution payload is installed share this boundary.
-    for (0..4) |kind| {
+    // Both typed owners and admission-local Action custody before an
+    // execution payload is installed share this boundary.
+    for (0..3) |kind| {
         const token = host.custody.reserve().?;
         boundary.token = token;
         boundary.observed = false;
-        if (kind < 2) {
+        if (kind == 0) {
             var permit = store_module.DispatchPermit{ .binding = .{
                 .turn_id = 3,
                 .operation_id = 7,
                 .attempt_ordinal = 2,
             } };
             const binding = try host.custody.attach(token, &permit);
-            if (kind == 0) {
-                slot = .{ .model_preparing = .{ .token = token, .binding = binding } };
-                finishCustodyNow(&host, &slot, token);
-            } else {
-                try host.custody.detach(token);
-                slot = .{ .cleanup = .{
-                    .owner = .{ .token = token, .binding = binding },
-                    .cleanup_deadline = .{ .raw = .fromNanoseconds(0), .clock = .awake },
-                } };
-                finishSlotCleanup(&host, &slot);
-            }
+            slot = .{ .model_preparing = .{ .token = token, .binding = binding } };
+            finishCustodyNow(&host, &slot, token);
         } else {
             var permit = store_module.ActionDispatchPermit{ .binding = .{
                 .turn_id = 3,
@@ -5905,7 +5723,7 @@ test "execution slots agree with custody across the complete population" {
     try custody.cleanupComplete(model_token);
     try checkSlotCustodyAgreement(&empty, &custody);
 
-    // Two cleanup payloads on one detached token collide instead of sharing it.
+    // Two payloads on one token collide instead of sharing it.
     const retoken = custody.reserve().?;
     var repermit = store_module.DispatchPermit{ .binding = .{
         .turn_id = 3,
@@ -5913,15 +5731,14 @@ test "execution slots agree with custody across the complete population" {
         .attempt_ordinal = 1,
     } };
     const rebinding = try custody.attach(retoken, &repermit);
-    try custody.detach(retoken);
-    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
-    var retained = [_]ExecutionSlot{
-        .{ .cleanup = .{ .owner = .{ .token = retoken, .binding = rebinding }, .cleanup_deadline = now } },
-        .{ .cleanup = .{ .owner = .{ .token = retoken, .binding = rebinding }, .cleanup_deadline = now } },
+    var shared = [_]ExecutionSlot{
+        .{ .provider = .{ .owner = .{ .token = retoken, .binding = rebinding } } },
+        .{ .provider = .{ .owner = .{ .token = retoken, .binding = rebinding } } },
     };
-    try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&retained, &custody));
+    try std.testing.expectError(error.DuplicateExecutionToken, checkSlotCustodyAgreement(&shared, &custody));
 
     // A stale payload after reuse leaves the new owner unchanged.
+    try custody.detach(retoken);
     try custody.cleanupComplete(retoken);
     const reused = custody.reserve().?;
     var reused_permit = store_module.DispatchPermit{ .binding = .{
@@ -6090,49 +5907,6 @@ test "closed Bash delivery retains its payload with detached custody" {
     try checkSlotCustodyAgreement(&slots, &host.custody);
 }
 
-test "detached payloads keep their typed binding identity" {
-    var records: [2]execution.CustodyRecord = undefined;
-    var custody = execution.CustodyPool.initialize(&records);
-    const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
-
-    var first_permit = store_module.DispatchPermit{ .binding = .{
-        .turn_id = 1,
-        .operation_id = 1,
-        .attempt_ordinal = 1,
-    } };
-    const first_token = custody.reserve().?;
-    const first_binding = try custody.attach(first_token, &first_permit);
-    var second_permit = store_module.DispatchPermit{ .binding = .{
-        .turn_id = 2,
-        .operation_id = 2,
-        .attempt_ordinal = 1,
-    } };
-    const second_token = custody.reserve().?;
-    const second_binding = try custody.attach(second_token, &second_permit);
-    try custody.detach(first_token);
-    try custody.detach(second_token);
-
-    var slots = [_]ExecutionSlot{
-        .{ .cleanup = .{ .owner = .{ .token = first_token, .binding = first_binding }, .cleanup_deadline = now } },
-        .{ .cleanup = .{ .owner = .{ .token = second_token, .binding = second_binding }, .cleanup_deadline = now } },
-    };
-    try checkSlotCustodyAgreement(&slots, &custody);
-
-    // Swap only the scalar tokens while leaving bindings unchanged. Both
-    // tokens are current, both records are detached, tokens stay unique,
-    // and the represented count still equals occupied custody: only the
-    // retained typed identity can reject this arrangement.
-    slots[0].cleanup.owner.token = second_token;
-    slots[1].cleanup.owner.token = first_token;
-    try std.testing.expectError(error.ForeignLaunchAuthority, checkSlotCustodyAgreement(&slots, &custody));
-    // Restore before cleanup so the same owners release exactly once.
-    slots[0].cleanup.owner.token = first_token;
-    slots[1].cleanup.owner.token = second_token;
-    try checkSlotCustodyAgreement(&slots, &custody);
-    try custody.cleanupComplete(first_token);
-    try custody.cleanupComplete(second_token);
-}
-
 test "closed Bash payloads keep their typed binding identity" {
     var records: [2]execution.CustodyRecord = undefined;
     var custody = execution.CustodyPool.initialize(&records);
@@ -6205,7 +5979,7 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expect(storage.configure(&command, true, .{}) == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
@@ -7187,7 +6961,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
-        try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+        try std.testing.expect(storage.configure(&configure, true, .{}) == .accepted);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .instance = @splat(0), .faults = .{} };
         var retention = output_retention.Queue.initialize(io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
         host.retention = &retention;

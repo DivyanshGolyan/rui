@@ -1230,7 +1230,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	deadline := measurement.NewDeadline(6 * time.Minute)
 	store := filepath.Join(directory, "store")
 	stderrPath := filepath.Join(directory, "host-stderr.log")
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "20000", "--test-cleanup-delay-ms", "1500", "--test-client-send-buffer-bytes", "4096")
+	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, stderrPath, deadline, "--test-phase-trace", "--test-inspection-reply-delay-ms", "20000", "--test-client-send-buffer-bytes", "4096")
 	if err != nil {
 		return nil, err
 	}

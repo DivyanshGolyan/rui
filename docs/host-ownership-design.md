@@ -29,7 +29,7 @@ Each record contains its generation and one tagged state:
 - `reserved` holds an admission-local credit but no Attempt binding.
 - `owned` holds one typed model or Action binding, one-shot launch authority, terminal-delivery authority, and the current resource payload.
 
-The payload distinguishes admission-local work, model preparation, authentication, provider transfer, Bash preparation, running Bash, delayed cleanup, and retained cleanup. The model or Action binding belongs to the enclosing owner, not every payload. Resource objects may retain their own identity where their existing interface requires it, such as the provider capture's immutable Attempt identity. That identity must not become a second admission or release authority.
+The payload distinguishes admission-local work, model preparation, authentication, provider transfer, Bash preparation, running Bash, and retained cleanup. The model or Action binding belongs to the enclosing owner, not every payload. Resource objects may retain their own identity where their existing interface requires it, such as the provider capture's immutable Attempt identity. That identity must not become a second admission or release authority.
 
 `owned` includes the admission-local interval before a preparation payload exists. Today that interval legitimately has attached custody and a free slot. The replacement must represent it directly rather than forbid it with an assertion.
 
@@ -64,7 +64,7 @@ The Store lease outlives execution drainage and intake drainage. Infrastructure 
 
 ## Qualification follows the edges
 
-The owner tests must cover each transition above through the production record interface. Include both model and Action bindings, every identity field, stale tokens after reuse, double launch, double terminal delivery, no-work admission, rollback, and committed-but-unprepared failure. For retained cleanup, include failed removal followed by success, empty charged owners, delayed model cleanup, Bash cleanup, and admission-local Action cleanup.
+The owner tests must cover each transition above through the production record interface. Include both model and Action bindings, every identity field, stale tokens after reuse, double launch, double terminal delivery, no-work admission, rollback, and committed-but-unprepared failure. For retained cleanup, include failed removal followed by success, empty charged owners, Bash cleanup, and admission-local Action cleanup.
 
 Native checks retain the existing owner boundaries. The server tests cover callback identity, delayed authentication return, cleanup publication, control supersession, and both admission orders during shutdown. Dispatch, Control, Bash recovery, descriptor-capacity, and H2 fixtures cover real Store handoffs, capture drainage, saved-result identity, exact custody and scratch release, and independent sibling progress. A value test cannot replace these checks.
 
