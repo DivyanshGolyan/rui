@@ -2570,11 +2570,14 @@ def main(mode="all", correlation_case="all"):
         frozen_peers.finish(time.monotonic() + 5)
         processes.remove(host)
 
-        # Killing the execution owner cannot erase either saved result.
+        # Killing the execution owner cannot erase either saved result. Input
+        # accepted without execution stays queued for the restarted Host.
         offline = start_host(store, None)
         processes.append(offline)
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
         assert observe(store, "message-b")["result"]["code"] == "provider_http_422"
+        message(state, store, "message-c", "direct/main", "after restart")
+        assert observe(store, "message-c")["queue"]["status"] == "queued"
         stop_host(offline)
         processes.remove(offline)
 
@@ -2582,13 +2585,32 @@ def main(mode="all", correlation_case="all"):
         # the prior failed Turn's messages and each distinct instruction
         # update, including repeated equal text and reversals.
         successor = json.loads(endpoint.requests[1])
-        assert successor["input"] == expected["input"] + [
+        later_input = expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
-        ], successor
+        ]
+        assert successor["input"] == later_input, successor
         assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session="direct/main"), successor
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
+
+        # A restarted Host reconstructs the same projection from the Store
+        # alone and dispatches the queued Message after it.
+        host = start_host(store, url)
+        processes.append(host)
+        wait_for(lambda: len(endpoint.requests) == 3, "post-restart successor request")
+        restarted = json.loads(endpoint.requests[2])
+        assert restarted["input"] == later_input + [
+            {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
+        ], restarted
+        assert restarted["instructions"] == successor["instructions"], restarted
+        assert restarted["model"] == "model-a", restarted
+        assert restarted["tools"] == [], restarted
+        assert "text" not in restarted, restarted
+        wait_for(lambda: observe(store, "message-c").get("result", {}).get("code") == "provider_http_422", "post-restart successor failure")
+        assert len(endpoint.requests) == 3, "a permit launched more than once"
+        stop_host(host)
+        processes.remove(host)
 
         # A known live preparation failure saves future eligibility. Killing
         # the process before such a failure can settle leaves conservative
