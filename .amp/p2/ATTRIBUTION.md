@@ -65,6 +65,20 @@ HOLD uses [P1 source](https://github.com/DivyanshGolyan/rui/commit/b13caa4b603e4
 
 The untraced control records 5,300 voluntary context switches across the Host's five threads over a 60-second interior window. Two threads contribute 2,980 and 2,320; the other three contribute zero. Nonvoluntary switches total 419. With strace, voluntary switches rise to 1,212,768. Traced switches are not natural wakeups. Even the untraced Linux task counter is not Mac `IDLEW` or a count of distinct timer wakeups. No before/after production fix or Mac wakeup result is claimed.
 
+## Uninstrumented Linux CPU diagnostics
+
+The CPU follow-up invokes the existing Go capacity runner directly against the same baseline ReleaseFast binary. It uses no strace, perf, heaptrack, SQL callback or phase diagnostics. Only these new uninstrumented runs supply CPU times. Existing instrumented clock outputs remain excluded.
+
+| Fixture | Pre-run estimate | Measured Host user+system CPU | Actual events | CPU/event |
+| --- | ---: | ---: | ---: | ---: |
+| STREAM N=1 | About 0.158 CPU-seconds | 1.53 CPU-seconds | 3,600 | 425 µs |
+| STREAM N=100 | About 14.12 CPU-seconds | Pending | Pending | Pending |
+| HOLD N=100, interior window | About 0.054 CPU-seconds | Pending | Zero required | Undefined |
+
+N=1 has two complete-work deltas of 0.77 and 0.76 CPU-seconds. Complete-work CPU includes Message admission, fixture readiness, paced offer, result delivery and Host drain. It excludes Configure and Host startup. Host CPU excludes provider, controller and CLI processes. The 40-second interior windows independently measure about 0.01274 and 0.01199 average cores. Both rounds pass functional and offline durable audits; the report remains incomplete for unavailable Mac physical footprint.
+
+The estimate uses previous counts and explicitly assumed unit costs, not instrumented timings. The observed N=1 cost is about 9.7 times the estimate. Linux CLK_TCK is 100; ratios are derived from coarse process counters, not microsecond-resolution observations. Each fixture has one fresh Host and two streaming rounds, not five-repeat statistics. These are Linux fixture diagnostics, never Mac headlines or qualification of a production fix. [Raw N=1 report](raw/stream1-uninstrumented.json) and [CPU summary](raw/cpu-stream1-summary.json) retain the observations.
+
 ## Original estimates remain beside the measurements
 
 The [run notes](NOTES.md) retain the arithmetic recorded before each run. Large gaps are findings, not revised estimates.
