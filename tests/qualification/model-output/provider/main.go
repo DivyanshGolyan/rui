@@ -717,9 +717,9 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-f.startCh:
 		case <-f.cancelCh:
-			return
+			panic(http.ErrAbortHandler)
 		case <-r.Context().Done():
-			return
+			panic(http.ErrAbortHandler)
 		}
 		timer := time.NewTimer(time.Until(f.startAt.Add(120 * time.Second)))
 		defer timer.Stop()
@@ -727,7 +727,9 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		case <-timer.C:
 			http.Error(w, "HOLD observation complete", http.StatusGatewayTimeout)
 		case <-f.cancelCh:
+			panic(http.ErrAbortHandler)
 		case <-r.Context().Done():
+			panic(http.ErrAbortHandler)
 		}
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -1784,6 +1785,42 @@ func finalizeQualification(result map[string]any, runError error, cleanup ...fun
 	return result, runError
 }
 
+func sessionSourceEvidence(root, binary string) (map[string]any, error) {
+	hashes := map[string]string{}
+	for _, name := range []string{"src", "build.zig", "build.zig.zon", "tests/qualification/model-output", "tests/qualification/measurement", "tests/qualification/go.mod", "tests/qualification/go.sum"} {
+		err := filepath.WalkDir(filepath.Join(root, name), func(path string, entry fs.DirEntry, walkError error) error {
+			if walkError != nil {
+				return walkError
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			switch filepath.Ext(path) {
+			case ".zig", ".zon", ".go", ".c", ".h", ".sh", ".patch", ".mod", ".sum":
+				hash, err := measurement.SHA256File(path)
+				if err != nil {
+					return err
+				}
+				relative, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				hashes[filepath.ToSlash(relative)] = hash
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	binaryHash, err := measurement.SHA256File(binary)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"checkout_source_sha256": hashes, "binary_sha256": binaryHash,
+		"binary_build_provenance": map[string]any{"status": "unavailable", "source_revision": nil, "build_mode": nil, "reason": "externally supplied binary; attach its actual build log/source identity separately; current checkout hashes do not establish its origin"}}, nil
+}
+
 func sessionMeasurementOptions(sessions int, hold bool, expectation string) error {
 	if sessions != 0 && sessions != 10 && sessions != 100 {
 		return errors.New("--sessions must be 0, 10 or 100")
@@ -1821,9 +1858,8 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	if err != nil {
 		return result, err
 	}
-	for name, value := range evidence {
-		result[name] = value
-	}
+	result["measurement_checkout"] = evidence
+	result["measurement_revision"] = evidence["tested_revision"]
 	controller, err := os.Executable()
 	if err != nil {
 		return result, err
@@ -1836,6 +1872,13 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	workspace, err := measurement.RepositoryRoot()
 	if err != nil {
 		return result, err
+	}
+	sourceEvidence, err := sessionSourceEvidence(workspace, binary)
+	if err != nil {
+		return result, err
+	}
+	for name, value := range sourceEvidence {
+		result[name] = value
 	}
 	store, err := measurement.CanonicalStore(filepath.Join(directory, "store"))
 	if err != nil {
@@ -2030,7 +2073,13 @@ func main() {
 		}
 		return
 	}
-	if *sessions != -1 || *hold {
+	sessionsSet := false
+	flag.Visit(func(option *flag.Flag) {
+		if option.Name == "sessions" {
+			sessionsSet = true
+		}
+	})
+	if sessionsSet || *hold {
 		if flag.NArg() != 1 || *capacityOnly != 0 || *repeatWork || *growthOnly || *projection {
 			fmt.Fprintln(os.Stderr, "--sessions needs exactly one binary and cannot combine measurement modes")
 			os.Exit(2)

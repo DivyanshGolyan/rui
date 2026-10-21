@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,71 @@ import (
 	"rui.local/qualification/measurement"
 	"rui.local/qualification/model-output/provider"
 )
+
+func TestExplicitInvalidSessionCLIRejectsBeforeLaunch(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "model-output")
+	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v: %s", err, output)
+	}
+	for _, sessions := range []string{"-1", "1"} {
+		root := t.TempDir()
+		command := exec.Command(binary, "--sessions="+sessions, "--expectation", "10 MB estimated base", "/nonexistent-rui")
+		command.Env = append(os.Environ(), "TMPDIR="+root)
+		output, err := command.CombinedOutput()
+		var exited *exec.ExitError
+		if !errors.As(err, &exited) || exited.ExitCode() != 2 || !strings.Contains(string(output), "--sessions must be 0, 10 or 100") {
+			t.Fatalf("sessions=%s: err=%v output=%s", sessions, err, output)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("invalid session option created measurement state: %v %v", entries, err)
+		}
+	}
+	output, err := exec.Command(binary).CombinedOutput()
+	var exited *exec.ExitError
+	if !errors.As(err, &exited) || exited.ExitCode() != 1 || !strings.Contains(string(output), "usage: measure-model-output") {
+		t.Fatalf("omitted --sessions changed existing dispatch: err=%v output=%s", err, output)
+	}
+}
+
+func TestSessionSourceEvidenceKeepsDirtyCheckoutAndSuppliedBinarySeparate(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"src/server.zig", "build.zig", "build.zig.zon", "tests/qualification/model-output/main.go", "tests/qualification/measurement/measurement.go", "tests/qualification/go.mod", "tests/qualification/go.sum"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("clean source\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(t.TempDir(), "separate-rui")
+	if err := os.WriteFile(binary, []byte("separate binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sessionSourceEvidence(root, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src/server.zig"), []byte("dirty source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sessionSourceEvidence(root, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := after["checkout_source_sha256"].(map[string]string)
+	if hashes["src/server.zig"] != "d2c3da588b6e34968f3c503abe0055569e3ccaf6a22f37d3495510a82b731963" || hashes["src/server.zig"] == before["checkout_source_sha256"].(map[string]string)["src/server.zig"] {
+		t.Fatalf("dirty source hash not retained: %v", hashes)
+	}
+	if after["binary_sha256"] != "31e4eac6a9fd3c6f0abb0f31c1089476090217980208844631ce58228ba13dd1" {
+		t.Fatalf("supplied binary was relabelled: %v", after)
+	}
+	provenance := after["binary_build_provenance"].(map[string]any)
+	if provenance["status"] != "unavailable" || provenance["source_revision"] != nil || provenance["build_mode"] != nil {
+		t.Fatalf("checkout was promoted to binary build authority: %v", provenance)
+	}
+}
 
 func TestSessionFootprintOptionsKeepIdleDistinctAndRequireEstimate(t *testing.T) {
 	for _, test := range []struct {

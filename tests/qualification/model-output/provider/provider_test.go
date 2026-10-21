@@ -602,7 +602,16 @@ func TestHoldAcceptsWithoutHeadersForFullWindowAndCancels(t *testing.T) {
 				request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hold"}]}]}`)).WithContext(ctx)
 				response := holdResponseWriter{header: make(http.Header), writes: make(chan int, 8)}
 				done := make(chan struct{})
-				go func() { defer close(done); f.serveResponse(response, request) }()
+				go func() {
+					defer close(done)
+					// The real HTTP server consumes this sentinel without writing headers.
+					defer func() {
+						if value := recover(); value != nil && value != http.ErrAbortHandler {
+							t.Errorf("unexpected handler panic: %v", value)
+						}
+					}()
+					f.serveResponse(response, request)
+				}()
 				ready, err := server.WaitReady(ctx)
 				if err != nil || ready.ReadyStreams != 1 || ready.HeldStreams != 1 {
 					t.Fatalf("request acceptance = %+v, %v", ready, err)
@@ -642,15 +651,25 @@ func TestHoldAcceptsWithoutHeadersForFullWindowAndCancels(t *testing.T) {
 }
 
 func TestHoldPublicH1AndH2SendNoHeadersAndClose(t *testing.T) {
-	for _, tls := range []bool{false, true} {
-		t.Run(fmt.Sprint(tls), func(t *testing.T) {
+	for _, test := range []struct {
+		tls  bool
+		stop string
+	}{
+		{false, "client"}, {false, "server-before-start"}, {false, "server-during-hold"},
+		{true, "client"}, {true, "server-before-start"}, {true, "server-during-hold"},
+	} {
+		tls, stop := test.tls, test.stop
+		t.Run(fmt.Sprintf("%t/%s", tls, stop), func(t *testing.T) {
 			server, err := Start(Config{Streams: 1, Duration: time.Second, EventsPerSecond: 3, TLS: tls, Hold: true, ArtifactDir: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}
+			closed := false
 			defer func() {
-				if err := server.Close(); err != nil {
-					t.Error(err)
+				if !closed {
+					if err := server.Close(); err != nil {
+						t.Error(err)
+					}
 				}
 			}()
 			client := http.DefaultClient
@@ -675,17 +694,30 @@ func TestHoldPublicH1AndH2SendNoHeadersAndClose(t *testing.T) {
 			if err != nil || ready.HeldStreams != 1 || (tls && ready.H2Streams != 1) {
 				t.Fatalf("public HOLD acceptance = %+v, %v", ready, err)
 			}
-			if _, err := server.StartOffer(); err != nil {
-				t.Fatal(err)
+			if stop != "server-before-start" {
+				if _, err := server.StartOffer(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			select {
 			case err := <-done:
 				t.Fatalf("HOLD returned headers before expiry: %v", err)
 			case <-time.After(25 * time.Millisecond):
 			}
-			cancel()
-			if err := <-done; !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancelled held request = %v", err)
+			if stop == "client" {
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled held request = %v", err)
+				}
+			} else {
+				err := server.Close()
+				closed = true
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := <-done; err == nil || ctx.Err() != nil {
+					t.Fatalf("server close sent headers or left request waiting: err=%v context=%v", err, ctx.Err())
+				}
 			}
 		})
 	}
