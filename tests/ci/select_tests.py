@@ -192,7 +192,7 @@ def execution_batches(targets, check_part="all"):
                else [target] for target in targets if target in isolated])
 
 
-def select(paths, phase, available, main_push=False):
+def select(paths, phase, available):
     targets, native_targets, reasons = set(), set(), set()
     manual_checks = set()
     linux_memory_checks = False
@@ -247,11 +247,6 @@ def select(paths, phase, available, main_push=False):
         targets.add("check")
         native_targets.add("check")
         reasons.add("Frontend change beside a strict path or other executable change keeps check")
-    if main_push:
-        # Pre-landing tips may skip check; post-push main always runs it before stable advances.
-        targets.add("check")
-        native_targets.add("check")
-        reasons.add("Main push: Store-native check always runs")
     for checks in (targets, native_targets):
         if "check-full" in checks:
             checks.discard("check")
@@ -281,21 +276,12 @@ def select(paths, phase, available, main_push=False):
             "reasons": sorted(reasons)}
 
 
-def changed_paths(base, head, fallback_base=None):
+def changed_paths(base, head):
     def commit(ref):
         return subprocess.check_output(
             ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"],
             text=True, stderr=subprocess.PIPE).strip()
-    head_commit = commit(head)
-    try:
-        base_commit = commit(base)
-    except subprocess.CalledProcessError:
-        if fallback_base is None:
-            raise
-        # An orphaned push predecessor may not be present after fetch-depth: 0.
-        # Review base failures remain errors; only pushes opt into this fallback.
-        base_commit = subprocess.check_output(
-            ["git", "merge-base", head_commit, commit(fallback_base)], text=True).strip()
+    head_commit, base_commit = commit(head), commit(base)
     # No rename inference: both deleted and added owners select their checks.
     raw = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z",
                                    base_commit, head_commit])
@@ -306,13 +292,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", required=True)
     parser.add_argument("--head", default="HEAD")
-    parser.add_argument("--fallback-base", help="Push-only fallback ancestor when the before commit is unavailable")
     parser.add_argument("--phase", choices=("development", "review"), default="review")
-    parser.add_argument("--main-push", action="store_true", help="Post-push main selection always includes check")
     args = parser.parse_args()
     available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path("build.zig").read_text()))
-    paths, base = changed_paths(args.base, args.head, args.fallback_base)
-    result = select(paths, args.phase, available, args.main_push)
+    paths, base = changed_paths(args.base, args.head)
+    result = select(paths, args.phase, available)
     result["base"] = base
     result["head"] = subprocess.check_output(["git", "rev-parse", args.head], text=True).strip()
     print(json.dumps(result, indent=2))

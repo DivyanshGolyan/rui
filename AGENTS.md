@@ -47,14 +47,11 @@ Ask before publishing to a different destination, expanding scope, force-pushing
 
 Standing grant: an item ready for main lands under these rules without further approval. Passing their gates is the authority; there is no separate human approval or qualification stage.
 
-- Stack ready items on `wip/land-N` and gate only the tip.
+- Stack ready items on `wip/land-N` and gate only the tip. At most one `wip/land-N` is open; later ready work waits for the next stack. Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists. Retire an abandoned stack (back it up, then delete it) before starting another. Selected's plan job repeats the check.
 - If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
-- [Auto-land](.github/workflows/auto-land.yml) performs the non-force fast-forward push of a passing tip and dispatches main's post-push CI; agents only assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so it holds such tips for a manual push.
-- If main goes red after the push in Store/recovery/upgrade: automatic non-force `git revert`, then freeze landing.
-- Any other red: file an issue and fix forward.
+- Only [Auto-land](.github/workflows/auto-land.yml) pushes `main`: one atomic non-force fast-forward of a passing tip to both `main` and `stable`. Agents only assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so Auto-land holds such tips for the user.
+- Main is not re-tested after the push. Daily full runs on main file an issue when red; fix forward.
 - After ready, at most one rerun per item, and no commits except fixes for red CI.
-- `stable` is the last main commit whose post-push CI passed; install from `stable`.
+- `stable` is the last landed tip; install from `stable`.
 
 The strict paths are `src/store*`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list; the [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on exactly these paths. A `wip/land-N` push runs [Selected checks](.github/workflows/check.yml) on the tip, and the upgrade check when the tip touches a strict path.
-
-[Main health](.github/workflows/main-health.yml) applies the post-push rules. It advances `stable`, or reverts the commits since `stable` and opens a `landing-freeze` issue, or files a fix-forward issue. Landing stays frozen while a `landing-freeze` issue is open; close it after the fix lands.
