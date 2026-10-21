@@ -5652,8 +5652,8 @@ def main(selected="all"):
             terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
-            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingPreferenceModelEdit"),
-                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingPreferenceModelEdit"),
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
+                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
                                    ('/setup --model ""', "InvalidPreferenceModel")):
                 terminal_step(master, command, error, composer=True)
                 assert interactive_saved.read_bytes() == cleared_preferences
