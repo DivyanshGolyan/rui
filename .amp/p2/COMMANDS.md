@@ -74,3 +74,12 @@ jq '{fixture:true, uninstrumented_cpu:true, scope:"Host user+system complete-wor
 ```
 
 For HOLD, the isolated P1b13caa4 export uses retained `p2_hold_cpu_test.go.txt` in place of its prior temporary count test. It calls existing sampleCPU twice, preserves query brackets, and checks the same100held/0events/0offer-bytes contract. Compile between measured streaming runs with `GOTOOLCHAIN=local go -C .amp/p2/p1-source/tests/qualification test -c -mod=readonly -o /home/user/workspace/repo/.amp/p2/bin/p1-hold-cpu-test ./model-output`. CPU-test source and binary hashes are in `raw/cpu-binary-source-identity.sha256`. No product/provider source changes or new shipped runner are involved.
+
+STREAM100 ended19:03:42UTC with retained exit1/incomplete. Reduce its raw JSON with the same jq expression, changing input to `stream100-uninstrumented.json` and output to `cpu-stream100-summary.json`. HOLD started19:04:20UTC and ended19:05:33UTC, PASS/exit0, using:
+
+```sh
+P2_HOLD_BINARY="$PWD/.amp/p2/bin/rui-baseline" P2_HOLD_DIRECTORY="$PWD/.amp/p2/raw/hold100-cpu" .amp/p2/bin/p1-hold-cpu-test -test.run '^TestP2HoldAttribution$' -test.v -test.timeout 5m
+getconf CLK_TCK # 100
+```
+
+The retained HOLD evidence has both CPU query brackets, cumulative values, delta and minimum/maximum window bounds. Streaming reports retain per-round CPU brackets, actual event counters, process identities, exact binary hash and post-reap audits. Instrumentation/count-source exports were not rebuilt during the CPU runs, and prior count evidence was not recaptured. Final verification regenerates the prior nine count cases and both new streaming summaries from raw inputs and checks the HOLD subtraction independently.
