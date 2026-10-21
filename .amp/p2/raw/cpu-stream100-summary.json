@@ -1,0 +1,90 @@
+{
+  "fixture": true,
+  "uninstrumented_cpu": true,
+  "scope": "Host user+system complete-work CPU; Linux fixture diagnostic only",
+  "binary_sha256": "b843b47aca5f06488101f52ea5714716d96d8e039068b7a11bf03362d16cdbb2",
+  "harness_verdict": "incomplete",
+  "messages": 200,
+  "events": 1200000,
+  "host_cpu_seconds": 42.4,
+  "rounds": [
+    {
+      "round": 1,
+      "events": 600000,
+      "cpu": {
+        "at_most_2_average_cores": true,
+        "average_cores_conservative": 0.3096936702997704,
+        "bracket_valid": true,
+        "complete_work_at_most_120_cpu_seconds": true,
+        "complete_work_cpu_available": true,
+        "complete_work_cpu_seconds": 20.619999999999997,
+        "cpu_seconds": 12.4,
+        "earliest_stream_final_completion_unix_ns": 1792609348618818600,
+        "first_query": {
+          "finish_unix_ns": 1792609298639748600,
+          "host_cpu_seconds": 2.94,
+          "start_unix_ns": 1792609298639659800
+        },
+        "maximum_sample_window_seconds": 40.039749941,
+        "minimum_sample_window_seconds": 40.03956551,
+        "provider_offer_qualified": true,
+        "second_query": {
+          "finish_unix_ns": 1792609338679410000,
+          "host_cpu_seconds": 15.34,
+          "start_unix_ns": 1792609338679314200
+        },
+        "status": "passed"
+      },
+      "host_dimensions": {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      },
+      "all_results_audited": true,
+      "offline_audit_after_host_reaped": true
+    },
+    {
+      "round": 2,
+      "events": 600000,
+      "cpu": {
+        "at_most_2_average_cores": true,
+        "average_cores_conservative": 0.29970873272856857,
+        "bracket_valid": true,
+        "complete_work_at_most_120_cpu_seconds": true,
+        "complete_work_cpu_available": true,
+        "complete_work_cpu_seconds": 21.78,
+        "cpu_seconds": 12,
+        "earliest_stream_final_completion_unix_ns": 1792609414719534600,
+        "first_query": {
+          "finish_unix_ns": 1792609364738492000,
+          "host_cpu_seconds": 25.11,
+          "start_unix_ns": 1792609364738258200
+        },
+        "maximum_sample_window_seconds": 40.039209981,
+        "minimum_sample_window_seconds": 40.038873378,
+        "provider_offer_qualified": true,
+        "second_query": {
+          "finish_unix_ns": 1792609404777468200,
+          "host_cpu_seconds": 37.11,
+          "start_unix_ns": 1792609404777365200
+        },
+        "status": "passed"
+      },
+      "host_dimensions": {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      },
+      "all_results_audited": true,
+      "offline_audit_after_host_reaped": true
+    }
+  ],
+  "cpu_seconds_per_event": 3.533333333333333e-05,
+  "microseconds_per_event": 35.333333333333336
+}

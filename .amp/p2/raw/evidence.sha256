@@ -1,6 +1,6 @@
-3d4662b30d97a1815ee9fdea2011463984f82be69989acad55b9e879d199e32d  .amp/p2/ATTRIBUTION.md
-cfed954ca7c2b06da3dd7f5039dee4af1a32f88f881473fc5e85c565dd9d011e  .amp/p2/COMMANDS.md
-e598591eca4a794f4439b3da9efdac063e09d3ae9894a4f77fd2d5d95e31bd61  .amp/p2/NOTES.md
+e0887f8a8518c5e35acaebe71a775a08a9de35143e842f5e4ce65926d529c1ad  .amp/p2/ATTRIBUTION.md
+13c3883a52755fe6bd9d209093b28c3bce333811ab7bde38feea3a8664bd2418  .amp/p2/COMMANDS.md
+08f0695f2f7047d36ead4888b5b4f7c0d77bf65385e54ba2d7bb32b3839a9d34  .amp/p2/NOTES.md
 dfa5377b442f8cbf14b0fa5ffbf1b3ad95296219169d211011f48629f498a20f  .amp/p2/analyze.py
 c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
 fd72b0aaf6ef427387b78c853c96c2b940544ff0828c0a7dad2ea9c045547c98  .amp/p2/bin/rui-perf
@@ -17,6 +17,7 @@ ad80a92002dc4b2bd2d3be573118db7e82f035b86f72944a2a0df4f2ed2084f2  .amp/p2/raw/bu
 7727ea269f21d233772c891551d59251644913522c81273afd421077ad8f902f  .amp/p2/raw/count-summary.json
 5b838e3186efc6105e4796c90698a500a071a99607c9e87a8315d9f9b178c3b0  .amp/p2/raw/cpu-binary-source-identity.sha256
 f1bc0915ada31b206873fd204ff1b44794ce6e9596cbf503ef841d9ee1d45739  .amp/p2/raw/cpu-stream1-summary.json
+d6703cd511f02314dfddf6b4d8888eb8025f8bb82a38e8193de154f77c9e707f  .amp/p2/raw/cpu-stream100-summary.json
 febdc2fb86de22c2d3b4c5e8e4bef9aa0e886d6cfed53dafa4d11f8b11c43e4b  .amp/p2/raw/final-binary-source-identity.sha256
 9a8eb2a058a8e7d499b76182231506037cd5d4058c41bea01dd7dd148faf5e6d  .amp/p2/raw/heap1-host.log.gz
 abd9d7f08a8f5b307dc2e2f60948b1401175bbc37c87cc82c0d79331221e189a  .amp/p2/raw/heap1-interpret.log
@@ -24,6 +25,8 @@ abd9d7f08a8f5b307dc2e2f60948b1401175bbc37c87cc82c0d79331221e189a  .amp/p2/raw/he
 78333e8e6a255d13896cd20937b6552aa9e78ddc2d6d965b06511556c1100b52  .amp/p2/raw/heap1.interpreted.gz
 d9e7c22467ccc122a45c76104d38872dcdde98d6b5a30df1fdb53f1bf4b64423  .amp/p2/raw/heap1.json
 9a0bc90e61ce684069346c9369d961cfc33d1aad75f54d6ab3ecbe6062abdc94  .amp/p2/raw/heap1.raw.gz
+656b21583a2250a854b88feb7d79d3e9d50a99d0a188a711c2df4ec206a26c00  .amp/p2/raw/hold100-cpu-test.log
+dfdbe70d023e8d32da107d1fc772a48df45b4e295a423072fa7a49222bc20b28  .amp/p2/raw/hold100-cpu/evidence.json
 e5b94cd27f68882910b61d38b98af351b3a371a17fb8fd15250ae367e855eb27  .amp/p2/raw/hold100-strace.txt
 3e915bfb1eebc17b44ab2a1956a30d4ed6ebb090a052936d9256387135a7a188  .amp/p2/raw/hold100-test.log
 a0e7213d8e4e35adabbdb71de38f752055fc6d677a7f11f45bc96bbea4334bdc  .amp/p2/raw/hold100-untraced-test.log
@@ -94,5 +97,6 @@ af668e17dff9728725616e184e9ce1e1fbf29e8b7f21bead2b3298af810ce095  .amp/p2/raw/st
 59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2  .amp/p2/raw/stream100-strace-host.log.gz
 d4bd6d5c2940cf6943aea82cc20b7f5ed685b80e6c876486a4ada2d584a83b0e  .amp/p2/raw/stream100-strace.json
 e9b4463182c04e4286dca4f12f24d7b5f89413a314398364ef65d36b4efe252b  .amp/p2/raw/stream100-strace.txt
+90301c17042faf006c2795b189f3b14f301d7b9c83a903424d18f5a54079fe8c  .amp/p2/raw/stream100-uninstrumented.json
 5af211bb9ce0671578234f094a3a63d34a2c7844db7a23546f23bf037310f390  .amp/p2/raw/tool-capabilities.txt
 58b029cb34fbd105953fff18d53e7ec06ea96a489415cc5b183ee52a4550b3a5  .amp/p2/sql-instrumentation.patch.gz

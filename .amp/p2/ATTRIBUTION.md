@@ -72,12 +72,16 @@ The CPU follow-up invokes the existing Go capacity runner directly against the s
 | Fixture | Pre-run estimate | Measured Host user+system CPU | Actual events | CPU/event |
 | --- | ---: | ---: | ---: | ---: |
 | STREAM N=1 | About 0.158 CPU-seconds | 1.53 CPU-seconds | 3,600 | 425 µs |
-| STREAM N=100 | About 14.12 CPU-seconds | Pending | Pending | Pending |
-| HOLD N=100, interior window | About 0.054 CPU-seconds | Pending | Zero required | Undefined |
+| STREAM N=100 | About 14.12 CPU-seconds | 42.40 CPU-seconds | 1,200,000 | 35.3 µs |
+| HOLD N=100, interior window | About 0.054 CPU-seconds | 1.84 CPU-seconds over 60.01 seconds | 0 | Undefined |
 
 N=1 has two complete-work deltas of 0.77 and 0.76 CPU-seconds. Complete-work CPU includes Message admission, fixture readiness, paced offer, result delivery and Host drain. It excludes Configure and Host startup. Host CPU excludes provider, controller and CLI processes. The 40-second interior windows independently measure about 0.01274 and 0.01199 average cores. Both rounds pass functional and offline durable audits; the report remains incomplete for unavailable Mac physical footprint.
 
-The estimate uses previous counts and explicitly assumed unit costs, not instrumented timings. The observed N=1 cost is about 9.7 times the estimate. Linux CLK_TCK is 100; ratios are derived from coarse process counters, not microsecond-resolution observations. Each fixture has one fresh Host and two streaming rounds, not five-repeat statistics. These are Linux fixture diagnostics, never Mac headlines or qualification of a production fix. [Raw N=1 report](raw/stream1-uninstrumented.json) and [CPU summary](raw/cpu-stream1-summary.json) retain the observations.
+N=100 has complete-work deltas of 20.62 and 21.78 CPU-seconds. Its 40-second interior windows measure about 0.310 and 0.300 average cores. Both rounds pass capture, request integrity, result delivery, cleanup and post-reap durable audits. Its aggregate also remains incomplete for unavailable Mac physical footprint.
+
+HOLD measures Host CPU from 0.90 to 2.74 seconds over a bracketed 60.01-second interior window, about 0.03066 average cores, or 3.07% of one core. The existing provider confirms 100 held streams on one H2 connection, zero response events and zero offer bytes. This measures waiting CPU, not admission or settlement CPU, and not distinct wakeups. The test passes. The CPU/event denominator is zero and the ratio is undefined.
+
+The estimates use previous counts and explicitly assumed unit costs, not instrumented timings. Observed CPU is about 9.7 times the N=1 estimate, 3.0 times the N=100 estimate and 34 times the HOLD estimate. The original estimates remain unchanged. Linux CLK_TCK is 100; ratios are derived from coarse process counters, not microsecond-resolution observations. Each fixture has one fresh Host, with two rounds for streaming and one HOLD window, not five-repeat statistics. Runs are serial, and compilation occurs between measured intervals. These are Linux fixture diagnostics, never Mac headlines or qualification of a production fix. Raw reports and derived summaries are [N=1](raw/stream1-uninstrumented.json), [N=1 summary](raw/cpu-stream1-summary.json), [N=100](raw/stream100-uninstrumented.json), [N=100 summary](raw/cpu-stream100-summary.json) and [HOLD](raw/hold100-cpu/evidence.json).
 
 ## Original estimates remain beside the measurements
 
@@ -102,6 +106,6 @@ The [run notes](NOTES.md) retain the arithmetic recorded before each run. Large 
 
 Hardware cycles, instructions, branches, branch misses and cache misses are unsupported. Perf context-switch and CPU-migration counters report zero despite independent task-switch evidence, so those metrics are unavailable. Page faults and user sampling work. Instrumented clock outputs are retained only as raw tool output.
 
-All seven streaming, SQL, heap and perf JSON reports remain `incomplete`, with process exit 1 because Mac physical footprint is unavailable. Capture, request integrity, result delivery, cleanup and post-reap durable audits pass in both rounds. Linux RSS, profile memory and switch counts do not replace Mac headline results. Normal-install, previous-release and live-provider qualification were not performed here.
+The seven original instrumented streaming, SQL, heap and perf JSON reports remain `incomplete`, with process exit 1 because Mac physical footprint is unavailable. Capture, request integrity, result delivery, cleanup and post-reap durable audits pass in both rounds. The two new uninstrumented streaming reports retain the same missing-footprint limitation. Linux RSS, profile memory, CPU and switch counts do not replace Mac headline results. Normal-install, previous-release and live-provider qualification were not performed here.
 
 The failed SQL build caused by a dependency symlink and the failed perf post-processing field request remain in raw logs. Corrected infrastructure and post-processing did not rerun workloads for green. The original partial HOLD implementation remains frozen and unused by HOLD measurements. [Commands](COMMANDS.md) identify each executable, option, source export and post-processing step. [Count summary](raw/count-summary.json) is regenerated from the published raw evidence with `python3 .amp/p2/analyze.py`. Raw profiles and patches use gzip without deleting local originals. Final product-file hash verification is in [source-recheck-final.txt](raw/source-recheck-final.txt).
