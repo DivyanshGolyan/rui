@@ -43,8 +43,8 @@ pub const Job = struct {
     older: ?client.ConversationCursor = null,
     // A history read renders this part of a transcript's listing instead.
     listing: ?Listing = null,
-    // A message read shows this collapsed block's Message in full.
-    message_target: ?View.Collapsed = null,
+    // A message read shows these Messages of one collapsed block in full.
+    message_targets: Targets = .{},
     // Messages shown in live output before this read.
     messages: Messages = .{},
     // The Screen's page epoch this read belongs to; its page shows only while
@@ -766,12 +766,33 @@ test "a transcript joins at the first retained boundary or shows the gap after t
     try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
 }
 
-/// The Ctrl-O page. The Message's length, digest and end are validated
-/// before anything shows; its full text then follows at column 0.
+/// The Messages one Ctrl-O page shows, in order: one for a collapsed
+/// Message, or each of a fold's, at most one page's worth.
+pub const Targets = struct {
+    pub const capacity = @typeInfo(@FieldType(Collected, "items")).array.len;
+    items: [capacity]View.Collapsed = undefined,
+    count: usize = 0,
+
+    pub fn one(target: View.Collapsed) Targets {
+        var targets: Targets = .{ .count = 1 };
+        targets.items[0] = target;
+        return targets;
+    }
+
+    pub fn slice(self: *const Targets) []const View.Collapsed {
+        return self.items[0..self.count];
+    }
+};
+
+/// One Message read into the scratch file at `start`, already validated.
+const Staged = struct { target: View.Collapsed, start: u64, lines: u64, last: u8 };
+
+/// The Ctrl-O page. Each Message's length, digest and end are validated
+/// before anything shows; their full text then follows at column 0.
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    const target = job.message_target.?;
+    std.debug.assert(job.message_targets.count != 0);
     const Staging = struct {
         io: std.Io,
         file: std.Io.File,
@@ -787,58 +808,99 @@ pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     };
     try job.scratch.setLength(task.io, 0);
     var staging: Staging = .{ .io = task.io, .file = job.scratch };
-    const reference: client.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
-    const failure = switch (target.source) {
-        .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
-        .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
-    };
-    if (failure) |value| return requests.failRead(value);
-    if (staging.offset != target.content.length) return error.ContentLengthMismatch;
-    const lines = staging.newlines + @intFromBool(staging.last != '\n');
-    try writeMessagePage(task.io, job.scratch, staging.offset, lines, staging.last, target, job.store, job.session, job.inspection_file);
+    var staged: [Targets.capacity]Staged = undefined;
+    // Every Message is read whole and checked before any page is written.
+    for (job.message_targets.slice(), staged[0..job.message_targets.count]) |target, *message| {
+        const start = staging.offset;
+        staging.newlines = 0;
+        staging.last = '\n';
+        const reference: client.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+        const failure = switch (target.source) {
+            .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
+            .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, &staging),
+        };
+        if (failure) |value| return requests.failRead(value);
+        if (staging.offset - start != target.content.length) return error.ContentLengthMismatch;
+        message.* = .{ .target = target, .start = start, .lines = staging.newlines + @intFromBool(staging.last != '\n'), .last = staging.last };
+    }
+    try writeMessagePage(task.io, job.scratch, staged[0..job.message_targets.count], job.store, job.session, job.inspection_file);
 }
 
-/// Writes the Message page for the `length` validated bytes in `scratch`.
-fn writeMessagePage(io: std.Io, scratch: std.Io.File, length: u64, lines: u64, last: u8, target: View.Collapsed, store: []const u8, session: []const u8, file: std.Io.File) !void {
+/// Writes one page of validated Messages staged in `scratch`, each under its
+/// own heading.
+fn writeMessagePage(io: std.Io, scratch: std.Io.File, messages: []const Staged, store: []const u8, session: []const u8, file: std.Io.File) !void {
     try file.setLength(io, 0);
     var page: MessagePage = .{ .io = io, .file = file };
-    var size: [24]u8 = undefined;
-    var heading: [96]u8 = undefined;
-    try page.feed(View.Mark.summary);
-    try page.feed(try std.fmt.bufPrint(&heading, "Message · {d} line{s} · {s}", .{ lines, if (lines == 1) "" else "s", View.kilobytes(target.content.length, &size) }));
-    try page.feed(View.Mark.reset ++ "\n");
-    if (target.row) {
-        try History.writeExport(&page, store, session, target.position, target.ordinal);
+    // The Message the display limit cut, and whether it cut its heading.
+    var cut: ?struct { index: usize, heading: bool, before: u64 } = null;
+    for (messages, 0..) |message, index| {
+        const target = message.target;
+        const before = page.offset;
+        if (index != 0) try page.feed("\n");
+        var size: [24]u8 = undefined;
+        var heading: [128]u8 = undefined;
+        var count: [32]u8 = undefined;
+        try page.feed(View.Mark.summary);
+        try page.feed(try std.fmt.bufPrint(&heading, "Message{s} · {d} line{s} · {s}", .{
+            if (messages.len == 1) "" else try std.fmt.bufPrint(&count, " {d} of {d}", .{ index + 1, messages.len }),
+            message.lines,
+            if (message.lines == 1) "" else "s",
+            View.kilobytes(target.content.length, &size),
+        }));
+        try page.feed(View.Mark.reset ++ "\n");
+        if (target.row) {
+            try History.writeExport(&page, store, session, target.position, target.ordinal);
+            try page.feed("\n");
+        }
         try page.feed("\n");
+        // Room for the first heading again covers the notice and its command.
+        if (index == 0) page.limit = Viewport.capacity - 2 * page.offset - 128;
+        if (page.full) {
+            cut = .{ .index = index, .heading = true, .before = before };
+            break;
+        }
+        page.heading_lines = page.lines;
+        var escaped: View.Escaped(*MessagePage) = .{ .sink = &page, .text = .{ .mode = .multiline } };
+        var window: [protocol.content_window_bytes]u8 = undefined;
+        var offset: u64 = 0;
+        const length = target.content.length;
+        while (offset < length and !page.full) {
+            const wanted: usize = @intCast(@min(window.len, length - offset));
+            if (try scratch.readPositionalAll(io, window[0..wanted], message.start + offset) != wanted) return error.TruncatedDisplayScratch;
+            try escaped.feed(window[0..wanted]);
+            offset += wanted;
+        }
+        if (!page.full) try escaped.finish();
+        if (page.full) {
+            cut = .{ .index = index, .heading = false, .before = before };
+            break;
+        }
+        if (message.last != '\n') try page.feed("\n");
     }
-    try page.feed("\n");
-    // Room for the heading again covers the notice and its command.
-    page.limit = Viewport.capacity - 2 * page.offset - 128;
-    page.heading_lines = page.lines;
-    var escaped: View.Escaped(*MessagePage) = .{ .sink = &page, .text = .{ .mode = .multiline } };
-    var window: [protocol.content_window_bytes]u8 = undefined;
-    var offset: u64 = 0;
-    while (offset < length and !page.full) {
-        const wanted: usize = @intCast(@min(window.len, length - offset));
-        if (try scratch.readPositionalAll(io, window[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
-        try escaped.feed(window[0..wanted]);
-        offset += wanted;
-    }
-    if (!page.full) try escaped.finish();
-    if (!page.full) return if (last != '\n') page.feed("\n");
+    const at = cut orelse return;
     // Escaped controls and invalid bytes can outgrow the view: keep whole
     // lines, or the first line's start when none fits whole, and say how
-    // many lines are not shown in full, never cut silently.
-    const whole = page.lines - page.heading_lines;
-    const end = if (whole != 0) page.line_end else page.boundary;
+    // many lines and Messages are not shown in full, never cut silently.
+    // A heading the limit reached leaves with its Message.
+    const whole = if (at.heading) 0 else page.lines - page.heading_lines;
+    const end = if (at.heading) at.before else if (whole != 0) page.line_end else page.boundary;
     try file.setLength(io, end);
     page.offset = end;
     page.limit = std.math.maxInt(u64);
     page.full = false;
-    var notice: [96]u8 = undefined;
-    const hidden = lines - whole;
-    try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} not shown in full\n", .{ hidden, if (hidden == 1) "" else "s" }));
-    if (target.row) {
+    var notice: [160]u8 = undefined;
+    const target = messages[at.index].target;
+    const hidden = messages[at.index].lines - whole;
+    const later = messages.len - at.index - 1;
+    if (messages.len == 1)
+        try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} not shown in full\n", .{ hidden, if (hidden == 1) "" else "s" }))
+    else if (at.heading)
+        try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} message{s} not shown · /history shows them\n", .{ later + 1, if (later == 0) "" else "s" }))
+    else if (later == 0)
+        try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} of message {d} not shown in full\n", .{ hidden, if (hidden == 1) "" else "s", at.index + 1 }))
+    else
+        try page.feed(try std.fmt.bufPrint(&notice, "\n! Display limit reached; {d} line{s} of message {d} not shown in full, nor {d} later · /history shows them\n", .{ hidden, if (hidden == 1) "" else "s", at.index + 1, later }));
+    if (!at.heading and target.row) {
         try History.writeExport(&page, store, session, target.position, target.ordinal);
         try page.feed("\n");
     }
@@ -872,7 +934,9 @@ test "a Message page past the display limit keeps what fits and says what it cut
     }) |case| {
         try scratch.setLength(io, 0);
         try scratch.writePositionalAll(io, case.body, 0);
-        try writeMessagePage(io, scratch, case.body.len, case.lines, case.body[case.body.len - 1], target, "/s", "a", file);
+        var sized = target;
+        sized.content.length = case.body.len;
+        try writeMessagePage(io, scratch, &.{.{ .target = sized, .start = 0, .lines = case.lines, .last = case.body[case.body.len - 1] }}, "/s", "a", file);
         const text = page[0..try file.readPositionalAll(io, page, 0)];
         try std.testing.expect(text.len <= Viewport.capacity);
         try std.testing.expect(std.unicode.utf8ValidateSlice(text));
@@ -881,6 +945,40 @@ test "a Message page past the display limit keeps what fits and says what it cut
         // The export command follows the notice, so the bytes stay reachable.
         try std.testing.expect(std.mem.indexOfPos(u8, text, notice, "--position 7 --ordinal 0") != null);
     }
+    // A fold's page heads each Message, in order, from its own scratch range.
+    try scratch.setLength(io, 0);
+    try scratch.writePositionalAll(io, "first\nsecond\nthird", 0);
+    var parts: [3]Staged = undefined;
+    for (&parts, [_][2]u64{ .{ 0, 6 }, .{ 6, 7 }, .{ 13, 5 } }, 0..) |*part, range, index| {
+        var each = target;
+        each.content.length = range[1];
+        each.position = 10 + index;
+        each.row = index == 1;
+        part.* = .{ .target = each, .start = range[0], .lines = 1, .last = if (index == 2) 'd' else '\n' };
+    }
+    try writeMessagePage(io, scratch, &parts, "/s", "a", file);
+    const folded = page[0..try file.readPositionalAll(io, page, 0)];
+    const expected = View.Mark.summary ++ "Message 1 of 3 · 1 line · 0.0 KB" ++ View.Mark.reset ++ "\n\nfirst\n\n" ++
+        View.Mark.summary ++ "Message 2 of 3 · 1 line · 0.0 KB" ++ View.Mark.reset ++ "\n";
+    try std.testing.expectEqualStrings(expected, folded[0..expected.len]);
+    // Only the conversation row exports, under its own heading.
+    try std.testing.expect(std.mem.indexOf(u8, folded, "--position 11 --ordinal 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, folded, "--position 10 ") == null);
+    try std.testing.expect(std.mem.endsWith(u8, folded, View.Mark.summary ++ "Message 3 of 3 · 1 line · 0.0 KB" ++ View.Mark.reset ++ "\n\nthird\n"));
+    // Past the limit inside the second, the third is counted, never shown.
+    try scratch.setLength(io, 0);
+    try scratch.writePositionalAll(io, "first\n", 0);
+    try scratch.writePositionalAll(io, controls, 6);
+    try scratch.writePositionalAll(io, "third", 6 + controls.len);
+    parts[1].target.content.length = controls.len;
+    parts[1].lines = 1000;
+    parts[2].start = 6 + controls.len;
+    try writeMessagePage(io, scratch, &parts, "/s", "a", file);
+    const cut = page[0..try file.readPositionalAll(io, page, 0)];
+    try std.testing.expect(cut.len <= Viewport.capacity);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "first\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "third") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cut, "lines of message 2 not shown in full, nor 1 later · /history shows them\n") != null);
 }
 
 /// A Message page's file. Body bytes stop at `limit`; `line_end` is where

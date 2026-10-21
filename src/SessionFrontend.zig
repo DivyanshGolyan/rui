@@ -533,7 +533,7 @@ fn driveActive(self: *Self) !void {
             if (self.reader.thread == null) if (self.message_wanted) |wanted| if (wanted == .target) {
                 self.message_wanted = null;
                 var job = self.freeze(.message);
-                job.message_target = wanted.target.block;
+                job.message_targets = .one(wanted.target.block);
                 // The page belongs to the view Ctrl-O was pressed over.
                 job.page_epoch = wanted.target.page_epoch;
                 try self.launch(job, reads.fullMessage);
