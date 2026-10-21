@@ -56,3 +56,21 @@ sha256sum -c .amp/p2/raw/product-source.sha256
 The temporary HOLD test reads every Host task's `/proc/PID/task/TID/status` at 10 and 70 seconds after offer start. `analyze.py` subtracts those counters. The traced run's context switches are ptrace-distorted. The second run has no strace, heaptrack, SQL callback or perf collector. Both assert 100 held streams, zero SSE events and zero offer bytes before teardown. Provider and controller share one process only in this temporary HOLD test, and neither enters Host counts.
 
 The final PNG is a Chromium rendering of the retained SVG, inspected for visible labels and correct sample units. No additional workload capture produced it. Large raw profiles, SQL logs and patches are gzip copies; decompress them to reproduce downstream tools. `raw/identity.txt` records initial environment and binary identity. `raw/final-binary-source-identity.sha256` adds the research and HOLD binary hashes. `raw/source-recheck-final.txt` verifies product files stayed unchanged.
+
+## Uninstrumented CPU follow-up
+
+The estimates precede execution in NOTES.md. STREAM1 started18:58:49UTC and ended19:00:51UTC with retained exit1/incomplete for missing Mac footprint. STREAM100 started19:01:24UTC. The actual Rui binary is passed directly, not through an instrumentation launcher. LD_PRELOAD was unset. Product/source identities remain baseline240, independently of the controller checkout revision recorded in JSON.
+
+```sh
+.amp/p2/bin/model-output --capacity 1 --output "$PWD/.amp/p2/raw/stream1-uninstrumented.json" "$PWD/.amp/p2/bin/rui-baseline"
+.amp/p2/bin/model-output --capacity 100 --output "$PWD/.amp/p2/raw/stream100-uninstrumented.json" "$PWD/.amp/p2/bin/rui-baseline"
+# Apply this reduction independently to each completed raw report:
+jq '{fixture:true, uninstrumented_cpu:true, scope:"Host user+system complete-work CPU; Linux fixture diagnostic only", binary_sha256, harness_verdict:.status,
+     messages:([.active_capacity_growth[0].rounds[].audit_rows|length]|add),
+     events:([.active_capacity_growth[0].rounds[].paced_offer.completed_events]|add),
+     host_cpu_seconds:([.active_capacity_growth[0].rounds[].cpu.complete_work_cpu_seconds]|add),
+     rounds:[.active_capacity_growth[0].rounds[]|{round,events:.paced_offer.completed_events,cpu,host_dimensions,all_results_audited,offline_audit_after_host_reaped}]}
+    | . + {cpu_seconds_per_event:(.host_cpu_seconds/.events),microseconds_per_event:(1000000*.host_cpu_seconds/.events)}' .amp/p2/raw/stream1-uninstrumented.json > .amp/p2/raw/cpu-stream1-summary.json
+```
+
+For HOLD, the isolated P1b13caa4 export uses retained `p2_hold_cpu_test.go.txt` in place of its prior temporary count test. It calls existing sampleCPU twice, preserves query brackets, and checks the same100held/0events/0offer-bytes contract. Compile between measured streaming runs with `GOTOOLCHAIN=local go -C .amp/p2/p1-source/tests/qualification test -c -mod=readonly -o /home/user/workspace/repo/.amp/p2/bin/p1-hold-cpu-test ./model-output`. CPU-test source and binary hashes are in `raw/cpu-binary-source-identity.sha256`. No product/provider source changes or new shipped runner are involved.
