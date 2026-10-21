@@ -1,0 +1,34 @@
+COUNTER=cycles
+<not supported>;;cycles:u;0;100.00;;
+EXIT=0
+COUNTER=instructions
+<not supported>;;instructions:u;0;100.00;;
+EXIT=0
+COUNTER=branches
+<not supported>;;branches:u;0;100.00;;
+EXIT=0
+COUNTER=branch-misses
+<not supported>;;branch-misses:u;0;100.00;;
+EXIT=0
+COUNTER=cache-misses
+<not supported>;;cache-misses:u;0;100.00;;
+EXIT=0
+COUNTER=context-switches
+0;;context-switches:u;875494;100.00;;
+EXIT=0
+COUNTER=cpu-migrations
+0;;cpu-migrations:u;848353;100.00;;
+EXIT=0
+COUNTER=page-faults
+47;;page-faults:u;915094;100.00;;
+EXIT=0
+COUNTER=task-clock
+0.92;msec;task-clock:u;917664;100.00;0.677;CPUs utilized
+EXIT=0
+COUNTER=cpu-clock
+0.88;msec;cpu-clock:u;875924;100.00;0.731;CPUs utilized
+EXIT=0
+CALLGRAPH
+[ perf record: Woken up 1 times to write data ]
+[ perf record: Captured and wrote 0.001 MB .amp/p2/raw/probe-perf.data (3 samples) ]
+EXIT=0

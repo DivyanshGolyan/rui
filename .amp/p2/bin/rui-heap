@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Inject standard heaptrack only into the Host, preserving its PID."""
+import os
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+binary = str(root / "bin/rui-baseline")
+args = sys.argv[1:]
+if args[:2] == ["host", "serve"]:
+    os.environ["LD_PRELOAD"] = "/usr/lib/heaptrack/libheaptrack_preload.so"
+    os.environ["DUMP_HEAPTRACK_OUTPUT"] = os.environ["P2_HEAP_OUTPUT"]
+os.execv(binary, [binary, *args])

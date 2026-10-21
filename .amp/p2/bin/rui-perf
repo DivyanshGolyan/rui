@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""One-run perf attachment, keeping the Host's PID and ordinary source."""
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+binary = str(root / "bin/rui-baseline")
+args = sys.argv[1:]
+if args[:2] == ["host", "serve"]:
+    prefix = os.environ["P2_PERF_PREFIX"]
+    log = open(prefix + "-collector.log", "wb")
+    events = "context-switches,cpu-migrations,page-faults,task-clock:u,cpu-clock:u"
+    stat = subprocess.Popen(["perf", "stat", "-x", ";", "-e", events,
+                             "-p", str(os.getpid()), "-o", prefix + "-stat.txt"],
+                            stdout=log, stderr=log)
+    record = subprocess.Popen(["perf", "record", "-e", "cpu-clock:u", "-F", "99",
+                               "--call-graph", "dwarf,16384", "-p", str(os.getpid()),
+                               "-o", prefix + ".data"], stdout=log, stderr=log)
+    Path(prefix + "-pids.json").write_text(json.dumps({"host": os.getpid(), "stat": stat.pid, "record": record.pid}))
+os.execv(binary, [binary, *args])

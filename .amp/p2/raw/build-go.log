@@ -1,0 +1,2 @@
++ GOTOOLCHAIN=local
++ go -C tests/qualification build -mod=readonly -o /home/user/workspace/repo/.amp/p2/bin/model-output ./model-output

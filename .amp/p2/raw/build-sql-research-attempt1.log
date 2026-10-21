@@ -1,0 +1,98 @@
++ zig build -Doptimize=ReleaseFast -j2 --summary all
+install
++- install rui
+   +- compile exe rui fast native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/.amp/p2/research-source/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/.amp/p2/research-source/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/.amp/p2/research-source/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/.amp/p2/research-source/src/curl-post-retry.patch /home/user/workspace/repo/.amp/p2/research-source/.zig-cache/o/9746ab6e852655295218ff70dcffe206/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+
+install
++- install rui
+   +- compile exe rui fast native
+      +- run exe uucode_generate (tables.zig) failure
+error: FileNotFound
+/home/user/.local/opt/zig-0.17.0/lib/std/Io/Threaded.zig:4411:35: 0x114f4b1 in dirCreateFilePosix (uucode_generate)
+                        .NOENT => return error.FileNotFound,
+                                  ^
+/home/user/.local/opt/zig-0.17.0/lib/std/Io/Dir.zig:642:5: 0x1150315 in createFile (uucode_generate)
+    return io.vtable.dirCreateFile(io.userdata, dir, sub_path, flags);
+    ^
+/home/user/workspace/repo/zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/generate.zig:330:20: 0x1182800 in main (uucode_generate)
+    var out_file = try std.Io.Dir.cwd().createFile(io, output_path, .{});
+                   ^
+error: process exited with code 1
+failed command: cd zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv && ./../../.zig-cache/o/8dfba5e85a25a2bf53d36ba358bea132/uucode_generate ./../../.zig-cache/o/fa849cfc87ed4fc00dc3a7e72f184a09/tables.zig
+
+Build Summary: 38/42 steps succeeded (1 failed)
+install transitive failure
++- install rui transitive failure
+|  +- compile exe rui fast native transitive failure
+|     +- run sh (pinned-transport-x86_64-linux) success 3m
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- translate-c sqlite success 28ms
+|     |  +- compile exe translate-c fast native success 1m MaxRSS:1G
+|     |  |  +- options success
+|     |  |  +- options success
+|     |  |  +- options success
+|     |  |  +- run exe generate-def (aarch64.zig) success 168ms
+|     |  |  |  +- compile exe generate-def debug native success 2s MaxRSS:137M
+|     |  |  +- run exe generate-def (amdgcn.zig) success 818ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (arm.zig) success 138ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (bpf.zig) success 9ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (common.zig) success 591ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (hexagon.zig) success 821ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (loongarch.zig) success 480ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (mips.zig) success 198ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (neon.zig) success 523ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (nvptx.zig) success 457ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (powerpc.zig) success 262ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (riscv.zig) success 129ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (s390x.zig) success 132ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (ve.zig) success 516ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (wasm.zig) success 140ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86_64.zig) success 117ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86.zig) success 977ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (xcore.zig) success 19ms
+|     |  |     +- compile exe generate-def debug native (reused)
+|     |  +- WriteFile sqlite.h success
+|     +- translate-c posix success 42ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile posix.h success
+|     +- run bash (vaxis) success 14ms
+|     +- run bash (vaxis) (reused)
+|     +- run bash (vaxis) (reused)
+|     +- options success
+|     +- translate-c curl success 56ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile curl.h success
+|     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run exe uucode_generate (tables.zig) failure
+|     |  +- compile exe uucode_generate debug native success 13s MaxRSS:303M
+|     |     +- WriteFile build_config.zig success
+|     +- WriteFile build_config.zig (reused)
++- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
++- install rui-evaluator success
+   +- compile exe rui-evaluator fast native success 40s MaxRSS:540M
+      +- run sh (quickjs.c) success 20ms
+

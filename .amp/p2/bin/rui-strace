@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""One-run measurement launcher; only Host is traced, PID stays the tracee."""
+import os
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+binary = str(root / "bin/rui-baseline")
+args = sys.argv[1:]
+if args[:2] == ["host", "serve"]:
+    output = os.environ["P2_SYSCALL_OUTPUT"]
+    diagnostics = [] if os.environ.get("P2_DIAGNOSTICS") == "0" else ["--test-phase-trace", "--test-sqlite-diagnostics"]
+    os.execvp("strace", ["strace", "-D", "-f", "-c", "-o", output,
+                         binary, *args, *diagnostics])
+os.execv(binary, [binary, *args])

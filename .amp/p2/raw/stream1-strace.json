@@ -1,0 +1,1245 @@
+{
+  "active_capacity_growth": [
+    {
+      "active_capacity": 1,
+      "events_per_second_per_stream": 30,
+      "last_retained_delta_from_first": {
+        "open_descriptors": 0,
+        "pss_bytes": 36864,
+        "rss_bytes": 28672,
+        "status": "observed"
+      },
+      "process_identity": {
+        "all_distinct": true,
+        "controller_pid": 60731,
+        "host_pid": 60742,
+        "provider_pid": 60737
+      },
+      "rounds": [
+        {
+          "active_capacity": 1,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-1-round-1-0",
+              "session": "measure/capacity-1/1/0",
+              "input_text": "capacity-1-round-1-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-1/1/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "answer",
+              "response_id": "capacity-response-capacity-1-round-1-0",
+              "model_evidence": "010E006D6F64656C2D612D7365727665640E006D6F64656C2D612D7365727665640000",
+              "request_id": "capacity-capacity-1-round-1-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "469010",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": "capacity-1-round-1-0",
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [
+              {
+                "message": "capacity-1-round-1-0",
+                "outcome": "completed",
+                "turn": "1"
+              }
+            ],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": null,
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "e82a7659f8a461cea007d3550eb2ffef627517198586abcfdce59cde272135b8"
+                }
+              },
+              "operation": "1",
+              "status": "completed",
+              "turn": "1"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.0846739080296361,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_available": true,
+            "complete_work_cpu_seconds": 5.12,
+            "cpu_seconds": 3.39,
+            "earliest_stream_final_completion_unix_ns": 1792602816319348524,
+            "first_query": {
+              "finish_unix_ns": 1792602766362616784,
+              "host_cpu_seconds": 0.9800000000000001,
+              "start_unix_ns": 1792602766362441161
+            },
+            "maximum_sample_window_seconds": 40.036307671,
+            "minimum_sample_window_seconds": 40.035945888,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1792602806398748837,
+              "host_cpu_seconds": 4.37,
+              "start_unix_ns": 1792602806398562678
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 1800,
+            "events": 1800,
+            "bytes": 468000
+          },
+          "expected_response_scratch_delta_bytes": 468000,
+          "expected_retained_scratch_bytes": 469010,
+          "fixture_completion": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 1,
+            "valid_offer_streams": 1,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1661,
+              "observed_ns": 2862778
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1151,
+              "observed_ns": 35365497
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1783,
+              "observed_ns": 64538918
+            },
+            "latest_final_completion_unix_ns": 1792602816319348524,
+            "earliest_final_completion_unix_ns": 1792602816319348524,
+            "terminal_bytes": 821,
+            "request_bytes": 1010,
+            "request_set_sha256": "8dc8745415ec5adba7539fe76a35c3f09ed45b8553da767738bceffd95235246",
+            "history_valid_streams": 1,
+            "start_unix_ns": 1792602756352134662,
+            "offer_horizon_unix_ns": 1792602816385467996,
+            "hard_deadline_unix_ns": 1792602876352134662,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 1010,
+            "request_set_sha256": "8dc8745415ec5adba7539fe76a35c3f09ed45b8553da767738bceffd95235246",
+            "history_valid_streams": 1,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "memory": "incomplete",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 7241728,
+              "virtual_bytes": 118284288,
+              "cpu_user_seconds": 0.04,
+              "cpu_system_seconds": 0.02,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 11,
+              "disk_read_bytes": 385024,
+              "disk_write_bytes": 536576,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1245184,
+                  "Private_Clean": 5758976,
+                  "Private_Dirty": 1245184,
+                  "Pss": 7235584,
+                  "Pss_Anon": 1245184,
+                  "Pss_File": 5990400,
+                  "Pss_Shmem": 0,
+                  "Rss": 8499200,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 7241728,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1245184,
+                  "Private_Clean": 5758976,
+                  "Private_Dirty": 1245184,
+                  "Pss": 7235584,
+                  "Pss_Anon": 1245184,
+                  "Pss_File": 5990400,
+                  "Pss_Shmem": 0,
+                  "Rss": 8499200,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 7241728,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "accepted macOS physical-footprint evidence unavailable; RSS and Linux /proc counters are diagnostic only",
+              "rss_bytes": 7241728,
+              "sampling_error": "",
+              "status": "unavailable"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 30.016402031654554,
+            "seconds": 59.967213862,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 1,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1661,
+              "observed_ns": 2862778
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1151,
+              "observed_ns": 35365497
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-1-0",
+              "ordinal": 1783,
+              "observed_ns": 64538918
+            },
+            "latest_final_completion_unix_ns": 1792602816319348524,
+            "earliest_final_completion_unix_ns": 1792602816319348524,
+            "terminal_bytes": 0,
+            "request_bytes": 1010,
+            "request_set_sha256": "8dc8745415ec5adba7539fe76a35c3f09ed45b8553da767738bceffd95235246",
+            "history_valid_streams": 1,
+            "start_unix_ns": 1792602756352134662,
+            "offer_horizon_unix_ns": 1792602816385467996,
+            "hard_deadline_unix_ns": 1792602876352134662,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 7872512,
+              "virtual_bytes": 1601568768,
+              "cpu_user_seconds": 0,
+              "cpu_system_seconds": 0,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 7,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 0,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1277952,
+                  "Private_Clean": 139264,
+                  "Private_Dirty": 1277952,
+                  "Pss": 5061632,
+                  "Pss_Anon": 1277952,
+                  "Pss_File": 3783680,
+                  "Pss_Shmem": 0,
+                  "Rss": 9715712,
+                  "Shared_Clean": 8298496,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 7872512,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "pid": 60737,
+            "retained": {
+              "rss_bytes": 8671232,
+              "virtual_bytes": 1601568768,
+              "cpu_user_seconds": 0.27,
+              "cpu_system_seconds": 0.33,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 8,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 36864,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1732608,
+                  "Private_Clean": 397312,
+                  "Private_Dirty": 1732608,
+                  "Pss": 5838848,
+                  "Pss_Anon": 1732608,
+                  "Pss_File": 4106240,
+                  "Pss_Shmem": 0,
+                  "Rss": 10690560,
+                  "Shared_Clean": 8560640,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8671232,
+                "requested_glibc_tunables": ""
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 1010,
+            "expected_set_sha256": "8dc8745415ec5adba7539fe76a35c3f09ed45b8553da767738bceffd95235246",
+            "observed_bytes": 1010,
+            "observed_set_sha256": "8dc8745415ec5adba7539fe76a35c3f09ed45b8553da767738bceffd95235246",
+            "oracle": "independent exact-byte set",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 8331264,
+              "virtual_bytes": 185442304,
+              "cpu_user_seconds": 0.68,
+              "cpu_system_seconds": 4.5,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 11,
+              "disk_read_bytes": 385024,
+              "disk_write_bytes": 3878912,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1896448,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1896448,
+                  "Pss": 8300544,
+                  "Pss_Anon": 1896448,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9609216,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8331264,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1896448,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1896448,
+                  "Pss": 8300544,
+                  "Pss_Anon": 1896448,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9609216,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8331264,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "accepted macOS physical-footprint evidence unavailable; RSS and Linux /proc counters are diagnostic only",
+              "rss_bytes": 8331264,
+              "sampling_error": "",
+              "status": "unavailable"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "1010",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": "capacity-1-round-1-0",
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/1/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "1",
+              "status": "in_flight",
+              "turn": "1"
+            }
+          },
+          "retained_request_scratch_bytes": 1010,
+          "round": 1,
+          "status": "incomplete"
+        },
+        {
+          "active_capacity": 1,
+          "all_results_audited": true,
+          "audit_rows": [
+            {
+              "key": "capacity-1-round-2-0",
+              "session": "measure/capacity-1/2/0",
+              "input_text": "capacity-1-round-2-0",
+              "turn_outcome": "completed",
+              "operation_session": "measure/capacity-1/2/0",
+              "attempt_ordinal": 1,
+              "allowance_used": 1,
+              "uncertain": 0,
+              "resolution_code": "answer",
+              "response_id": "capacity-response-capacity-1-round-2-0",
+              "model_evidence": "010E006D6F64656C2D612D7365727665640E006D6F64656C2D612D7365727665640000",
+              "request_id": "capacity-capacity-1-round-2-0",
+              "output_items": 1,
+              "private_output_items": 1,
+              "assistant_projections": 1,
+              "last_failure_code": null
+            }
+          ],
+          "capture_before_terminal": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "469010",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": "capacity-1-round-2-0",
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "2",
+              "status": "in_flight",
+              "turn": "2"
+            }
+          },
+          "capture_observation_complete": true,
+          "cleanup_observation_complete": true,
+          "completion_inspection": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "0",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "0",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [
+              {
+                "message": "capacity-1-round-2-0",
+                "outcome": "completed",
+                "turn": "2"
+              }
+            ],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": null,
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": {
+                "code": "completed",
+                "content": {
+                  "bytes": "36",
+                  "sha256": "61c0e60c128a41a48bed93e8eec165c05f5eaa3c4c615908912ce89e4568d27d"
+                }
+              },
+              "operation": "2",
+              "status": "completed",
+              "turn": "2"
+            }
+          },
+          "cpu": {
+            "at_most_2_average_cores": true,
+            "average_cores_conservative": 0.07917457740289326,
+            "bracket_valid": true,
+            "complete_work_at_most_120_cpu_seconds": true,
+            "complete_work_cpu_available": true,
+            "complete_work_cpu_seconds": 3.880000000000001,
+            "cpu_seconds": 3.169999999999999,
+            "earliest_stream_final_completion_unix_ns": 1792602877490415325,
+            "first_query": {
+              "finish_unix_ns": 1792602827523974922,
+              "host_cpu_seconds": 5.53,
+              "start_unix_ns": 1792602827523661867
+            },
+            "maximum_sample_window_seconds": 40.03850509,
+            "minimum_sample_window_seconds": 40.038104452,
+            "provider_offer_qualified": true,
+            "second_query": {
+              "finish_unix_ns": 1792602867562166942,
+              "host_cpu_seconds": 8.7,
+              "start_unix_ns": 1792602867562079378
+            },
+            "status": "passed"
+          },
+          "durable_audit_prerequisite_met": true,
+          "events_per_second_per_stream": 30,
+          "expected_provider_work": {
+            "batches": 1800,
+            "events": 1800,
+            "bytes": 468000
+          },
+          "expected_response_scratch_delta_bytes": 468000,
+          "expected_retained_scratch_bytes": 469010,
+          "fixture_completion": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 1,
+            "valid_offer_streams": 1,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 757,
+              "observed_ns": 3797243
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 1576,
+              "observed_ns": 36671815
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 1494,
+              "observed_ns": 63439499
+            },
+            "latest_final_completion_unix_ns": 1792602877490415325,
+            "earliest_final_completion_unix_ns": 1792602877490415325,
+            "terminal_bytes": 821,
+            "request_bytes": 1010,
+            "request_set_sha256": "5ad4e11575d561660d3929a3a8df67b762b0625bdefc0102f7d22bbe93102ac9",
+            "history_valid_streams": 1,
+            "start_unix_ns": 1792602817522919845,
+            "offer_horizon_unix_ns": 1792602877556253179,
+            "hard_deadline_unix_ns": 1792602937522919845,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "fixture_ready": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 0,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 0,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 0,
+            "maximum_completed_batches": 0,
+            "completed_batches": 0,
+            "completed_events": 0,
+            "offer_bytes": 0,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "terminal_bytes": 0,
+            "request_bytes": 1010,
+            "request_set_sha256": "5ad4e11575d561660d3929a3a8df67b762b0625bdefc0102f7d22bbe93102ac9",
+            "history_valid_streams": 1,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "host_dimensions": {
+            "capture": "passed",
+            "cleanup": "passed",
+            "durable_audit": "passed",
+            "memory": "incomplete",
+            "request_integrity": "passed",
+            "result_delivery": "passed"
+          },
+          "initial": {
+            "host": {
+              "rss_bytes": 8331264,
+              "virtual_bytes": 185442304,
+              "cpu_user_seconds": 0.68,
+              "cpu_system_seconds": 4.51,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 11,
+              "disk_read_bytes": 385024,
+              "disk_write_bytes": 3878912,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1896448,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1896448,
+                  "Pss": 8300544,
+                  "Pss_Anon": 1896448,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9609216,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8331264,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1896448,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1896448,
+                  "Pss": 8300544,
+                  "Pss_Anon": 1896448,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9609216,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8331264,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "accepted macOS physical-footprint evidence unavailable; RSS and Linux /proc counters are diagnostic only",
+              "rss_bytes": 8331264,
+              "sampling_error": "",
+              "status": "unavailable"
+            }
+          },
+          "observed_offer": {
+            "events_per_second": 30.01626106930421,
+            "seconds": 59.96749548,
+            "status": "observed"
+          },
+          "offer_seconds": 60,
+          "offline_audit_after_host_reaped": true,
+          "paced_offer": {
+            "h2_streams": 0,
+            "h2_connections": 0,
+            "delivery_method": "rational_pacing_v1",
+            "delivery_rule": {
+              "batch_interval_ns": 33333334,
+              "allowed_delivery_variation_ns": 33333334,
+              "maximum_completion_gap_ns": 66666668,
+              "burst_window_ns": 33333334,
+              "maximum_batches_per_burst_window": 2
+            },
+            "expected_streams": 1,
+            "ready_streams": 1,
+            "offer_finished_streams": 1,
+            "terminal_finished_streams": 0,
+            "valid_offer_streams": 1,
+            "timing_invalid_streams": 0,
+            "offer_failed_streams": 0,
+            "terminal_failed_streams": 0,
+            "minimum_completed_batches": 1800,
+            "maximum_completed_batches": 1800,
+            "completed_batches": 1800,
+            "completed_events": 1800,
+            "offer_bytes": 468000,
+            "expected_batches": 1800,
+            "expected_events": 1800,
+            "expected_offer_bytes": 468000,
+            "early_completion_violations": 0,
+            "late_completion_violations": 0,
+            "completion_gap_violations": 0,
+            "burst_window_violations": 0,
+            "maximum_completion_delay": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 757,
+              "observed_ns": 3797243
+            },
+            "maximum_adjacent_gap": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 1576,
+              "observed_ns": 36671815
+            },
+            "minimum_two_back_span": {
+              "id": "capacity-1-round-2-0",
+              "ordinal": 1494,
+              "observed_ns": 63439499
+            },
+            "latest_final_completion_unix_ns": 1792602877490415325,
+            "earliest_final_completion_unix_ns": 1792602877490415325,
+            "terminal_bytes": 0,
+            "request_bytes": 1010,
+            "request_set_sha256": "5ad4e11575d561660d3929a3a8df67b762b0625bdefc0102f7d22bbe93102ac9",
+            "history_valid_streams": 1,
+            "start_unix_ns": 1792602817522919845,
+            "offer_horizon_unix_ns": 1792602877556253179,
+            "hard_deadline_unix_ns": 1792602937522919845,
+            "event_bytes": 260,
+            "events_per_batch": 1,
+            "batches_per_stream": 1800,
+            "offer_seconds": 60,
+            "events_per_second": 30
+          },
+          "provider_process": {
+            "initial": {
+              "rss_bytes": 8671232,
+              "virtual_bytes": 1601568768,
+              "cpu_user_seconds": 0.27,
+              "cpu_system_seconds": 0.33,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 8,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 36864,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1732608,
+                  "Private_Clean": 401408,
+                  "Private_Dirty": 1732608,
+                  "Pss": 5830656,
+                  "Pss_Anon": 1732608,
+                  "Pss_File": 4098048,
+                  "Pss_Shmem": 0,
+                  "Rss": 10690560,
+                  "Shared_Clean": 8556544,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8671232,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "pid": 60737,
+            "retained": {
+              "rss_bytes": 8671232,
+              "virtual_bytes": 1601568768,
+              "cpu_user_seconds": 0.48,
+              "cpu_system_seconds": 0.6,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 8,
+              "disk_read_bytes": 0,
+              "disk_write_bytes": 73728,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1843200,
+                  "Private_Clean": 335872,
+                  "Private_Dirty": 1843200,
+                  "Pss": 5972992,
+                  "Pss_Anon": 1843200,
+                  "Pss_File": 4129792,
+                  "Pss_Shmem": 0,
+                  "Rss": 10866688,
+                  "Shared_Clean": 8687616,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8671232,
+                "requested_glibc_tunables": ""
+              }
+            }
+          },
+          "request_integrity": {
+            "expected_bytes": 1010,
+            "expected_set_sha256": "5ad4e11575d561660d3929a3a8df67b762b0625bdefc0102f7d22bbe93102ac9",
+            "observed_bytes": 1010,
+            "observed_set_sha256": "5ad4e11575d561660d3929a3a8df67b762b0625bdefc0102f7d22bbe93102ac9",
+            "oracle": "independent exact-byte set",
+            "status": "passed"
+          },
+          "result_delivery_complete": true,
+          "retained": {
+            "host": {
+              "rss_bytes": 8359936,
+              "virtual_bytes": 185442304,
+              "cpu_user_seconds": 1.23,
+              "cpu_system_seconds": 7.84,
+              "threads": 5,
+              "live_descendant_processes": 0,
+              "open_descriptors": 11,
+              "disk_read_bytes": 385024,
+              "disk_write_bytes": 7213056,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1933312,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1933312,
+                  "Pss": 8337408,
+                  "Pss_Anon": 1933312,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9646080,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8380416,
+                "requested_glibc_tunables": ""
+              }
+            },
+            "whole_rui": {
+              "host_processes": 1,
+              "linux_memory": {
+                "smaps_rollup_bytes": {
+                  "AnonHugePages": 0,
+                  "Anonymous": 1933312,
+                  "Private_Clean": 6217728,
+                  "Private_Dirty": 1933312,
+                  "Pss": 8337408,
+                  "Pss_Anon": 1933312,
+                  "Pss_File": 6404096,
+                  "Pss_Shmem": 0,
+                  "Rss": 9646080,
+                  "Shared_Clean": 1495040,
+                  "Shared_Dirty": 0,
+                  "Swap": 0,
+                  "SwapPss": 0
+                },
+                "status_rss_high_water_bytes": 8380416,
+                "requested_glibc_tunables": ""
+              },
+              "measurement_basis": "accepted macOS physical-footprint evidence unavailable; RSS and Linux /proc counters are diagnostic only",
+              "rss_bytes": 8359936,
+              "sampling_error": "",
+              "status": "unavailable"
+            }
+          },
+          "retained_request_baseline": {
+            "actionable_permissions": [],
+            "actions": {
+              "count": "0",
+              "resolved": [],
+              "unresolved": []
+            },
+            "execution": {
+              "custody_occupied": "1",
+              "dispatch_fenced": false,
+              "scratch_used_bytes": "1010",
+              "status": "partial",
+              "unavailable": [
+                "structured_output"
+              ]
+            },
+            "pending_messages": "0",
+            "profile": "current",
+            "recent_messages": [],
+            "rejected_calls": {
+              "count": "0",
+              "items": []
+            },
+            "selected_message": "capacity-1-round-2-0",
+            "session": {
+              "compaction_trigger": null,
+              "compaction_trigger_override": null,
+              "instructions": {
+                "bytes": "0",
+                "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+              },
+              "model": "model-a",
+              "output_reservation": "0",
+              "output_reservation_override": null,
+              "output_schema": null,
+              "permission_mode": "bypass",
+              "provider": "codex",
+              "reference": "measure/capacity-1/2/0",
+              "revision": "1",
+              "tools": [],
+              "workspace": "/home/user/workspace/repo"
+            },
+            "type": "session_report",
+            "version": "1",
+            "work": {
+              "latest_outcome": null,
+              "operation": "2",
+              "status": "in_flight",
+              "turn": "2"
+            }
+          },
+          "retained_request_scratch_bytes": 1010,
+          "round": 2,
+          "status": "incomplete"
+        }
+      ],
+      "same_host_rounds": 2,
+      "same_sessions": false,
+      "status": "incomplete"
+    }
+  ],
+  "answer_byte_growth": [],
+  "artifacts": "/tmp/rui-output-measure-3389473429",
+  "binary": "/home/user/workspace/repo/.amp/p2/bin/rui-strace",
+  "binary_sha256": "d3e43f9f2b895fdd3f406102383c575451cffbd2b1d44aa63dee8bb6ae381b18",
+  "elapsed_seconds": 122.347173085,
+  "format": "rui-model-output-v8-go",
+  "item_count_growth": [],
+  "limits": [
+    "runtime evidence applies only to the recorded platform; Linux RSS/PSS do not qualify the macOS physical-footprint target",
+    "repeat-work uses one Host and 100 stable Sessions for 20 six-second waves with growing durable history; its short CPU window is diagnostic rather than the canonical sustained gate, while complete-work CPU remains assessed",
+    "growth/spill and capacity 1 use loopback H1; concurrent capacities 8/16/100 use trusted local TLS/H2, not a live provider",
+    "ordinary 1/8/16-capacity scenarios offer 30 realistic 260-byte SSE records per second per stream for 60 seconds; the 100-capacity stress scenario offers 100 per second",
+    "canonical capacity CPU samples retain the conservative 40-second bracket wholly inside 60 seconds of simultaneous complete offer work; the result must average at most two cores and complete work must consume at most 120 CPU seconds",
+    "live result delivery and exact answer reads remain inside each round; private durable-row audits run only after all rounds and confirmed Host stop/reap",
+    "spill rows force and verify SQLite cache spill with a test-only 32 KiB cache; production retains its 1 MiB cache"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "amd64",
+    "go_os": "linux",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 2,
+    "module_path": "rui.local/qualification",
+    "physical_memory_bytes": 4122021888
+  },
+  "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Wed Sep 30 12:40:02 UTC 2026 x86_64 GNU/Linux",
+  "repeat_work": null,
+  "scope": "assembled model-path capacity and same-Host repeated-work qualification",
+  "sqlite_cache_spill_comparison": null,
+  "status": "incomplete",
+  "tested_revision": "240aef2e46d7240ce31a02ce4cefceb695551a56",
+  "working_tree_dirty": true,
+  "zig": "0.17.0"
+}
