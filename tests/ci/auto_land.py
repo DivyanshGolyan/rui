@@ -110,20 +110,29 @@ def land(branch, sha, main_sha):
         print("GITHUB_TOKEN cannot push workflow-file changes; this tip needs a manual push.")
     if verdict != "land":
         return False
-    # Atomic: main updates only from the exact main_sha classified above (an
-    # ancestor of sha, so a fast-forward), stable only as a non-force
-    # fast-forward. Any moved main, even to an ancestor of sha, or a stable off
-    # main's line rejects both refs.
-    pushed = subprocess.run(["git", "push", "--atomic", f"--force-with-lease=refs/heads/main:{main_sha}",
-                             "origin", f"{sha}:refs/heads/main", f"{sha}:refs/heads/stable"],
-                            capture_output=True, text=True)
+    # The classification above is against main_sha. A main that moved, even to
+    # an ancestor of sha, may make the actual delta strict, so re-decide on the
+    # next run. Only this lander writes main, inside one concurrency group, so
+    # main cannot move between this check and the push.
+    if moved(main_sha, branch):
+        return False
+    # Atomic and non-force: a diverged main or a stable off main's line rejects
+    # both refs, so stable never names a tip that main did not take.
+    pushed = subprocess.run(["git", "push", "--atomic", "origin", f"{sha}:refs/heads/main",
+                             f"{sha}:refs/heads/stable"], capture_output=True, text=True)
     if pushed.returncode:
-        git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
-        if git("rev-parse", "origin/main") != main_sha:
-            print(f"not a fast-forward: main moved from {main_sha}; restack {branch}")
+        if moved(main_sha, branch):
             return False
         raise SystemExit(f"Push of {sha} to main and stable failed; neither moved:\n{pushed.stderr}")
     print(f"Fast-forwarded main and stable from {main_sha} to {sha}")
+    return True
+
+
+def moved(main_sha, branch):
+    git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    if git("rev-parse", "origin/main") == main_sha:
+        return False
+    print(f"main moved from {main_sha}; re-deciding {branch} on the next run")
     return True
 
 
