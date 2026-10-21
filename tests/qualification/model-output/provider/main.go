@@ -46,6 +46,7 @@ type stream struct {
 	terminalBytes int
 	offerError    string
 	terminalError string
+	holdEnded     bool
 }
 
 type fixture struct {
@@ -60,6 +61,7 @@ type fixture struct {
 	totalWork        workExpectation
 	artifactDir      string
 	historyAware     bool
+	hold             bool
 	workspace        string
 	store            string
 	round            int
@@ -91,7 +93,10 @@ type Config struct {
 	Rounds          int
 	TLS             bool
 	HistoryAware    bool
-	Workspace       string
+	// Hold accepts requests but sends no response bytes until 120 seconds
+	// after StartOffer. Readiness means request acceptance, not headers sent.
+	Hold      bool
+	Workspace string
 	// Store is the canonical Store selector the controller configured for
 	// every history-aware Session.
 	Store string
@@ -134,6 +139,9 @@ type streamFact struct {
 }
 
 type Summary struct {
+	Hold                          bool                     `json:"hold,omitempty"`
+	HeldStreams                   int                      `json:"held_streams,omitempty"`
+	HoldUntilUnixNS               int64                    `json:"hold_until_unix_ns,omitempty"`
 	H2Streams                     int                      `json:"h2_streams"`
 	H2Connections                 int64                    `json:"h2_connections"`
 	DeliveryMethod                string                   `json:"delivery_method"`
@@ -694,6 +702,36 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 
+	if f.hold {
+		defer func() {
+			f.mu.Lock()
+			current.holdEnded = true
+			f.mu.Unlock()
+		}()
+		f.mu.Lock()
+		f.ready++
+		if f.ready == f.expected {
+			close(f.readyCh)
+		}
+		f.mu.Unlock()
+		select {
+		case <-f.startCh:
+		case <-f.cancelCh:
+			return
+		case <-r.Context().Done():
+			return
+		}
+		timer := time.NewTimer(time.Until(f.startAt.Add(120 * time.Second)))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			http.Error(w, "HOLD observation complete", http.StatusGatewayTimeout)
+		case <-f.cancelCh:
+		case <-r.Context().Done():
+		}
+		return
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("OpenAI-Model", "model-a-served")
 	w.Header().Set("X-Request-Id", "capacity-"+id)
@@ -826,6 +864,7 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	result := Summary{
+		Hold:               f.hold,
 		H2Streams:          f.h2Streams,
 		H2Connections:      int64(len(f.h2Peers)),
 		DeliveryMethod:     deliveryMethod,
@@ -849,6 +888,9 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 	}
 	requestSet := sha256.New()
 	for _, row := range rows {
+		if f.hold && !f.streams[row.ID].holdEnded {
+			result.HeldStreams++
+		}
 		result.RequestBytes += row.RequestBytes
 		if f.streams[row.ID].historyValid {
 			result.HistoryValidStreams++
@@ -905,6 +947,9 @@ func (f *fixture) factsSnapshot() ([]streamFact, Summary) {
 		result.StartUnixNS = f.startAt.UnixNano()
 		result.OfferHorizonUnixNS = f.startAt.Add(f.duration + f.batchInterval).UnixNano()
 		result.HardDeadlineUnixNS = collectionDeadline(f.startAt, f.duration).UnixNano()
+		if f.hold {
+			result.HoldUntilUnixNS = f.startAt.Add(120 * time.Second).UnixNano()
+		}
 	}
 	return rows, result
 }
@@ -1096,6 +1141,7 @@ func (s *Server) Reset() error {
 	prepared.round = nextRound
 	prepared.workspace = s.config.Workspace
 	prepared.store = s.config.Store
+	prepared.hold = s.config.Hold
 	s.fixtureMu.Lock()
 	defer s.fixtureMu.Unlock()
 	old.handlers.Wait()
@@ -1139,6 +1185,7 @@ func Start(config Config) (*Server, error) {
 	fixture.round = 1
 	fixture.workspace = config.Workspace
 	fixture.store = config.Store
+	fixture.hold = config.Hold
 	mux := http.NewServeMux()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -70,7 +70,7 @@ type fixtureStartup struct {
 	PID         int    `json:"pid"`
 }
 
-func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace, store string) (*childFixture, error) {
+func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace, store string, hold ...bool) (*childFixture, error) {
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -94,6 +94,9 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 	)
 	if historyAware {
 		cmd.Args = append(cmd.Args, "--provider-history-aware")
+	}
+	if len(hold) != 0 && hold[0] {
+		cmd.Args = append(cmd.Args, "--provider-hold")
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1781,8 +1784,184 @@ func finalizeQualification(result map[string]any, runError error, cleanup ...fun
 	return result, runError
 }
 
-func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifacts, workspace, store string) error {
-	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, Workspace: workspace, Store: store, ArtifactDir: artifacts, TLS: streams > 1})
+func sessionMeasurementOptions(sessions int, hold bool, expectation string) error {
+	if sessions != 0 && sessions != 10 && sessions != 100 {
+		return errors.New("--sessions must be 0, 10 or 100")
+	}
+	if hold && sessions != 100 {
+		return errors.New("--hold requires --sessions 100")
+	}
+	if strings.TrimSpace(expectation) == "" || strings.ContainsAny(expectation, "\r\n") {
+		return errors.New("--expectation requires one line with an estimated number and reasoning")
+	}
+	return nil
+}
+
+// This is an observation, not the complete-work qualification above: the
+// fixture stays active past a ten-second warmup and sixty-second CPU window.
+// Configure/Message callers are synchronous and reaped before that window.
+func measureSessions(binary, output string, sessions int, hold bool, expectation string) (result map[string]any, resultError error) {
+	result = map[string]any{"format": "rui-session-footprint-v1", "status": "incomplete", "fixture": true, "sessions": sessions, "active_capacity": 100, "hold": hold}
+	if err := measurement.RequireRuntime(); err != nil {
+		return result, err
+	}
+	binary, err := filepath.Abs(binary)
+	if err != nil {
+		return result, err
+	}
+	directory, err := os.MkdirTemp("", "rui-session-footprint-")
+	if err != nil {
+		return result, err
+	}
+	result["artifacts"] = directory
+	if err := os.WriteFile(filepath.Join(directory, "run-notes.txt"), []byte("estimated: "+expectation+"\n"), 0o600); err != nil {
+		return result, err
+	}
+	evidence, err := measurement.EnvironmentEvidence(measurement.NewDeadline(time.Minute), binary, output)
+	if err != nil {
+		return result, err
+	}
+	for name, value := range evidence {
+		result[name] = value
+	}
+	controller, err := os.Executable()
+	if err != nil {
+		return result, err
+	}
+	harnessHash, err := measurement.SHA256File(controller)
+	if err != nil {
+		return result, err
+	}
+	result["harness_sha256"], result["argv"] = harnessHash, os.Args
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
+		return result, err
+	}
+	store, err := measurement.CanonicalStore(filepath.Join(directory, "store"))
+	if err != nil {
+		return result, err
+	}
+	deadline := measurement.NewDeadline(5 * time.Minute)
+	// Keep the same TLS-capable provider and Host capacity even for idle N=0.
+	fixture, err := startChildFixture(deadline, max(2, sessions), 30, 120*time.Second, 1, false, filepath.Join(directory, "provider"), workspace, store, hold)
+	if err != nil {
+		return result, err
+	}
+	defer measurement.JoinCleanup(&resultError, fixture.Close)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.providerCA)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		exit, err := host.StopWithExit(measurement.TeardownAllowance)
+		result["host_exit"] = exit
+		resultError = errors.Join(resultError, err)
+	}()
+	result["host_pid"], result["provider_pid"] = host.Cmd.Process.Pid, fixture.cmd.Process.Pid
+	client := measurement.Client{Binary: binary, Store: store, Artifacts: directory, Deadline: deadline}
+	identity := capacityAuditIdentity(sessions, 1, false)
+	for index, session := range identity.sessions {
+		if err := client.Configure(identity.keys[index], session, "--tools", "none"); err != nil {
+			return result, err
+		}
+	}
+	for index, session := range identity.sessions {
+		if err := client.Message(identity.keys[index], session, identity.keys[index]); err != nil {
+			return result, err
+		}
+	}
+	started := time.Now()
+	if sessions > 0 {
+		ready, err := fixture.WaitReady(deadline)
+		if err != nil {
+			return result, err
+		}
+		result["fixture_ready"] = ready
+		if ready.ReadyStreams != sessions || ready.H2Streams != sessions || ready.H2Connections != 1 {
+			return result, errors.New("fixture did not accept every Session on one H2 connection")
+		}
+		offer, err := fixture.StartOffer(deadline)
+		if err != nil {
+			return result, err
+		}
+		started = time.Unix(0, offer.StartUnixNS)
+	}
+	if err := deadline.SleepUntil(started.Add(10 * time.Second)); err != nil {
+		return result, err
+	}
+	initial, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "host-window-start.txt"))
+	if err != nil {
+		return result, err
+	}
+	result["host_window_start"] = initial
+	first, err := sampleCPU(host.Process)
+	if err != nil {
+		return result, err
+	}
+	// top is diagnostic and kept raw. Failure cannot become zero wakeups.
+	if hold {
+		topContext, cancel, err := deadline.Context()
+		if err != nil {
+			return result, err
+		}
+		topResult := make(chan error, 1)
+		result["wakeups_raw"] = filepath.Join(directory, "host-top-idlew.txt")
+		go func() {
+			data, err := exec.CommandContext(topContext, "/usr/bin/top", "-l", "2", "-s", "60", "-pid", strconv.Itoa(host.Cmd.Process.Pid), "-stats", "pid,cpu,idlew").CombinedOutput()
+			topResult <- errors.Join(err, os.WriteFile(filepath.Join(directory, "host-top-idlew.txt"), data, 0o600))
+		}()
+		defer func() {
+			if resultError != nil {
+				cancel()
+			}
+			err := <-topResult
+			cancel()
+			if err != nil {
+				result["wakeups_error"] = err.Error()
+				resultError = errors.Join(resultError, err)
+			}
+		}()
+	}
+	if err := deadline.SleepUntil(first.QueryEnd.Add(60 * time.Second)); err != nil {
+		return result, err
+	}
+	second, err := sampleCPU(host.Process)
+	if err != nil {
+		return result, err
+	}
+	result["cpu_first"], result["cpu_second"] = first, second
+	seconds := second.QueryStart.Sub(first.QueryEnd).Seconds()
+	cpu, err := measurement.CheckedCPUDelta(first.CPUSeconds, second.CPUSeconds)
+	if err != nil {
+		return result, err
+	}
+	result["window_seconds"], result["host_cpu_seconds"], result["host_average_cores"] = seconds, cpu, cpu/seconds
+	final, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "host-window-end.txt"))
+	if err != nil {
+		return result, err
+	}
+	result["host_window_end"] = final
+	if sessions > 0 {
+		snapshot, err := fixture.WaitReady(deadline)
+		if err != nil {
+			return result, err
+		}
+		result["fixture_window_end"] = snapshot
+		if snapshot.OfferFailedStreams != 0 || snapshot.TerminalFinished != 0 || snapshot.ReadyStreams != sessions || (hold && (!snapshot.Hold || snapshot.HeldStreams != sessions || snapshot.OfferBytes != 0)) {
+			return result, errors.New("fixture failed or completed inside the observation window")
+		}
+		if !time.Now().Before(started.Add(120 * time.Second)) {
+			return result, errors.New("observation exceeded the fixture's active window")
+		}
+	}
+	result["steady_state_clients"] = map[string]any{"count": 0, "physical_footprint_bytes": 0, "basis": "all owned Configure/Message callers reaped before window; no CLI launched inside window", "transient_client_peak_physical_footprint_bytes": nil}
+	result["limits"] = []string{"fixture/controller/top excluded from Rui counters", "client transient peaks unavailable; no persistent per-Session CLI in this workload", "Host RSS and physical footprint overlap and are not additive; lifetime peaks are not simultaneous aggregate peaks", "two external footprint/lsof snapshots bracket the CPU window; top sampling overhead is not subtracted", "Host is intentionally reaped before fixture completion; this is not complete-work or recovery qualification"}
+	result["status"] = "passed"
+	return result, nil
+}
+
+func runProviderChild(streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware, hold bool, artifacts, workspace, store string) error {
+	server, err := provider.Start(provider.Config{Streams: streams, EventsPerSecond: eventsPerSecond, Duration: duration, Rounds: rounds, HistoryAware: historyAware, Hold: hold, Workspace: workspace, Store: store, ArtifactDir: artifacts, TLS: streams > 1})
 	if err != nil {
 		return err
 	}
@@ -1824,6 +2003,9 @@ func main() {
 	projection := flag.Bool("projection", false, "measure 1/4/8 KiB and 100 KB plain and escaped answer projections")
 	output := flag.String("output", "", "write the final JSON to this path")
 	capacityOnly := flag.Int("capacity", 0, "measure one active capacity")
+	sessions := flag.Int("sessions", -1, "macOS steady-state footprint at 0, 10 or 100 Sessions, fixed Host capacity 100")
+	hold := flag.Bool("hold", false, "with --sessions 100, measure a provider sending no response bytes for 120 seconds")
+	expectation := flag.String("expectation", "", "one-line estimated number and reasoning, saved before --sessions launches")
 	repeatWork := flag.Bool("repeat-work", false, "run 20 growing-history waves of 100 streams on one Host and the same Sessions")
 	growthOnly := flag.Bool("growth-only", false, "run growth and spill smoke without capacity qualification")
 	providerChild := flag.Bool("provider-child", false, "run the owned provider fixture child")
@@ -1832,6 +2014,7 @@ func main() {
 	providerDuration := flag.Duration("provider-duration", 0, "provider child offer duration")
 	providerRounds := flag.Int("provider-rounds", 1, "provider child round count")
 	providerHistoryAware := flag.Bool("provider-history-aware", false, "validate complete repeated-session history")
+	providerHold := flag.Bool("provider-hold", false, "accept requests without response bytes until 120 seconds after StartOffer")
 	providerArtifacts := flag.String("provider-artifacts", "", "provider child artifact directory")
 	providerWorkspace := flag.String("provider-workspace", "", "configured Session Workspace expected by the provider child")
 	providerStore := flag.String("provider-store", "", "canonical configured Store selector expected by the provider child")
@@ -1841,11 +2024,24 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerArtifacts, *providerWorkspace, *providerStore); err != nil {
+		if err := runProviderChild(*providerStreams, *providerEventsPerSecond, *providerDuration, *providerRounds, *providerHistoryAware, *providerHold, *providerArtifacts, *providerWorkspace, *providerStore); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
 		return
+	}
+	if *sessions != -1 || *hold {
+		if flag.NArg() != 1 || *capacityOnly != 0 || *repeatWork || *growthOnly || *projection {
+			fmt.Fprintln(os.Stderr, "--sessions needs exactly one binary and cannot combine measurement modes")
+			os.Exit(2)
+		}
+		if err := sessionMeasurementOptions(*sessions, *hold, *expectation); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		result, err := measureSessions(flag.Arg(0), *output, *sessions, *hold, *expectation)
+		result, _ = finalizeQualification(result, err)
+		os.Exit(publishQualification(*output, result))
 	}
 	if *projection {
 		answerSizes = []int{1024, 4096, 8192, 100_000}

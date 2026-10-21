@@ -13,6 +13,28 @@ import (
 	"rui.local/qualification/model-output/provider"
 )
 
+func TestSessionFootprintOptionsKeepIdleDistinctAndRequireEstimate(t *testing.T) {
+	for _, test := range []struct {
+		sessions int
+		hold     bool
+		valid    bool
+	}{
+		{0, false, true}, {10, false, true}, {100, false, true},
+		{100, true, true}, {0, true, false}, {10, true, false},
+		{-1, false, false}, {1, false, false}, {101, false, false},
+	} {
+		err := sessionMeasurementOptions(test.sessions, test.hold, "10 wakeups/s estimated from one 100 ms timer")
+		if (err == nil) != test.valid {
+			t.Fatalf("sessions=%d hold=%t: %v", test.sessions, test.hold, err)
+		}
+	}
+	for _, estimate := range []string{"", " ", "10\nrevised to 20"} {
+		if sessionMeasurementOptions(10, false, estimate) == nil {
+			t.Fatalf("accepted missing/multiline estimate %q", estimate)
+		}
+	}
+}
+
 func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
 	families := 4
 	for family := range families {
