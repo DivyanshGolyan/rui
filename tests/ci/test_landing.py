@@ -169,23 +169,25 @@ class LandingTest(unittest.TestCase):
             first = commit('first', landed)
             preflight('wip/land-4', first)
             git('push', '-q', 'origin', f'{first}:refs/heads/wip/land-4')
-            # One open: re-pushing it, or a higher stack containing it, passes.
+            # One open: re-pushing that same branch passes.
             preflight('wip/land-4', commit('first-fix', first))
-            stacked = commit('second', first)
-            preflight('wip/land-5', stacked)
-            # A parallel stack beside it, or a lower number, fails before any push.
-            beside = commit('beside', landed)
-            with self.assertRaisesRegex(SystemExit, 'wip/land-4 .* still open'):
-                preflight('wip/land-5', beside)
+            # A second ref fails before any push, whether it contains the open
+            # stack or sits beside it; so does a lower number.
+            for candidate in (commit('second', first), commit('beside', landed)):
+                with self.assertRaisesRegex(SystemExit, 'wip/land-4 .* still open'):
+                    preflight('wip/land-5', candidate)
             with self.assertRaisesRegex(SystemExit, 'below wip/land-4'):
                 preflight('wip/land-2', first)
-            # Multiple open (already violated): any further stack must contain all of them.
+            # Multiple open (already violated): every further push fails, even to one of them.
+            beside = commit('beside', landed)
             git('push', '-q', 'origin', f'{beside}:refs/heads/wip/land-5')
             with self.assertRaisesRegex(SystemExit, 'wip/land-4 .* still open'):
-                preflight('wip/land-6', commit('third', beside))
+                preflight('wip/land-5', commit('third', beside))
             # Retiring the abandoned stack restores one open stack.
             git('push', '-q', 'origin', ':refs/heads/wip/land-4')
-            preflight('wip/land-6', commit('third', beside))
+            preflight('wip/land-5', commit('third', beside))
+            with self.assertRaisesRegex(SystemExit, 'wip/land-5 .* still open'):
+                preflight('wip/land-6', commit('combined', beside))
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.

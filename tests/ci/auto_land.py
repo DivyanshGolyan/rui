@@ -93,23 +93,21 @@ def tips():
 def preflight(branch, sha):
     """Fail a landing-tip push before it qualifies a second open stack.
 
-    At most one wip/land-N is open. Refs main already contains are landed and
-    never count. Every other ref must have a lower number and be contained in
-    this push, so it adds to that stack instead of qualifying beside it. An
-    abandoned stack is retired (backed up, then deleted) before a new one.
+    At most one wip/land-N is open: refs main already contains are landed and
+    never count; any other ref is a second open stack, even one this push
+    contains. Add work to the open stack by pushing its own branch, or retire
+    it (back it up, then delete it) before starting the next number.
     """
     if not BRANCH.fullmatch(branch):
         raise SystemExit(f"{branch} is not a wip/land-N landing branch")
     refs = tips()
     main_sha = git("rev-parse", "origin/main")
-    open_refs = [(other, tip) for other, tip in refs if other != branch and not contains(main_sha, tip)]
     newer = [other for other, _ in refs if number(other) > number(branch)]
     if newer:
         raise SystemExit(f"{branch} is below {newer[-1]}; land numbers only increase")
-    beside = [f"{other} {tip}" for other, tip in open_refs if not contains(sha, tip)]
-    if beside:
-        raise SystemExit(f"{', '.join(beside)} still open and {branch} does not contain it; "
-                         "stack onto it, wait until it lands, or retire it")
+    others = [f"{other} {tip}" for other, tip in refs if other != branch and not contains(main_sha, tip)]
+    if others:
+        raise SystemExit(f"{', '.join(others)} is still open; push to it, wait until it lands, or retire it")
     print(f"{branch} {sha} is the only open landing stack")
 
 
