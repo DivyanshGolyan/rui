@@ -52,6 +52,8 @@ What the A/B shows (measured, Linux fixture, P1 [`4463e505`](https://github.com/
 
   Review scope excludes distinct or timer wakeups, thread-role attribution, confidence intervals, any general CPU speedup and production qualification. An earlier audit endpoint error by P1 (general 28.23 versus dedicated 28.22) is kept, and no workload was rerun. Post-teardown process absence is P1's own orb evidence, and nobody rebuilt the binaries independently.
 
+**Database polling while waiting** (**measured** SQL counts, Linux fixture, matched run, owner-reported by P2, artifact and audit pending). With the same Host and the same 100 configured Sessions, 0 held streams ran 62.44 SELECT/s and 100 held streams receiving no events ran 1,004.39 SELECT/s: 16.1× as many, +941.9/s. That is substantial polling with no useful work, mostly per-operation control reads (964.8/s). These are statement counts, not CPU cost. It is **found, not fixed**; the Store-commit wake it needs is out of scope tonight. Details are in the appendix under "Where the SELECTs come from".
+
 ## Headline 3: one illustrative live Mac 100 × gpt-6-luna wave
 
 | Quantity | Value |
@@ -164,7 +166,19 @@ Source: P2 [`352ea142`](https://github.com/DivyanshGolyan/rui/commit/352ea142df4
 - **Cancelled-and-settled idle** (20.018 s, all 100 outcomes cancelled, none unresolved): 1,248 SELECTs, 62.34 per second, plus 218 `BEGIN` and 218 `ROLLBACK` with no `COMMIT`.
 - **Empty Host, no Messages** (same run, 10.009 s): 629 SELECTs, 62.84 per second, plus 110 `BEGIN` and 110 `ROLLBACK`. This window ran **before** any Session was configured, had no warmup and lasted 10 s. The HOLD100 window followed 100 configured and admitted Sessions plus a 10 s warmup and lasted 60 s.
 
-In plain terms (**measured** counts, **preliminary comparison**): holding 100 streams that receive nothing runs about 1,000.98 SELECTs/s, while the empty Host ran 62.84/s. Both numbers are measured, but the two windows differ in setup, so the ratio (about 15.9×, about 938 extra SELECTs/s) is **setup-confounded**, not a matched HOLD0-versus-HOLD100 result. It still shows substantial database polling while no events arrive. SQL counts alone do not establish CPU cost. P2 started a matched run at 21:50:40 UTC: one Host, 100 configured Sessions before both windows, then a 10 s warmup and 60 s count at zero Messages, then 100 admitted HOLD streams with the same 10 s + 60 s. Same SQL-count binary and provider. P2's pre-run estimate (**estimated**): about 3,770 SELECTs at 0 and 60,060 at 100. Publication ETA 22:00 UTC.
+In plain terms (**measured** counts, **preliminary comparison**): holding 100 streams that receive nothing runs about 1,000.98 SELECTs/s, while the empty Host ran 62.84/s. Both numbers are measured, but the two windows differ in setup, so the ratio (about 15.9×, about 938 extra SELECTs/s) is **setup-confounded**, not a matched HOLD0-versus-HOLD100 result. It still shows substantial database polling while no events arrive. SQL counts alone do not establish CPU cost.
+
+**Matched HOLD0 versus HOLD100** (**measured** counts, Linux fixture; **owner-reported, artifact not yet published**, link to follow). P2 ran it from 21:52:49 to 21:55:16 UTC and it passed. One Host at capacity 100, the same 100 configured `tools-none` Sessions, the same SQL-count binary and provider, and a 10 s warmup plus 60 s observation for each window. Admission happened outside both windows. P2's pre-run estimate (**estimated**): about 3,770 SELECTs at 0 and 60,060 at 100.
+
+| Window | SELECTs | Interval, s | SELECT/s | Other statements |
+| --- | ---: | ---: | ---: | --- |
+| 0 held streams | 3,750 | 60.055861641 | 62.4419 | 655 `BEGIN` + 655 `ROLLBACK` (84.2549 statements/s total) |
+| 100 held streams, 0 events/bytes | 60,273 | 60.009824453 | 1,004.3855 | none |
+
+- SELECT ratio 16.0851×, +941.9437 SELECT/s. All-statement ratio 11.9208×, +920.1307 statements/s.
+- Callers at 100: 57,900 control reads (964.8420/s, or 9.6484 per operation per second), 2,313 uncertain-Action scans (38.5437/s), 60 retry scans (0.9998/s).
+- Plainly: holding 100 streams makes the Host poll the database about 16 times as often while doing no useful work. These are counts; they do not quantify CPU waste or set a speedup threshold.
+- P2's reducer first rejected a `held_streams` field omitted at zero (the provider's `omitempty` rule). P2 corrected the reducer and kept the failure; the workload was not rerun.
 
 This polling is **found, not fixed**: removing it needs a Store-commit wake or a SELECT redesign, both out of scope tonight.
 
