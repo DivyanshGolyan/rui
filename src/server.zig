@@ -1913,6 +1913,8 @@ fn admitBashAttempt(
         host.allocator,
         arguments,
         input.arguments.length,
+        input.session,
+        host.lease.paths.store.slice(),
         input.workspace,
         host.lease.paths.scratch.slice(),
         host.bash_path,
@@ -3783,7 +3785,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 try response.appendFmt("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"kind\":\"{s}\",\"content\":{{\"bytes\":\"{d}\",\"sha256\":\"{s}\",\"display\":\"omitted\"}}", .{
                     item.position, item.ordinal, @tagName(item.kind), item.content.length, std.fmt.bytesToHex(item.content.digest, .lower),
                 });
-                if (item.admitted_at) |second| try response.appendFmt(",\"admitted_at\":\"{d}\"", .{second});
+                if (item.admitted_at) |second| {
+                    try response.appendFmt(",\"admitted_at\":\"{d}\",\"sender\":", .{second});
+                    if (item.sender) |sender| {
+                        var buffer: [protocol.max_peer_json_bytes]u8 = undefined;
+                        var writer = std.Io.Writer.fixed(&buffer);
+                        try sender.writeJson(&writer);
+                        try response.append(writer.buffered());
+                    } else try response.append("null");
+                }
                 if (item.presentation) |presentation| {
                     var buffer: [protocol.max_tool_presentation_json_bytes]u8 = undefined;
                     var writer = std.Io.Writer.fixed(&buffer);
@@ -5476,7 +5486,9 @@ test "cleanup publication follows complete execution retirement" {
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     host.retention = &retention;
-    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try session.set("direct/bash");
+    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, session, root, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
             var failure = initial;
@@ -6149,6 +6161,8 @@ test "preparing slots belong to their live preparations" {
     var bash_preparation = bash.Preparation{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
+        .session = .{},
+        .store_selector = root,
         .workspace = .{},
         .scratch_path = root,
         .bash_path = default_bash_path,
@@ -6775,7 +6789,7 @@ test "retired ordinary capture still consumes its intake classification and reso
                 });
                 retained.ingress = ingress;
                 // Seal the content file, but leave request framing incomplete.
-                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
@@ -7033,7 +7047,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -7245,7 +7259,7 @@ test "ingress resumes its peer wait after local capture completion" {
     defer _ = std.c.close(sockets[1]);
     try setNonblocking(sockets[0]);
     const payload = @as([4097]u8, @splat('x'));
-    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{body.len});
     try writeAll(std.testing.io, sockets[1], header);
@@ -7299,7 +7313,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         .store = undefined, // Failed/incomplete captures never reach admission.
         .faults = .{},
     };
-    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
     const suffix = "\"}}";
     for ([_]bool{ false, true }) |seal| {
@@ -7563,6 +7577,8 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             var prepared = bash.Prepared{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
+                .session = .{},
+                .store_selector = "",
                 .workspace = .{},
                 .scratch_path = root,
                 .bash_path = undefined, // Native construction must not run.

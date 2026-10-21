@@ -998,7 +998,7 @@ const NewSessionOptions = struct {
 /// any Host or Session change when that terminal is absent or cannot draw.
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output {s}; use explicit one-shot commands for scripts. No Host or Session changed.\n", .{purpose});
+        TerminalText.diagnostic("rui needs terminal input and output {s}; to message a Session from a script or agent, use rui session send --session SESSION TEXT. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
@@ -1418,10 +1418,19 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
     if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (location.record.len == 0) != !key_seen) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    // An agent's tool process names its own Session; the Host records it.
+    var address_buffer: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
+    if (init.environ_map.get("RUI_ADDRESS")) |address| input.sender = client.Address.parse(address, &address_buffer) catch |err| {
+        TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was sent.\n", .{});
+        return err;
+    };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const human = !key_seen;
     const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
-    var captured = try client.captureMessage(io, input, target);
+    var captured = client.captureMessage(io, input, target) catch |err| {
+        if (err == error.CrossStoreSend) TerminalText.diagnostic("rui: This Session's Store is not the selected Store; a peer can message only Sessions in its own Store. Nothing was sent.\n", .{});
+        return err;
+    };
     const saved = captured.identity().*;
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {

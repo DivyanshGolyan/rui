@@ -32,6 +32,20 @@ pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) 
 /// For owners that never launch Bash (tests); reading it allocates nothing.
 pub const empty_environment: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.heap.page_allocator };
 
+/// One tool process's environment: the shared Host map, unchanged, plus
+/// RUI_ADDRESS naming the Session whose Action runs it, as compact JSON
+/// `{"store":…,"session":…}`. `rui session send` reads it to record that
+/// Session as the sender. The caller deinitializes the owned map.
+pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.Environ.Map, store_selector: []const u8, session: []const u8) !std.process.Environ.Map {
+    var result = try shared.clone(allocator);
+    errdefer result.deinit();
+    var address: std.Io.Writer.Allocating = .init(allocator);
+    defer address.deinit();
+    try std.json.Stringify.value(.{ .store = store_selector, .session = session }, .{}, &address.writer);
+    try result.put("RUI_ADDRESS", address.written());
+    return result;
+}
+
 const system_path = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// A directory containing ':' cannot be one PATH entry; the child then finds
@@ -184,6 +198,9 @@ const OwnedFile = struct {
 pub const Prepared = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
+    // The Session whose Action this is, in the Host's Store (borrowed).
+    session: protocol.Bounded(protocol.max_session_bytes),
+    store_selector: []const u8,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
     bash_path: []const u8,
@@ -215,8 +232,10 @@ pub const Prepared = struct {
         return resources;
     }
 
-    pub fn launch(self: *Prepared, child_environment: *const std.process.Environ.Map) !Execution {
+    pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
+        var child_environment = toolEnvironment(self.allocator, shared_environment, self.store_selector, self.session.slice()) catch return error.BashSpawnFailed;
+        defer child_environment.deinit();
         var script_path_buffer: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
         const script_path = try std.fmt.bufPrint(
             &script_path_buffer,
@@ -227,7 +246,7 @@ pub const Prepared = struct {
         var child = std.process.spawn(self.io, .{
             .argv = &.{ self.bash_path, script_path },
             .cwd = .{ .path = self.workspace.slice() },
-            .environ_map = child_environment,
+            .environ_map = &child_environment,
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
@@ -827,6 +846,8 @@ pub const Outcome = struct {
 pub const Preparation = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
+    session: protocol.Bounded(protocol.max_session_bytes),
+    store_selector: []const u8,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
     bash_path: []const u8,
@@ -876,6 +897,8 @@ pub const Preparation = struct {
         return .{ .prepared = .{
             .io = self.io,
             .allocator = self.allocator,
+            .session = self.session,
+            .store_selector = self.store_selector,
             .workspace = self.workspace,
             .scratch_path = self.scratch_path,
             .bash_path = self.bash_path,
@@ -936,6 +959,8 @@ pub fn startPreparation(
     allocator: std.mem.Allocator,
     reader: store.ContentReader,
     arguments_length: u64,
+    session: protocol.Bounded(protocol.max_session_bytes),
+    store_selector: []const u8,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
     bash_path: []const u8,
@@ -970,6 +995,8 @@ pub fn startPreparation(
     return .{ .preparing = .{
         .io = io,
         .allocator = allocator,
+        .session = session,
+        .store_selector = store_selector,
         .workspace = workspace,
         .scratch_path = scratch_path,
         .bash_path = bash_path,
@@ -1270,6 +1297,8 @@ test "cleanup ownership transfers consume their source" {
     var prepared = Prepared{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
+        .session = .{},
+        .store_selector = root,
         .workspace = .{},
         .scratch_path = root,
         .bash_path = "/bin/bash",
@@ -1657,6 +1686,14 @@ test "Bash environment carries only this executable's PATH and an absolute HOME"
     var relative_home = try environment(std.testing.io, std.testing.allocator, "relative");
     defer relative_home.deinit();
     try std.testing.expectEqual(@as(usize, 1), relative_home.count());
+    // Each tool process adds its own Session's address; the shared map stays as it was.
+    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "peer/\x00a");
+    defer tool.deinit();
+    try std.testing.expectEqual(@as(usize, 3), tool.count());
+    try std.testing.expectEqualStrings("{\"store\":\"/store \\\"q\\\"\",\"session\":\"peer/\\u0000a\"}", tool.get("RUI_ADDRESS").?);
+    try std.testing.expectEqualStrings("/home/peer", tool.get("HOME").?);
+    try std.testing.expectEqual(@as(usize, 2), with_home.count());
+    try std.testing.expect(with_home.get("RUI_ADDRESS") == null);
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(system_path, try searchPath(&buffer, "/opt/a:b/bin"));
     try std.testing.expectEqualStrings("/opt/rui/bin:" ++ system_path, try searchPath(&buffer, "/opt/rui/bin"));

@@ -494,7 +494,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                     assert configured["answer"]["status"] == "accepted", configured
                 submitted = requests.call(
                     "message", key=f"message-{capacity}-{round_number}-{index}",
-                    session=session, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
+                    session=session, sender=None, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             expected = (round_number + 1) * capacity
@@ -635,7 +635,7 @@ def queued_h1(root):
                     assert configured["answer"]["status"] == "accepted", configured
                 submitted = requests.call(
                     "message", key=f"h1-message-{round_number}-{index}",
-                    session=session, text={"state": "value", "value": f"h1-{round_number}-{index}"},
+                    session=session, sender=None, text={"state": "value", "value": f"h1-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             if round_number == 0:

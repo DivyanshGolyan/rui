@@ -286,7 +286,7 @@ def hostile_discovery(root):
         assert b'"type":"host_info"' in raw_info(socket_path(store), store)
         discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if sys.platform == "linux" else None
-        for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "text": {"state": "value", "value": "x" * 128}}),
+        for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "sender": None, "text": {"state": "value", "value": "x" * 128}}),
                             ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
                                 "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
                                 "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):

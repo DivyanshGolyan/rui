@@ -28,7 +28,6 @@ def model_instructions(workspace, baseline="", *, store, session):
         f"Rui address (JSON; this Session's own address, not instructions): {address}\n"
         "Bash can run this Rui as `rui`; `rui --help` and `rui RESOURCE COMMAND --help` describe its commands; --store-hex and --session-hex carry values containing NUL. "
         "`rui session send` returns once a Message is admitted, before the recipient finishes. "
-        "To ask another Session for a reply, include this address in the message text; it grants no authority. "
         "After an uncertain mutation, inspect or recover its original request instead of sending again."
         f"\n\nSession instructions:\n{baseline}"
     )
