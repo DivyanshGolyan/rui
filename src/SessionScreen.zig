@@ -380,9 +380,16 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File, blocks: []const V
     self.overscroll = 0;
     // The page's kept rows show its newest blocks; one cut above them is
     // unknown. Prepended newest first, each lands before the last.
-    for (0..older) |from_end| {
-        const block: ?View.Collapsed = if (from_end < blocks.len) blocks[blocks.len - 1 - from_end] else null;
-        self.transcript_blocks.prepend(&.{block});
+    var end = blocks.len;
+    for (0..older) |_| {
+        if (end == 0) {
+            self.transcript_blocks.prependUnknown();
+            continue;
+        }
+        var oldest = end - 1;
+        while (oldest > 0 and blocks[oldest].joined) oldest -= 1;
+        self.transcript_blocks.prepend(blocks[oldest..end]);
+        end = oldest;
     }
     // Newer rows the page pushed off the end take their blocks with them.
     self.transcript_blocks.dropNewest(before + older - self.transcriptCollapsed());
@@ -416,10 +423,10 @@ fn boundary(self: *Self, text: []const u8) !void {
     self.transcript_blocks.dropNewest(before - self.transcriptCollapsed());
 }
 
-/// What the lowest collapsed user block the latest frame drew in the live
-/// view or transcript shows: its Message, or that none was drawn, or that
-/// its Message is no longer held here.
-pub const InView = union(enum) { none, released, message: View.Collapsed };
+/// What the lowest collapsed block the latest frame drew in the live view
+/// or transcript shows: its Messages, or that none was drawn, or that they
+/// are no longer held here.
+pub const InView = union(enum) { none, released, message: View.Block };
 
 /// Call right after drawing: later text moves what the frame drew.
 pub fn collapsedInView(self: *Self) InView {
@@ -432,8 +439,7 @@ pub fn collapsedInView(self: *Self) InView {
     const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return .none;
     // Each block is counted by how many follow it in its document.
     const blocks = if (self.view == .live) &self.live_blocks else &self.transcript_blocks;
-    const message = blocks.fromEnd(document.collapsed(last + 1, text).count) orelse return .released;
-    return .{ .message = message };
+    return .{ .message = blocks.fromEnd(document.collapsed(last + 1, text).count) orelse return .released };
 }
 
 /// Shows one Message's full text over the live view or the transcript.
@@ -1191,7 +1197,7 @@ test "Ctrl-O names the Message of the lowest collapsed block drawn as pages join
             return switch (in_view) {
                 .none => null,
                 .released => 0,
-                .message => |message| message.position,
+                .message => |block| block.items[0].position,
             };
         }
     };
@@ -1233,8 +1239,8 @@ test "Ctrl-O names the Message of the lowest collapsed block drawn as pages join
     try older.writePositionalAll(io, "\n› " ++ View.Mark.summary ++ "┄ 59 KB" ++ View.Mark.reset ++ "\n", 0);
     try screen.prependFile(io, older, &.{ Message.at(2, content), Message.at(3, content) });
     try std.testing.expectEqual(@as(usize, 4), screen.transcriptCollapsed());
-    try std.testing.expectEqual(@as(u64, 3), screen.transcript_blocks.fromEnd(3).?.position);
-    try std.testing.expectEqual(@as(u64, 10), screen.transcript_blocks.fromEnd(2).?.position);
+    try std.testing.expectEqual(@as(u64, 3), screen.transcript_blocks.fromEnd(3).?.items[0].position);
+    try std.testing.expectEqual(@as(u64, 10), screen.transcript_blocks.fromEnd(2).?.items[0].position);
     // A full transcript ending in a block: either label pushes that block
     // off the end, so its Message leaves with it and the one before stays.
     for (0..2) |label| {
@@ -1245,7 +1251,7 @@ test "Ctrl-O names the Message of the lowest collapsed block drawn as pages join
         screen.appendCollapsed(&.{Message.at(20 + label, content)});
         try screen.beginTranscript(try screen.liveStart());
         try std.testing.expectEqual(@as(usize, 1), screen.transcriptCollapsed());
-        try std.testing.expectEqual(@as(u64, 20 + label), screen.transcript_blocks.fromEnd(0).?.position);
+        try std.testing.expectEqual(@as(u64, 20 + label), screen.transcript_blocks.fromEnd(0).?.items[0].position);
         if (label == 0) try screen.markBeginning() else try screen.markGap();
         try std.testing.expectEqual(@as(usize, 0), screen.transcriptCollapsed());
         try std.testing.expect(screen.transcript_blocks.fromEnd(0) == null);

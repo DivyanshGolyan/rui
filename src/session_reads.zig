@@ -331,6 +331,15 @@ const DisplayCapture = struct {
         self.current_start = self.offset;
     }
 
+    /// `value` shows in the fold row the current item just wrote.
+    pub fn folded(self: *@This(), value: protocol.ActivityItem) void {
+        const start = self.current_start;
+        _ = self.finish();
+        self.current = value;
+        self.current_start = start;
+        self.current_shown = true;
+    }
+
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
         if (self.blocks.count == self.blocks.items.len) return error.TooManyCollapsedBlocks;
         self.blocks.items[self.blocks.count] = value;
@@ -766,23 +775,8 @@ test "a transcript joins at the first retained boundary or shows the gap after t
     try std.testing.expectEqual(@as(u64, 199), marks.start(500).gap.?.cursor.?.before_position);
 }
 
-/// The Messages one Ctrl-O page shows, in order: one for a collapsed
-/// Message, or each of a fold's, at most one page's worth.
-pub const Targets = struct {
-    pub const capacity = @typeInfo(@FieldType(Collected, "items")).array.len;
-    items: [capacity]View.Collapsed = undefined,
-    count: usize = 0,
-
-    pub fn one(target: View.Collapsed) Targets {
-        var targets: Targets = .{ .count = 1 };
-        targets.items[0] = target;
-        return targets;
-    }
-
-    pub fn slice(self: *const Targets) []const View.Collapsed {
-        return self.items[0..self.count];
-    }
-};
+/// The Messages one Ctrl-O page shows: one collapsed block's.
+pub const Targets = View.Block;
 
 /// One Message read into the scratch file at `start`, already validated.
 const Staged = struct { target: View.Collapsed, start: u64, lines: u64, last: u8 };

@@ -486,17 +486,20 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
         }
 
-        /// Where each collapsed user block's summary (`┄`, drawn dim and
-        /// quiet) starts within text bytes `[from, to)`: their count, and the
-        /// last one's offset.
+        /// Where each collapsed block's summary (`┄` for a user block, `┈`
+        /// for a peer fold, drawn dim and quiet) starts within text bytes
+        /// `[from, to)`: their count, and the last one's offset.
         pub fn collapsed(self: *const Self, from: usize, to: usize) Summaries {
             comptime std.debug.assert(styled);
-            const marker = "┄";
+            // `┄` and `┈` share their first two bytes.
+            const lead = "┄"[0..2];
+            comptime std.debug.assert(std.mem.eql(u8, lead, "┈"[0..2]));
             const bytes = self.text();
             var result: Summaries = .{};
             var index = from;
             const end = @min(to, bytes.len);
-            while (std.mem.indexOfPos(u8, bytes[0..end], index, marker)) |found| : (index = found + marker.len) {
+            while (std.mem.indexOfPos(u8, bytes[0..end], index, lead)) |found| : (index = found + lead.len) {
+                if (found + 3 > end or (bytes[found + 2] != "┄"[2] and bytes[found + 2] != "┈"[2])) continue;
                 const run = user_bit | summary_bit;
                 if (self.styles[found] & run != run) continue;
                 if (found != 0 and self.styles[found - 1] & run == run) continue;

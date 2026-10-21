@@ -222,6 +222,89 @@ fn trimmed(bytes: []const u8) []const u8 {
     return bytes[0..end];
 }
 
+pub const PeerDirection = enum { inbound, outbound };
+
+/// What one item draws, for folding: nothing, one peer line, or anything
+/// else, which ends a run of peer lines.
+pub const Drawn = union(enum) { nothing, other, peer: PeerDirection };
+
+/// A page's run of this many same-direction peer lines or more draws one
+/// fold row instead. Items that draw nothing do not end a run.
+pub const fold_run = 3;
+
+/// An item's place in a fold: the first of `count` Messages, or a later one.
+pub const Fold = union(enum) { none, rest, first: usize };
+
+/// Each item's place in its page's folds, in drawing order.
+pub fn folds(lines: []const Drawn, out: []Fold) void {
+    @memset(out, .none);
+    var start: usize = 0;
+    while (start < lines.len) {
+        const direction = switch (lines[start]) {
+            .peer => |direction| direction,
+            else => {
+                start += 1;
+                continue;
+            },
+        };
+        var count: usize = 0;
+        var end = start;
+        while (end < lines.len) : (end += 1) switch (lines[end]) {
+            .nothing => {},
+            .other => break,
+            .peer => |next| if (next == direction) {
+                count += 1;
+            } else break,
+        };
+        if (count >= fold_run) {
+            out[start] = .{ .first = count };
+            for (lines[start + 1 .. end], out[start + 1 .. end]) |value, *fold| if (value == .peer) {
+                fold.* = .rest;
+            };
+        }
+        start = end;
+    }
+}
+
+test "a page folds three or more same-direction peer lines that nothing else interrupts" {
+    const I: Drawn = .{ .peer = .inbound };
+    const O: Drawn = .{ .peer = .outbound };
+    const n: Drawn = .nothing;
+    const x: Drawn = .other;
+    const cases = .{
+        // Two never fold; three do, past items that draw nothing.
+        .{ &[_]Drawn{ I, I }, &[_]Fold{ .none, .none } },
+        .{ &[_]Drawn{ I, n, I, n, I }, &[_]Fold{ .{ .first = 3 }, .none, .rest, .none, .rest } },
+        // Other rows and a change of direction end a run.
+        .{ &[_]Drawn{ I, I, x, I, I, I, I }, &[_]Fold{ .none, .none, .none, .{ .first = 4 }, .rest, .rest, .rest } },
+        .{ &[_]Drawn{ I, I, I, O, O, O, I, I }, &[_]Fold{ .{ .first = 3 }, .rest, .rest, .{ .first = 3 }, .rest, .rest, .none, .none } },
+        .{ &[_]Drawn{ O, O, I, O, O }, &[_]Fold{ .none, .none, .none, .none, .none } },
+    };
+    inline for (cases) |case| {
+        var out: [8]Fold = undefined;
+        folds(case[0], out[0..case[0].len]);
+        try std.testing.expectEqualSlices(Fold, case[1], out[0..case[0].len]);
+    }
+}
+
+/// `┈ N from peers` or `┈ sent to N peers`: one row for a page's run of
+/// peer lines, as one collapsed block that Ctrl-O opens whole.
+pub fn peerFold(sink: anytype, direction: PeerDirection, count: usize) !void {
+    var buffer: [48]u8 = undefined;
+    try sink.feed("\n" ++ Mark.summary);
+    try sink.feed(switch (direction) {
+        .inbound => std.fmt.bufPrint(&buffer, "┈ {d} from peers", .{count}) catch unreachable,
+        .outbound => std.fmt.bufPrint(&buffer, "┈ sent to {d} peers", .{count}) catch unreachable,
+    });
+    try sink.feed(Mark.reset ++ "\n");
+}
+
+/// Tells a sink that records shown items that `item` shows in the fold row
+/// its run's first item just wrote.
+pub fn noteFolded(sink: anytype, item: protocol.ActivityItem) void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "folded")) sink.folded(item);
+}
+
 /// One peer Message as one upright dim line, never `›`: `← ref · first line`
 /// from a peer, `→ ref · first line` sent to one. Its size and admission
 /// time go in the right margin, size first so a narrow view drops it.
@@ -238,7 +321,7 @@ pub fn PeerLine(comptime Sink: type) type {
         phase: enum { leading, first, after } = .leading,
         longer: bool = false,
 
-        pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.Peer, length: u64) !void {
+        pub fn init(self: *Self, sink: Sink, direction: PeerDirection, peer: protocol.Peer, length: u64) !void {
             self.* = .{ .sink = sink, .length = length };
             var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
             try sink.feed("\n" ++ Mark.summary);
@@ -311,24 +394,45 @@ pub fn kilobytes(bytes: u64, buffer: *[24]u8) []const u8 {
     return std.fmt.bufPrint(buffer, "{d} KB", .{(bytes + 500) / 1000}) catch unreachable;
 }
 
-/// The Message behind a collapsed user block, for its Ctrl-O page: which
-/// read returns its bytes, and whether a conversation row exports them.
+/// One Message behind a collapsed block, for its Ctrl-O page: which read
+/// returns its bytes, and whether a conversation row exports them. A fold's
+/// later Messages are `joined` to the one before.
 pub const Collapsed = struct {
     source: enum { activity, conversation },
     position: u64,
     ordinal: u64,
     content: protocol.ActivityItem.Content,
     row: bool,
+    joined: bool = false,
 };
 
-/// The Messages of one Document's collapsed blocks in order. Each block
-/// draws exactly one summary run starting `┄`, so the Document's k-th such
-/// run from its end is the k-th entry from the end. Live output appends and
+/// The Messages one collapsed block shows, in order: one for a collapsed
+/// Message, or each of a fold's, at most one page's worth.
+pub const Block = struct {
+    pub const capacity = 16;
+    items: [capacity]Collapsed = undefined,
+    count: usize = 0,
+
+    pub fn one(target: Collapsed) Block {
+        var block: Block = .{ .count = 1 };
+        block.items[0] = target;
+        return block;
+    }
+
+    pub fn slice(self: *const Block) []const Collapsed {
+        return self.items[0..self.count];
+    }
+};
+
+/// The blocks of one Document in order, as their Messages. Each block draws
+/// exactly one summary run starting `┄` or `┈`, so the Document's k-th such
+/// run from its end is the k-th block from the end. Live output appends and
 /// evicts from the front; a transcript also gains older pages at the front
-/// and loses newer rows from the end. Beyond capacity the oldest entries
-/// are only counted.
+/// and loses newer rows from the end. Beyond capacity the oldest blocks are
+/// only counted; a block is kept or counted whole.
 pub const Blocks = struct {
     pub const capacity = 1024;
+    // Messages oldest first; null is a block whose Messages are not kept.
     items: [capacity]?Collapsed = undefined,
     start: usize = 0,
     count: usize = 0,
@@ -339,55 +443,101 @@ pub const Blocks = struct {
         return (self.start + index) % capacity;
     }
 
+    fn starts(value: ?Collapsed) bool {
+        return if (value) |kept| !kept.joined else true;
+    }
+
+    /// Where the block ending before item `end` begins.
+    fn blockStart(self: *const Blocks, end: usize) usize {
+        var index = end - 1;
+        while (index > 0 and !starts(self.items[self.at(index)])) index -= 1;
+        return index;
+    }
+
+    /// Appends one Message: a new block's, or one joined to the last block.
     pub fn append(self: *Blocks, value: ?Collapsed) void {
         if (self.count == capacity) {
+            // The oldest block leaves whole.
             self.start = self.at(1);
             self.count -= 1;
+            while (self.count != 0 and !starts(self.items[self.start])) {
+                self.start = self.at(1);
+                self.count -= 1;
+            }
             self.unknown += 1;
         }
         self.items[self.at(self.count)] = value;
         self.count += 1;
     }
 
-    /// Places an older page's blocks, oldest first, before every other.
-    /// Behind blocks already unknown they are unknown too: placing them
-    /// next to the kept ones would shift every older index.
-    pub fn prepend(self: *Blocks, older: []const ?Collapsed) void {
-        if (self.unknown != 0) {
-            self.unknown += older.len;
-            return;
-        }
-        var index = older.len;
-        while (index > 0) : (index -= 1) {
-            if (self.count == capacity) {
-                self.unknown += index;
+    /// Places an older page's whole blocks, oldest first, before every
+    /// other. Behind blocks already unknown they are unknown too: placing
+    /// them next to the kept ones would shift every older index.
+    pub fn prepend(self: *Blocks, older: []const Collapsed) void {
+        var end = older.len;
+        while (end > 0) {
+            var first = end - 1;
+            while (first > 0 and older[first].joined) first -= 1;
+            if (self.unknown != 0 or self.count + (end - first) > capacity) {
+                self.unknown += 1;
+                for (older[1..end]) |entry| self.unknown += @intFromBool(!entry.joined);
                 return;
             }
-            self.start = (self.start + capacity - 1) % capacity;
-            self.items[self.start] = older[index - 1];
-            self.count += 1;
+            var index = end;
+            while (index > first) : (index -= 1) {
+                self.start = (self.start + capacity - 1) % capacity;
+                self.items[self.start] = older[index - 1];
+                self.count += 1;
+            }
+            end = first;
         }
+    }
+
+    /// Places one older block whose Messages are not kept.
+    pub fn prependUnknown(self: *Blocks) void {
+        if (self.unknown != 0 or self.count == capacity) {
+            self.unknown += 1;
+            return;
+        }
+        self.start = (self.start + capacity - 1) % capacity;
+        self.items[self.start] = null;
+        self.count += 1;
     }
 
     /// Forgets the newest `count` blocks, which left the Document's end.
     pub fn dropNewest(self: *Blocks, count: u64) void {
-        const kept: usize = @intCast(@min(count, self.count));
-        self.count -= kept;
-        self.unknown -|= count - kept;
+        var left = count;
+        while (left != 0 and self.count != 0) : (left -= 1) self.count = self.blockStart(self.count);
+        self.unknown -|= left;
     }
 
     /// The block `index` from the end (0 is the newest), if kept.
-    pub fn fromEnd(self: *const Blocks, index: u64) ?Collapsed {
-        if (index >= self.count) return null;
-        return self.items[self.at(self.count - 1 - @as(usize, @intCast(index)))];
+    pub fn fromEnd(self: *const Blocks, index: u64) ?Block {
+        var end = self.count;
+        var blocks: u64 = 0;
+        while (end != 0) : (blocks += 1) {
+            const first = self.blockStart(end);
+            if (blocks == index) {
+                var block: Block = .{};
+                for (first..end) |item| {
+                    block.items[block.count] = self.items[self.at(item)] orelse return null;
+                    block.count += 1;
+                }
+                return block;
+            }
+            end = first;
+        }
+        return null;
     }
 
     /// A copy holding only the newest `count` blocks.
     pub fn newest(self: *const Blocks, count: u64) Blocks {
         var copy = self.*;
-        const kept: usize = @intCast(@min(count, self.count));
-        copy.start = self.at(self.count - kept);
-        copy.count = kept;
+        var first = self.count;
+        var kept: u64 = 0;
+        while (kept < count and first != 0) : (kept += 1) first = self.blockStart(first);
+        copy.start = self.at(first);
+        copy.count = self.count - first;
         copy.unknown = count - kept;
         return copy;
     }
@@ -397,39 +547,83 @@ test "collapsed blocks keep their order from the end as pages join and leave" {
     var blocks: Blocks = .{};
     const body_ref: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const at = struct {
-        fn f(position: u64, c: protocol.ActivityItem.Content) ?Collapsed {
+        fn f(position: u64, c: protocol.ActivityItem.Content) Collapsed {
             return .{ .source = .activity, .position = position, .ordinal = 0, .content = c, .row = false };
         }
     }.f;
     for (0..Blocks.capacity + 3) |index| blocks.append(at(index + 10, body_ref));
     try std.testing.expectEqual(@as(u64, 3), blocks.unknown);
-    try std.testing.expectEqual(@as(u64, Blocks.capacity + 12), blocks.fromEnd(0).?.position);
-    try std.testing.expectEqual(@as(u64, 13), blocks.fromEnd(Blocks.capacity - 1).?.position);
+    try std.testing.expectEqual(@as(u64, Blocks.capacity + 12), blocks.fromEnd(0).?.items[0].position);
+    try std.testing.expectEqual(@as(u64, 13), blocks.fromEnd(Blocks.capacity - 1).?.items[0].position);
     try std.testing.expect(blocks.fromEnd(Blocks.capacity) == null);
     var copy = blocks.newest(5);
-    try std.testing.expectEqual(@as(u64, Blocks.capacity + 8), copy.fromEnd(4).?.position);
-    copy.prepend(&.{ at(1, body_ref), null, at(3, body_ref) });
-    try std.testing.expectEqual(@as(u64, 3), copy.fromEnd(5).?.position);
+    try std.testing.expectEqual(@as(u64, Blocks.capacity + 8), copy.fromEnd(4).?.items[0].position);
+    copy.prepend(&.{at(3, body_ref)});
+    copy.prependUnknown();
+    copy.prepend(&.{at(1, body_ref)});
+    try std.testing.expectEqual(@as(u64, 3), copy.fromEnd(5).?.items[0].position);
     try std.testing.expect(copy.fromEnd(6) == null);
-    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(7).?.position);
+    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(7).?.items[0].position);
     copy.dropNewest(6);
     try std.testing.expect(copy.fromEnd(0) == null and copy.fromEnd(2) == null);
-    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(1).?.position);
+    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(1).?.items[0].position);
     // An older page beyond capacity counts its oldest blocks only.
     var full = blocks.newest(Blocks.capacity - 1);
     full.prepend(&.{ at(1, body_ref), at(2, body_ref) });
-    try std.testing.expectEqual(@as(u64, 2), full.fromEnd(Blocks.capacity - 1).?.position);
+    try std.testing.expectEqual(@as(u64, 2), full.fromEnd(Blocks.capacity - 1).?.items[0].position);
     try std.testing.expectEqual(@as(u64, 1), full.unknown);
     // Behind an unknown block, slots freed at the end never let an older
     // page's Message take a kept index: the oldest kept block stays 13 and
     // every index past it stays unknown.
     var gap = blocks.newest(Blocks.capacity + 1);
-    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 1).?.position);
+    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 1).?.items[0].position);
     gap.prepend(&.{at(2, body_ref)});
     gap.dropNewest(1);
     gap.prepend(&.{at(1, body_ref)});
-    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 2).?.position);
+    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 2).?.items[0].position);
     for (Blocks.capacity - 1..Blocks.capacity + 3) |index| try std.testing.expect(gap.fromEnd(index) == null);
+}
+
+test "a fold is one block of all its Messages, kept, dropped and evicted whole" {
+    const body_ref: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
+    const at = struct {
+        fn f(position: u64, joined: bool, c: protocol.ActivityItem.Content) Collapsed {
+            return .{ .source = .activity, .position = position, .ordinal = 0, .content = c, .row = false, .joined = joined };
+        }
+    }.f;
+    var blocks: Blocks = .{};
+    blocks.append(at(1, false, body_ref));
+    for ([_]u64{ 2, 3, 4 }, 0..) |position, index| blocks.append(at(position, index != 0, body_ref));
+    blocks.append(at(5, false, body_ref));
+    // Three blocks: 1, the fold 2–4 and 5.
+    const fold = blocks.fromEnd(1).?;
+    try std.testing.expectEqual(@as(usize, 3), fold.count);
+    for (fold.slice(), [_]u64{ 2, 3, 4 }) |entry, position| try std.testing.expectEqual(position, entry.position);
+    try std.testing.expectEqual(@as(u64, 1), blocks.fromEnd(2).?.items[0].position);
+    try std.testing.expect(blocks.fromEnd(3) == null);
+    // A transcript copy of the newest two keeps the fold whole.
+    var copy = blocks.newest(2);
+    try std.testing.expectEqual(@as(usize, 3), copy.fromEnd(1).?.count);
+    try std.testing.expect(copy.fromEnd(2) == null);
+    // An older page's fold lands whole before them.
+    copy.prepend(&.{ at(7, false, body_ref), at(8, true, body_ref), at(9, true, body_ref), at(10, false, body_ref) });
+    try std.testing.expectEqual(@as(u64, 10), copy.fromEnd(2).?.items[0].position);
+    try std.testing.expectEqual(@as(usize, 3), copy.fromEnd(3).?.count);
+    // Dropping the newest two blocks takes the whole fold with block 5.
+    copy.dropNewest(2);
+    try std.testing.expectEqual(@as(u64, 10), copy.fromEnd(0).?.items[0].position);
+    try std.testing.expectEqual(@as(u64, 9), copy.fromEnd(1).?.items[2].position);
+    // Eviction at capacity removes the oldest block whole: no fold is kept
+    // in part.
+    var full: Blocks = .{};
+    for ([_]u64{ 2, 3, 4 }, 0..) |position, index| full.append(at(position, index != 0, body_ref));
+    for (0..Blocks.capacity - 3) |index| full.append(at(100 + index, false, body_ref));
+    try std.testing.expectEqual(@as(u64, 0), full.unknown);
+    full.append(at(9999, false, body_ref));
+    try std.testing.expectEqual(@as(u64, 1), full.unknown);
+    try std.testing.expectEqual(@as(usize, Blocks.capacity - 2), full.count);
+    try std.testing.expectEqual(@as(u64, 100), full.fromEnd(Blocks.capacity - 3).?.items[0].position);
+    try std.testing.expect(full.fromEnd(Blocks.capacity - 2) == null);
 }
 
 /// Tells a sink that records collapsed blocks which Message the one just
@@ -1334,13 +1528,56 @@ test "an ended Turn says what happened and what to do next where it ended" {
     try std.testing.expectEqualStrings("\n! Work ended: retry_exhausted. Send a message to continue.\n", out.buffered());
 }
 
+/// What an Activity item draws below, for folding.
+fn activityDrawn(item: protocol.ActivityItem, historical: bool) Drawn {
+    return switch (item.value) {
+        // A historical Admission that is not applied draws its label first.
+        .admission => |value| if (historical and value.state == .applied) .nothing else if (!historical and value.sender != null) .{ .peer = .inbound } else .other,
+        .user => |value| if (!historical) .nothing else if (value.sender != null) .{ .peer = .inbound } else .other,
+        .call => .nothing,
+        .outcome => |outcome| if (outcome.code.eql("completed")) .nothing else .other,
+        .sent => .{ .peer = .outbound },
+        .assistant, .tool_result, .stop, .send_failed => .other,
+    };
+}
+
+/// The Message a folded peer line shows.
+fn activityCollapsed(item: protocol.ActivityItem, joined: bool) Collapsed {
+    const reference = switch (item.value) {
+        .admission, .user => |value| value.content,
+        .sent => |sent| sent.content,
+        else => unreachable,
+    };
+    return .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = reference, .row = item.value == .user, .joined = joined };
+}
+
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const client.ActivityPage, sink: anytype, colour: bool, compact_tools: *bool) !void {
     const historical = page.facts.direction == .backward;
+    const Items = @FieldType(protocol.ActivityFacts, "items");
+    var shown: [@typeInfo(Items).array.len]Drawn = undefined;
+    var fold: [@typeInfo(Items).array.len]Fold = undefined;
+    for (shown[0..page.facts.count], 0..) |*value, index| value.* = activityDrawn(page.facts.items[if (historical) page.facts.count - index - 1 else index], historical);
+    folds(shown[0..page.facts.count], fold[0..page.facts.count]);
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
+        // A fold's first item drew every later one.
+        if (fold[index] == .rest) continue;
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
         sink.item(item);
+        if (fold[index] == .first) {
+            compact_tools.* = false;
+            try peerFold(sink, shown[index].peer, fold[index].first);
+            var noted: usize = 0;
+            var member = index;
+            while (noted < fold[index].first) : (member += 1) if (member == index or fold[member] == .rest) {
+                const value = page.facts.items[if (historical) page.facts.count - member - 1 else member];
+                try noteCollapsed(sink, activityCollapsed(value, member != index));
+                if (member != index) noteFolded(sink, value);
+                noted += 1;
+            };
+            continue;
+        }
         switch (item.value) {
             .admission => |value| {
                 if (historical and value.state == .applied) continue;

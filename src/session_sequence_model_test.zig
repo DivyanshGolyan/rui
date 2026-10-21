@@ -568,9 +568,9 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     const screen = front.terminal.screen;
     for (0..screen.transcriptCollapsed()) |block| {
         const shown = screen.transcript_blocks.fromEnd(block) orelse continue;
-        for (messages, 0..) |text, index| {
-            if (shown.content.length == text.len and std.mem.eql(u8, &shown.content.digest, &digests[index])) reachable[index] = true;
-        }
+        for (shown.slice()) |message| for (messages, 0..) |text, index| {
+            if (message.content.length == text.len and std.mem.eql(u8, &message.content.digest, &digests[index])) reachable[index] = true;
+        };
     }
     var cursor = front.transcript_older;
     const requests: client.Requests = .{ .io = std.testing.io };

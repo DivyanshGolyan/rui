@@ -19,9 +19,32 @@ pub const Prepared = struct {
     pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
+        // Folds go by drawing order, oldest first.
+        var drawn: [protocol.public_conversation_page_items]View.Drawn = undefined;
+        var fold: [protocol.public_conversation_page_items]View.Fold = undefined;
+        for (drawn[0..self.page.count], 0..) |*value, reverse| {
+            const item = self.page.items[self.page.count - 1 - reverse];
+            value.* = if (item.kind == .user and item.sender != null) .{ .peer = .inbound } else .other;
+        }
+        View.folds(drawn[0..self.page.count], fold[0..self.page.count]);
         for (0..self.page.count) |reverse| {
             const index = self.page.count - 1 - reverse;
             const item = self.page.items[index];
+            switch (fold[reverse]) {
+                .none => {},
+                .rest => continue,
+                .first => |count| {
+                    compact = false;
+                    try View.peerFold(sink, .inbound, count);
+                    for (fold[reverse..][0..count], 0..) |member, offset| {
+                        std.debug.assert(member != .none);
+                        var message = collapsed(self.page.items[index - offset]);
+                        message.joined = offset != 0;
+                        try View.noteCollapsed(sink, message);
+                    }
+                    continue;
+                },
+            }
             if (item.content.bytes > item_bytes) {
                 compact = false;
                 var buffer: [192]u8 = undefined;
