@@ -116,3 +116,16 @@ python3 .amp/p2/sse_candidate_comparison.py > .amp/p2/raw/sse-candidate-comparis
 ```
 
 The controller log retains actual UTC start/end and exit 1. `raw/sse-candidate-identity.txt` separates source revision, build mode, actual Rui hashes, original Go binary hash and launcher hashes. The canonical JSON's `binary_sha256` identifies its launcher, not the underlying Rui binary. Baseline count reuse requires identical runner/provider and matched requested/actual event populations. Both cases have pacing violations under tracing. No instrumented elapsed, syscall-time or CPU number is used as a cost result.
+
+## Matched HOLD0 versus HOLD100 SQL counts
+
+The temporary `p2_hold_population_test.go.txt` is compiled in the same isolated P1 b13caa4 export. It configures all 100 Sessions before the zero-population window. Both zero and held windows follow 10-second warmups and request 60 seconds. All Message admissions lie between them. The SQL-count binary and provider remain unchanged during measurement.
+
+```sh
+GOTOOLCHAIN=local go -C .amp/p2/p1-source/tests/qualification test -c -mod=readonly -o /home/user/workspace/repo/.amp/p2/bin/p1-hold-population-test ./model-output
+env -u LD_PRELOAD P2_SQL_BINARY="$PWD/.amp/p2/bin/rui-sql-phases" P2_SQL_DIRECTORY="$PWD/.amp/p2/raw/hold-population" .amp/p2/bin/p1-hold-population-test -test.run '^TestP2HoldPopulation$' -test.v -test.timeout 6m
+gzip -cn .amp/p2/raw/hold-population/host-stderr.log > .amp/p2/raw/hold-population/host-stderr.log.gz
+python3 .amp/p2/sql_phase_attribution.py raw/hold-population > .amp/p2/raw/hold-population-summary.json
+```
+
+The controller log preserves start/end UTC and PASS/exit 0. The reducer reports SELECT and all-statement rates separately, verifies the configured population, zero events, full/free slots, admission exclusion and caller-delta sum. Its default invocation still reproduces the original phase summary unchanged. The first schema-related reduction failure remains explicit; no workload was retried.

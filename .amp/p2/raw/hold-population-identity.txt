@@ -1,0 +1,25 @@
+identity_utc=2026-10-21T21:52:49Z
+product_baseline=240aef2e46d7240ce31a02ce4cefceb695551a56
+harness_source=b13caa4b603e44de482694e241f18b4d752a5456
+build_mode=ReleaseFast+retained_SQL_phase_patch
+Linux 6.1.158+ x86_64
+e2b.local
+go version go1.27.1 linux/amd64
+752f96638c80c1244fb0dd20dc9ce28ccc1fd812ed491239b678902ab70fb599  .amp/p2/bin/rui-sql-phases
+0c481403a3d689e8a9c2156783f609863648e021883a2c84a2c49ba3921ad1d5  .amp/p2/bin/p1-hold-population-test
+0cde9b1628110ea676b1fc00f57c90b056f3d55a853ca3896b2e728c41af792b  .amp/p2/p2_hold_population_test.go.txt
+af08d10cb9e13c49b89afa1abbc1b33d5fd4148662d8765047d3364ebe6ccfad  .amp/p2/sql-phase-instrumentation.patch.gz
+31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd  .amp/p2/p1-source/tests/qualification/go.sum
+4e1c28e289455ec10f60a11a8dfe9b0cd247fb399d57b5f9ca97cbce6191be7b  .amp/p2/p1-source/tests/qualification/measurement/client.go
+09c4ba21348607ac2755b1db9c3503a3ad0c0a379a85acf21ca674f0ddfbdd62  .amp/p2/p1-source/tests/qualification/measurement/linux_memory.go
+3d41d5543feabdfc72ed0cb42632e0c749be460a0c4fa906fb7a3e6b1ec7a41a  .amp/p2/p1-source/tests/qualification/measurement/linux_memory_test.go
+45f63ce6c5bd5ba548f8c71aa06fe92c2be79eebbf996aa747b85535149ea4c5  .amp/p2/p1-source/tests/qualification/measurement/measurement.go
+cd7d0cb36b14f56fa6c6f53115f68fafed1570b96b749b8ff552c6249223c86d  .amp/p2/p1-source/tests/qualification/measurement/measurement_test.go
+cc2cae05b19a1b1596799eaeec422a50d18bb5ca7b4d1bd3ca30a6c86601b617  .amp/p2/p1-source/tests/qualification/model-output/evidence_test.go
+a2877cbbd76d41f81b106d8c831c2a73db0272d7f4cb294fc7a9f9035ed3c776  .amp/p2/p1-source/tests/qualification/model-output/main.go
+4158d3608fa40476ded2b9290d3a005547d10185fe20e60d0cc99cb767555a88  .amp/p2/p1-source/tests/qualification/model-output/main_test.go
+bc53698444dd979b6d1e8bdb1f572765deca98ebbabb1aa9af9ca1832b41fa57  .amp/p2/p1-source/tests/qualification/model-output/p2_attribution_test.go
+0cde9b1628110ea676b1fc00f57c90b056f3d55a853ca3896b2e728c41af792b  .amp/p2/p1-source/tests/qualification/model-output/p2_hold_population_test.go
+8bcbdaaf938bce53e1941cd0d06f9631732732a4f5a50cdf3e48bb0164096373  .amp/p2/p1-source/tests/qualification/model-output/p2_sql_phases_test.go
+e680a69cf5a2d5c9a35e4b4d40d1daa5abd1b0c076cb9da304ddc26a3d965934  .amp/p2/p1-source/tests/qualification/model-output/provider/main.go
+086c92c39be1e9a13c38de0fb0eebde0ab3c22808a28c4070e63f149b469fd1c  .amp/p2/p1-source/tests/qualification/model-output/provider/provider_test.go

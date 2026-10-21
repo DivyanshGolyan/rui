@@ -1,6 +1,6 @@
-914fd4515a739f5ac52fc4db9a5940cd99aa2a1470c6eeba059c630df0932f3d  .amp/p2/ATTRIBUTION.md
-d03956164b00489e244ea44a839b04b4d9ea02680f35650d165f53d0902a413d  .amp/p2/COMMANDS.md
-df51443e1336bc5fbc7c4d064c5bdb7ad490853e74f29a3781e96ca9742303a5  .amp/p2/NOTES.md
+36e106a1a5a44ef2b0df122809bb79da6fb015ec0f7e312be8abcfcff9db51de  .amp/p2/ATTRIBUTION.md
+80a6d3d9cc4d21eb79ffd66a648152d57d9bda78a5044f04ea2cd5051e60128f  .amp/p2/COMMANDS.md
+765c5e415fcb0ea2dc4fd34aa3dbf8553f22b1f43363ac11e3eda32d5db0363a  .amp/p2/NOTES.md
 dfa5377b442f8cbf14b0fa5ffbf1b3ad95296219169d211011f48629f498a20f  .amp/p2/analyze.py
 6362db0d531b4949c50466a10d57dbb381c100aa9eca8a581830e9aad500418c  .amp/p2/bin/rui-candidate-strace
 c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
@@ -9,10 +9,12 @@ b5119beb8b888fbb4d27dfff3564c600d0e603d15536ab661ef92a642c54e3b1  .amp/p2/bin/ru
 78c8e24e5332e019ffa3753eea2d0c81ed7620a88cb57567eff81235319caf53  .amp/p2/graceful-controller.patch.gz
 574e60bb08491a1b675d0812efd9169670050b84a45b68d79b0493591517b46f  .amp/p2/p2_attribution_test.go.txt
 bc53698444dd979b6d1e8bdb1f572765deca98ebbabb1aa9af9ca1832b41fa57  .amp/p2/p2_hold_cpu_test.go.txt
+0cde9b1628110ea676b1fc00f57c90b056f3d55a853ca3896b2e728c41af792b  .amp/p2/p2_hold_population_test.go.txt
 8bcbdaaf938bce53e1941cd0d06f9631732732a4f5a50cdf3e48bb0164096373  .amp/p2/p2_sql_phases_test.go.txt
 4b3984c25de257c2e4a016bbdd4a7cf9b0c8721c7dba6d537465a669ecd2ffb3  .amp/p2/partial-hold.patch.gz
 dfc78be19e43f6c5f2c4d219c8753ea8327bd24b51244be35fdc818a93c288a5  .amp/p2/raw/build-go.log
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/build-hold-cpu.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/build-hold-population-go.log
 18fa0c5498088ec345918854e2882093bd397b90c9435cc6780d9b28fa1b626c  .amp/p2/raw/build-releasefast.log
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/build-sql-phases-go.log
 291981ca7d41c77ec246fc6aec01901819a4e0a42b4ea0943fd440b077749208  .amp/p2/raw/build-sql-phases.log.gz
@@ -30,6 +32,14 @@ abd9d7f08a8f5b307dc2e2f60948b1401175bbc37c87cc82c0d79331221e189a  .amp/p2/raw/he
 78333e8e6a255d13896cd20937b6552aa9e78ddc2d6d965b06511556c1100b52  .amp/p2/raw/heap1.interpreted.gz
 d9e7c22467ccc122a45c76104d38872dcdde98d6b5a30df1fdb53f1bf4b64423  .amp/p2/raw/heap1.json
 9a0bc90e61ce684069346c9369d961cfc33d1aad75f54d6ab3ecbe6062abdc94  .amp/p2/raw/heap1.raw.gz
+b40ddd98fe36eb49646abb1c3a81c6041c00d55a99634b0c0ab0216d3043cb3c  .amp/p2/raw/hold-population-controller.log
+4ebc3dc460da151aa37d3b133e3c5793715f7dffe55fa56004875f54d4ba6b09  .amp/p2/raw/hold-population-identity.txt
+bc9f34db807d463bd180b6b0572ee7754a1575085b719e86a0dfba4b22e6b2a0  .amp/p2/raw/hold-population-postrun-verification.txt
+cd853c620acdf2515e0fbbdc503e5b6adcb94abb9dc9dfe100724505737e141c  .amp/p2/raw/hold-population-reduction-attempt1.txt
+ee2baa7c304904fabdf8d53b40c9df3ae5e774723514d80a196c9eff30e90ade  .amp/p2/raw/hold-population-store-facts.json
+b87af90f3c067a7b1a93554abd23999395a3959967cb81a7676e15db3329d03d  .amp/p2/raw/hold-population-summary.json
+2ea8b45b873c3f9b49e6ba03384edefb69c3e9fefda0805b855944bcc2d5603e  .amp/p2/raw/hold-population/evidence.json
+c0fb82199e9b72dff3ff17f5d90cc158b95ddc91fc7b0bee9d4fcd628d56b2a5  .amp/p2/raw/hold-population/host-stderr.log.gz
 656b21583a2250a854b88feb7d79d3e9d50a99d0a188a711c2df4ec206a26c00  .amp/p2/raw/hold100-cpu-test.log
 dfdbe70d023e8d32da107d1fc772a48df45b4e295a423072fa7a49222bc20b28  .amp/p2/raw/hold100-cpu/evidence.json
 e5b94cd27f68882910b61d38b98af351b3a371a17fb8fd15250ae367e855eb27  .amp/p2/raw/hold100-strace.txt
@@ -124,7 +134,7 @@ e9b4463182c04e4286dca4f12f24d7b5f89413a314398364ef65d36b4efe252b  .amp/p2/raw/st
 5af211bb9ce0671578234f094a3a63d34a2c7844db7a23546f23bf037310f390  .amp/p2/raw/tool-capabilities.txt
 58b029cb34fbd105953fff18d53e7ec06ea96a489415cc5b183ee52a4550b3a5  .amp/p2/sql-instrumentation.patch.gz
 af08d10cb9e13c49b89afa1abbc1b33d5fd4148662d8765047d3364ebe6ccfad  .amp/p2/sql-phase-instrumentation.patch.gz
-bec2a1b6c8f2c556d102a23fc3df07bda1f039acd0129a7c2b27dd5af3a59d78  .amp/p2/sql_phase_attribution.py
+b90e4b1bff98659a33b03f8eb8083b177bcaeb4567b40af7c47508dad87db350  .amp/p2/sql_phase_attribution.py
 72c51b98a7b517214dafc51e5dd1df78c5eca1dfaab631539f6514492b6ba475  .amp/p2/sql_read_attribution.py
 1de9f450b595a932791dcc492c46e3be2f5d9e93b4439c72cb414adc6b93c0c8  .amp/p2/sse-range-instrumentation.patch.gz
 58dc2827de0674b0c9578c64792c26032b9d3d9687df97a37f08d46db1a92dd7  .amp/p2/sse_candidate_comparison.py

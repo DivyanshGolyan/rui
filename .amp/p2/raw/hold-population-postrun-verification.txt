@@ -1,0 +1,19 @@
+verification_utc=2026-10-21T21:55:36Z
+.amp/p2/bin/rui-sql-phases: OK
+.amp/p2/bin/p1-hold-population-test: OK
+.amp/p2/p2_hold_population_test.go.txt: OK
+.amp/p2/sql-phase-instrumentation.patch.gz: OK
+.amp/p2/p1-source/tests/qualification/go.sum: OK
+.amp/p2/p1-source/tests/qualification/measurement/client.go: OK
+.amp/p2/p1-source/tests/qualification/measurement/linux_memory.go: OK
+.amp/p2/p1-source/tests/qualification/measurement/linux_memory_test.go: OK
+.amp/p2/p1-source/tests/qualification/measurement/measurement.go: OK
+.amp/p2/p1-source/tests/qualification/measurement/measurement_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/evidence_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/main.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/main_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/p2_attribution_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/p2_hold_population_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/p2_sql_phases_test.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/provider/main.go: OK
+.amp/p2/p1-source/tests/qualification/model-output/provider/provider_test.go: OK

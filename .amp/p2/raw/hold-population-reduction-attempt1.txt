@@ -1,0 +1,9 @@
+Copied from the 21:55:37 UTC tool transcript; this is a post-processing failure, not a workload failure.
+
+Traceback (most recent call last):
+  File "/home/user/workspace/repo/.amp/p2/sql_phase_attribution.py", line 74, in <module>
+    assert snapshot["held_streams"] == snapshot["ready_streams"] == snapshot["completed_events"] == snapshot["offer_bytes"] == 0
+           ~~~~~~~~^^^^^^^^^^^^^^^^
+KeyError: 'held_streams'
+
+Cause: provider Snapshot.HeldStreams uses json:"held_streams,omitempty", so a zero held count is omitted. The test already asserted its typed zero value, and both retained zero snapshots explicitly record ready_streams=0, h2_streams=0, events=0 and bytes=0. The reducer now handles that declared zero-omission rule. No workload rerun, evidence normalization or missing-counter-as-zero inference was used.

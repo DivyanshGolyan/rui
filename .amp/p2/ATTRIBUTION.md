@@ -190,3 +190,33 @@ The pre-run estimate predicted 6,000,000 fewer `preadv` calls, leaving 2,491,607
 The candidate ran from 20:32:45 to 20:35:50 UTC. Both rounds passed capture, request-integrity, result-delivery, cleanup and offline durable audits. The controller retained exit 1 and `incomplete` because Mac footprint is unavailable. Both the reused baseline and candidate have 100 timing-invalid streams per round under tracing. Their nominal offer durations do not establish accepted pacing or uninstrumented cost. The candidate's remaining JSON-object and type-string rereads are not fixed by this comparison.
 
 The [comparison reducer](sse_candidate_comparison.py) checks matching fixture inputs, emitted denominators, launcher identities and syscall row sums before producing the [comparison](raw/sse-candidate-comparison.json). The [raw candidate syscalls](raw/stream100-sse-candidate-strace.txt), [canonical report](raw/stream100-sse-candidate.json), [controller outcome](raw/stream100-sse-candidate-controller.log), [build log](raw/build-sse-candidate.log.gz) and [source/binary identities](raw/sse-candidate-identity.txt) retain exact evidence. The candidate binary hash is `8c3add2e42b2173c47a86f3ec11759087f1b310b94f57546af1812ccc2c123c6`; the baseline remains `b843b47a…`. All 87 candidate product/build files were byte-compared to the published candidate and rehashed after execution. No product source, REPORT or landing ref was changed by P2.
+
+## Matched HOLD0 versus HOLD100 shows polling amplification, not CPU causality
+
+The older 62.8435-versus-1,000.9831 SELECT/second comparison is descriptive, not strictly matched. Its empty-idle phase precedes Session configuration, has no warmup and lasts 10 seconds. Its held phase follows configuration and admission, has a 10-second warmup and lasts 60 seconds. The approximate 15.93× ratio must not be presented as a matched HOLD0 experiment.
+
+A new observation ran 21:52:49–21:55:16 UTC and passed. Both windows use the same Host PID 2903747, capacity 100, Store, 100 already-configured Sessions with tools disabled, SQL-instrumented baseline binary and corrected P1 HOLD provider. Each follows 10 seconds of warmup and requests a 60-second window. The zero window has no Messages or provider requests. All 100 Message admissions occur between the windows. The held window has 100 accepted Operations and one H2 connection, with no response bytes, events or terminal completions. Population and resulting transport/Message rows intentionally differ. This is one sequential same-Host observation, not repeated or randomized statistics.
+
+| Instrumented first executions | Configured HOLD0 | HOLD100 |
+| --- | ---: | ---: |
+| Observed interval, seconds | 60.055861641 | 60.009824453 |
+| SELECT count | 3,750 | 60,273 |
+| SELECTs per observed second | 62.4419 | 1,004.3855 |
+| BEGIN / ROLLBACK count | 655 / 655 | 0 / 0 |
+| All statement count | 5,060 | 60,273 |
+| All statements per observed second | 84.2549 | 1,004.3855 |
+
+The SELECT rate rises **16.0851×**, or **941.9437 extra SELECTs/second**. The all-statement rate rises **11.9208×**, or **920.1307 extra statements/second**. These ratios differ because zero-population admission probes execute BEGIN/ROLLBACK even when they find no work. Neither window issues COMMIT or data-changing SQL. The estimates were approximately 3,770 versus 60,060 SELECTs and 5,090 versus 60,060 total statements. Actual SELECT counts differ by about −0.5% and +0.4%, respectively.
+
+| SELECT caller | HOLD0 per second | HOLD100 per second | Difference per second |
+| --- | ---: | ---: | ---: |
+| Per-active-Operation control reconciliation | 0 | 964.8420 | +964.8420 |
+| Global uncertain-Action recovery scan | 9.9074 | 38.5437 | +28.6362 |
+| Global exhausted-retry recovery scan | 0.9991 | 0.9998 | +0.0008 |
+| Empty Bash, Message, tool and retry probes plus retry clock | 51.5354 | 0 | −51.5354 |
+
+`serviceLifecycle` reconciles controls approximately every 100ms. Its `cancelSupersededTransfers` loop calls `Store.operationSupersededByControl` for each active slot. The held window executes that SELECT 57,900 times, or **9.6484 control reads per held Operation per second**. All checks observe unchanged, uncancelled work because the test sends no control until after the window. Global uncertain-Action recovery executes once in each of 2,313 transport-wait turns, even with all slots full and no Actions. Exhausted-retry recovery adds 60 scans. There are no admission probes in the held window because free slots remain zero. At HOLD0, 595 idle turns instead run empty admission/continuation checks with 100 free slots, plus 60 retry-maintenance cycles. Read-only post-reap inspection confirms zero Actions and 100 subsequently cancelled Messages.
+
+This is substantial repeated SQL observation with no model progress or new admissions during the measured windows. The control queries dominate held SQL volume, so avoiding repeated unchanged-state reads is a concrete investigation target. It does not prove that all polling can be removed while preserving control responsiveness, nor establish a universal threshold for "extremely wasteful." Count amplification is not CPU attribution, an uninstrumented cost measurement or an optimization-speedup claim. No Store-wakeup, production or durability change is implemented.
+
+The [matched summary and exact caller contributions](raw/hold-population-summary.json), [raw Host trace](raw/hold-population/host-stderr.log.gz), [fixture snapshots and boundaries](raw/hold-population/evidence.json), [temporary test](p2_hold_population_test.go.txt), [binary/source identity](raw/hold-population-identity.txt) and [controller outcome](raw/hold-population-controller.log) retain the comparison. Run `python3 .amp/p2/sql_phase_attribution.py raw/hold-population` to reproduce it. The [first reduction failure](raw/hold-population-reduction-attempt1.txt) is retained: the reducer initially rejected the provider's documented omission of zero `held_streams`. The schema correction reused the same capture without rerunning the workload. All rates normalize instrumented first-execution counts, not statement completions or CPU time.

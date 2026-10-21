@@ -2,13 +2,15 @@
 """Reduce instrumented SQL/turn counts by explicit fixture phase windows."""
 import gzip
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
 from sql_read_attribution import owner
 
 ROOT = Path(__file__).resolve().parent
-directory = ROOT / "raw/sql-phases-hold100"
+assert len(sys.argv) <= 2
+directory = ROOT / (sys.argv[1] if len(sys.argv) == 2 else "raw/sql-phases-hold100")
 evidence = json.loads((directory / "evidence.json").read_text())
 assert evidence["messages"] == 100 and evidence["events"] == 0
 held = evidence["held_snapshot"]
@@ -56,10 +58,52 @@ for window in evidence["windows"]:
         assert set(verbs) == {"SELECT"}, verbs
         assert set(groups) <= {"uncertain_action_recovery", "control_reconciliation", "exhausted_retry_recovery"}, groups
         assert abs(groups["uncertain_action_recovery"] - stages["begin"]) <= 1
-    if window["name"] in ("empty_idle", "cancelled_settled_idle"):
+    if window["name"] in ("empty_idle", "cancelled_settled_idle", "configured_zero"):
         assert set(free_slots) == {100}, free_slots
         assert not groups["control_reconciliation"]
     rows.append(row)
-print(json.dumps({"fixture": True, "instrumented_counts_only": True,
-                  "execution_tid": execution_tids[0], "windows": rows,
-                  "limits": evidence["limits"]}, indent=2))
+output = {"fixture": True, "instrumented_counts_only": True,
+          "execution_tid": execution_tids[0], "windows": rows,
+          "limits": evidence["limits"]}
+if len(sys.argv) == 2:
+    assert evidence["host_capacity"] == evidence["configured_sessions"] == 100
+    assert evidence["warmup_seconds_each"] == 10 and evidence["requested_window_seconds_each"] == 60
+    assert evidence["tools"] == "none"
+    for key in ("zero_start_snapshot", "zero_end_snapshot"):
+        snapshot = evidence[key]
+        # Provider Snapshot.HeldStreams has json omitempty, so zero is absent.
+        assert snapshot.get("held_streams", 0) == 0
+        assert snapshot["ready_streams"] == snapshot["h2_streams"] == snapshot["completed_events"] == snapshot["offer_bytes"] == 0
+    assert held["terminal_finished_streams"] == 0
+    zero = next(row for row in rows if row["name"] == "configured_zero")
+    full = next(row for row in rows if row["name"] == "held_100")
+    admission = next(row for row in rows if row["name"] == "admit_100")
+    assert zero["end_unix_ns"] <= admission["start_unix_ns"] < admission["end_unix_ns"] < full["start_unix_ns"]
+    assert set(zero["statement_verbs"]) == {"SELECT", "BEGIN", "ROLLBACK"}
+    assert zero["statement_verbs"]["BEGIN"] == zero["statement_verbs"]["ROLLBACK"]
+    rates = []
+    for row in (zero, full):
+        assert row["observed_seconds"] >= 60
+        rates.append({"phase": row["name"], "seconds": row["observed_seconds"],
+                      "select_count": row["statement_verbs"]["SELECT"], "all_statement_count": row["first_executions"],
+                      "selects_per_second": row["select_first_executions_per_second"],
+                      "all_statements_per_second": row["first_executions"] / row["observed_seconds"]})
+    contributions = []
+    for group in sorted(set(zero["select_owners"]) | set(full["select_owners"])):
+        before = zero["select_owners"].get(group, 0) / zero["observed_seconds"]
+        after = full["select_owners"].get(group, 0) / full["observed_seconds"]
+        contributions.append({"owner": group, "zero_per_second": before, "held100_per_second": after,
+                              "extra_selects_per_second": after - before})
+    select_delta = rates[1]["selects_per_second"] - rates[0]["selects_per_second"]
+    assert abs(sum(row["extra_selects_per_second"] for row in contributions) - select_delta) < 1e-9
+    output["matched_comparison"] = {
+        "host_pid": evidence["host_pid"], "host_capacity": 100, "configured_sessions": 100,
+        "warmup_seconds_each": 10, "requested_window_seconds_each": 60, "rates": rates,
+        "select_rate_ratio": rates[1]["selects_per_second"] / rates[0]["selects_per_second"],
+        "extra_selects_per_second": select_delta,
+        "all_statement_rate_ratio": rates[1]["all_statements_per_second"] / rates[0]["all_statements_per_second"],
+        "extra_all_statements_per_second": rates[1]["all_statements_per_second"] - rates[0]["all_statements_per_second"],
+        "control_selects_per_held_operation_per_second": full["select_owners"]["control_reconciliation"] / full["observed_seconds"] / 100,
+        "select_caller_contributions": contributions,
+        "limits": "One sequential same-Host configured-zero versus held100 observation, not repeated/fresh-Host statistics. Admission lies outside both windows. Rates normalize instrumented first-execution counts; neither CPU causality nor an optimization speedup is measured. Held connections and durable Message/Operation rows are the intentional population difference."}
+print(json.dumps(output, indent=2))
