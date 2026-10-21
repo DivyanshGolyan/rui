@@ -2338,19 +2338,20 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                             os.write(master, b"\x00\n")
                             read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             before_notice = current_screen(master)
-                            # A page read under the stale Current shows only with a
-                            # settled one: neither its success nor an approval yet.
-                            assert (f"✓ {prior_label}\n" in before_notice) == (f"✓ {prior_label}\n" in held), (held, before_notice)
-                            assert "? Run Bash" not in before_notice, before_notice
+                            # The released page applies whole: its approval
+                            # never shows without the success it read with.
+                            if f"? {label}" in before_notice:
+                                assert f"✓ {prior_label}\n" in before_notice, before_notice
                             prefix = b""
                         refreshed_release.set()
                         await_screen(master, f"✓ {label}", composer=True)
                         shown = settle_screen(master)
                         start = shown.index(f"✓ {label}\n")
                         # A notice is status only; neither it nor the stale
-                        # permission scan separates the two successes.
+                        # page separates the two successes, and the next page
+                        # retires the stale page's approval.
                         assert f"✓ {prior_label}\n✓ {label}\n" in shown, ("stale permission scan separated successes", with_notice, shown)
-                        assert "? Run Bash" not in shown, ("stale scan invented an approval block", shown)
+                        assert "? Run Bash" not in shown and f"? {label}" not in shown[start:], ("stale approval outlived the next page", shown)
                         answer_release.set()
                         read_terminal(master, answer, composer=True)
                     finally:
