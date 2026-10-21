@@ -171,6 +171,29 @@ def dispatch(sha, before, workflows, existing=()):
     print(f"Dispatched main health to wait for runs {' '.join(ids)}: {run['html_url']}")
 
 
+def repair(head):
+    """Start main head's missing post-push runs and a waiter for all of them, before main moves.
+
+    Only main's head can get exact dispatched runs, and its waiter may never
+    have started (a failed dispatch), so every push to main (auto-land and
+    revert alike) first repairs the head it displaces, or that head's CI
+    could finish with nothing left to wake a decision.
+    """
+    subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/heads/stable:refs/remotes/origin/stable"],
+                   capture_output=True)
+    stable = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "origin/stable"],
+                            capture_output=True, text=True).stdout.strip() or None
+    if stable and subprocess.run(["git", "merge-base", "--is-ancestor", head, stable]).returncode == 0:
+        return
+    # Fails until GitHub's activity shows every push since stable.
+    before = pushes(stable, head)[head]
+    runs = {workflow: latest(workflow, head, "main") for workflow in required(before, head)}
+    missing = [workflow for workflow, run in runs.items() if run is None]
+    if missing:
+        print(f"main {head} has no post-push {', '.join(missing)}; dispatching before main moves past it")
+    dispatch(head, before, missing, [run["id"] for run in runs.values() if run])
+
+
 def wait(sha, run_ids, limit=WAIT):
     """Return once every given run, sha's own post-push CI on main, has completed.
 
@@ -310,11 +333,17 @@ def decide_push(stable, sha, earlier):
             git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
             git("checkout", "--quiet", "--detach", "origin/main")
             before = git("rev-parse", "HEAD")
+            repaired = ""
+            try:
+                repair(before)
+            except (SystemExit, subprocess.CalledProcessError) as error:
+                # The revert still lands; a stuck head is reported, never a reason to keep red code.
+                repaired = f"\n\nRepairing displaced main {before}'s post-push CI failed; dispatch it by hand.\n\n{error}"
             git("-c", "user.name=github-actions[bot]",
                 "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
                 "revert", "--no-edit", *reversed(commits))
             git("push", "origin", "HEAD:refs/heads/main")
-            outcome = f"Reverted {base[:12]}..{sha[:12]} with a non-force commit {git('rev-parse', 'HEAD')}."
+            outcome = f"Reverted {base[:12]}..{sha[:12]} with a non-force commit {git('rev-parse', 'HEAD')}.{repaired}"
             try:
                 # The revert push, like the auto-lander's, starts no workflows itself.
                 reverted = git("rev-parse", "HEAD")
