@@ -40,8 +40,8 @@ The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/
 | Pre-run napkin (**estimated**) | ≈90/s before; ≈40/s after (only the intake 20 ms timer is removed) | not estimated | — |
 
 What the A/B shows (measured, Linux fixture, P1 [`4463e505`](https://github.com/DivyanshGolyan/rui/commit/4463e5051a79f46e88b3f3636985b2f0867b958f), runs alternated A1/B1/A2/B2/A3/B3, all exit 0):
-- One Host thread fell from ≈2,955 to exactly 60 voluntary switches per 60 s, which is the 1 s cap. That identifies it as the intake loop. The other thread stayed at ≈2,320 per 60 s (≈38.7/s), consistent with the unchanged 25 ms execution/curl wait.
-- The switch proxy fell 54.8%, matching the pre-run estimate of ≈40/s. Distinct wakeups remain unavailable.
+- One Host thread fell from ≈2,955 to exactly 60 voluntary switches per 60 s, which is the 1 s cap. That supports attributing it to the intake loop; the counter still counts voluntary context switches, not distinct wakeups. The other thread stayed at ≈2,320 per 60 s (≈38.7/s), consistent with the unchanged 25 ms execution/curl wait.
+- Voluntary context-switch proxy events fell 54.8%, matching the pre-run estimate of ≈40/s. This is not a measured count of distinct wakeups, which remain unavailable.
 - **CPU barely moved:** 1.64 → 1.54 CPU-s per minute, about 0.17% of one core, within the spread of single runs and at Linux's 10 ms CPU granularity. Removing the intake timer is not a material CPU saving; most waiting CPU is elsewhere (likely the execution loop's 25 ms wait, unmeasured per thread).
 - HOLD Host PSS medians 13,499,392 → 13,450,240 B: no meaningful change, as expected.
 - Same Sol audit of the A/B data is pending.
