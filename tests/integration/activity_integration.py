@@ -17,7 +17,7 @@ import time
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources
 from model_fixture import sse_tool_calls
-from host_process import TestHTTPServer, canonical_fixture_root, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
 from proposal_integration import digest
 from one_reply import one_reply
 
@@ -261,7 +261,7 @@ def main():
         if completed:
             shutil.rmtree(root)
         else:
-            print(f"retained activity failure state: {root}", file=sys.stderr)
+            retain_failure_state("activity failure state", root)
 
 
 def performance_case(item_bytes):
@@ -440,7 +440,7 @@ def performance_case(item_bytes):
             shutil.rmtree(root)
             print("performance native receipts, cancellation, disposal and fixture removal complete", flush=True)
         else:
-            print(f"retained performance failure state: {root}", file=sys.stderr)
+            retain_failure_state("performance failure state", root)
         if disposal_errors:
             primary = incoming_error if incoming_error is not None else disposal_errors[0]
             primary.add_note("Performance fixture disposal failed: " + ", ".join(str(error) for error in disposal_errors))

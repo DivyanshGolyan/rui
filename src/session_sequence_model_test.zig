@@ -92,7 +92,6 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.front.init.io = std.testing.io;
             self.front.input.init();
             self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = "model", .directory = path, .input = &self.front.input };
-            self.front.choice = .{ .buffer = &self.front.choice_buffer, .allow_paste = false };
             try self.setPage("EARLIER PAGE\n");
             try self.action.writePositionalAll(std.testing.io, "Run Bash\nprintf exact\nWorkspace: /model\n", 0);
             try ops.draw(self.front);
@@ -141,8 +140,8 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             const actual = self.front.input.composition();
             try std.testing.expectEqualStrings(draft.slice(), actual.bytes);
             try std.testing.expectEqual(draft.cursor, actual.cursor);
-            try std.testing.expectEqualStrings(choice.slice(), self.front.choice.buffer[0..self.front.choice.length]);
-            try std.testing.expectEqual(choice.cursor, self.front.choice.cursor);
+            try std.testing.expectEqualStrings(choice.slice(), self.screen.choiceText());
+            try std.testing.expectEqual(choice.cursor, self.screen.choice.cursor);
             try ops.draw(self.front);
             const shown = if (choosing) choice else draft;
             const window = self.screen.vx.window();
@@ -200,8 +199,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         var decision = false;
         var sealed: Text = .{};
         if (blocked) {
-            front.input.command_buffer[0] = 'x';
-            front.input.command_length = 1;
+            front.input.queueCommand("x");
         }
         if (alive) {
             if (unread) {

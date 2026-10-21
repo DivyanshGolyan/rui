@@ -15,7 +15,7 @@ import time
 import codex_integration as codex
 import model_fixture as fixture
 import transport_h2_integration as h2_fixture
-from host_process import HostDiagnostics, start_ready_process
+from host_process import HostDiagnostics, retain_failure_state, start_ready_process
 
 
 def assert_managed_descriptor_rejection(rejected, limit):
@@ -170,7 +170,7 @@ def run(*, observed=False, intake=100):
         if complete and incoming_error is None and not errors:
             shutil.rmtree(root)
         else:
-            print(f"retained Codex H2 fixture failure state: {root}", file=sys.stderr)
+            retain_failure_state("Codex H2 fixture failure state", root)
         if errors:
             if incoming_error is None:
                 raise errors[0]

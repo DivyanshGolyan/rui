@@ -1173,9 +1173,6 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--fault")) {
             const fault = try takeValue(args, &index);
             if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "completion-private-missing")) faults.completion_identity_fault = .missing else if (std.mem.eql(u8, fault, "completion-private-foreign")) faults.completion_identity_fault = .foreign else if (std.mem.eql(u8, fault, "completion-private-mismatch")) faults.completion_identity_fault = .mismatched else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-on-resume")) faults.response_write_on_resume = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-script")) faults.bash_preparation_after_script = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
-        } else if (std.mem.eql(u8, arg, "--test-cleanup-delay-ms")) {
-            faults.cleanup_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.cleanup_delay_ms < 0 or faults.cleanup_delay_ms > 60_000) return error.InvalidCleanupDelay;
         } else if (std.mem.eql(u8, arg, "--test-provider-inactivity-seconds")) {
             faults.provider_inactivity_seconds = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.provider_inactivity_seconds < 1) return error.InvalidProviderInactivity;
@@ -1214,8 +1211,6 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
             if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
         } else if (std.mem.eql(u8, arg, "--test-transition-gate-path")) {
             faults.test_transition_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-model-cleanup-gate-path")) {
-            faults.model_cleanup_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-path")) {
             faults.response_capture_gate_path = try takeValue(args, &index);
         } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-min-written-bytes")) {
@@ -1329,18 +1324,26 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
     }
     if ((location.record.len == 0) != !key_seen) return usage();
     if (input.session == .named and input.session.named.len == 0) return usage();
-    var defaults: preferences.Values = .{};
+    var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    // Only fresh creation resolves defaults, once, into the capture. Addressed
+    // Only fresh creation resolves defaults, once, into the capture, through
+    // the same prospective selection as a new interactive Session. Addressed
     // input remains sparse for the canonical create-or-update owner, without a
     // probe; an unknown address needs its complete first configuration.
     if (input.session == .from_capture_key) {
-        if (!input.provider.present or !input.model.present) {
+        const intent: new_session_selection.Intent = .{
+            .provider = if (input.provider.present) input.provider.value else null,
+            .model = if (input.model.present) input.model.value else null,
+        };
+        const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
-            defaults = try preferences.load(home);
-        }
-        if (!input.provider.present) input.provider = .{ .present = true, .value = if (defaults.provider.len != 0) defaults.provider.slice() else model_adapter.provider_label };
-        if (!input.model.present) input.model = .{ .present = true, .value = if (defaults.model.len != 0 and defaults.provider.eql(input.provider.value)) defaults.model.slice() else product_defaults.recommended_model };
+            break :blk try preferences.load(home);
+        } else .{} };
+        // Credential readiness belongs to the serving Host, not this peer
+        // caller: select as if usable and let the Host answer for credentials.
+        binding = (try snapshot.resolve(.configured)).?;
+        input.provider = .{ .present = true, .value = binding.provider.slice() };
+        input.model = .{ .present = true, .value = binding.model.slice() };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1557,13 +1560,12 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
 fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
     var store: ?[]const u8 = null;
     var reference: ?[]const u8 = null;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var last = false;
     var literal = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
-        if (!literal and std.mem.eql(u8, arg, "--store") and store == null) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session") and reference == null) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session-hex") and reference == null) reference = try decodeHexIdentity(try takeValue(args, &index), &session_hex) else if (!literal and std.mem.eql(u8, arg, "--last") and !last) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (reference == null and (literal or !std.mem.startsWith(u8, arg, "-"))) reference = arg else return usage();
+        if (!literal and std.mem.eql(u8, arg, "--store")) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session")) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--last")) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (literal or !std.mem.startsWith(u8, arg, "-")) reference = arg else return usage();
     }
     if (last == (reference != null)) return usage();
     try requireInteractiveTerminal(init, "to resume a Session");
@@ -1872,19 +1874,13 @@ fn decideAction(init: std.process.Init, args: []const []const u8, decision: @Fie
     var key_seen = false;
     var action_seen = false;
     var session: ?[]const u8 = null;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
             location.key = try takeValue(args, &index);
             key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
-            if (session != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--action")) {
-            if (action_seen) return error.DuplicateArgument;
+        } else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
             input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             action_seen = true;
         } else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
@@ -1994,22 +1990,12 @@ fn inspect(init: std.process.Init, args: []const []const u8) !void {
 fn readConversation(init: std.process.Init, args: []const []const u8) !void {
     var store_path: ?[]const u8 = null;
     var session: ?[]const u8 = null;
-    var store_hex: [protocol.max_store_bytes]u8 = undefined;
-    var session_hex: [protocol.max_session_bytes]u8 = undefined;
     var position: ?u64 = null;
     var ordinal: ?u64 = null;
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store") or std.mem.eql(u8, arg, "--store-hex")) {
-            if (store_path != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            store_path = if (std.mem.eql(u8, arg, "--store-hex")) try decodeHexIdentity(value, &store_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--session") or std.mem.eql(u8, arg, "--session-hex")) {
-            if (session != null) return error.DuplicateArgument;
-            const value = try takeValue(args, &index);
-            session = if (std.mem.eql(u8, arg, "--session-hex")) try decodeHexIdentity(value, &session_hex) else value;
-        } else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
+        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
         index += 1;
     }
     const reference = session orelse return usage();
@@ -2395,17 +2381,6 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-fn objectField(value: std.json.Value, name: []const u8) !std.json.Value {
-    if (value != .object) return error.InvalidObservation;
-    return value.object.get(name) orelse error.InvalidObservation;
-}
-
-fn stringField(value: std.json.Value, name: []const u8) ![]const u8 {
-    const field = try objectField(value, name);
-    if (field != .string) return error.InvalidObservation;
-    return field.string;
-}
-
 const SavedRequest = client.CapturedIdentity;
 
 fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
@@ -2456,15 +2431,10 @@ fn sessions(init: std.process.Init, args: []const []const u8) !void {
     var all = false;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store") and explicit == null) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all") and !all) all = true else return usage();
+        if (std.mem.eql(u8, args[index], "--store")) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all")) all = true else return error.UnknownArgument;
     }
-    var saved: preferences.Values = .{};
-    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = if (explicit) |value| value else blk: {
-        const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
-        saved = try preferences.load(home);
-        break :blk if (saved.store.len != 0) saved.store.slice() else try preferences.defaultStore(home, &fallback);
-    };
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, explicit, &selected_buffer);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace: ?[]const u8 = if (all) null else blk: {
         var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -2576,18 +2546,6 @@ fn createRenderScratch(io: std.Io, dir: std.Io.Dir, fail_unlink: bool) !std.Io.F
     if (fail_unlink) return error.RenderScratchCleanupFailed;
     dir.deleteFile(io, name) catch return error.RenderScratchCleanupFailed;
     return file;
-}
-
-fn tokenString(token: std.json.Token) ![]const u8 {
-    return switch (token) {
-        .string => |s| s,
-        .allocated_string => |s| s,
-        else => error.InvalidObservation,
-    };
-}
-
-fn freeToken(token: std.json.Token) void {
-    if (token == .allocated_string) std.heap.c_allocator.free(token.allocated_string);
 }
 
 const SessionObservation = struct {

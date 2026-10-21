@@ -15,7 +15,7 @@ import time
 
 import bash_integration as bash
 import model_fixture as fixture
-from host_process import HostDiagnostics, start_ready_process
+from host_process import HostDiagnostics, retain_failure_state, start_ready_process
 
 
 ACCESS = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -282,7 +282,7 @@ def run():
         if complete and incoming_error is None and not errors:
             shutil.rmtree(state)
         else:
-            print(f"retained Codex fixture failure state: {state}", file=sys.stderr)
+            retain_failure_state("Codex fixture failure state", state)
         if errors:
             if incoming_error is None:
                 raise errors[0]

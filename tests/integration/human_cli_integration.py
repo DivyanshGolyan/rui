@@ -20,7 +20,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
+from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -1003,6 +1003,22 @@ def command_entry_cases():
         settings = fixture.command("session", "inspect", "--store", store, "--session", selected)["session"]
         assert (settings["workspace"], settings["provider"], settings["model"], settings["tools"],
             settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash"], "bypass"), settings
+        # Fresh Configure selects like a new Session: a saved model pin for the
+        # selected provider wins over the recommendation; explicit --model wins
+        # over the pin; a saved unsupported provider is refused before capture.
+        preferences_file = home / ".config/rui/preferences"
+        original_preferences = preferences_file.read_bytes()
+        preferences_file.write_bytes(original_preferences.replace(b"model=gpt-6-luna", b"model=family=variant"))
+        for flags, model in (((), "family=variant"), (("--model", "explicit-model"), "explicit-model")):
+            chosen = admit(home, "session", "configure", *flags, cwd=workspace)["admission"]["answer"]["session"]
+            assert fixture.command("session", "inspect", "--store", store, "--session", chosen)["session"]["model"] == model, flags
+        preferences_file.write_bytes(original_preferences.replace(b"provider=codex", b"provider=retired"))
+        records = home / ".config/rui/requests"
+        before_refusal = set(records.glob("*.json"))
+        refused = subprocess.run([str(fixture.RUI), "session", "configure"], cwd=workspace, env=env, capture_output=True, text=True, timeout=20)
+        assert refused.returncode != 0 and "UnsupportedSelectionProvider" in refused.stderr, refused
+        assert set(records.glob("*.json")) == before_refusal, "refused selection captured a request"
+        preferences_file.write_bytes(original_preferences)
         held = admit(home, "session", "send", "--session", selected, "held prompt", cwd=workspace)
         assert held["admission"]["answer"]["status"] == "accepted", held
         fixture.wait_for(lambda: len(endpoint.requests) == 3, "held provider request")
@@ -1183,7 +1199,7 @@ def command_entry_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained command-entry failure state: {state}", file=sys.stderr)
+            retain_failure_state("command-entry failure state", state)
 
 
 def scroll_return_case():
@@ -1569,7 +1585,7 @@ def persistent_opening_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent opening failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent opening failure state", state)
 
 
 def persistent_pending_case():
@@ -1636,7 +1652,7 @@ def persistent_pending_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent pending failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent pending failure state", state)
 
 
 def persistent_input_cases():
@@ -1822,7 +1838,7 @@ def persistent_input_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent input failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent input failure state", state)
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
@@ -2447,7 +2463,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent permission failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent permission failure state", state)
 
 
 def store_selection_cases(state, workspace, valid_store):
@@ -2806,7 +2822,7 @@ def silent_read_edit_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained silent-edit failure state: {state}", file=sys.stderr)
+            retain_failure_state("silent-edit failure state", state)
 
 
 def opaque_session_commands_case():
@@ -2929,7 +2945,7 @@ def opaque_session_commands_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained opaque-Session failure state: {state}", file=sys.stderr)
+            retain_failure_state("opaque-Session failure state", state)
 
 
 def long_input_case(home, store, workspace, endpoint, host):
@@ -4875,7 +4891,7 @@ def renderer_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained renderer failure state: {state}", file=sys.stderr)
+            retain_failure_state("renderer failure state", state)
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
@@ -6396,7 +6412,7 @@ def main(selected="all"):
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained human CLI failure state: {state}", file=sys.stderr)
+            retain_failure_state("human CLI failure state", state)
 
 
 if __name__ == "__main__":

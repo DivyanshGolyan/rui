@@ -8,6 +8,9 @@ const Position = Viewport.Position;
 const Frame = @import("TerminalFrame.zig");
 const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
+const ChoiceLine = @import("ChoiceLine.zig");
+const Editor = @import("TerminalEditor.zig");
+const TerminalInput = @import("TerminalInput.zig");
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
@@ -31,8 +34,8 @@ pub const Ticket = struct {
 /// returns it, after its final flush; `presented` applies it once.
 pub const Delivered = struct { frame: u64 };
 
-/// What the frontend must do after a receipt: clear old choice text and draw
-/// the decision instructions once reading completes.
+/// What a receipt changed. Completed reading clears old choice text and
+/// revokes the frame, so the next one draws the decision instructions.
 pub const PresentationChange = struct { read_completed: bool = false };
 
 vx: vaxis.Vaxis = undefined,
@@ -69,8 +72,14 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // The exact adopted Action and its fresh typing scope. Only this owner
 // changes it, from delivered frames and the frontend's completed observations.
 consent: ConsentPolicy.Consent = .{},
-// Advances whenever view, layout or consent authority is invalidated. A frame
-// receipt from an older scope credits nothing.
+// The Action's choice field and the line typed there. Every change the
+// choice did not see passes through invalidateChoice or withdrawAction.
+choice_buffer: [64]u8 = undefined,
+choice: Editor = undefined,
+choice_line: ChoiceLine = .{},
+// Advances whenever view, layout, consent authority or the shown choice is
+// invalidated. A frame receipt from an older scope credits nothing, and a
+// frame from an older scope is stale: the next one must be drawn.
 scope: u64 = 0,
 // The projection the latest frame encodes. Input routes by it until the next
 // frame is selected, even while that frame's output pumps input.
@@ -88,6 +97,7 @@ colour: bool,
 
 pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
     self.* = .{ .colour = colour };
+    self.restartChoice();
     self.vx = try vaxis.init(io, self.memory.allocator(), environ, .{});
     self.vx.caps.no_color = !colour;
     // SessionTerminal, not Vaxis.Tty, owns mode entry and restoration.
@@ -175,31 +185,71 @@ fn setView(self: *Self, view: ViewKind) void {
     self.page_epoch +%= 1;
 }
 
+/// No frame was drawn, or a change since revoked the latest one: draw the
+/// next before relying on what the screen shows.
+pub fn stale(self: *const Self) bool {
+    const ticket = self.ticket orelse return true;
+    return ticket.scope != self.scope;
+}
+
+/// Applies one decoded event to the choice and to the line typed there.
+pub fn applyChoice(self: *Self, decoded: TerminalInput.Decoded) Editor.Event {
+    const event = self.choice.apply(decoded);
+    // Typed, rejected or dropped input begins a line.
+    const began = self.choice.length != 0 or self.choice.rejected != null or event == .unbound or event == .edit_rejected;
+    self.choice_line.apply(began, Editor.endsLine(event));
+    return event;
+}
+
+pub fn choiceText(self: *const Self) []const u8 {
+    return self.choice.buffer[0..self.choice.length];
+}
+
+/// A fresh choice field: no text, rejection or paste custody. The line it
+/// belongs to stays open until its end.
+pub fn restartChoice(self: *Self) void {
+    self.choice = .{ .buffer = &self.choice_buffer, .allow_paste = false };
+}
+
+/// A change the choice did not see. Returns whether its shown text changed.
+fn choiceChanged(self: *Self) bool {
+    const kept = ChoiceLine.changed(self.choiceText()).len;
+    if (kept == self.choice.length) return false;
+    self.choice.length = kept;
+    self.choice.cursor = @min(self.choice.cursor, kept);
+    return true;
+}
+
 fn shownAction(self: *const Self) ConsentPolicy.Shown {
     return .{ .action_page = self.actionVisible(), .whole = self.preview_complete, .read = self.actionRead() };
 }
 
 /// Selects the next frame's editor and approval through the pure policy.
 /// A visible incomplete preview is export-only for the rest of its life.
-pub fn select(self: *Self, command_blocked: bool, line_open: bool) ConsentPolicy.Projection {
+pub fn select(self: *Self, command_blocked: bool) ConsentPolicy.Projection {
     if (self.consent.active() and self.actionVisible() and !self.preview_complete) self.consent.presentation = .preview;
-    self.selected = ConsentPolicy.project(self.consent, self.shownAction(), command_blocked, line_open);
+    self.selected = ConsentPolicy.project(self.consent, self.shownAction(), command_blocked, self.choice_line.open);
     return self.selected;
 }
 
 /// Adopts the exact Action with its immutable file after the permission read
-/// joined and the draft decoder relinquished custody.
+/// joined and the draft decoder relinquished custody. Its choice starts empty.
 pub fn adopt(self: *Self, io: std.Io, file: std.Io.File, action: u64) !void {
     const presentation: ConsentPolicy.Presentation = if ((try file.stat(io)).size <= Viewport.capacity) .complete else .preview;
     try self.prepareAction(io, file);
     self.consent.adopt(action, presentation);
+    self.restartChoice();
     self.invalidateScope();
 }
 
-/// Revokes freshness; the Action and its read rows remain.
+/// Revokes freshness and keeps only a slash command of the choice text; the
+/// Action and its read rows remain. Only revoked freshness or changed text
+/// revokes the frame: revoking again must not force a frame per byte typed
+/// or pasted while approval is paused.
 pub fn invalidateChoice(self: *Self) void {
+    const fresh = self.consent.acceptsInput();
     self.consent.invalidate();
-    self.invalidateScope();
+    if (self.choiceChanged() or fresh) self.invalidateScope();
 }
 
 /// Ends consent without leaving the Action's file (exit and interruption).
@@ -218,7 +268,14 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
     const was_read = self.actionRead();
     // Only rows delivered contiguously from the top count as read.
     if (ticket.first.order(self.action_seen) != .gt and ticket.next.order(self.action_seen) == .gt) self.action_seen = ticket.next;
-    return .{ .read_completed = !was_read and self.actionRead() };
+    if (was_read or !self.actionRead()) return .{};
+    // Old choice text must not become a decision, but a slash command and
+    // fragmented decoder/paste custody survive until the existing empty-input
+    // freshness gate. The decision instructions need a new frame.
+    _ = self.choiceChanged();
+    self.consent.invalidate();
+    self.invalidateScope();
+    return .{ .read_completed = true };
 }
 
 /// The latest delivered frame asked for this Action's decision, and nothing
@@ -477,8 +534,9 @@ pub fn releaseAction(self: *Self) void {
 }
 
 /// The Action stopped pending elsewhere: end consent, leave its page and keep
-/// any other view.
+/// any other view. Its choice text keeps only a slash command.
 pub fn withdrawAction(self: *Self) void {
+    _ = self.choiceChanged();
     self.consent.interrupt();
     self.action_view = null;
     if (self.view == .action) self.setView(.live);
@@ -924,7 +982,7 @@ test "prepared Action preserves selected inspection until explicit return" {
         try std.testing.expectEqual(!oversized, screen.preview_complete);
         try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text(), "Run Bash: exact command\n"));
         if (!oversized) {
-            try std.testing.expectEqual(ConsentPolicy.Editor.choice, screen.select(false, false).editor);
+            try std.testing.expectEqual(ConsentPolicy.Editor.choice, screen.select(false).editor);
             _ = try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, Frame.approval_choice, &.{});
             const window = screen.vx.window();
             try std.testing.expectEqualStrings("R", window.readCell(0, 0).?.char.grapheme);
@@ -985,7 +1043,7 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     var steps: usize = 0;
     while (true) : (steps += 1) {
         try std.testing.expect(steps < 100);
-        _ = screen.select(false, false);
+        _ = screen.select(false);
         _ = screen.presented(try screen.render(&out.writer, size, "", 0, "", &.{}));
         for (0..12) |row| {
             const shown = rowText(screen, @intCast(row), &storage);
@@ -1311,7 +1369,7 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
         screen.withdrawAction();
         screen.view = .live;
         try screen.adopt(io, fixture.file, 0xa);
-        try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.select(false, false).approval);
+        try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.select(false).approval);
         var held: HeldWriter = .init(screen, &buffer);
         held.failure = switch (case) {
             .fails => .first,
@@ -1353,7 +1411,7 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
         try std.testing.expect(!screen.presented(delivered).read_completed);
         if (case == .replaced) {
             try std.testing.expectEqual(@as(?u64, 0xb), screen.consent.action);
-            try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.select(false, false).approval);
+            try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.select(false).approval);
         }
     }
 }
@@ -1379,11 +1437,11 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     var held: HeldWriter = .init(screen, &buffer);
     try screen.adopt(io, fixture.file, 0xa);
     // The frame that completes reading still said "read the rest".
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     try std.testing.expect(screen.presented(try screen.render(&held.writer, size, "", 0, "", &.{})).read_completed);
     try std.testing.expect(!screen.decisionPromptDelivered());
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
-    try std.testing.expectEqual(ConsentPolicy.Approval.draining, screen.select(false, false).approval);
+    try std.testing.expectEqual(ConsentPolicy.Approval.draining, screen.select(false).approval);
     // A planned decision prompt is not a delivered one.
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     const prompt = try screen.render(&held.writer, size, "", 0, Frame.approval_choice, &.{});
@@ -1394,7 +1452,7 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     try std.testing.expect(!screen.promptCompleted(.empty, true, false));
     try std.testing.expect(!screen.promptCompleted(.empty, false, true));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
-    try std.testing.expectEqual(ConsentPolicy.Approval.ready, screen.select(false, false).approval);
+    try std.testing.expectEqual(ConsentPolicy.Approval.ready, screen.select(false).approval);
     // A resize between the prompt and Enter fails the live probe and restarts reading.
     const resized: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
     try expectBlocked(.layout, screen.submitChoice("a", resized, false));
@@ -1402,24 +1460,24 @@ test "a decision prompt opens freshness only after its own delivered frame" {
     try std.testing.expect(!screen.consent.acceptsInput());
     try std.testing.expectEqual(@as(?u64, 0xa), screen.consent.action);
     // Read again, prompt again, then a queued command blocks the decision.
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, "", &.{}));
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, Frame.approval_choice, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     try expectBlocked(.command, screen.submitChoice("a", size, true));
     try std.testing.expectEqual(@as(?u64, 0xa), screen.consent.action);
     // While the command holds the choice, its frames ask for no decision.
-    try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.select(true, false).approval);
+    try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.select(true).approval);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, "", &.{}));
     try std.testing.expect(!screen.decisionPromptDelivered());
     // The same Action needs a new delivered prompt and empty service.
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     _ = screen.presented(try screen.render(&held.writer, size, "", 0, Frame.approval_choice, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
-    _ = screen.select(false, false);
+    _ = screen.select(false);
     const decided = screen.submitChoice("d", size, false);
     try std.testing.expect(decided == .decision);
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .deny }, decided.decision);
