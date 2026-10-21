@@ -508,6 +508,7 @@ body = json.dumps({
     "store": store,
     "key": "partial-message-key",
     "session": "direct/main",
+    "sender": None,
     "text": {"state": "value", "value": "unterminated"},
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)

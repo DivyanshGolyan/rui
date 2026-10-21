@@ -905,8 +905,6 @@ def prove_sealed_interruption_and_cleanup(state):
     process = None
     milestones = None
     settlement_gate = ReleaseGate(state / "sealed-result-gate")
-    cleanup_gate = state / "sealed-cleanup-gate"
-    cleanup_gate.touch()
     try:
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, _ = start_host(
@@ -915,8 +913,6 @@ def prove_sealed_interruption_and_cleanup(state):
             "--test-phase-trace",
             "--test-model-result-gate-path",
             settlement_gate.path,
-            "--test-model-cleanup-gate-path",
-            cleanup_gate,
             "--test-suppress-first-control-hint",
         )
         milestones = HostDiagnostics(process)
@@ -951,23 +947,15 @@ def prove_sealed_interruption_and_cleanup(state):
         assert replayed["answer"]["replayed"] is True, replayed
         milestones.wait("control_hint_published", subject="sealed-interrupt")
         settlement_gate.release()
+        release_deadline = time.monotonic() + 8
         milestones.wait(
             "model_settlement_superseded", operation=processing["operation"]
         )
-        milestones.wait("cleanup_started", operation=processing["operation"])
-        milestones.claim_inspection()
-        during_cleanup = inspect_execution(store, "phase/sealed")
-        assert during_cleanup["custody_occupied"] == "1", during_cleanup
-        release_deadline = time.monotonic() + 8
-        cleanup_gate.unlink()
         milestones.wait_model_cleanup(processing, release_deadline)
         wait_execution_release(
             milestones, store, "phase/sealed", release_deadline,
         )
         assert observe(store, "sealed-message") == semantic
-        assert len(
-            milestones.matching("cleanup_started", operation=processing["operation"])
-        ) == 1
         assert len(
             milestones.matching(
                 "cleanup_completed", operation=processing["operation"]
@@ -1005,15 +993,12 @@ def prove_sealed_interruption_and_cleanup(state):
             process, milestones, endpoint, endpoint_thread,
             settlement_gate.release,
             lambda: settlement_gate.path.unlink(missing_ok=True),
-            lambda: cleanup_gate.unlink(missing_ok=True),
         )
         if milestones is not None and sys.exc_info()[1] is None:
             milestones.assert_model_cleanup_census(processing, released["processing"])
 
 
-def prove_delivery_and_settlement_contention(
-    state, *, sample_host=None, cleanup_delay_ms=0
-):
+def prove_delivery_and_settlement_contention(state, *, sample_host=None):
     store = state / "contention-store"
     store.mkdir(mode=0o700)
     endpoint, endpoint_thread = start_success_endpoint()
@@ -1031,8 +1016,6 @@ def prove_delivery_and_settlement_contention(
             "--test-model-result-gate-path",
             settlement_gate.path,
         ]
-        if cleanup_delay_ms:
-            extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
         # H1 now has ceil(C/100) connections. Keep two independently held
         # fixture responses while exercising the two client control places.
         process, fields = start_host(store, url, *extra, active_capacity=101, observations="control_peers")
@@ -1208,7 +1191,7 @@ def prove_delivery_and_settlement_contention(
 
 
 def prove_real_settlement_contention(
-    state, *, sample_host=None, cleanup_delay_ms=0, large_answer_bytes=100_000
+    state, *, sample_host=None, large_answer_bytes=100_000
 ):
     store = state / "real-settlement-contention-store"
     store.mkdir(mode=0o700)
@@ -1232,8 +1215,6 @@ def prove_real_settlement_contention(
             "--test-client-send-buffer-bytes",
             "4096",
         ]
-        if cleanup_delay_ms:
-            extra += ["--test-cleanup-delay-ms", str(cleanup_delay_ms)]
         process, fields = start_host(store, url, *extra, active_capacity=1, observations="control_peers")
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)

@@ -10,6 +10,40 @@ pub const OutputFact = enum {
     compacted,
 };
 
+/// Model operation resolutions that Turn policy decides on. A failure records
+/// its own code, which never names one of these.
+pub const Resolution = enum {
+    answer,
+    compacted,
+    tool_proposals,
+    interrupted,
+    context_overflow,
+
+    pub fn of(output: OutputFact) Resolution {
+        return switch (output) {
+            .answer => .answer,
+            .tool_proposals => .tool_proposals,
+            .compacted => .compacted,
+        };
+    }
+
+    pub fn parse(code: []const u8) ?Resolution {
+        return std.meta.stringToEnum(Resolution, code);
+    }
+};
+
+/// Accepted provider output; context history and later Turn steps build on it.
+pub const accepted = [_]Resolution{ .answer, .compacted, .tool_proposals };
+/// The active Turn admits queued input without waiting for tool results.
+pub const continues_with_input = [_]Resolution{ .answer, .compacted, .interrupted, .context_overflow };
+/// The active Turn continues with tool results and no queued input. An
+/// interrupted operation waits for new input.
+pub const continues_without_input = [_]Resolution{ .answer, .compacted, .context_overflow };
+
+pub fn contains(comptime set: []const Resolution, resolution: Resolution) bool {
+    return std.mem.indexOfScalar(Resolution, set, resolution) != null;
+}
+
 pub fn outputFact(purpose: Purpose, calls: u64) OutputFact {
     return if (purpose == .compaction) .compacted else if (calls != 0) .tool_proposals else .answer;
 }
@@ -70,6 +104,10 @@ test "output facts do not encode the Turn continuation decision" {
     try std.testing.expect(!recoversOverflow(.assistant_response, false));
     try std.testing.expect(!recoversOverflow(.compaction, true));
     try std.testing.expect(!recoversOverflow(.compaction, false));
+}
+
+test "every provider output is accepted context history" {
+    for (std.enums.values(OutputFact)) |fact| try std.testing.expect(contains(&accepted, Resolution.of(fact)));
 }
 
 test "compaction purpose respects recovery prefix and both sides of pressure" {
