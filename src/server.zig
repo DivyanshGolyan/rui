@@ -626,6 +626,10 @@ const Intake = struct {
         var failure: ?anyerror = null;
         var accept_retry_at: i128 = 0;
         while (true) {
+            // Drain before rechecking: a hint written after this read stays
+            // readable, so the bounded poll below cannot sleep past it.
+            var bytes: [256]u8 = undefined;
+            while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             if (self.host.effect_shutdown.load(.acquire)) {
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
@@ -651,7 +655,6 @@ const Intake = struct {
             for (self.exchanges.items) |exchange| {
                 var fd: std.posix.fd_t = -1;
                 var events: i16 = std.posix.POLL.IN;
-                if (exchange.cleanup_retry_at > now) wake_at = @min(wake_at, exchange.cleanup_retry_at);
                 switch (exchange.state) {
                     .header, .body => {
                         if (now >= exchange.deadline) {
@@ -696,13 +699,17 @@ const Intake = struct {
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
             self.serviceWorkers();
+            // Worker results applied above can leave closures to destroy or
+            // cleanup to retry. A worker owns its exchange's fields meanwhile.
+            for (self.exchanges.items) |exchange| {
+                if (exchange.state == .working) continue;
+                if (exchange.cleanup_retry_at > now) {
+                    wake_at = @min(wake_at, exchange.cleanup_retry_at);
+                } else if (exchange.state == .closed) wake_at = now;
+            }
             const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
             if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
-            if (self.polls.items[1].revents != 0) {
-                var bytes: [256]u8 = undefined;
-                while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
-            }
             for (self.exchanges.items, self.polls.items[2..]) |exchange, poll| {
                 if (poll.revents == 0) continue;
                 switch (exchange.state) {
