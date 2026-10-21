@@ -8789,6 +8789,8 @@ test "Current reports progress alongside an actionable sibling" {
     defer parsed.deinit();
     const first = parsed.value.object.get("actions").?.object.get("unresolved").?.array.items[0];
     const action_id = try std.fmt.parseInt(u64, first.object.get("action").?.string, 10);
+    try std.testing.expectEqualStrings("waiting_for_permission", parsed.value.object.get("work").?.object.get("status").?.string);
+    try pageWorkAgrees(&storage, parsed.value, action_id);
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
     try allow.key.set("mixed-allow");
     try allow.session.set("direct/mixed");
@@ -8803,6 +8805,23 @@ test "Current reports progress alongside an actionable sibling" {
     try std.testing.expectEqualStrings("processing", @tagName(message.queue.?.state));
     try std.testing.expectEqual(MessageProgress.Status.in_flight, message.progress.?.status);
     try std.testing.expectEqual(action_id + 1, message.progress.?.action_id.?);
+    try pageWorkAgrees(&storage, mixed.value, action_id + 1);
+}
+
+/// The activity page carries the work Current reports and the first
+/// actionable Action, from its own read.
+fn pageWorkAgrees(store: *Store, report: std.json.Value, first_action: u64) !void {
+    var request: protocol.ActivityPage = .{};
+    try request.session.set("direct/mixed");
+    const page = try store.activityPage(request);
+    const work = report.object.get("work").?.object;
+    try std.testing.expectEqualStrings(work.get("status").?.string, @tagName(page.work.status));
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("turn").?.string, 10), page.work.turn.?);
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, work.get("operation").?.string, 10), page.work.operation.?);
+    try std.testing.expectEqual(first_action, page.work.first_action.?);
+    const session = report.object.get("session").?.object;
+    try std.testing.expectEqual(try std.fmt.parseInt(u64, session.get("revision").?.string, 10), page.work.revision);
+    try std.testing.expectEqualStrings(session.get("workspace").?.string, page.work.workspace.slice());
 }
 
 test "Action settlement atomically yields to an earlier Session stop" {
