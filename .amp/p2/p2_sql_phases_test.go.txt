@@ -1,0 +1,74 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"rui.local/qualification/measurement"
+	"rui.local/qualification/model-output/provider"
+)
+
+// Temporary count investigation, using the unchanged P1 b13caa4 fixture owners.
+func TestP2SQLPhases(t *testing.T) {
+	directory, binary := os.Getenv("P2_SQL_DIRECTORY"), os.Getenv("P2_SQL_BINARY")
+	if directory == "" || binary == "" {
+		t.Skip("explicit isolated count inputs required")
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil { t.Fatal(err) }
+	store, err := measurement.CanonicalStore(filepath.Join(directory, "store"))
+	if err != nil { t.Fatal(err) }
+	fixture, err := provider.Start(provider.Config{Streams: 100, Duration: 120*time.Second, EventsPerSecond: 30, TLS: true, Hold: true, ArtifactDir: filepath.Join(directory, "provider")})
+	if err != nil { t.Fatal(err) }
+	defer func() { if err := fixture.Close(); err != nil { t.Error(err) } }()
+	deadline := measurement.NewDeadline(4*time.Minute)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.ProviderCAFile())
+	if err != nil { t.Fatal(err) }
+	defer func() { if err := host.Stop(measurement.TeardownAllowance); err != nil { t.Error(err) } }()
+	client := measurement.Client{Binary: binary, Store: store, Artifacts: directory, Deadline: deadline}
+	type window struct { Name string `json:"name"`; Start int64 `json:"start_unix_ns"`; End int64 `json:"end_unix_ns"` }
+	windows := []window{}
+	mark := func(name string, duration time.Duration) {
+		start := time.Now().UnixNano()
+		if err := deadline.SleepUntil(time.Now().Add(duration)); err != nil { t.Fatal(err) }
+		windows = append(windows, window{name, start, time.Now().UnixNano()})
+	}
+	mark("empty_idle", 10*time.Second)
+	admissionStart := time.Now().UnixNano()
+	identity := capacityAuditIdentity(100, 1, false)
+	for index, session := range identity.sessions {
+		if err := client.Configure(identity.keys[index], session, "--tools", "none"); err != nil { t.Fatal(err) }
+	}
+	for index, session := range identity.sessions {
+		if err := client.Message(identity.keys[index], session, identity.keys[index]); err != nil { t.Fatal(err) }
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ready, err := fixture.WaitReady(ctx)
+	if err != nil { t.Fatal(err) }
+	if ready.ReadyStreams != 100 || ready.HeldStreams != 100 || ready.H2Connections != 1 { t.Fatalf("acceptance: %+v", ready) }
+	windows = append(windows, window{"configure_and_admit", admissionStart, time.Now().UnixNano()})
+	if _, err := fixture.StartOffer(); err != nil { t.Fatal(err) }
+	if err := deadline.SleepUntil(time.Now().Add(10*time.Second)); err != nil { t.Fatal(err) }
+	mark("held_100", 60*time.Second)
+	held := fixture.Snapshot()
+	if held.HeldStreams != 100 || held.OfferBytes != 0 || held.CompletedEvents != 0 || held.TerminalFinished != 0 { t.Fatalf("not held: %+v", held) }
+	stopStart := time.Now().UnixNano()
+	for index, session := range identity.sessions {
+		if err := client.StopSession("stop-"+identity.keys[index], session); err != nil { t.Fatal(err) }
+	}
+	for _, key := range identity.keys {
+		if _, err := client.WaitResult(key); err != nil { t.Fatal(err) }
+	}
+	windows = append(windows, window{"stop_and_drain", stopStart, time.Now().UnixNano()})
+	if err := deadline.SleepUntil(time.Now().Add(2*time.Second)); err != nil { t.Fatal(err) }
+	mark("cancelled_settled_idle", 20*time.Second)
+	evidence := map[string]any{"fixture":true, "instrumented_counts_only":true, "host_pid":host.Cmd.Process.Pid, "controller_provider_pid":os.Getpid(), "messages":100, "events":0, "held_snapshot":held, "windows":windows,
+		"limits":"SQL first executions, not completions; logged wall-clock intervals are count denominators, not CPU cost. Settled idle follows explicit cancellation of all Messages, not successful model completion."}
+	encoded, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(directory, "evidence.json"), encoded, 0600); err != nil { t.Fatal(err) }
+}

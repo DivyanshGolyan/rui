@@ -1,0 +1,10 @@
+{
+  "source": "sql-phases-hold100/store/rui.sqlite3",
+  "read_only": true,
+  "messages": 100,
+  "actions": 0,
+  "outcomes": {
+    "cancelled": 100
+  },
+  "unresolved_operations": 0
+}
