@@ -1834,13 +1834,41 @@ func sessionMeasurementOptions(sessions int, hold bool, expectation string) erro
 	return nil
 }
 
+// Retain each owned Host thread's raw counters. Voluntary switches are a
+// waiting diagnostic, not distinct wakeups or macOS IDLEW.
+func captureLinuxThreads(pid int, path string) (map[string]any, error) {
+	begin := time.Now()
+	root := fmt.Sprintf("/proc/%d/task", pid)
+	threads, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var raw bytes.Buffer
+	for _, thread := range threads {
+		data, err := os.ReadFile(filepath.Join(root, thread.Name(), "status"))
+		if err != nil {
+			return nil, err
+		}
+		raw.Write(data)
+		raw.WriteByte('\n')
+	}
+	end := time.Now()
+	if err := os.WriteFile(path, raw.Bytes(), 0o600); err != nil {
+		return nil, err
+	}
+	return map[string]any{"begin_unix_ns": begin.UnixNano(), "end_unix_ns": end.UnixNano(), "raw_path": path, "threads": len(threads)}, nil
+}
+
 // This is an observation, not the complete-work qualification above: the
 // fixture stays active past a ten-second warmup and sixty-second CPU window.
 // Configure/Message callers are synchronous and reaped before that window.
 func measureSessions(binary, output string, sessions int, hold bool, expectation string) (result map[string]any, resultError error) {
 	result = map[string]any{"format": "rui-session-footprint-v1", "status": "incomplete", "fixture": true, "sessions": sessions, "active_capacity": 100, "hold": hold}
-	if err := measurement.RequireRuntime(); err != nil {
+	if err := measurement.RequireProcessRuntime(); err != nil {
 		return result, err
+	}
+	if runtime.GOOS == "linux" {
+		result["memory_metric"] = "Linux PSS (macOS footprint pending)"
 	}
 	binary, err := filepath.Abs(binary)
 	if err != nil {
@@ -1937,12 +1965,19 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	result["host_window_start"] = initial
+	if hold && runtime.GOOS == "linux" {
+		result["linux_thread_window_start"], err = captureLinuxThreads(host.Cmd.Process.Pid, filepath.Join(directory, "host-threads-start.txt"))
+		if err != nil {
+			return result, err
+		}
+		result["wakeups"] = map[string]any{"status": "unavailable", "reason": "distinct scheduler wakeups are not collected; raw per-thread voluntary switches are a separately labelled proxy, not distinct wakeups"}
+	}
 	first, err := sampleCPU(host.Process)
 	if err != nil {
 		return result, err
 	}
 	// top is diagnostic and kept raw. Failure cannot become zero wakeups.
-	if hold {
+	if hold && runtime.GOOS == "darwin" {
 		topContext, cancel, err := deadline.Context()
 		if err != nil {
 			return result, err
@@ -1973,6 +2008,12 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	result["cpu_first"], result["cpu_second"] = first, second
+	if hold && runtime.GOOS == "linux" {
+		result["linux_thread_window_end"], err = captureLinuxThreads(host.Cmd.Process.Pid, filepath.Join(directory, "host-threads-end.txt"))
+		if err != nil {
+			return result, err
+		}
+	}
 	seconds := second.QueryStart.Sub(first.QueryEnd).Seconds()
 	cpu, err := measurement.CheckedCPUDelta(first.CPUSeconds, second.CPUSeconds)
 	if err != nil {
@@ -1998,7 +2039,13 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		}
 	}
 	result["steady_state_clients"] = map[string]any{"count": 0, "physical_footprint_bytes": 0, "basis": "all owned Configure/Message callers reaped before window; no CLI launched inside window", "transient_client_peak_physical_footprint_bytes": nil}
+	if runtime.GOOS == "linux" {
+		result["steady_state_clients"] = map[string]any{"count": 0, "pss_bytes": 0, "basis": "all owned Configure/Message callers reaped before window; no CLI launched inside window", "transient_client_peak_pss_bytes": nil}
+	}
 	result["limits"] = []string{"fixture/controller/top excluded from Rui counters", "client transient peaks unavailable; no persistent per-Session CLI in this workload", "Host RSS and physical footprint overlap and are not additive; lifetime peaks are not simultaneous aggregate peaks", "two external footprint/lsof snapshots bracket the CPU window; top sampling overhead is not subtracted", "Host is intentionally reaped before fixture completion; this is not complete-work or recovery qualification"}
+	if runtime.GOOS == "linux" {
+		result["limits"] = []string{"fixture/controller excluded from Rui counters", "client transient PSS peaks unavailable; no persistent per-Session CLI in this workload", "PSS apportions shared pages and is not macOS physical footprint; RSS and PSS are not additive", "two smaps_rollup snapshots bracket the CPU window; no lifetime PSS peak is claimed; sampling overhead is not subtracted", "per-thread voluntary switches are not distinct wakeups; thread identities must match before deriving their deltas", "Host is intentionally reaped before fixture completion; this is not complete-work or recovery qualification"}
+	}
 	result["status"] = "passed"
 	return result, nil
 }
@@ -2046,7 +2093,7 @@ func main() {
 	projection := flag.Bool("projection", false, "measure 1/4/8 KiB and 100 KB plain and escaped answer projections")
 	output := flag.String("output", "", "write the final JSON to this path")
 	capacityOnly := flag.Int("capacity", 0, "measure one active capacity")
-	sessions := flag.Int("sessions", -1, "macOS steady-state footprint at 0, 10 or 100 Sessions, fixed Host capacity 100")
+	sessions := flag.Int("sessions", -1, "steady-state macOS footprint or Linux PSS at 0, 10 or 100 Sessions, fixed Host capacity 100")
 	hold := flag.Bool("hold", false, "with --sessions 100, measure a provider sending no response bytes for 120 seconds")
 	expectation := flag.String("expectation", "", "one-line estimated number and reasoning, saved before --sessions launches")
 	repeatWork := flag.Bool("repeat-work", false, "run 20 growing-history waves of 100 streams on one Host and the same Sessions")

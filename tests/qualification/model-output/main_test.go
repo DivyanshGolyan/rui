@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,15 @@ func TestExplicitInvalidSessionCLIRejectsBeforeLaunch(t *testing.T) {
 		entries, err := os.ReadDir(root)
 		if err != nil || len(entries) != 0 {
 			t.Fatalf("invalid session option created measurement state: %v %v", entries, err)
+		}
+	}
+	if runtime.GOOS == "linux" {
+		command := exec.Command(binary, "--sessions=0", "--expectation", "8 MiB estimated base", "/nonexistent-rui")
+		command.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+		output, err := command.CombinedOutput()
+		var exited *exec.ExitError
+		if !errors.As(err, &exited) || exited.ExitCode() != 1 || !strings.Contains(string(output), "open /nonexistent-rui") || !strings.Contains(string(output), "Linux PSS (macOS footprint pending)") {
+			t.Fatalf("valid Linux session observation failed before binary validation: err=%v output=%s", err, output)
 		}
 	}
 	output, err := exec.Command(binary).CombinedOutput()
