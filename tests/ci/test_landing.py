@@ -91,7 +91,7 @@ class LandingTest(unittest.TestCase):
         pushed, before, newer = 'a' * 40, 'b' * 40, 'c' * 40
         both = ['check.yml', 'previous-release-upgrade.yml']
 
-        def run_dispatch(head):
+        def run_dispatch(head, workflows=both, existing=()):
             calls = []
 
             def gh(*args):
@@ -102,7 +102,7 @@ class LandingTest(unittest.TestCase):
                 return json.dumps({'head_sha': head})
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
                     mock.patch.object(main_health, 'gh', gh), contextlib.redirect_stdout(io.StringIO()):
-                main_health.dispatch(pushed, before, both)
+                main_health.dispatch(pushed, before, workflows, existing)
             return [call[3].rsplit('/', 2)[1] for call in calls if 'POST' in call], calls
 
         workflows, calls = run_dispatch(pushed)
@@ -113,6 +113,12 @@ class LandingTest(unittest.TestCase):
         health = [call for call in calls if 'POST' in call][-1]
         self.assertIn(f'inputs[sha]={pushed}', health)
         self.assertIn('inputs[runs]=8 9', health)
+        # A repair's waiter also covers the push's runs that already exist, even with nothing new to start.
+        workflows, calls = run_dispatch(pushed, ['previous-release-upgrade.yml'], [41])
+        self.assertIn('inputs[runs]=41 8', calls[-1])
+        workflows, calls = run_dispatch(pushed, [], [41, 42])
+        self.assertEqual(workflows, ['main-health.yml'])
+        self.assertIn('inputs[runs]=41 42', calls[-1])
         # A run GitHub started on a newer main is not the pushed commit's post-push run.
         with self.assertRaises(SystemExit) as failure:
             run_dispatch(newer)
@@ -127,13 +133,29 @@ class LandingTest(unittest.TestCase):
             return dict(dict(path=path, head_repository=dict(full_name='o/r'), head_branch='main',
                              event='workflow_dispatch', head_sha=sha, status=status, conclusion=conclusion), **change)
 
+        timeouts = []
+
         def run_wait(states, run_ids=('1', '2'), limit=3600):
-            """states maps run ID to the run each successive read returns; returns the clock at exit."""
+            """states maps run ID to the run each successive read returns; returns the clock at exit.
+
+            A run's 'takes' key is how long that read lasts; a 'takes' beyond the read's timeout
+            raises TimeoutExpired, as subprocess.run would.
+            """
             clock = [0.0]
             reads = {run_id: iter(runs) for run_id, runs in states.items()}
 
-            def gh(*args):
-                return json.dumps(next(reads[args[1].rsplit('/', 1)[1]]))
+            def gh(*args, timeout=None):
+                timeouts.append((clock[0], timeout))
+                run = dict(next(reads[args[1].rsplit('/', 1)[1]]))
+                takes = run.pop('takes', 0)
+                if run.pop('overrun', False):
+                    # A read that returns late despite its timeout, like the queue's counterexample.
+                    clock[0] += takes
+                    return json.dumps(run)
+                clock[0] += min(takes, timeout)
+                if takes > timeout:
+                    raise subprocess.TimeoutExpired('gh', timeout)
+                return json.dumps(run)
             fake_time = mock.Mock(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(main_health, 'gh', gh), \
                     mock.patch.object(main_health, 'time', fake_time), contextlib.redirect_stdout(io.StringIO()):
@@ -154,6 +176,21 @@ class LandingTest(unittest.TestCase):
                 run_wait({'1': [emitter(**wrong)]}, ['1'])
         with self.assertRaises(SystemExit):
             run_wait({'1': [emitter(status='in_progress')] * 10}, ['1'], limit=90)
+        # The deadline bounds each read: a completion seen by a read returning after it counts for
+        # nothing, one seen just before it does, and every read is cut off at the time left.
+        self.assertEqual(run_wait({'1': [emitter(takes=89)]}, ['1'], limit=90), 89)
+        for takes in (91, 1000):
+            with self.assertRaises(SystemExit):
+                run_wait({'1': [emitter(takes=takes)]}, ['1'], limit=90)
+            with self.assertRaises(SystemExit):
+                run_wait({'1': [emitter(takes=takes, overrun=True)]}, ['1'], limit=90)
+        # The first read uses up the budget, so the second run is never read.
+        with self.assertRaises(SystemExit):
+            run_wait({'1': [emitter(takes=90)], '2': [emitter(upgrade)]}, limit=90)
+        timeouts.clear()
+        with self.assertRaises(SystemExit):
+            run_wait({'1': [emitter(status='in_progress', takes=50), emitter(takes=1000)]}, ['1'], limit=90)
+        self.assertEqual(timeouts, [(0, 90), (80, 10)])
         for run_ids in ([], ['1 2'], ['x']):
             with self.assertRaises(SystemExit):
                 run_wait({}, run_ids)
@@ -224,7 +261,16 @@ class LandingTest(unittest.TestCase):
                 # Before landing on a main head without its own runs, auto-land starts them.
                 exact[('check.yml', cli)] = None
                 auto_land.repair(cli)
-                self.assertEqual(dispatched, [(cli, revert, ['check.yml'])])
+                self.assertEqual(dispatched, [(cli, revert, ['check.yml'], [])])
+                # A strict head with Selected still running and no upgrade run: the new waiter also
+                # covers the running Selected run, so its completion still wakes a decision.
+                saved = {key: exact.get(key) for key in (('check.yml', store), ('previous-release-upgrade.yml', store))}
+                exact.update({('check.yml', store): dict(red, id=41, status='in_progress'),
+                              ('previous-release-upgrade.yml', store): None})
+                dispatched.clear()
+                auto_land.repair(store)
+                self.assertEqual(dispatched, [(store, stable, ['previous-release-upgrade.yml'], [41])])
+                exact.update(saved)
                 exact.update({('previous-release-upgrade.yml', revert): green, ('check.yml', cli): green})
                 main_health.main()
                 self.assertEqual(stable_ref(), cli)
