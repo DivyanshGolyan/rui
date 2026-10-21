@@ -1,0 +1,113 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"rui.local/qualification/measurement"
+	"rui.local/qualification/model-output/provider"
+)
+
+// Temporary investigation only: reuse P1's verified HOLD and existing Host/client owners.
+func TestP2HoldAttribution(t *testing.T) {
+	directory := os.Getenv("P2_HOLD_DIRECTORY")
+	binary := os.Getenv("P2_HOLD_BINARY")
+	if directory == "" || binary == "" {
+		t.Skip("explicit isolated attribution inputs required")
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := measurement.CanonicalStore(filepath.Join(directory, "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := provider.Start(provider.Config{Streams: 100, Duration: 120 * time.Second, EventsPerSecond: 30, TLS: true, Hold: true, ArtifactDir: filepath.Join(directory, "provider")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := fixture.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	deadline := measurement.NewDeadline(4 * time.Minute)
+	host, err := measurement.StartHost(binary, store, fixture.ProviderURL(), 100, filepath.Join(directory, "host-stderr.log"), deadline, "--provider-ca-file", fixture.ProviderCAFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := host.Stop(measurement.TeardownAllowance); err != nil {
+			t.Error(err)
+		}
+	}()
+	client := measurement.Client{Binary: binary, Store: store, Artifacts: directory, Deadline: deadline}
+	identity := capacityAuditIdentity(100, 1, false)
+	for index, session := range identity.sessions {
+		if err := client.Configure(identity.keys[index], session, "--tools", "none"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, session := range identity.sessions {
+		if err := client.Message(identity.keys[index], session, identity.keys[index]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ready, err := fixture.WaitReady(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.ReadyStreams != 100 || ready.H2Streams != 100 || ready.H2Connections != 1 {
+		t.Fatalf("HOLD acceptance: %+v", ready)
+	}
+	started, err := fixture.StartOffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deadline.SleepUntil(time.Unix(0, started.StartUnixNS).Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func(name string) {
+		paths, err := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/status", host.Cmd.Process.Pid))
+		if err != nil || len(paths) == 0 {
+			t.Fatalf("thread census: %v", err)
+		}
+		for _, path := range paths {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, name+"-thread-"+filepath.Base(filepath.Dir(path))+".status"), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/smaps_rollup", host.Cmd.Process.Pid))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, name+"-smaps_rollup.txt"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot("start")
+	time.Sleep(60 * time.Second)
+	snapshot("end")
+	end := fixture.Snapshot()
+	if !end.Hold || end.HeldStreams != 100 || end.OfferBytes != 0 || end.CompletedEvents != 0 || end.TerminalFinished != 0 {
+		t.Fatalf("HOLD window not held: %+v", end)
+	}
+	encoded, err := json.MarshalIndent(map[string]any{"fixture": true, "instrumented_counts_only": true, "host_pid": host.Cmd.Process.Pid, "controller_provider_pid": os.Getpid(), "messages": 100, "events": 0, "accepted": ready, "window_end": end, "limits": "provider shares controller process; both excluded from Host counts; no completion/settlement in held workload; per-event denominator undefined"}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "evidence.json"), encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+}

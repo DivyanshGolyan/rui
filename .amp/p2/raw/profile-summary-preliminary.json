@@ -1,0 +1,26 @@
+{
+  "samples": 4466,
+  "lost_samples": 0,
+  "event": "cpu-clock:u",
+  "scope": "Host PID with inherited threads; user stacks only; kernel unavailable; named-family counts overlap; not elapsed time",
+  "families": {
+    "provider_output": {
+      "samples": 222,
+      "percent": 4.970891177787729
+    },
+    "curl_OpenSSL": {
+      "samples": 3479,
+      "percent": 77.89968652037618
+    },
+    "SQLite": {
+      "samples": 613,
+      "percent": 13.725929243170622
+    },
+    "positional_IO": {
+      "samples": 52,
+      "percent": 1.1643528884908194
+    }
+  },
+  "unknown_leaf_samples": 0,
+  "unknown_any_frame_samples": 4294
+}

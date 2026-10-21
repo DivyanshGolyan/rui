@@ -190,5 +190,373 @@
       "stream1-no-trace.json": "5e2ee473cff15be03183172bb4e6b971d175c2850d79609dfe71e7f81e0dd565",
       "stream1-no-trace-strace.txt": "a8da68092f972d2f5e171deafa7681bd784762eaecc2b4ef5d5c299d579a3792"
     }
+  },
+  {
+    "run": "stream100-strace",
+    "fixture": true,
+    "instrumented_counts_only": true,
+    "harness_verdict": "incomplete",
+    "messages": 200,
+    "events": 1200000,
+    "syscalls": {
+      "futex": 607521,
+      "poll": 59934,
+      "preadv": 8491607,
+      "fcntl": 774179,
+      "recvfrom": 1492438,
+      "newfstatat": 573860,
+      "writev": 233028,
+      "pread64": 191284,
+      "sendto": 34662,
+      "read": 84455,
+      "fsync": 4812,
+      "pwrite64": 50048,
+      "clock_nanosleep": 75,
+      "close": 6339,
+      "write": 6184,
+      "accept": 3418,
+      "openat": 4635,
+      "unlink": 801,
+      "statx": 2412,
+      "unlinkat": 807,
+      "madvise": 898,
+      "mprotect": 426,
+      "getpid": 820,
+      "geteuid": 804,
+      "readlink": 201,
+      "execve": 1,
+      "clone3": 4,
+      "connect": 1,
+      "mmap": 16,
+      "bind": 1,
+      "eventfd2": 2,
+      "socket": 3,
+      "mkdirat": 3,
+      "brk": 13,
+      "pwritev": 3,
+      "munmap": 4,
+      "rt_sigprocmask": 15,
+      "getsockname": 3,
+      "readlinkat": 1,
+      "socketpair": 1,
+      "setsockopt": 1,
+      "chmod": 1,
+      "getdents64": 6,
+      "getrandom": 3,
+      "lseek": 4,
+      "rt_sigaction": 4,
+      "listen": 1,
+      "getsockopt": 1,
+      "sysinfo": 1,
+      "set_robust_list": 5,
+      "rseq": 5,
+      "access": 1,
+      "flock": 1,
+      "arch_prctl": 1,
+      "sched_getaffinity": 1,
+      "set_tid_address": 1,
+      "prlimit64": 4,
+      "total": 12625760
+    },
+    "syscalls_per_event": 10.521466666666667,
+    "syscalls_per_message": 63128.8,
+    "fsync_per_message": 24.06,
+    "fdatasync_per_message": 0.0,
+    "host_dimensions": [
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      },
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      }
+    ],
+    "raw_report": "stream100-strace.json",
+    "raw_syscalls": "stream100-strace.txt",
+    "raw_sha256": {
+      "stream100-strace.json": "d4bd6d5c2940cf6943aea82cc20b7f5ed685b80e6c876486a4ada2d584a83b0e",
+      "stream100-strace.txt": "e9b4463182c04e4286dca4f12f24d7b5f89413a314398364ef65d36b4efe252b"
+    }
+  },
+  {
+    "run": "sql1",
+    "fixture": true,
+    "instrumented_counts_only": true,
+    "harness_verdict": "incomplete",
+    "messages": 2,
+    "sql_trace_stmt_callbacks": 8909,
+    "statement_mix": {
+      "PRAGMA": 10,
+      "BEGIN": 19,
+      "CREATE": 39,
+      "INSERT": 31,
+      "COMMIT": 9,
+      "SELECT": 8773,
+      "ROLLBACK": 10,
+      "UPDATE": 16,
+      "WITH": 2
+    },
+    "statements_per_message": 4454.5,
+    "commit_statement_executions_per_message": 4.5,
+    "begin_statement_executions_per_message": 9.5,
+    "scope": "Host only; SQLite TRACE_STMT at first execution, not completion; explicit transactions only; startup, configuration, two Message rounds and observations; no schema triggers",
+    "raw_report": "sql1.json",
+    "raw_sql": "sql1-host.log.gz",
+    "host_dimensions": [
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      },
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      }
+    ]
+  },
+  {
+    "run": "sql100",
+    "fixture": true,
+    "instrumented_counts_only": true,
+    "harness_verdict": "incomplete",
+    "messages": 200,
+    "sql_trace_stmt_callbacks": 433586,
+    "statement_mix": {
+      "PRAGMA": 10,
+      "BEGIN": 1511,
+      "CREATE": 39,
+      "INSERT": 2803,
+      "COMMIT": 801,
+      "SELECT": 425912,
+      "ROLLBACK": 710,
+      "UPDATE": 1600,
+      "WITH": 200
+    },
+    "statements_per_message": 2167.93,
+    "commit_statement_executions_per_message": 4.005,
+    "begin_statement_executions_per_message": 7.555,
+    "scope": "Host only; SQLite TRACE_STMT at first execution, not completion; explicit transactions only; startup, configuration, two Message rounds and observations; no schema triggers",
+    "raw_report": "sql100.json",
+    "raw_sql": "sql100-host.log.gz",
+    "host_dimensions": [
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      },
+      {
+        "capture": "passed",
+        "cleanup": "passed",
+        "durable_audit": "passed",
+        "memory": "incomplete",
+        "request_integrity": "passed",
+        "result_delivery": "passed"
+      }
+    ]
+  },
+  {
+    "run": "heap1",
+    "fixture": true,
+    "instrumented_counts_only": true,
+    "messages": 2,
+    "libc_allocation_calls": 21021,
+    "allocations_per_message": 10510.5,
+    "allocator_calls": {
+      "sqlite3MemMalloc": 16726,
+      "sqlite3MemRealloc": 811,
+      "CRYPTO_malloc": 3067
+    },
+    "harness_verdict": "incomplete",
+    "scope": "Host startup through graceful-stop exit1/EffectAwareShutdown; libc allocator only, not arena suballocations or direct-page allocations",
+    "raw_profile": "heap1.raw.gz",
+    "raw_interpretation": "heap1-print.txt.gz"
+  },
+  {
+    "run": "stream100-perf",
+    "fixture": true,
+    "instrumented_counts_only": true,
+    "samples": 4466,
+    "lost_samples": 0,
+    "families": {
+      "provider_output": {
+        "pattern": "provider_output",
+        "samples": 222,
+        "percent": 4.970891177787729
+      },
+      "curl_OpenSSL": {
+        "pattern": "\\b(?:Curl_|curl_|SSL_|ssl_|CRYPTO_|ossl_)",
+        "samples": 3481,
+        "percent": 77.94446932377967
+      },
+      "SQLite": {
+        "pattern": "sqlite",
+        "samples": 613,
+        "percent": 13.725929243170622
+      },
+      "positional_IO": {
+        "pattern": "pread|readPositional",
+        "samples": 52,
+        "percent": 1.1643528884908194
+      }
+    },
+    "unknown_leaf_samples": 567,
+    "unknown_any_frame_samples": 4294,
+    "scope": "Host user stacks only; named families overlap; no kernel stacks, complete ancestor unwinds or elapsed-time claim"
+  },
+  {
+    "run": "hold100",
+    "fixture": true,
+    "messages": 100,
+    "events": 0,
+    "syscalls_per_event": null,
+    "thread_deltas": [
+      {
+        "tid": "518350",
+        "voluntary_ctxt_switches": 8791,
+        "nonvoluntary_ctxt_switches": 2
+      },
+      {
+        "tid": "518375",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      },
+      {
+        "tid": "518376",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      },
+      {
+        "tid": "518377",
+        "voluntary_ctxt_switches": 1203977,
+        "nonvoluntary_ctxt_switches": 464
+      },
+      {
+        "tid": "518380",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      }
+    ],
+    "voluntary_total": 1212768,
+    "nonvoluntary_total": 466,
+    "scope": "Host status counter differences over a 60s interior HOLD window; context switches, not Mac wakeups; traced run includes ptrace distortion",
+    "syscalls": {
+      "poll": 7200,
+      "fcntl": 274943,
+      "newfstatat": 205078,
+      "recvfrom": 202735,
+      "pread64": 68355,
+      "futex": 2885,
+      "clock_nanosleep": 31,
+      "pwrite64": 15958,
+      "fsync": 1705,
+      "read": 3557,
+      "openat": 1821,
+      "unlink": 301,
+      "close": 1716,
+      "writev": 1800,
+      "write": 916,
+      "madvise": 711,
+      "accept": 400,
+      "sendto": 103,
+      "unlinkat": 300,
+      "statx": 305,
+      "preadv": 200,
+      "getpid": 320,
+      "geteuid": 304,
+      "mprotect": 249,
+      "readlink": 101,
+      "mkdirat": 3,
+      "brk": 13,
+      "clone3": 4,
+      "execve": 1,
+      "mmap": 16,
+      "pwritev": 3,
+      "bind": 1,
+      "rt_sigprocmask": 15,
+      "getdents64": 6,
+      "munmap": 4,
+      "socket": 3,
+      "socketpair": 1,
+      "readlinkat": 1,
+      "chmod": 1,
+      "set_robust_list": 5,
+      "flock": 1,
+      "sysinfo": 1,
+      "rseq": 5,
+      "lseek": 4,
+      "rt_sigaction": 4,
+      "listen": 1,
+      "eventfd2": 2,
+      "getrandom": 3,
+      "access": 1,
+      "getsockname": 3,
+      "arch_prctl": 1,
+      "sched_getaffinity": 1,
+      "prlimit64": 4,
+      "connect": 1,
+      "setsockopt": 1,
+      "getsockopt": 1,
+      "set_tid_address": 1,
+      "total": 792106
+    },
+    "syscalls_per_message": 7921.06,
+    "fsync_per_message": 17.05,
+    "count_scope": "Whole initialization/admission/hold/teardown, not only the counter window; no Message settlement"
+  },
+  {
+    "run": "hold100-untraced",
+    "fixture": true,
+    "messages": 100,
+    "events": 0,
+    "syscalls_per_event": null,
+    "thread_deltas": [
+      {
+        "tid": "563438",
+        "voluntary_ctxt_switches": 2980,
+        "nonvoluntary_ctxt_switches": 2
+      },
+      {
+        "tid": "563461",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      },
+      {
+        "tid": "563462",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      },
+      {
+        "tid": "563463",
+        "voluntary_ctxt_switches": 2320,
+        "nonvoluntary_ctxt_switches": 417
+      },
+      {
+        "tid": "563468",
+        "voluntary_ctxt_switches": 0,
+        "nonvoluntary_ctxt_switches": 0
+      }
+    ],
+    "voluntary_total": 5300,
+    "nonvoluntary_total": 419,
+    "scope": "Host status counter differences over a 60s interior HOLD window; context switches, not Mac wakeups; traced run includes ptrace distortion"
   }
 ]

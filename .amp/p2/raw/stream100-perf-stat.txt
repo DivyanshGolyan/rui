@@ -1,0 +1,7 @@
+# started on Wed Oct 21 17:40:00 2026
+
+0;;context-switches:u;73371809912;100.00;0.000;/sec
+0;;cpu-migrations:u;73371809912;100.00;0.000;/sec
+14039;;page-faults:u;73371809912;100.00;192.010;/sec
+73371.81;msec;task-clock:u;73371809912;100.00;0.457;CPUs utilized
+72859.98;msec;cpu-clock:u;73371809912;100.00;0.454;CPUs utilized

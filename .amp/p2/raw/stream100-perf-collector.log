@@ -1,0 +1,2 @@
+[ perf record: Woken up 283 times to write data ]
+[ perf record: Captured and wrote 70.883 MB /home/user/workspace/repo/.amp/p2/raw/stream100-perf.data (4466 samples) ]

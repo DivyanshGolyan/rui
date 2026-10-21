@@ -1,0 +1,10 @@
+ab97a07f53f63d8b78a96c992bd8a0ab18b2adf9ed710ceb8f41f4fe94b41d46  .amp/p2/bin/model-output
+ba5728de11997f085e078f5b5c0fd4a3c151a42aa0ea8e16e526218c1e19daab  .amp/p2/bin/model-output-graceful
+baec7a4d17204ae66ca270056d7e63fe833636a320ac4e2cdce99847edc26214  .amp/p2/bin/p1-attribution-test
+b843b47aca5f06488101f52ea5714716d96d8e039068b7a11bf03362d16cdbb2  .amp/p2/bin/rui-baseline
+c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
+fd72b0aaf6ef427387b78c853c96c2b940544ff0828c0a7dad2ea9c045547c98  .amp/p2/bin/rui-perf
+488f5611f65bc7320b24721b98a82cb6ea5ddf2b99b606299e10a66c01091f8d  .amp/p2/bin/rui-sql-research
+b5119beb8b888fbb4d27dfff3564c600d0e603d15536ab661ef92a642c54e3b1  .amp/p2/bin/rui-strace
+986105eafe10c4e958e36c7353884f2e7b21aaa6f3e11bdaefaa539ccf852bf3  tests/qualification/model-output/main.go
+d9938f9733c1a689237ebdd0ab47fac34a469a70f841e3e303ad3f16fed04880  tests/qualification/model-output/provider/main.go

@@ -1,0 +1,32 @@
+{
+  "scope": "/proc task status counter deltas; traced run includes ptrace distortion; no wakeup/time claim",
+  "threads": [
+    {
+      "tid": 518350,
+      "voluntary_ctxt_switches": 8791,
+      "nonvoluntary_ctxt_switches": 2
+    },
+    {
+      "tid": 518375,
+      "voluntary_ctxt_switches": 0,
+      "nonvoluntary_ctxt_switches": 0
+    },
+    {
+      "tid": 518376,
+      "voluntary_ctxt_switches": 0,
+      "nonvoluntary_ctxt_switches": 0
+    },
+    {
+      "tid": 518377,
+      "voluntary_ctxt_switches": 1203977,
+      "nonvoluntary_ctxt_switches": 464
+    },
+    {
+      "tid": 518380,
+      "voluntary_ctxt_switches": 0,
+      "nonvoluntary_ctxt_switches": 0
+    }
+  ],
+  "voluntary_total": 1212768,
+  "nonvoluntary_total": 466
+}
