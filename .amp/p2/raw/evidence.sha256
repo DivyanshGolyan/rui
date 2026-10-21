@@ -1,6 +1,6 @@
 e0887f8a8518c5e35acaebe71a775a08a9de35143e842f5e4ce65926d529c1ad  .amp/p2/ATTRIBUTION.md
 13c3883a52755fe6bd9d209093b28c3bce333811ab7bde38feea3a8664bd2418  .amp/p2/COMMANDS.md
-08f0695f2f7047d36ead4888b5b4f7c0d77bf65385e54ba2d7bb32b3839a9d34  .amp/p2/NOTES.md
+1acc7fd94f492cb9b720254e787fa27c767f53dd76d9fd675c9c0393bfe17fb8  .amp/p2/NOTES.md
 dfa5377b442f8cbf14b0fa5ffbf1b3ad95296219169d211011f48629f498a20f  .amp/p2/analyze.py
 c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
 fd72b0aaf6ef427387b78c853c96c2b940544ff0828c0a7dad2ea9c045547c98  .amp/p2/bin/rui-perf
@@ -62,6 +62,7 @@ b8c4429836204e325828166564234053f5a0c989b9ff804a5c7e6a42b7dbe589  .amp/p2/raw/ho
 5bd064b4e7e2a6ab29ba42c6b029c3947ee279bb49ae8f67a864e5e7ca6c6be2  .amp/p2/raw/hold100/thread-deltas.json
 2d65043c01ac1bcbb80414994d42b62e07d28f5c191c45304d954fa83ffe8361  .amp/p2/raw/identity.txt
 42c66d1d52bb83e825618912fe588b93e41e3f348623c7fb24f52000cb7a06d8  .amp/p2/raw/perf-postprocess-attempt1-errors.txt
+a358258ed3793ca1125758ec007fe46fd927df38782725c3a0b396d490dd36f9  .amp/p2/raw/preflight-history-diagnosis.txt
 7b7588deadcebc6b4ca33f684ce5313fcfb81d5d35162f3812bb37e27165d337  .amp/p2/raw/product-source.sha256
 99e6f1139c256b1e8954ec9c7b8ee377444b5bd44669b8acc0cbb98464e6bae5  .amp/p2/raw/profile-summary-preliminary.json
 c7df6edcd333baeac95ce8b61950d7060dd721990c826b00f22299fac7fc6ea7  .amp/p2/raw/source-recheck-final.txt

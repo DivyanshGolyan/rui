@@ -1,0 +1,54 @@
+Preflight history diagnosis; new capture, not the original 19:05:45 UTC failure log.
+Original command: python3 tests/ci/auto_land.py --preflight wip/land-17
+Original exit: 1; output retained in Amp tool transcript and NOTES.md only; no standalone original log was created.
+capture_utc=2026-10-21T19:13:04Z
+
+Before fetch:
+true
+19fedb861b2ba6b44292ca34edb4586ad85f83e8
+240aef2e46d7240ce31a02ce4cefceb695551a56
+d1e6e4195745d97daca0b3fbc8cc64fb74634b63
+50474c7a865ab2672f94e4e3eebbdef05d76f011
+3dcddc4bc915d34d39599b80c39b82693c4ea9e8
+240aef2e46d7240ce31a02ce4cefceb695551a56
+
+Original shallow boundaries:
+240aef2e46d7240ce31a02ce4cefceb695551a56
+351c15f9b19e2f3919b86bdf50399cdab9fcc590
+3dcddc4bc915d34d39599b80c39b82693c4ea9e8
+4229868cf73b8fba2e23ccb83901f221dd8a59aa
+50474c7a865ab2672f94e4e3eebbdef05d76f011
+5681226b44ff6c06d8f55602b67d8c011e2077e6
+65284a4c334b2112ada8bf09a4e0307da67c10b7
+c4736dbf9869e96c24dd6dc5b1406e06748f7099
+f2a048dbf8580d509eb189dc8228f68185d5f3db
+
+COMMAND: git fetch --quiet --unshallow origin
+unshallow_exit=0
+
+After fetch:
+false
+19fedb861b2ba6b44292ca34edb4586ad85f83e8
+240aef2e46d7240ce31a02ce4cefceb695551a56
+d1e6e4195745d97daca0b3fbc8cc64fb74634b63
+
+COMMAND: git merge-base --is-ancestor origin/wip/land-15 origin/main
+exit=0
+
+COMMAND: git merge-base --is-ancestor origin/wip/land-16 origin/main
+exit=0
+
+COMMAND: git merge-base --is-ancestor origin/wip/land-17 origin/main
+exit=0
+
+COMMAND: python3 tests/ci/auto_land.py --preflight wip/land-17
+wip/land-17 19fedb861b2ba6b44292ca34edb4586ad85f83e8 is the only open landing stack
+preflight_exit=0
+
+Post-preflight identities:
+19fedb861b2ba6b44292ca34edb4586ad85f83e8
+240aef2e46d7240ce31a02ce4cefceb695551a56
+50474c7a865ab2672f94e4e3eebbdef05d76f011
+3dcddc4bc915d34d39599b80c39b82693c4ea9e8
+240aef2e46d7240ce31a02ce4cefceb695551a56
+capture_end_utc=2026-10-21T19:13:10Z
