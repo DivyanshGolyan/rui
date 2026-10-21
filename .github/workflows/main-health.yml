@@ -6,6 +6,16 @@ on:
     workflows: [Selected checks, Previous installed-release upgrade]
     types: [completed]
     branches: [main]
+  # A GITHUB_TOKEN-dispatched run's completion starts no workflow_run, so
+  # main_health.dispatch() starts this with the CI runs it created.
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Pushed main commit whose post-push CI the runs are
+        required: true
+      runs:
+        description: Space-separated post-push run IDs to wait for
+        required: true
 
 permissions:
   contents: write
@@ -13,17 +23,38 @@ permissions:
   # A revert pushed with this token starts no workflows; it dispatches main's CI.
   actions: write
 
-concurrency:
-  # One decision at a time; a running revert or stable push is never cancelled.
-  # A newer queued run replaces a pending one, so each run decides every push
-  # since stable rather than only its own event.
-  group: main-health
-  cancel-in-progress: false
-
 jobs:
+  wait:
+    # Outside the decision group, so a newer push cannot replace an older
+    # push's wait while its slower CI is still running.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    # Longer than main_health.WAIT, so the script's deadline fails first.
+    timeout-minutes: 190
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Wait for the pushed commit's post-push CI to complete
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+          RUNS: ${{ inputs.runs }}
+        run: python3 -B tests/ci/main_health.py wait "$SHA" "$RUNS"
   decide:
+    needs: wait
     # GITHUB_TOKEN pushes (auto-land, revert) get dispatched post-push runs.
-    if: ${{ contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
+    if: ${{ always() && !github.event.repository.private && (github.event_name == 'workflow_dispatch' && needs.wait.result == 'success' || github.event_name == 'workflow_run' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+    concurrency:
+      # One decision at a time; a running revert or stable push is never cancelled.
+      # A newer queued run replaces a pending one, so each run decides every push
+      # since stable rather than only its own event.
+      group: main-health
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
