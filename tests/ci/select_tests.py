@@ -270,6 +270,8 @@ def select(paths, phase, available, main_push=False):
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
+            # Store, recovery and upgrade changes fail for real; never rerun them.
+            "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,
             "linux_memory_checks": linux_memory_checks, "manual_checks": sorted(manual_checks),
             "reasons": sorted(reasons)}

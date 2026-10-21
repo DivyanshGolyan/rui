@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 
-from qualification import NO_RETRY
 from select_tests import execution_batches
 
 
@@ -113,13 +112,12 @@ def main():
     parser.add_argument("--check-part", choices=("all", "execution", "callers"), default="all")
     parser.add_argument("--ci-artifacts", help="Verified emitted executables from this run's producer")
     parser.add_argument("--retry", action="store_true",
-                        help="Rerun a failed batch once unless the shard holds a no-retry gate")
+                        help="Rerun a failed batch once; the selector allows it only without strict paths")
     args = parser.parse_args()
     targets = json.loads(args.targets)
-    retry = args.retry and not set(targets) & NO_RETRY
     for batch in execution_batches(targets, args.check_part):
         returncode = execute(batch, args.ci_artifacts)
-        if returncode and retry:
+        if returncode and args.retry:
             note = (f"{' '.join(batch)} failed (exit {returncode}); one automatic retry. "
                     "A pass after this retry is a flake to fix, not a clean pass.")
             print(f"::warning::{note}", flush=True)

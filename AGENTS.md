@@ -49,7 +49,7 @@ Standing grant: an item ready for main lands under these rules without further a
 
 - Stack ready items on `wip/land-N` and gate only the tip.
 - If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
-- Push as a non-force fast-forward.
+- [Auto-land](.github/workflows/auto-land.yml) performs the non-force fast-forward push of a passing tip and dispatches main's post-push CI; agents only assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so it holds such tips for a manual push.
 - If main goes red after the push in Store/recovery/upgrade: automatic non-force `git revert`, then freeze landing.
 - Any other red: file an issue and fix forward.
 - After ready, at most one rerun per item, and no commits except fixes for red CI.

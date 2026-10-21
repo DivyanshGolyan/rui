@@ -4,6 +4,12 @@ on:
     branches: [main, 'wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Post-push runs for GITHUB_TOKEN pushes to main, which start no push runs.
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Previous main commit; selection covers base..main like a push
+        required: true
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ jobs:
       targets: ${{ steps.select.outputs.targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
+      retry: ${{ steps.select.outputs.retry }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
@@ -35,7 +42,7 @@ jobs:
       - name: Select existing targets
         id: select
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
@@ -43,8 +50,9 @@ jobs:
         run: |
           set -euo pipefail
           fallback=()
-          if [ "$EVENT_NAME" = push ]; then
-            fallback=(--fallback-base origin/main)
+          if [ "$EVENT_NAME" != pull_request ]; then
+            # A dispatched base must resolve; only pushes may lose their predecessor.
+            if [ "$EVENT_NAME" = push ]; then fallback=(--fallback-base origin/main); fi
             # Landing tips may skip check; every main push always runs it.
             if [ "$REF_NAME" = main ]; then fallback+=(--main-push); fi
             if [[ "$REF_NAME" = wip/* ]]; then
@@ -67,6 +75,7 @@ jobs:
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
+              print('retry=' + str(p['retry']).lower(), file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
@@ -208,13 +217,14 @@ jobs:
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
+          RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --retry
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -281,12 +291,13 @@ jobs:
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
+          RETRY: ${{ needs.plan.outputs.retry == 'true' && '--retry' || '' }}
           RUI_FAILURE_ARTIFACTS: ${{ runner.temp }}/rui-failure-artifacts
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled --retry
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

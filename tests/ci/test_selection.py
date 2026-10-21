@@ -109,6 +109,16 @@ class SelectionTest(unittest.TestCase):
                                                                     "REF_NAME": ref, "BASE": "HEAD"})
                 self.assertEqual("--main-push" in result.stdout.split(), expected)
 
+    def test_strict_paths_never_retry(self):
+        # Each of these selected retryable suites before strictness decided retries.
+        for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],
+                      ["src/cli.zig", "build.zig.zon"]):
+            with self.subTest(paths=paths):
+                self.assertFalse(select(paths, "review", AVAILABLE)["retry"])
+        for paths in (["src/cli.zig"], ["tests/integration/codex_integration.py"], ["src/bash_platform.c"]):
+            with self.subTest(paths=paths):
+                self.assertTrue(select(paths, "review", AVAILABLE)["retry"])
+
     def test_strict_path_beside_frontend_keeps_check(self):
         # execution_turn.zig is strict but alone selects only its logic root.
         self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["test-logic"])
