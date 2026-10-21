@@ -10,12 +10,7 @@ import unittest
 
 
 RUNNER = Path(__file__).with_name("session_sequence_model.py")
-FRONTEND = """
-    const projection = screen.select(self.commandActive(), self.choice_line);
-    self.dirty = false;
-    if (!self.dirty and screen.decisionPromptDelivered() and true) {
-if (screen.promptCompleted(service, false, false)) {
-"""
+FRONTEND = "synthetic frontend source\n"
 COMMAND = r'''
 import os
 from pathlib import Path

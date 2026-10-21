@@ -8,6 +8,7 @@ const core_boundary = @import("core_boundary.zig");
 const cores = .{
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
+    .{ "ChoiceLine.zig", @import("ChoiceLine.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },

@@ -14,6 +14,7 @@ pub const View = struct { bytes: []const u8, cursor: usize };
 stream: TerminalInput = .{},
 banks: [2][capacity]u8 = undefined,
 editors: [2]Editor = undefined,
+// The one queued inspection command; only queueCommand and takeCommand change it.
 command_buffer: [capacity]u8 = undefined,
 command_length: ?usize = null,
 active: u1 = 0,
@@ -52,15 +53,30 @@ pub fn applySelected(self: *Self, decoded: TerminalInput.Decoded, selected: bool
     if (event != .submit) return .{ .editor = event };
     const bytes = self.composition().bytes;
     if (bytes.len == 0) return .{ .editor = .none };
-    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) {
-        if (self.command_length != null) return .busy;
-        @memcpy(self.command_buffer[0..bytes.len], bytes);
-        self.command_length = bytes.len;
-        self.clear();
-        return .command;
-    }
+    // A slash command stays in the draft; the caller clears it once it runs.
+    // While another waits, every draft command waits too, local ones included.
+    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.command_length != null) .busy else .command;
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false) };
+}
+
+/// Queues one inspection command for the reader, from the draft or the
+/// choice. Each source admits a command only while none waits.
+pub fn queueCommand(self: *Self, text: []const u8) void {
+    std.debug.assert(self.command_length == null);
+    @memcpy(self.command_buffer[0..text.len], text);
+    self.command_length = text.len;
+}
+
+pub fn queuedCommand(self: *const Self) ?[]const u8 {
+    return self.command_buffer[0 .. self.command_length orelse return null];
+}
+
+/// Takes the queued command. Its bytes stay until the next one queues.
+pub fn takeCommand(self: *Self) ?[]const u8 {
+    const text = self.queuedCommand();
+    self.command_length = null;
+    return text;
 }
 
 /// Command-line text was validated before Session creation. It is literal,
