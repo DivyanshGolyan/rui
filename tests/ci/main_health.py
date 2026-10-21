@@ -19,6 +19,11 @@ UPGRADE = "previous-release-upgrade.yml"
 FREEZE = "landing-freeze"
 # GITHUB_TOKEN pushes start no workflows, so its pushes dispatch main's CI.
 EVENTS = ("push", "workflow_dispatch")
+HEALTH = "main-health.yml"
+EMITTERS = (".github/workflows/check.yml", f".github/workflows/{UPGRADE}")
+# Covers queued Mac shards and the 45-minute upgrade check; main-health.yml's
+# wait job timeout must exceed it.
+WAIT = 3 * 60 * 60
 
 
 def git(*args):
@@ -122,35 +127,82 @@ def report(title, body, label=None):
               *(["--label", label] if label else [])).strip()
 
 
+def post(workflow, inputs, failure):
+    """Dispatch workflow on main, retrying twice; the created run's details."""
+    repository = os.environ["GITHUB_REPOSITORY"]
+    for attempt in range(3):
+        try:
+            return json.loads(gh("api", "-X", "POST", f"repos/{repository}/actions/workflows/{workflow}/dispatches",
+                                 "-f", "ref=main", "-F", "return_run_details=true", *inputs))
+        except subprocess.CalledProcessError as error:
+            if attempt == 2:
+                raise SystemExit(f"{failure}:\n{error.stderr}") from error
+            time.sleep(10)
+
+
 def dispatch(sha, before, workflows):
     """Start main's post-push workflows for a GITHUB_TOKEN push of before..sha.
 
     Selected diffs from before like a push. A dispatch runs on main's head, so
     if main moved first the run is kept but sha has no exact post-push run,
-    and this fails instead of claiming one.
+    and this fails instead of claiming one. A dispatched run's completion
+    starts no workflow_run, so this also dispatches main health, which waits
+    for exactly these runs to finish, however they end, and then decides.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
-    moved = []
+    moved, ids = [], []
     for workflow in workflows:
         base = ["-f", f"inputs[base]={before}"] if workflow == "check.yml" else []
-        for attempt in range(3):
-            try:
-                run = json.loads(gh("api", "-X", "POST", f"repos/{repository}/actions/workflows/{workflow}/dispatches",
-                                    "-f", "ref=main", "-F", "return_run_details=true", *base))
-                break
-            except subprocess.CalledProcessError as error:
-                if attempt == 2:
-                    raise SystemExit(f"main {sha} landed, but dispatching {workflow} failed; the next auto-land "
-                                     f"run dispatches it while main is still {sha}:\n{error.stderr}") from error
-                time.sleep(10)
+        run = post(workflow, base, f"main {sha} landed, but dispatching {workflow} failed; the next auto-land "
+                                   f"run dispatches it while main is still {sha}")
         head = json.loads(gh("api", f"repos/{repository}/actions/runs/{run['workflow_run_id']}"))["head_sha"]
         print(f"Dispatched {workflow} on main {head}: {run['html_url']}")
+        ids.append(str(run["workflow_run_id"]))
         if head != sha:
             moved.append(f"{workflow} ran on {head}: {run['html_url']}")
     if moved:
         raise SystemExit(f"main {sha} landed, but main moved before its post-push CI was dispatched, so {sha} "
                          f"has no exact post-push run:\n" + "\n".join(moved) + "\nThose runs stay; they are not "
                          f"{sha}'s. stable holds before {sha}; main health files an issue for a user decision.")
+    run = post(HEALTH, ["-f", f"inputs[sha]={sha}", "-f", f"inputs[runs]={' '.join(ids)}"],
+               f"main {sha}'s post-push CI is running, but dispatching main health failed; stable holds until "
+               "another main health run decides it")
+    print(f"Dispatched main health to wait for runs {' '.join(ids)}: {run['html_url']}")
+
+
+def wait(sha, run_ids, limit=WAIT):
+    """Return once every given run, sha's own post-push CI on main, has completed.
+
+    The deadline covers the first read, queueing and API retries. A run that
+    is not sha's post-push CI on main, or that does not finish in time, fails
+    here so that no decision is made from it. A completed failure or
+    cancellation is evidence for the decision, not a reason to skip it.
+    """
+    repository = os.environ["GITHUB_REPOSITORY"]
+    deadline = time.monotonic() + limit
+    if not run_ids or not all(run_id.isdigit() for run_id in run_ids):
+        raise SystemExit(f"Expected numeric run IDs, got {run_ids!r}")
+    waiting = list(run_ids)
+    while waiting:
+        for run_id in list(waiting):
+            try:
+                run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}"))
+            except subprocess.CalledProcessError as error:
+                print(f"Reading run {run_id} failed; retrying until the deadline:\n{error.stderr}")
+                continue
+            identity = (run["path"], run["head_repository"]["full_name"], run["head_branch"], run["event"],
+                        run["head_sha"])
+            if not (run["path"] in EMITTERS and identity[1:3] == (repository, "main")
+                    and run["event"] in EVENTS and run["head_sha"] == sha):
+                raise SystemExit(f"Run {run_id} is not {sha}'s post-push CI on main: {identity}")
+            if run["status"] == "completed":
+                print(f"Run {run_id} ({run['path']}) completed: {run['conclusion']}")
+                waiting.remove(run_id)
+        if waiting:
+            if time.monotonic() >= deadline:
+                raise SystemExit(f"Runs {' '.join(waiting)} for {sha} did not complete within {limit}s; "
+                                 "no decision. The next main health run decides them.")
+            time.sleep(30)
 
 
 def decide(results, changed, own=()):
@@ -174,12 +226,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
+    waiter = commands.add_parser("wait")
+    waiter.add_argument("sha")
+    waiter.add_argument("runs", help="Space-separated run IDs")
     issue = commands.add_parser("report")
     issue.add_argument("--title", required=True)
     issue.add_argument("--body", required=True)
     args = parser.parse_args()
     if args.command == "report":
         print(report(args.title, args.body))
+        return
+    if args.command == "wait":
+        wait(args.sha, args.runs.split())
         return
     git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
     # stable is absent until main's first green post-push run.

@@ -97,7 +97,8 @@ class LandingTest(unittest.TestCase):
             def gh(*args):
                 calls.append(args)
                 if 'POST' in args:
-                    return '{"workflow_run_id": 7, "html_url": "https://example/run/7"}'
+                    run_id = 7 + sum('POST' in call for call in calls)
+                    return json.dumps({'workflow_run_id': run_id, 'html_url': f'https://example/run/{run_id}'})
                 return json.dumps({'head_sha': head})
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
                     mock.patch.object(main_health, 'gh', gh), contextlib.redirect_stdout(io.StringIO()):
@@ -105,14 +106,57 @@ class LandingTest(unittest.TestCase):
             return [call[3].rsplit('/', 2)[1] for call in calls if 'POST' in call], calls
 
         workflows, calls = run_dispatch(pushed)
-        self.assertEqual(workflows, both)
+        # A dispatched run's completion starts no workflow_run, so main health is dispatched
+        # last, to wait for exactly the runs just created.
+        self.assertEqual(workflows, [*both, 'main-health.yml'])
         self.assertIn(f'inputs[base]={before}', calls[0])
+        health = [call for call in calls if 'POST' in call][-1]
+        self.assertIn(f'inputs[sha]={pushed}', health)
+        self.assertIn('inputs[runs]=8 9', health)
         # A run GitHub started on a newer main is not the pushed commit's post-push run.
         with self.assertRaises(SystemExit) as failure:
             run_dispatch(newer)
         self.assertIn(pushed, str(failure.exception))
         self.assertIn(f'check.yml ran on {newer}', str(failure.exception))
         self.assertIn(f'previous-release-upgrade.yml ran on {newer}', str(failure.exception))
+
+    def test_health_waits_for_exactly_its_runs_to_complete(self):
+        sha, other = 'a' * 40, 'b' * 40
+
+        def emitter(path='.github/workflows/check.yml', status='completed', conclusion='success', **change):
+            return dict(dict(path=path, head_repository=dict(full_name='o/r'), head_branch='main',
+                             event='workflow_dispatch', head_sha=sha, status=status, conclusion=conclusion), **change)
+
+        def run_wait(states, run_ids=('1', '2'), limit=3600):
+            """states maps run ID to the run each successive read returns; returns the clock at exit."""
+            clock = [0.0]
+            reads = {run_id: iter(runs) for run_id, runs in states.items()}
+
+            def gh(*args):
+                return json.dumps(next(reads[args[1].rsplit('/', 1)[1]]))
+            fake_time = mock.Mock(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(main_health, 'gh', gh), \
+                    mock.patch.object(main_health, 'time', fake_time), contextlib.redirect_stdout(io.StringIO()):
+                main_health.wait(sha, list(run_ids), limit)
+            return clock[0]
+
+        upgrade = '.github/workflows/previous-release-upgrade.yml'
+        # Either finish order: return only after both, including a cancelled whole run.
+        self.assertEqual(run_wait({'1': [emitter(status='queued'), emitter(status='in_progress'), emitter()],
+                                   '2': [emitter(upgrade, conclusion='cancelled')]}), 60)
+        self.assertEqual(run_wait({'1': [emitter()],
+                                   '2': [emitter(upgrade, status='in_progress'), emitter(upgrade, conclusion='failure')]}),
+                         30)
+        # Wrong identity or no completion before the deadline: no decision.
+        for wrong in (dict(head_sha=other), dict(head_branch='wip/land-3'), dict(event='pull_request'),
+                      dict(path='.github/workflows/main-health.yml'), dict(head_repository=dict(full_name='fork/r'))):
+            with self.assertRaises(SystemExit):
+                run_wait({'1': [emitter(**wrong)]}, ['1'])
+        with self.assertRaises(SystemExit):
+            run_wait({'1': [emitter(status='in_progress')] * 10}, ['1'], limit=90)
+        for run_ids in ([], ['1 2'], ['x']):
+            with self.assertRaises(SystemExit):
+                run_wait({}, run_ids)
 
     def test_landing_and_post_push_follow_actual_pushes_and_paths(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
@@ -203,8 +247,21 @@ class LandingTest(unittest.TestCase):
         self.assertFalse(auto_land.BRANCH.fullmatch('wip/land-12x'))
         for name in ('check.yml', 'previous-release-upgrade.yml'):
             self.assertIn('\n  workflow_dispatch:', workflow(name).split('\npermissions:', 1)[0], name)
-        self.assertIn("contains(fromJSON('[\"push\", \"workflow_dispatch\"]'), github.event.workflow_run.event)",
-                      workflow('main-health.yml'))
+        health = workflow('main-health.yml')
+        self.assertIn("contains(fromJSON('[\"push\", \"workflow_dispatch\"]'), github.event.workflow_run.event)", health)
+        self.assertIn('\n  workflow_dispatch:', health.split('\npermissions:', 1)[0])
+        waiter = re.search(r'(?ms)^  wait:\n(.*?)(?=^  [a-z_]+:|\Z)', health)[1]
+        decider = re.search(r'(?ms)^  decide:\n(.*?)(?=^  [a-z_]+:|\Z)', health)[1]
+        # Waits stay outside the decision group, so a newer push never replaces an older slow
+        # push's wait; the serialized decision replays every push since stable.
+        self.assertNotIn('concurrency', waiter)
+        self.assertNotIn('\nconcurrency:', health)
+        self.assertIn('group: main-health', decider)
+        self.assertIn('needs: wait', decider)
+        self.assertIn("needs.wait.result == 'success'", decider)
+        self.assertIn('main_health.py wait', waiter)
+        self.assertNotIn('write', waiter)
+        self.assertGreater(int(re.search(r'timeout-minutes: (\d+)', waiter)[1]) * 60, main_health.WAIT)
 
     def test_selected_runs_only_on_pull_requests_landing_tips_and_main(self):
         text = workflow('check.yml')
