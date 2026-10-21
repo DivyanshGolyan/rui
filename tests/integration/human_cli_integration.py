@@ -1003,6 +1003,22 @@ def command_entry_cases():
         settings = fixture.command("session", "inspect", "--store", store, "--session", selected)["session"]
         assert (settings["workspace"], settings["provider"], settings["model"], settings["tools"],
             settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash"], "bypass"), settings
+        # Fresh Configure selects like a new Session: a saved model pin for the
+        # selected provider wins over the recommendation; explicit --model wins
+        # over the pin; a saved unsupported provider is refused before capture.
+        preferences_file = home / ".config/rui/preferences"
+        original_preferences = preferences_file.read_bytes()
+        preferences_file.write_bytes(original_preferences.replace(b"model=gpt-6-luna", b"model=family=variant"))
+        for flags, model in (((), "family=variant"), (("--model", "explicit-model"), "explicit-model")):
+            chosen = admit(home, "session", "configure", *flags, cwd=workspace)["admission"]["answer"]["session"]
+            assert fixture.command("session", "inspect", "--store", store, "--session", chosen)["session"]["model"] == model, flags
+        preferences_file.write_bytes(original_preferences.replace(b"provider=codex", b"provider=retired"))
+        records = home / ".config/rui/requests"
+        before_refusal = set(records.glob("*.json"))
+        refused = subprocess.run([str(fixture.RUI), "session", "configure"], cwd=workspace, env=env, capture_output=True, text=True, timeout=20)
+        assert refused.returncode != 0 and "UnsupportedSelectionProvider" in refused.stderr, refused
+        assert set(records.glob("*.json")) == before_refusal, "refused selection captured a request"
+        preferences_file.write_bytes(original_preferences)
         held = admit(home, "session", "send", "--session", selected, "held prompt", cwd=workspace)
         assert held["admission"]["answer"]["status"] == "accepted", held
         fixture.wait_for(lambda: len(endpoint.requests) == 3, "held provider request")
