@@ -169,3 +169,24 @@ The first record occupies bytes [0,260). The scanner initially reads [0,1215), t
 Each of the three nonterminal records has exactly seven rereads totaling 283 requested bytes: five framing reads totaling nine bytes and two JSON/type reads totaling 274 bytes. The JSON type range is itself inside the object range. The original N100 observation of 7.07634 `preadv` calls per event is consistent with these seven reads, one broad scanner refill per 4,096 bytes, and additional terminal/metadata/Store reads. The small replay proves the mechanism, not an exact partition of every historical `preadv` call.
 
 The caller is `completeSuccessfulTransfer → model_adapter.interpretOutput → provider_output.validate`, after the response capture completes. This is not repeated whole-response validation on every arriving network event. The [range summary](raw/sse-range-summary.json), [source patch](sse-range-instrumentation.patch.gz) and [raw replay output](raw/sse-replay.log.gz) retain the exact roles and frontiers. `python3 .amp/p2/sse_range_attribution.py` independently checks all syscall matches and seven already-consumed reads for each record. The result attributes calls, not CPU time. P4's separate framing candidate removes the five framing reads; its JSON/type rereads remain outside that change.
+
+## The framing candidate removes approximately five preadv calls per event
+
+One additional N100 count run compares frozen baseline `240aef2e46d7240ce31a02ce4cefceb695551a56` with P4's candidate `12f84075a2f5e73dcd5e4c8b38ed0ea890f1beef`. Both use ReleaseFast and the identical original Go runner/provider binary. The existing baseline capture is reused only after matching the requested and emitted workload. Each case has two fresh-Session rounds on one Host, 100 Messages and 600,000 emitted 260-byte events per round, one H2 connection, 100 streams and a nominal 60-second offer at 100 events/second/stream. Distinct temporary Store paths and endpoints are expected. These are whole-run Host-only `strace -D -f -c` counts, including setup and audits, with SQLite and phase diagnostics disabled.
+
+| Instrumented count | Baseline 240 | Candidate 12f84075 |
+| --- | ---: | ---: |
+| Actual event denominator | 1,200,000 | 1,200,000 |
+| Message denominator | 200 | 200 |
+| `preadv` calls | 8,491,607 | 2,487,410 |
+| `preadv` per event | 7.07634 | 2.07284 |
+| All syscalls | 12,625,760 | 9,895,882 |
+| All syscalls per event | 10.52147 | 8.24657 |
+| `fsync` calls | 4,812 | 4,815 |
+| `fsync` per Message | 24.06 | 24.075 |
+
+The pre-run estimate predicted 6,000,000 fewer `preadv` calls, leaving 2,491,607. The measured reduction is 6,004,197, or 5.00350 calls/event. The estimate that every other count would remain fixed was wrong. Other syscalls increased by 3,274,319, principally `recvfrom` by 2,482,223. Total calls therefore fell by 2,729,878, not the estimated 6,000,000. These scheduling and network-sensitive whole-run differences are not a CPU attribution or a speedup measurement. No `fdatasync` call appears in either unfiltered syscall summary, and neither journal configuration nor durability changed.
+
+The candidate ran from 20:32:45 to 20:35:50 UTC. Both rounds passed capture, request-integrity, result-delivery, cleanup and offline durable audits. The controller retained exit 1 and `incomplete` because Mac footprint is unavailable. Both the reused baseline and candidate have 100 timing-invalid streams per round under tracing. Their nominal offer durations do not establish accepted pacing or uninstrumented cost. The candidate's remaining JSON-object and type-string rereads are not fixed by this comparison.
+
+The [comparison reducer](sse_candidate_comparison.py) checks matching fixture inputs, emitted denominators, launcher identities and syscall row sums before producing the [comparison](raw/sse-candidate-comparison.json). The [raw candidate syscalls](raw/stream100-sse-candidate-strace.txt), [canonical report](raw/stream100-sse-candidate.json), [controller outcome](raw/stream100-sse-candidate-controller.log), [build log](raw/build-sse-candidate.log.gz) and [source/binary identities](raw/sse-candidate-identity.txt) retain exact evidence. The candidate binary hash is `8c3add2e42b2173c47a86f3ec11759087f1b310b94f57546af1812ccc2c123c6`; the baseline remains `b843b47a…`. All 87 candidate product/build files were byte-compared to the published candidate and rehashed after execution. No product source, REPORT or landing ref was changed by P2.

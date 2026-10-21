@@ -101,3 +101,18 @@ strace -f -yy -e trace=preadv -s 1 -o /home/user/workspace/repo/.amp/p2/raw/sse-
 ```
 
 Both output streams are retained in `raw/sse-replay.log.gz`. The trace and source patch are compressed byte-preserving copies. `python3 .amp/p2/sse_range_attribution.py` reproduces `raw/sse-range-summary.json` and checks every logged read against its actual syscall. These are counts and byte ranges, not CPU-cost measurements.
+
+## Baseline versus framing-candidate counts
+
+Export exact candidate `12f84075a2f5e73dcd5e4c8b38ed0ea890f1beef` into `.amp/p2/candidate-source`, copy the pinned dependencies and build there. No original binary or measurement source is replaced. The candidate launcher changes only the target binary relative to `rui-strace`.
+
+```sh
+# From .amp/p2/candidate-source:
+zig build -Doptimize=ReleaseFast -j2 --cache-dir /home/user/workspace/repo/.zig-cache --summary all
+cp zig-out/bin/rui /home/user/workspace/repo/.amp/p2/bin/rui-sse-candidate
+# From the repository root, using the unchanged original runner/provider:
+env -u LD_PRELOAD P2_DIAGNOSTICS=0 P2_SYSCALL_OUTPUT="$PWD/.amp/p2/raw/stream100-sse-candidate-strace.txt" .amp/p2/bin/model-output --capacity 100 --output "$PWD/.amp/p2/raw/stream100-sse-candidate.json" "$PWD/.amp/p2/bin/rui-candidate-strace"
+python3 .amp/p2/sse_candidate_comparison.py > .amp/p2/raw/sse-candidate-comparison.json
+```
+
+The controller log retains actual UTC start/end and exit 1. `raw/sse-candidate-identity.txt` separates source revision, build mode, actual Rui hashes, original Go binary hash and launcher hashes. The canonical JSON's `binary_sha256` identifies its launcher, not the underlying Rui binary. Baseline count reuse requires identical runner/provider and matched requested/actual event populations. Both cases have pacing violations under tracing. No instrumented elapsed, syscall-time or CPU number is used as a cost result.
