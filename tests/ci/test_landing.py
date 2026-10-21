@@ -117,6 +117,18 @@ class LandingTest(unittest.TestCase):
                 self.assertFalse(auto_land.land('wip/land-2', late, tip))
                 self.assertEqual(refs(), (moved, tip))
 
+                # main moved forward to an ancestor of the tip: moved→restored is
+                # clean, but ahead→restored undoes a strict change, so the push
+                # made from the stale classification must not land.
+                ahead = commit('src/store.zig', moved)
+                git('rm', '-q', 'src/store.zig')
+                restored = commit('src/cli2.zig', 'HEAD')
+                git('push', '-q', 'origin', f'{ahead}:refs/heads/main')
+                runs[('check.yml', restored, 'wip/land-4')] = green
+                self.assertFalse(auto_land.land('wip/land-4', restored, moved))
+                self.assertEqual(refs(), (ahead, tip))
+                git('push', '-q', '--force', 'origin', f'{moved}:refs/heads/main')
+
                 # stable off main's line: main alone could fast-forward, but the
                 # push fails loudly and main stays.
                 side = commit('docs/side.md', base)

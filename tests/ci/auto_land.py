@@ -110,10 +110,13 @@ def land(branch, sha, main_sha):
         print("GITHUB_TOKEN cannot push workflow-file changes; this tip needs a manual push.")
     if verdict != "land":
         return False
-    # Atomic and non-force: a moved main or a stable off main's line rejects
-    # both refs, so stable never names a tip that main did not take.
-    pushed = subprocess.run(["git", "push", "--atomic", "origin", f"{sha}:refs/heads/main",
-                             f"{sha}:refs/heads/stable"], capture_output=True, text=True)
+    # Atomic: main updates only from the exact main_sha classified above (an
+    # ancestor of sha, so a fast-forward), stable only as a non-force
+    # fast-forward. Any moved main, even to an ancestor of sha, or a stable off
+    # main's line rejects both refs.
+    pushed = subprocess.run(["git", "push", "--atomic", f"--force-with-lease=refs/heads/main:{main_sha}",
+                             "origin", f"{sha}:refs/heads/main", f"{sha}:refs/heads/stable"],
+                            capture_output=True, text=True)
     if pushed.returncode:
         git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
         if git("rev-parse", "origin/main") != main_sha:
