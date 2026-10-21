@@ -45,6 +45,10 @@ staging: Document = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
 composer: [65_536]u8 = undefined,
 view: ViewKind = .live,
+// Advances whenever the view changes, and when the frontend sends or asks for
+// a newer Message page. A page read shows only if this is unchanged since the
+// read began; that is the only check of whether a page is still wanted.
+page_epoch: u64 = 0,
 // Newer transcript rows left the copy so older pages fit; returning to them
 // means returning to live.
 newer_trimmed: bool = false,
@@ -155,6 +159,13 @@ fn invalidateScope(self: *Self) void {
     self.scope +%= 1;
 }
 
+/// Every view change goes through here, so no page read for the old view
+/// shows over the new one.
+fn setView(self: *Self, view: ViewKind) void {
+    self.view = view;
+    self.page_epoch +%= 1;
+}
+
 fn shownAction(self: *const Self) ConsentPolicy.Shown {
     return .{ .action_page = self.actionVisible(), .whole = self.preview_complete, .read = self.actionRead() };
 }
@@ -250,7 +261,7 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing.top = null;
     self.newer_trimmed = false;
     self.overscroll = 0;
-    self.view = .transcript;
+    self.setView(.transcript);
     self.invalidateScope();
 }
 
@@ -354,7 +365,7 @@ pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
     try self.load(&self.staging, io, file, true);
     self.staging.top = .{};
     self.message_return = self.view;
-    self.view = .message;
+    self.setView(.message);
     self.invalidateScope();
 }
 
@@ -364,7 +375,7 @@ pub fn leaveMessage(self: *Self) !void {
     std.debug.assert(self.view == .message);
     self.staging.clear();
     if (self.action_view != null) return self.latest();
-    self.view = self.message_return;
+    self.setView(self.message_return);
     self.invalidateScope();
 }
 
@@ -381,7 +392,7 @@ pub fn latest(self: *Self) !void {
         const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
         self.action_seen = seen;
-    } else self.view = .live;
+    } else self.setView(.live);
     self.invalidateScope();
 }
 
@@ -406,7 +417,7 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
 
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
-    self.view = if (action) .action else .inspection;
+    self.setView(if (action) .action else .inspection);
     try self.load(&self.browsing, io, file, true);
     self.browsing.top = .{};
     self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
@@ -441,7 +452,7 @@ fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
 /// The decision was consumed: leave its page for the latest view.
 pub fn releaseAction(self: *Self) void {
     self.action_view = null;
-    self.view = .live;
+    self.setView(.live);
     self.invalidateScope();
 }
 
@@ -450,7 +461,7 @@ pub fn releaseAction(self: *Self) void {
 pub fn withdrawAction(self: *Self) void {
     self.consent.interrupt();
     self.action_view = null;
-    if (self.view == .action) self.view = .live;
+    if (self.view == .action) self.setView(.live);
     self.invalidateLayout();
 }
 

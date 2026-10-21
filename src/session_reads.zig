@@ -47,7 +47,9 @@ pub const Job = struct {
     message_target: ?View.Collapsed = null,
     // Messages shown in live output before this read.
     messages: Messages = .{},
-    transcript: u64 = 0,
+    // The Screen's page epoch this read belongs to; its page shows only while
+    // that is unchanged.
+    page_epoch: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
     interrupted: *client.Cancellation = undefined,

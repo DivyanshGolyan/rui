@@ -311,7 +311,6 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 fresh = false;
                 choice = .{};
             }
-            try std.testing.expectEqual(submitted, front.sent);
             try std.testing.expectEqual(decision or submitted != 0, front.submission.intent != null);
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.message));
             try std.testing.expectEqual(fresh, fixture.screen.consent.acceptsInput());
@@ -331,10 +330,12 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         defer fixture.deinit();
         const front = fixture.front;
         var selected: Screen.ViewKind = .live;
-        var generation: u64 = 0;
+        // Advances on every send and view change; a page whose read began in
+        // an older epoch never shows.
+        var epoch: u64 = 0;
         var sent: u64 = 0;
         var requested_at: u64 = 0;
-        var request_generation: u64 = 0;
+        var request_epoch: u64 = 0;
         var request: ?enum { details, history, status } = null;
         var draft: Text = .{};
         var older: ?client.ConversationCursor = null;
@@ -344,7 +345,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         try ops.showStaged(front);
         if (seed % 2 == 1) {
             try ops.beginTranscript(front);
-            generation = 1;
+            epoch += 1;
             selected = .transcript;
             older = first_cursor;
         }
@@ -367,13 +368,12 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         else => .status,
                     };
                     requested_at = sent;
-                    request_generation = generation;
+                    request_epoch = epoch;
                     front.read_phase = switch (event) {
                         .details => .details,
                         .history => .history,
                         else => .activity,
                     };
-                    front.details_sent = front.sent;
                     front.job = ops.freeze(front, front.read_phase);
                     front.job.result.history_cursor = next_cursor;
                     if (event == .status) {
@@ -385,14 +385,17 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                 .complete => if (request) |pending| {
                     try fixture.complete();
                     switch (pending) {
-                        .details => if (sent == requested_at) {
+                        .details => if (epoch == request_epoch) {
                             selected = .inspection;
+                            epoch += 1;
                         },
                         .status => if (sent == requested_at) {
                             selected = .inspection;
+                            epoch += 1;
                         },
                         .history => {
-                            if (selected == .transcript and generation == request_generation) {
+                            if (epoch == request_epoch) {
+                                try std.testing.expectEqual(Screen.ViewKind.transcript, selected);
                                 try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text(), "EARLIER PAGE\n") != null);
                                 older = next_cursor;
                             } else try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text(), "EARLIER PAGE") == null);
@@ -413,6 +416,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         front.history_requested = .older;
                         try fixture.bytes("message\r");
                         sent = 1;
+                        epoch += 1;
                         selected = .live;
                         draft = .{};
                         try std.testing.expect(front.history_requested == null);
@@ -420,12 +424,13 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                 },
                 .latest => {
                     try ops.navigation(front, .latest);
+                    epoch += 1;
                     selected = .live;
                 },
                 .transcript => {
                     if (selected != .live) try ops.navigation(front, .latest);
                     try ops.beginTranscript(front);
-                    generation += 1;
+                    epoch += 1;
                     selected = .transcript;
                     older = first_cursor;
                 },
@@ -436,7 +441,6 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                 },
             }
             try std.testing.expectEqual(selected, fixture.screen.view);
-            try std.testing.expectEqual(sent, front.sent);
             try std.testing.expectEqual(older, front.transcript_older);
             try fixture.checkText(&draft, &.{}, false);
         }

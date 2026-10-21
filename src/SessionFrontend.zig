@@ -64,9 +64,6 @@ terminal: Terminal,
 colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
-/// Messages begun; a /details read begun before the latest one never covers it.
-sent: u64 = 0,
-details_sent: u64 = 0,
 input: Input = undefined,
 submission: Submission = undefined,
 reader: Task = .{},
@@ -89,23 +86,15 @@ echoes: reads.Record = .{},
 // The lowest position of a Message seen unapplied, where a transcript's
 // search for them may stop; a stale value only costs reads.
 lowest: ?u64 = null,
-// Each transcript gets a new identity, so a page loaded for one is never
-// joined to another.
-transcript: u64 = 0,
 // A failed older load waits for the next scroll rather than retrying at once.
 older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
 // The Messages of collapsed blocks in live output and in the transcript.
 live_blocks: View.Blocks = .{},
 transcript_blocks: View.Blocks = .{},
-// Ctrl-O waits for the frame it names a block in; the read then waits for
-// the reader, and its page shows only over the view it was asked from.
-expand_pending: bool = false,
-// A Message page asked for, and the one being read. Each holds where it was
-// asked from; Esc, Ctrl-G, a send or a newer Ctrl-O supersedes it.
-message_requested: ?MessageRequest = null,
-message_reading: ?MessageRequest = null,
-message_generation: u64 = 0,
+// A Message page asked for and not yet being read. Ctrl-O waits for the frame
+// it names a block in; the read then waits for the reader.
+message_wanted: ?MessageWanted = null,
 // Where each read's live output began, so a transcript whose live copy lost
 // its front still continues from a canonical position without a gap.
 marks: reads.Marks = .{},
@@ -132,7 +121,7 @@ notice_buffer: [1536]u8 = undefined,
 previous_signals: [2]std.posix.Sigaction = undefined,
 
 fn freeze(self: *const Self, phase: ReadPhase) Job {
-    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .listing = if (phase == .history) self.transcript_plan.next() else null, .messages = self.messages, .transcript = self.transcript, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
+    var job: Job = .{ .init = self.init, .store = self.store, .session = self.session, .scratch = self.scratch, .action_file = self.action_file, .inspection_file = self.inspection_file, .status_file = self.status_file, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.cursor, .opening = self.opening, .older = self.transcript_older, .listing = if (phase == .history) self.transcript_plan.next() else null, .messages = self.messages, .page_epoch = self.terminal.screen.page_epoch, .inspection_kind = self.inspection_kind, .interrupted = &interrupted, .force = self.unsettled >= 3 };
     if (phase == .activity or phase == .permission) {
         job.open_status = self.status_requested;
         job.watch_status = self.status_page and self.terminal.screen.view == .inspection;
@@ -506,7 +495,6 @@ fn driveActive(self: *Self) !void {
                 if (requested == .latest) {
                     try self.terminal.screen.latest();
                     self.dirty = true;
-                    self.details_sent = self.sent;
                     try self.launch(self.freeze(.details), reads.history);
                 } else {
                     // /history scrolls the transcript to its top; older pages
@@ -520,11 +508,12 @@ fn driveActive(self: *Self) !void {
                     self.dirty = true;
                 }
             }
-            if (self.reader.thread == null) if (self.message_requested) |request| {
-                self.message_requested = null;
-                self.message_reading = request;
+            if (self.reader.thread == null) if (self.message_wanted) |wanted| if (wanted == .target) {
+                self.message_wanted = null;
                 var job = self.freeze(.message);
-                job.message_target = request.target;
+                job.message_target = wanted.target.block;
+                // The page belongs to the view Ctrl-O was pressed over.
+                job.page_epoch = wanted.target.page_epoch;
                 try self.launch(job, reads.fullMessage);
             };
             if (self.reader.thread != null) {} else if (self.olderWanted()) {
@@ -559,7 +548,7 @@ fn driveActive(self: *Self) !void {
         }
         self.withdrawDecided();
         if (self.dirty) if (try self.draw()) break;
-        if (self.expand_pending) try self.expand();
+        if (self.message_wanted != null and self.message_wanted.? == .next_frame) try self.expand();
         _ = try self.step(16);
     }
 }
@@ -758,10 +747,10 @@ fn beginMessage(self: *Self, ticket: Input.Ticket) !void {
     // A sent Message continues the conversation: show it and its reply
     // rather than the frozen transcript or page the reader was browsing,
     // or a page asked for before it.
-    self.sent += 1;
     self.status_requested = false;
     self.history_requested = null;
-    self.dropMessageRequest();
+    self.message_wanted = null;
+    // Always a new page epoch, even when live output was already shown.
     try self.terminal.screen.latest();
 }
 
@@ -791,14 +780,14 @@ fn navigation(self: *Self, event: Editor.Event) !void {
         },
         .latest, .close_view => {
             // Leaving also abandons a Message page not yet shown.
-            self.dropMessageRequest();
+            self.message_wanted = null;
             if (event == .close_view and screen.view == .message) try screen.leaveMessage() else try screen.latest();
         },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
             // A newer Ctrl-O replaces any page asked for before it, even
             // before its own target is found, or if none is.
-            self.dropMessageRequest();
-            self.expand_pending = true;
+            screen.page_epoch +%= 1;
+            self.message_wanted = .next_frame;
         },
         // Every other event reaches here unhandled, and must not redraw.
         else => return,
@@ -806,18 +795,14 @@ fn navigation(self: *Self, event: Editor.Event) !void {
     self.dirty = true;
 }
 
-const MessageRequest = struct { target: View.Collapsed, view: Screen.ViewKind, transcript: u64, sent: u64, generation: u64 };
-
-/// No Message page asked for so far opens.
-fn dropMessageRequest(self: *Self) void {
-    self.message_generation += 1;
-    self.message_requested = null;
-    self.expand_pending = false;
-}
+const MessageWanted = union(enum) {
+    next_frame,
+    target: struct { block: View.Collapsed, page_epoch: u64 },
+};
 
 /// Ctrl-O: opens the lowest collapsed Message the latest frame drew.
 fn expand(self: *Self) !void {
-    self.expand_pending = false;
+    self.message_wanted = null;
     self.dirty = true;
     const screen = self.terminal.screen;
     if (screen.view != .live and screen.view != .transcript) {
@@ -833,7 +818,7 @@ fn expand(self: *Self) !void {
         self.notice = "! That message's full text is no longer held here; /history shows it again.";
         return;
     };
-    self.message_requested = .{ .target = target, .view = screen.view, .transcript = self.transcript, .sent = self.sent, .generation = self.message_generation };
+    self.message_wanted = .{ .target = .{ .block = target, .page_epoch = screen.page_epoch } };
     self.notice = "Opening message…";
 }
 
@@ -843,7 +828,6 @@ fn expand(self: *Self) !void {
 /// the copy, and older pages continue before the newest boundary that left.
 fn beginTranscript(self: *Self) !void {
     const screen = self.terminal.screen;
-    self.transcript += 1;
     const front = try screen.liveStart();
     self.transcript_plan = reads.plan(&self.marks, &self.echoes, front, self.lowest);
     try screen.beginTranscript(self.transcript_plan.start);
@@ -1090,10 +1074,12 @@ fn settleReader(self: *Self) !void {
         self.command_running = false;
         self.terminal.screen.invalidateChoice();
     }
+    // A page shows only over the unchanged view it was read for: no view
+    // change, send or newer Ctrl-O since the read began.
+    const screen = self.terminal.screen;
+    const current = self.job.page_epoch == screen.page_epoch;
     if (end == .complete and self.read_phase == .history) {
-        // The user may have left the transcript while this page loaded.
-        const screen = self.terminal.screen;
-        if (screen.view == .transcript and self.job.transcript == self.transcript) {
+        if (current) {
             const prepended = try screen.prependFile(self.init.io, self.inspection_file);
             // The page's newest blocks are those its kept rows show.
             const collapsed = self.job.result.collapsed.slice();
@@ -1112,18 +1098,12 @@ fn settleReader(self: *Self) !void {
             try self.showOlderLabels();
         }
     } else if (end == .complete and self.read_phase == .message) {
-        const screen = self.terminal.screen;
-        const request = self.message_reading.?;
-        self.message_reading = null;
-        // Only over the unchanged view it was asked from, before any send,
-        // dismissal or newer Ctrl-O.
-        if (request.generation == self.message_generation and request.sent == self.sent and screen.view == request.view and
-            (request.view == .live or request.transcript == self.transcript))
-            try screen.showMessage(self.init.io, self.inspection_file);
+        if (current) try screen.showMessage(self.init.io, self.inspection_file);
     } else if (end == .complete and (self.read_phase == .activity or self.read_phase == .permission)) {
         if (self.job.result.settled) try self.showStaged();
     } else if (end == .complete and (self.read_phase == .details or self.read_phase == .inspection)) {
-        if (self.read_phase != .details or self.details_sent == self.sent) try self.showInspection();
+        // A command's output always shows; exit would print it otherwise.
+        if (self.read_phase != .details or current) try self.showInspection();
         self.command_running = false; // Shown; exit no longer prints it.
     }
     try self.applyReader(end);
@@ -1713,7 +1693,7 @@ test "a transition inside a held frame leaves its remaining input with the frame
     try std.testing.expectEqualStrings("a", self.input.composition().bytes);
 }
 
-test "a details page read before a Message was sent never covers it" {
+test "a page shows only if no send, view change or newer Ctrl-O came after its read began" {
     const Worker = struct {
         var release: std.atomic.Value(bool) = .init(false);
         fn read(_: *anyopaque, _: *Task) !void {
@@ -1727,27 +1707,44 @@ test "a details page read before a Message was sent never covers it" {
     defer page.close(std.testing.io);
     try page.writePositionalAll(std.testing.io, "Saved tool output\n", 0);
     self.inspection_file = page;
-    for ([_]bool{ true, false }) |send| {
+    const Change = enum { none, send, latest, transcript, expand, unrelated };
+    for ([_]ReadPhase{ .details, .message }) |phase| for (std.enums.values(Change)) |change| {
+        errdefer std.debug.print("phase={s} change={s}\n", .{ @tagName(phase), @tagName(change) });
         Worker.release.store(false, .release);
         try held.screen.latest();
-        // /details begins its read, as driveActive does.
-        self.details_sent = self.sent;
-        self.read_phase = .details;
+        // The page's read begins, as driveActive does.
+        self.job.page_epoch = held.screen.page_epoch;
+        self.read_phase = phase;
         try self.reader.start(std.testing.io, self, Worker.read);
-        if (send) {
-            try self.beginMessage(self.input.submitText("sent while the page loaded"));
-            self.submission.cancel();
-            _ = self.submission.join();
-            self.submission.close();
-            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input };
-            self.input.init();
+        switch (change) {
+            .none => {},
+            .send => {
+                try self.beginMessage(self.input.submitText("sent while the page loaded"));
+                self.submission.cancel();
+                _ = self.submission.join();
+                self.submission.close();
+                self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input };
+                self.input.init();
+            },
+            .latest => try self.navigation(.latest),
+            // Entering the transcript and leaving it again ends on the same view.
+            .transcript => {
+                try self.beginTranscript();
+                try self.navigation(.latest);
+            },
+            .expand => try self.navigation(.expand),
+            // Scrolling live output down changes nothing it shows.
+            .unrelated => try self.navigation(.page_down),
         }
+        try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
         Worker.release.store(true, .release);
         while (!self.reader.completed()) std.Thread.yield() catch {};
         try self.settleReader();
-        // The sent Message keeps the latest view; an unrelated page still opens.
-        try std.testing.expectEqual(if (send) Screen.ViewKind.live else .inspection, held.screen.view);
-    }
+        const shown: Screen.ViewKind = if (phase == .details) .inspection else .message;
+        const current = change == .none or change == .unrelated;
+        try std.testing.expectEqual(if (current) shown else .live, held.screen.view);
+        self.message_wanted = null;
+    };
 }
 
 test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported text" {
