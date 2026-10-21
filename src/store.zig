@@ -1067,7 +1067,7 @@ fn toolBit(tool: Tool) u8 {
 
 /// Decodes a persisted tools_mask.
 fn toolSet(mask: c_int) !tool_catalog.ToolSet {
-    var set = tool_catalog.ToolSet.initEmpty();
+    var set: tool_catalog.ToolSet = .empty;
     var remaining = std.math.cast(u8, mask) orelse return error.CorruptStore;
     inline for (comptime std.meta.tags(Tool)) |tool| {
         if (remaining & toolBit(tool) != 0) set.insert(tool);

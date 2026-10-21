@@ -28,7 +28,7 @@ pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?pro
 }
 
 test "tool classification uses frozen availability before argument validity" {
-    const none = ToolSet.initEmpty();
+    const none: ToolSet = .empty;
     const bash_only = ToolSet.initOne(.bash);
     const edit_only = ToolSet.initOne(.edit);
     try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, false, none).?);
@@ -37,7 +37,7 @@ test "tool classification uses frozen availability before argument validity" {
     try std.testing.expect(classifyCall(.bash, true, bash_only) == null);
     try std.testing.expectEqual(protocol.ProposalRejection.tool_unavailable, classifyCall(.edit, true, edit_only).?);
     try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.edit, true, bash_only).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, ToolSet.initFull()).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, .full).?);
 }
 
 pub fn validBashArguments(source: anytype) !bool {
