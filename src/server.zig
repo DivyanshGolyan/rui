@@ -5841,6 +5841,107 @@ test "no-work admission restores only its temporary custody reservation" {
     }
 }
 
+test "failed admission releases its reservation and fences the Store and dispatch" {
+    // Message admission fails its real commit; every other admission meets the
+    // Store that failure fenced. Each catch must release the new reservation.
+    const Kind = enum { bash, retry, message, tool_continuation };
+    inline for (std.meta.tags(Kind)) |kind| {
+        for ([_]bool{ false, true }) |with_sibling| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+            const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+            var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+            const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+            var storage = try store_module.Store.open(std.testing.io, database, root);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var directory = try std.Io.Dir.cwd().openDir(std.testing.io, ".", .{});
+            defer directory.close(std.testing.io);
+            const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
+            var command: protocol.ConfigureCommand = .{};
+            try command.key.set("failed-admission-config");
+            try command.session.set("direct/failed-admission");
+            command.configuration.workspace.state = .value;
+            try command.configuration.workspace.value.set(workspace);
+            command.configuration.provider.state = .value;
+            try command.configuration.provider.value.set("codex");
+            command.configuration.model.state = .value;
+            try command.configuration.model.value.set("model-a");
+            try std.testing.expect(storage.configure(&command, true, .{}) == .accepted);
+            const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, "hello");
+            try file.sync(std.testing.io);
+            var message: protocol.MessageCommand = .{};
+            try message.key.set("failed-admission-key");
+            try message.session.set("direct/failed-admission");
+            message.text = .{
+                .state = .value,
+                .file = file,
+                .length = 5,
+                .digest = protocol.contentDigest("hello"),
+            };
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+            try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
+            if (kind != .message) {
+                try std.testing.expectError(
+                    error.InjectedAttemptCommitFailure,
+                    storage.admitModelAttempt(.message, .{ .attempt_before_commit = true }),
+                );
+                try std.testing.expect(storage.isFenced());
+            }
+
+            var records: [3]execution.CustodyRecord = undefined;
+            var host = Host{
+                .io = std.testing.io,
+                .allocator = std.testing.allocator,
+                .lease = undefined,
+                .store = &storage,
+                .faults = .{ .attempt_before_commit = kind == .message },
+                .custody = execution.CustodyPool.initialize(&records),
+            };
+            var slots = [_]ExecutionSlot{ .free, .free, .free };
+            const sibling = if (with_sibling) host.custody.reserve().? else null;
+            if (sibling) |token| {
+                var permit = store_module.DispatchPermit{ .binding = .{
+                    .turn_id = 17,
+                    .operation_id = 23,
+                    .attempt_ordinal = 2,
+                } };
+                const binding = try host.custody.attach(token, &permit);
+                slots[1] = .{ .model_preparing = .{ .token = token, .binding = binding } };
+            }
+            defer if (sibling) |token| {
+                host.custody.detach(token) catch unreachable;
+                host.custody.cleanupComplete(token) catch unreachable;
+            };
+            const baseline: usize = if (with_sibling) 1 else 0;
+            var model_preparation: model_adapter.Preparation = undefined;
+            var bash_preparation: ?bash.Preparation = null;
+            const progress = switch (kind) {
+                .bash => admitBashAttempt(&host, &slots[0], &bash_preparation),
+                .retry => admitRetryAttempt(&host, &slots[0], store_module.ActiveOperationFilter.empty(), &model_preparation),
+                .message => admitNewAttempt(&host, &slots[0], .message, &model_preparation),
+                .tool_continuation => admitNewAttempt(&host, &slots[0], .tool_continuation, &model_preparation),
+            };
+            try std.testing.expectEqual(AdmissionProgress.retry_later, progress);
+            try std.testing.expect(storage.isFenced());
+            try std.testing.expect(host.dispatch_fenced.load(.acquire));
+            try std.testing.expect(slots[0] == .free);
+            try std.testing.expect(bash_preparation == null);
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+            try checkSlotCustodyAgreement(&slots, &host.custody);
+
+            var reused: [records.len]execution.CustodyToken = undefined;
+            const free = records.len - baseline;
+            for (reused[0..free]) |*token| token.* = host.custody.reserve() orelse return error.TestExpectedCapacity;
+            try std.testing.expect(host.custody.reserve() == null);
+            for (reused[0..free]) |token| try host.custody.releaseUnused(token);
+            try std.testing.expectEqual(baseline, host.custody.occupied());
+        }
+    }
+}
+
 test "closed Bash delivery retains its payload with detached custody" {
     var records: [2]execution.CustodyRecord = undefined;
     var lease = platform.StoreLease{

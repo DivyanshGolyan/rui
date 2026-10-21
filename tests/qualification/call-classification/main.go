@@ -55,6 +55,10 @@ type endpoint struct {
 	responseEnd time.Time
 	release     chan struct{}
 	releaseOnce sync.Once
+	// The automatic continuation waits here so classification is observed
+	// while its Turn is still active.
+	continuation     chan struct{}
+	continuationOnce sync.Once
 }
 
 func startEndpoint(payload []byte, held bool) (*endpoint, error) {
@@ -62,7 +66,7 @@ func startEndpoint(payload []byte, held bool) (*endpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &endpoint{listener: listener, payload: payload, release: make(chan struct{})}
+	e := &endpoint{listener: listener, payload: payload, release: make(chan struct{}), continuation: make(chan struct{})}
 	if !held {
 		e.Release()
 	}
@@ -80,6 +84,7 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 	<-e.release
 	payload := e.payload
 	if requestNumber > 1 {
+		<-e.continuation
 		payload = encodeCompletedAnswer("continuation-completed")
 	}
 	writer.Header().Set("Content-Type", "text/event-stream")
@@ -95,6 +100,8 @@ func (e *endpoint) serve(writer http.ResponseWriter, request *http.Request) {
 func (e *endpoint) URL() string { return "http://" + e.listener.Addr().String() + "/responses" }
 
 func (e *endpoint) Release() { e.releaseOnce.Do(func() { close(e.release) }) }
+
+func (e *endpoint) ReleaseContinuation() { e.continuationOnce.Do(func() { close(e.continuation) }) }
 
 func (e *endpoint) facts() (int, time.Time) {
 	e.mu.Lock()
@@ -968,6 +975,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	}
 	defer measurement.JoinCleanup(&returnedError, func() error {
 		endpoint.Release()
+		endpoint.ReleaseContinuation()
 		return endpoint.server.Close()
 	})
 	deadline := measurement.NewDeadline(2 * time.Minute)
@@ -1080,8 +1088,10 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	if err != nil {
 		return result, err
 	}
+	// Only proposals without a valid call continue at once; the continuation
+	// stays held at the endpoint.
 	requests, responseEnd := endpoint.facts()
-	if requests != 1 || responseEnd.IsZero() {
+	if (requests != 1 && (value.Valid != 0 || requests != 2)) || responseEnd.IsZero() {
 		return result, fmt.Errorf("provider requests=%d response_end=%v", requests, responseEnd)
 	}
 	result["classification_admission_ms"] = float64(classifiedAt.Sub(admissionStarted).Microseconds()) / 1000
@@ -1099,12 +1109,31 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	}
 	result["inspection_ms"] = float64(time.Since(inspectStarted).Microseconds()) / 1000
 	recordPortableSample(result, "classified_sample", host)
-	result["classified_execution"] = inspection["execution"]
-	// Classification settles the model Attempt and releases its custody;
-	// proposed Actions wait for permission without holding any.
-	execution, ok := inspection["execution"].(map[string]any)
-	if !ok || execution["custody_occupied"] != "0" {
-		return result, fmt.Errorf("classified Attempt retained custody: %v", inspection["execution"])
+	// The classifying Attempt releases its custody after its Store commit.
+	// Proposed Actions wait for permission without custody; without a valid
+	// call, only the held continuation owns custody.
+	occupied, wantRequests := "0", 1
+	if value.Valid == 0 {
+		occupied, wantRequests = "1", 2
+	}
+	err = measurement.WaitFor(deadline, 10*time.Millisecond, "classified Attempt custody release", func() (bool, error) {
+		candidate, inspectError := client.Inspect("qualification/" + value.Name)
+		if inspectError != nil {
+			return false, inspectError
+		}
+		execution, ok := candidate["execution"].(map[string]any)
+		if !ok {
+			return false, errors.New("inspection omitted execution")
+		}
+		result["classified_execution"] = execution
+		requests, _ = endpoint.facts()
+		if requests > wantRequests {
+			return false, fmt.Errorf("provider requests=%d before denial, want at most %d", requests, wantRequests)
+		}
+		return requests == wantRequests && execution["custody_occupied"] == occupied, nil
+	})
+	if err != nil {
+		return result, fmt.Errorf("%w; execution=%v requests=%d", err, result["classified_execution"], requests)
 	}
 	if population, populationError := namedScratchPopulation(store); populationError == nil {
 		result["classified_named_scratch"] = population
@@ -1153,6 +1182,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			return result, err
 		}
 	}
+	endpoint.ReleaseContinuation()
 	denialLatencies := make([]float64, 0, len(actions))
 	for index, action := range actions {
 		started := time.Now()
