@@ -1,0 +1,183 @@
+{
+  "A3": {
+    "completed_events": null,
+    "exit": null,
+    "host_cpu_seconds": null,
+    "status": "interrupted_unknown"
+  },
+  "B3": {
+    "completed_events": null,
+    "exit": null,
+    "host_cpu_seconds": null,
+    "status": "not_started"
+  },
+  "completed_runs": [
+    {
+      "audited_messages": 200,
+      "canonical_status": "incomplete",
+      "case": "A1",
+      "completed_offer_events": 1200000,
+      "exit": 1,
+      "host_complete_work_cpu_seconds": 96.71,
+      "host_cpu_microseconds_per_completed_offer_event": 80.59166666666667,
+      "rounds": [
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 101,
+          "host_complete_work_cpu_seconds": 49.06,
+          "interior_cpu_seconds": 30.49,
+          "late_completion_violations": 300,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.992011117,
+          "round": 1,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 100
+        },
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 100,
+          "host_complete_work_cpu_seconds": 47.65,
+          "interior_cpu_seconds": 29.69,
+          "late_completion_violations": 0,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.991525254,
+          "round": 2,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 100
+        }
+      ]
+    },
+    {
+      "audited_messages": 200,
+      "canonical_status": "incomplete",
+      "case": "B1",
+      "completed_offer_events": 1200000,
+      "exit": 1,
+      "host_complete_work_cpu_seconds": 90.85,
+      "host_cpu_microseconds_per_completed_offer_event": 75.70833333333333,
+      "rounds": [
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 519,
+          "host_complete_work_cpu_seconds": 44.8,
+          "interior_cpu_seconds": 29.47,
+          "late_completion_violations": 289,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.99087407,
+          "round": 1,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 100
+        },
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 189,
+          "host_complete_work_cpu_seconds": 46.05,
+          "interior_cpu_seconds": 29.06,
+          "late_completion_violations": 57,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.990867676,
+          "round": 2,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 100
+        }
+      ]
+    },
+    {
+      "audited_messages": 200,
+      "canonical_status": "incomplete",
+      "case": "A2",
+      "completed_offer_events": 1200000,
+      "exit": 1,
+      "host_complete_work_cpu_seconds": 96.36,
+      "host_cpu_microseconds_per_completed_offer_event": 80.3,
+      "rounds": [
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 22,
+          "host_complete_work_cpu_seconds": 48.19,
+          "interior_cpu_seconds": 29.91,
+          "late_completion_violations": 0,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.99145008,
+          "round": 1,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 22
+        },
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 0,
+          "host_complete_work_cpu_seconds": 48.17,
+          "interior_cpu_seconds": 30.0,
+          "late_completion_violations": 0,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.99078583,
+          "round": 2,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 0
+        }
+      ]
+    },
+    {
+      "audited_messages": 200,
+      "canonical_status": "incomplete",
+      "case": "B2",
+      "completed_offer_events": 1200000,
+      "exit": 1,
+      "host_complete_work_cpu_seconds": 94.17,
+      "host_cpu_microseconds_per_completed_offer_event": 78.475,
+      "rounds": [
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 0,
+          "host_complete_work_cpu_seconds": 47.28,
+          "interior_cpu_seconds": 30.03,
+          "late_completion_violations": 0,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.991301266,
+          "round": 1,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 0
+        },
+        {
+          "audited_messages": 100,
+          "completed_offer_events": 600000,
+          "completion_gap_violations": 0,
+          "host_complete_work_cpu_seconds": 46.89,
+          "interior_cpu_seconds": 29.73,
+          "late_completion_violations": 700,
+          "offer_bytes": 156000000,
+          "offer_seconds_observed": 59.991074467,
+          "round": 2,
+          "terminal_bytes": 83840,
+          "timing_invalid_streams": 100
+        }
+      ]
+    }
+  ],
+  "descriptive_median_reduction_percent": 4.169472212151025,
+  "group_median_host_cpu_seconds": {
+    "A": 96.535,
+    "B": 92.51
+  },
+  "interior_window_completed_events": null,
+  "interior_window_cpu_per_event": null,
+  "limits": [
+    "No serialized complete-work start CPU endpoint; CPU deltas come from the frozen harness and cannot be independently re-subtracted.",
+    "In-window delivery progress was deferred until offer completion; no interior CPU/event or nominal denominator substitution.",
+    "All completed runs retain missing-Mac-footprint incomplete status and per-stream pacing violations.",
+    "Two complete pairs only; A3 interrupted by executor-scope teardown concurrent with Amp restart; no retry or B3.",
+    "Host CPU excludes provider/controller/CLI and Configure, but includes admissions, result reads, terminal bytes and custody/scratch drain.",
+    "Descriptive Linux fixture observation, not statistical/general speedup, live/Mac qualification or production acceptance."
+  ],
+  "paired_host_cpu_reduction_seconds": [
+    5.86,
+    2.19
+  ]
+}
