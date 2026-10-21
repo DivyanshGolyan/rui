@@ -1,0 +1,78 @@
+{
+  "label": "Linux PSS (macOS footprint pending)",
+  "iqr_method": "inclusive quartiles for three repeats: (max-min)/2",
+  "event_rate_limit": "STREAM in-window delivery counts unavailable; fixture counters publish only after the offer, so no CPU/event ratio is derived",
+  "rows": [
+    {
+      "file": "run-n0-r1.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "e2835cb25a7e45851df6dac35de0977de8a88b9d2861eea8ee5b43bd993b3a50",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 0,
+      "hold": false,
+      "host_pss_start_bytes": 7309312,
+      "host_pss_end_bytes": 7362560,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 0.57,
+      "window_seconds": 60.000227734,
+      "host_average_cores": 0.009499963942253525,
+      "host_threads": 5,
+      "host_pid": 65404
+    },
+    {
+      "file": "run-n10-r1.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "e2835cb25a7e45851df6dac35de0977de8a88b9d2861eea8ee5b43bd993b3a50",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 10,
+      "hold": false,
+      "host_pss_start_bytes": 11312128,
+      "host_pss_end_bytes": 11324416,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 3.2600000000000002,
+      "window_seconds": 60.057355149,
+      "host_average_cores": 0.054281444660892325,
+      "host_threads": 5,
+      "host_pid": 65955,
+      "actual_fixture_events_between_queries": null,
+      "fixture_events_per_second_lower": null,
+      "fixture_events_per_second_upper": null,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "unavailable: provider publishes delivery totals only after the complete offer; mid-offer zero counters are not measured zero delivery"
+    }
+  ],
+  "populations": [
+    {
+      "sessions": 0,
+      "completed_repeats": 1,
+      "host_pss_end_bytes": [
+        7362560
+      ],
+      "median_host_pss_bytes": 7362560,
+      "iqr_host_pss_bytes": null
+    },
+    {
+      "sessions": 10,
+      "completed_repeats": 1,
+      "host_pss_end_bytes": [
+        11324416
+      ],
+      "median_host_pss_bytes": 11324416,
+      "iqr_host_pss_bytes": null
+    },
+    {
+      "sessions": 100,
+      "completed_repeats": 0,
+      "host_pss_end_bytes": [],
+      "median_host_pss_bytes": null,
+      "iqr_host_pss_bytes": null
+    }
+  ],
+  "fit": null
+}
