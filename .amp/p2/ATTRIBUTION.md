@@ -150,3 +150,22 @@ The held window contains 57,700 control-reconciliation reads, 2,307 uncertain-Ac
 Once every Message is cancelled and settled, all 198 turn starts have 100 free slots and use the 100ms idle wait. Each turn performs one uncertain-Action scan, one Bash admission scan, one Message probe, one tool-continuation probe and two blocked-tool scans. Twenty retry-maintenance cycles add one exhausted-retry scan, one SQLite clock read and one retry-admission scan each. Empty Bash and retry admissions issue BEGIN/ROLLBACK even though no work is selected. These are statement executions, not fsync counts or successful commits.
 
 The cancelled-settled window is not successful model completion. Read-only Store inspection confirms 100 cancelled Turns, no unresolved model operations and zero Actions. The [phase summary](raw/sql-phase-summary.json) retains every exact SELECT text, phase boundaries, turn counts and free-slot histograms. [Raw host logging](raw/sql-phases-hold100/host-stderr.log.gz), [fixture evidence](raw/sql-phases-hold100/evidence.json), [source patch](sql-phase-instrumentation.patch.gz) and [temporary test](p2_sql_phases_test.go.txt) permit independent reduction with `python3 .amp/p2/sql_phase_attribution.py`. Interval lengths only normalize instrumented counts. They are not uninstrumented CPU or latency measurements, and the original streaming traces still have no exact historical phase split.
+
+## SSE validation rereads bytes already consumed by its line scanner
+
+A tiny isolated replay drives the unchanged validation algorithm with three fixture-shaped 260-byte `response.in_progress` records and valid terminal output. The instrumented source logs each read's role, offset, size and scanner-consumed frontier. All 56 logged source reads match actual `preadv` calls one-for-one in the [raw syscall trace](raw/sse-replay-preadv.txt.gz). The focused ReleaseSafe build exits 0 and reports 2/2 tests passed. No N100 workload was repeated for this range proof.
+
+The first record occupies bytes [0,260). The scanner initially reads [0,1215), then consumes the first line through offset 259 and its blank separator through offset 260. Each subsequent read below lies behind that consumed frontier. Offsets are half-open ranges in the same source file.
+
+| Baseline read owner | Range for first record | Read calls |
+| --- | --- | ---: |
+| `validate`, data-line LF and preceding CR check | [258,259), [257,258) | 2 |
+| `linePrefix`, data field name | [0,5) | 1 |
+| `validate`, leading payload space | [5,6) | 1 |
+| `validate`, blank-line LF | [259,260) | 1 |
+| `processEvent → readFields → FileSource.peek`, JSON object | [6,258) | 1 |
+| `processEvent → readString → FileSource.peek`, type string | [14,36) | 1 |
+
+Each of the three nonterminal records has exactly seven rereads totaling 283 requested bytes: five framing reads totaling nine bytes and two JSON/type reads totaling 274 bytes. The JSON type range is itself inside the object range. The original N100 observation of 7.07634 `preadv` calls per event is consistent with these seven reads, one broad scanner refill per 4,096 bytes, and additional terminal/metadata/Store reads. The small replay proves the mechanism, not an exact partition of every historical `preadv` call.
+
+The caller is `completeSuccessfulTransfer → model_adapter.interpretOutput → provider_output.validate`, after the response capture completes. This is not repeated whole-response validation on every arriving network event. The [range summary](raw/sse-range-summary.json), [source patch](sse-range-instrumentation.patch.gz) and [raw replay output](raw/sse-replay.log.gz) retain the exact roles and frontiers. `python3 .amp/p2/sse_range_attribution.py` independently checks all syscall matches and seven already-consumed reads for each record. The result attributes calls, not CPU time. P4's separate framing candidate removes the five framing reads; its JSON/type rereads remain outside that change.

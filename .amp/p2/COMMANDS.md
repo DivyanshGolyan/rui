@@ -83,3 +83,21 @@ getconf CLK_TCK # 100
 ```
 
 The retained HOLD evidence has both CPU query brackets, cumulative values, delta and minimum/maximum window bounds. Streaming reports retain per-round CPU brackets, actual event counters, process identities, exact binary hash and post-reap audits. Instrumentation/count-source exports were not rebuilt during the CPU runs, and prior count evidence was not recaptured. Final verification regenerates the prior nine count cases and both new streaming summaries from raw inputs and checks the HOLD subtraction independently.
+
+## SQL phases and consumed SSE ranges
+
+`sql_read_attribution.py` reduces the original SQL traces without recapture. The temporary test in `p2_sql_phases_test.go.txt` reuses the corrected P1 b13caa4 provider and measurement owners. Its isolated baseline export adds only the retained SQL/turn-phase patch. The source and binary identities are in `raw/sql-phases-identity.sha256`.
+
+```sh
+python3 .amp/p2/sql_read_attribution.py > .amp/p2/raw/sql-owner-summary.json
+P2_SQL_BINARY="$PWD/.amp/p2/bin/rui-sql-phases" P2_SQL_DIRECTORY="$PWD/.amp/p2/raw/sql-phases-hold100" .amp/p2/bin/p1-sql-phases-test -test.run '^TestP2SQLPhases$' -test.v -test.timeout 5m
+python3 .amp/p2/sql_phase_attribution.py > .amp/p2/raw/sql-phase-summary.json
+```
+
+The range replay adds the retained `sse-range-instrumentation.patch.gz` to the isolated SQL research export. It records role, offset, requested bytes and scanner-consumed frontier without changing the baseline read algorithm. From `.amp/p2/research-source`:
+
+```sh
+strace -f -yy -e trace=preadv -s 1 -o /home/user/workspace/repo/.amp/p2/raw/sse-replay-preadv.txt zig build test -Dtest-filter='P2 isolated SSE consumed-range evidence' -j2 --summary all
+```
+
+Both output streams are retained in `raw/sse-replay.log.gz`. The trace and source patch are compressed byte-preserving copies. `python3 .amp/p2/sse_range_attribution.py` reproduces `raw/sse-range-summary.json` and checks every logged read against its actual syscall. These are counts and byte ranges, not CPU-cost measurements.
