@@ -144,7 +144,13 @@ Source: P2 [`352ea142`](https://github.com/DivyanshGolyan/rui/commit/352ea142df4
 - **New HOLD100 phase run** (60.008 s window, 0 events, 0 bytes, no admissions, mutations or transactions; every one of 2,307 execution turns had all slots full): 60,067 SELECTs, **1,000.98 per second**. That is 57,700 control reads, 2,307 uncertain-Action scans and 60 retry scans. Pre-run estimate: 62,460. So while 100 streams wait with nothing arriving, the Host still runs about 1,000 SELECTs a second, none of them part of an admission, mutation or transaction.
 - **Cancelled-and-settled idle** (20.018 s, all 100 outcomes cancelled, none unresolved): 1,248 SELECTs, 62.34 per second, plus 218 `BEGIN` and 218 `ROLLBACK` with no `COMMIT`.
 
-This polling is **found, not fixed**: removing it needs a Store-commit wake or a SELECT redesign, both out of scope tonight. P2 also reports that a small isolated SSE replay shows 7 rereads behind the consumed position for each 260-byte event; that evidence is not yet packaged or audited, so it is not reported here as a result.
+This polling is **found, not fixed**: removing it needs a Store-commit wake or a SELECT redesign, both out of scope tonight. ### SSE byte-range rereads (measured counts, Linux fixture, small replay)
+
+Source: P2 [`af391fc7`](https://github.com/DivyanshGolyan/rui/commit/af391fc7526d1eef55428053c939f054688df7eb), merged here: [sse-range-summary.json](../../.amp/p2/raw/sse-range-summary.json), [sse-replay-preadv.txt.gz](../../.amp/p2/raw/sse-replay-preadv.txt.gz), [sse-replay.log.gz](../../.amp/p2/raw/sse-replay.log.gz). It is published and owner-verified; P2's reducer reproduces all 56 matches between instrumented reads and actual `preadv` calls. An independent audit is pending. On the baseline, each 260-byte event rereads 7 ranges (283 bytes) that the scanner has already consumed:
+- 5 framing reads: last byte of the line (1 B), CR check (1 B), `data:` prefix (5 B), leading space (1 B), and the last byte of the blank terminator line (1 B);
+- 2 JSON reads: the event's fields (252 B) and its `type` string (22 B).
+
+Candidate `12f84075` targets the 5 framing reads; the 2 JSON reads stay **found, not fixed**. This proof describes the baseline only; it is not a measured improvement for the candidate, which waits on P2's N=100 count comparison (baseline `240aef2e` vs candidate binary `8c3add2e…c123c6`, started 20:32:45 UTC with diagnostics off; this binary is a separate build from P1's).
 
 ### Appendix limits and retained failures
 
