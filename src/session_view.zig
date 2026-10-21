@@ -948,7 +948,7 @@ pub const Live = struct {
 
     pub fn init(facts: *const protocol.ActivityFacts) Live {
         const calls = facts.call_activity;
-        return .{ .entries = calls.entries, .count = calls.count, .total = calls.total, .peers = facts.working_peers };
+        return .{ .entries = calls.entries, .count = calls.count, .total = calls.total, .peers = facts.work.working_peers };
     }
 
     /// `3 peers working · a, b, c`: the peers this Session sent to whose

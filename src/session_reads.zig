@@ -57,19 +57,16 @@ pub const Job = struct {
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
     inspection_action: ?u64 = null,
-    // A settled scan renders /status from its own capture: when the user
+    // A scan renders /status from its own Current capture: when the user
     // asks for it, or when the shown page (`status_shown`) would change.
     open_status: bool = false,
     watch_status: bool = false,
     status_shown: u64 = 0,
-    // Apply the page even if the work changed while it was read.
-    force: bool = false,
     result: struct {
-        // The work did not change while the page was read, so its history,
-        // footer and status describe one moment.
-        settled: bool = false,
-        current: client.Current = undefined,
-        // /status from `current` is in the status file.
+        // The work the page's own Store read saw: its history, footer and
+        // consent describe one moment.
+        work: protocol.PageWork = .{},
+        // /status from one Current capture is in the status file.
         status: bool = false,
         status_digest: u64 = 0,
         // The newest Message admission this page holds, for Sent.
@@ -100,13 +97,6 @@ pub const Job = struct {
     } = .{},
 };
 
-/// What the composer status and consent read from Current.
-pub fn sameWork(shown: client.Current, observed: client.Current) bool {
-    return shown.work.status.value == observed.work.status.value and std.meta.eql(shown.work.turn, observed.work.turn) and
-        std.meta.eql(shown.work.operation, observed.work.operation) and shown.first_action == observed.first_action and
-        std.meta.eql(shown.settings.revision, observed.settings.revision);
-}
-
 /// Host commands keep their one-shot output owners. Their complete stdout and
 /// stderr become an inspection page while the Session screen keeps drawing
 /// through its own descriptor. No command reads terminal input.
@@ -131,11 +121,10 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 pub fn permission(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     try scan(raw, task);
-    if (!job.result.settled) return;
-    if (job.result.current.first_action) |action| {
+    if (job.result.work.first_action) |action| {
         try job.action_file.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.action_file };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.current.settings.workspace.slice(), job.scratch, &output, job.colour);
+        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.result.work.workspace.slice(), job.scratch, &output, job.colour);
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -144,27 +133,25 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
 pub fn scan(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    const before = try View.current(requests, job.store, job.session, job.scratch);
     var cursor = job.cursor;
     if (job.opening) cursor.direction = .backward;
     const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
         .page => |page| page,
         .failure => |failure| return requests.failRead(failure),
     };
-    // The page describes one moment only if the work did not change while it
-    // was read; otherwise the UI reads again rather than pair them.
-    job.result.current = try View.current(requests, job.store, job.session, job.scratch);
-    if (!job.force and !sameWork(before, job.result.current)) return;
-    job.result.settled = true;
-    // Before anything else reuses scratch, which holds this capture's rows.
+    // The page carries its work from its own Store read.
+    job.result.work = page.facts.work;
+    // Only /status reads Current, once; it may be newer than the page.
     if (job.open_status or job.watch_status) {
-        job.result.status_digest = try statusDigest(job, task.io);
+        const current = try View.current(requests, job.store, job.session, job.scratch);
+        // Before anything else reuses scratch, which holds this capture's rows.
+        job.result.status_digest = try statusDigest(job, task.io, &current);
         if (job.open_status or job.result.status_digest != job.status_shown) {
             try job.status_file.setLength(task.io, 0);
             try task.io.vtable.fileSeekTo(task.io.userdata, job.status_file, 0);
             var buffer: [4096]u8 = undefined;
             var output = job.status_file.writerStreaming(task.io, &buffer);
-            try writeStatus(job, task.io, &output.interface);
+            try writeStatus(job, task.io, &current, &output.interface);
             try output.flush();
             job.result.status = true;
         }
@@ -220,15 +207,15 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
 }
 
 /// The /status page for the Current capture whose rows are in scratch.
-fn writeStatus(job: *const Job, io: std.Io, out: *std.Io.Writer) !void {
-    try job.status(io, job.store, job.session, &job.result.current, job.scratch, out);
+fn writeStatus(job: *const Job, io: std.Io, current: *const client.Current, out: *std.Io.Writer) !void {
+    try job.status(io, job.store, job.session, current, job.scratch, out);
     try writeSubmission(job, out);
 }
 
-fn statusDigest(job: *const Job, io: std.Io) !u64 {
+fn statusDigest(job: *const Job, io: std.Io, current: *const client.Current) !u64 {
     var buffer: [256]u8 = undefined;
     var hashing = std.Io.Writer.Hashing(std.hash.Wyhash).initHasher(.init(0), &buffer);
-    try writeStatus(job, io, &hashing.writer);
+    try writeStatus(job, io, current, &hashing.writer);
     try hashing.writer.flush();
     return hashing.hasher.final();
 }
@@ -709,7 +696,7 @@ test "a silent read marks its end only when complete and every shown Message is 
 /// its cursor showed before its offset. Reads record only valid ones: the
 /// opening's start, and in a later read each shown item that follows every
 /// shown Message's conversation row, and its output's end (see `readEnd`).
-/// An unsettled or incomplete read that shows nothing records none.
+/// An incomplete read that shows nothing records none.
 pub const Marks = struct {
     pub const Mark = struct { offset: u64, cursor: ?client.ConversationCursor, admitted: u64 };
     pub const capacity = 64;

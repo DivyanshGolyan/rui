@@ -23,7 +23,7 @@ const allowed_std = [_][]const u8{
     "std.heap.ArenaAllocator", "std.Io.Writer",                  "std.Io.Timestamp",
     "std.Io.Clock.Timestamp",  "std.testing.allocator",          "std.testing.expect",
     "std.testing.expectEqual", "std.testing.expectEqualStrings", "std.testing.expectEqualSlices",
-    "std.testing.expectError",
+    "std.testing.expectError", "std.unicode.utf8ValidateSlice",
 };
 
 /// Allowed only inside `test` declarations, for failure diagnostics.

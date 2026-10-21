@@ -2296,32 +2296,32 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         (fixture.sse_answer(f"external-answer-{index}", f"external-reason-{index}",
                             f"external-message-{index}", answer)[0], answer_release),
                     ])
+                    # The first page that carries the Action is held: it is
+                    # stale once another client allows that Action.
                     def hold_pending_page(response):
+                        page = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                        if page["work"]["first_action"] is None:
+                            return response
+                        selected.append(page["work"]["first_action"])
+                        proxy.rewrite = lambda response: response
                         pending_held.set()
                         assert pending_release.wait(15), "stale Action page was not released"
                         return response
-                    def observe_action(response):
-                        report = json.loads(response.split(b"\r\n\r\n", 1)[1])
-                        if report["actionable_permissions"]:
-                            selected.append(report["actionable_permissions"][0]["action"])
-                            proxy.route = "/v1/activity-page"
-                            proxy.rewrite = hold_pending_page
-                        return response
-                    def hold_refreshed_current(response):
-                        report = json.loads(response.split(b"\r\n\r\n", 1)[1])
-                        assert not report["actionable_permissions"], report
+                    def hold_refreshed_page(response):
+                        page = json.loads(response.split(b"\r\n\r\n", 1)[1])
+                        assert page["work"]["first_action"] is None, page
                         refreshed_held.set()
                         assert refreshed_release.wait(15), "permission refresh was not released"
                         return response
                     try:
                         run(home, "session", "configure", "--store", store, "--session", reference, "--permission-mode", "bypass")
-                        proxy.rewrite = observe_action
-                        proxy.route = "/v1/inspect-session"
+                        proxy.rewrite = hold_pending_page
+                        proxy.route = "/v1/activity-page"
                         os.write(master, f"external approval race {index}\n".encode())
                         read_terminal(master, f"• {prior_label}", composer=True)
                         run(home, "session", "configure", "--store", store, "--session", reference, "--permission-mode", "ask")
                         prior_release.touch()
-                        prefix = terminal_gate(caller, master, pending_held, "stale actionable Current and pending page")
+                        prefix = terminal_gate(caller, master, pending_held, "stale actionable page")
                         assert len(selected) == 1, selected
                         # A scan settled after the prior call and before the
                         # Action rightly shows that success; only the held
@@ -2331,27 +2331,27 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         requests_before = len(endpoint.requests)
                         run(home, "action", "allow", "--store", store, "--session", reference, "--action", selected[0])
                         fixture.wait_for(lambda: len(endpoint.requests) == requests_before + 1, "successful external approval continuation")
-                        proxy.rewrite = hold_refreshed_current
-                        proxy.route = "/v1/inspect-session"
+                        proxy.rewrite = hold_refreshed_page
                         pending_release.set()
                         prefix += terminal_gate(caller, master, refreshed_held, "permission refresh without an Action")
                         if with_notice:
                             os.write(master, b"\x00\n")
                             read_terminal(master, "! Input rejected; nothing sent.", composer=True)
                             before_notice = current_screen(master)
-                            # A page read under the stale Current shows only with a
-                            # settled one: neither its success nor an approval yet.
-                            assert (f"✓ {prior_label}\n" in before_notice) == (f"✓ {prior_label}\n" in held), (held, before_notice)
-                            assert "? Run Bash" not in before_notice, before_notice
+                            # The released page applies whole: its approval
+                            # never shows without the success it read with.
+                            if f"? {label}" in before_notice:
+                                assert f"✓ {prior_label}\n" in before_notice, before_notice
                             prefix = b""
                         refreshed_release.set()
                         await_screen(master, f"✓ {label}", composer=True)
                         shown = settle_screen(master)
                         start = shown.index(f"✓ {label}\n")
                         # A notice is status only; neither it nor the stale
-                        # permission scan separates the two successes.
+                        # page separates the two successes, and the next page
+                        # retires the stale page's approval.
                         assert f"✓ {prior_label}\n✓ {label}\n" in shown, ("stale permission scan separated successes", with_notice, shown)
-                        assert "? Run Bash" not in shown, ("stale scan invented an approval block", shown)
+                        assert "? Run Bash" not in shown and f"? {label}" not in shown[start:], ("stale approval outlived the next page", shown)
                         answer_release.set()
                         read_terminal(master, answer, composer=True)
                     finally:
@@ -2772,7 +2772,8 @@ def silent_read_edit_cases():
     completed = False
     try:
         host = fixture.start_host(store, None)
-        for index, route in enumerate(("/v1/inspect-session", "/v1/activity-page")):
+        # A live scan reads only its activity page.
+        for index, route in enumerate(("/v1/activity-page",)):
             reference = f"silent/{index}"
             run(home, "session", "configure", "--store", store, "--session", reference,
                 "--workspace", state, "--provider", "codex", "--model", "model-a")
@@ -5652,8 +5653,8 @@ def main(selected="all"):
             terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
-            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingPreferenceModelEdit"),
-                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingPreferenceModelEdit"),
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
+                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
                                    ('/setup --model ""', "InvalidPreferenceModel")):
                 terminal_step(master, command, error, composer=True)
                 assert interactive_saved.read_bytes() == cleared_preferences
