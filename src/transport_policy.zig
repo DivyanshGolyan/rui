@@ -17,13 +17,18 @@ pub const Disposition = enum {
     invalid_headers,
     unsupported_http_version,
 
+    /// The provider answered with an HTTP error status.
+    pub fn answered(self: Disposition) bool {
+        return switch (self) {
+            .permanent_http, .temporary_http => true,
+            else => false,
+        };
+    }
+
     /// An HTTP response is the evidence, so its body is sealed before
     /// settlement. Every other outcome discards the partial capture.
     pub fn retainsResponse(self: Disposition) bool {
-        return switch (self) {
-            .success, .permanent_http, .temporary_http => true,
-            else => false,
-        };
+        return self == .success or self.answered();
     }
 };
 
@@ -32,6 +37,14 @@ pub const Evidence = struct {
     http_status: u16 = 0,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
+};
+
+pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
+
+pub const TransferOutcome = union(enum) {
+    response_capture_failed: CaptureFailure,
+    request_source_failed,
+    transport_finished: Evidence,
 };
 
 /// The curl results classification distinguishes. The shell maps each tag
@@ -310,8 +323,9 @@ test "contradictory response headers fail the transfer unless its version is ref
 
 test "only HTTP responses keep their captured body" {
     for (std.enums.values(Disposition)) |disposition| {
-        const expected = disposition == .success or disposition == .permanent_http or disposition == .temporary_http;
-        try std.testing.expectEqual(expected, disposition.retainsResponse());
+        const answered = disposition == .permanent_http or disposition == .temporary_http;
+        try std.testing.expectEqual(answered, disposition.answered());
+        try std.testing.expectEqual(disposition == .success or answered, disposition.retainsResponse());
     }
 }
 

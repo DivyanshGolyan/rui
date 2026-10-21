@@ -16,6 +16,7 @@ const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
+const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const product_defaults = @import("product_defaults.zig");
 
@@ -1090,11 +1091,12 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
     if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
     const active_capacity = try parsed.number(usize, "active-capacity") orelse product_defaults.active_capacity;
+    var limits: server.Limits = .{};
     var faults: server.Faults = .{};
-    if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| faults.bash_scratch_limit_bytes = limit;
+    if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
     if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
         if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
-        faults.retention_entry_capacity = capacity;
+        limits.retention_entry_capacity = capacity;
     }
     if (parsed.has("test-retention-removal-failure")) faults.retention_removal = true;
     for (parsed.all("fault")) |fault| {
@@ -1103,9 +1105,9 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
         if (seconds < 1) return error.InvalidProviderInactivity;
         _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
-        faults.provider_inactivity_seconds = seconds;
+        limits.provider_inactivity_seconds = seconds;
     }
-    if (parsed.get("test-retry-waits-ms")) |waits| faults.retry_waits_ms = try parseRetryWaits(waits);
+    if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
     if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
         if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
         faults.before_launch_delay_ms = delay;
@@ -1122,7 +1124,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
         if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
-        faults.client_send_buffer_bytes = bytes;
+        limits.client_send_buffer_bytes = bytes;
     }
     if (parsed.has("test-phase-trace")) faults.test_phase_trace = true;
     if (try parsed.number(c_int, "test-observation-fd")) |fd| {
@@ -1144,19 +1146,19 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     faults.control_gate_path = parsed.get("test-control-gate-path");
     if (parsed.has("test-suppress-first-control-hint")) faults.suppress_first_control_hint = true;
     if (parsed.has("test-sqlite-diagnostics")) faults.sqlite_diagnostics = true;
-    if (parsed.has("test-sqlite-cache-spill-off")) faults.sqlite_cache_spill = false;
+    if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
     if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
         if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
-        faults.sqlite_cache_kib = kib;
+        limits.sqlite_cache_kib = kib;
     }
-    if (try parsed.number(u64, "test-request-scratch-limit")) |limit| faults.request_scratch_limit_bytes = limit;
+    if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
     if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| {
         if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        faults.request_preparation_byte_allowance = allowance;
+        limits.request_preparation_byte_allowance = allowance;
     }
     if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| {
         if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-        faults.request_preparation_item_allowance = allowance;
+        limits.request_preparation_item_allowance = allowance;
     }
     if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
         if (delay < 0) return error.InvalidRequestPreparationDelay;
@@ -1174,6 +1176,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         std.heap.c_allocator,
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
+        limits,
         faults,
         if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
@@ -1184,15 +1187,16 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     );
 }
 
-fn parseRetryWaits(value: []const u8) ![3]u64 {
-    var waits: [3]u64 = undefined;
+fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
+    var waits: retry_policy.Waits = undefined;
     var parts = std.mem.splitScalar(u8, value, ',');
     for (&waits) |*wait| {
         const part = parts.next() orelse return error.InvalidRetryWaits;
         wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
-        if (wait.* == 0 or wait.* > std.math.maxInt(i64)) return error.InvalidRetryWaits;
     }
     if (parts.next() != null) return error.InvalidRetryWaits;
+    // The Store rechecks the deadlines against its clock at startup.
+    retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
     return waits;
 }
 

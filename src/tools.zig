@@ -13,26 +13,31 @@ pub const BashArguments = struct {
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
 };
 
+pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+pub const ToolSet = std.EnumSet(Tool);
 pub const CallName = enum { bash, edit, unknown };
 
 /// Admission policy over adapter-certified descriptor facts and frozen tools.
 /// Call this under the transaction that publishes the proposal and Action.
-pub fn classifyCall(name: CallName, valid_arguments: bool, frozen_tools: u8) ?[]const u8 {
+pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
     return switch (name) {
-        .bash => if (frozen_tools & 1 == 0) "unknown_tool" else if (!valid_arguments) "invalid_arguments" else null,
-        .edit => if (frozen_tools & 2 != 0) "tool_unavailable" else "unknown_tool",
-        .unknown => "unknown_tool",
+        .bash => if (!frozen.contains(.bash)) .unknown_tool else if (!valid_arguments) .invalid_arguments else null,
+        .edit => if (frozen.contains(.edit)) .tool_unavailable else .unknown_tool,
+        .unknown => .unknown_tool,
     };
 }
 
 test "tool classification uses frozen availability before argument validity" {
-    try std.testing.expectEqualStrings("unknown_tool", classifyCall(.bash, false, 0).?);
-    try std.testing.expectEqualStrings("unknown_tool", classifyCall(.bash, true, 2).?);
-    try std.testing.expectEqualStrings("invalid_arguments", classifyCall(.bash, false, 1).?);
-    try std.testing.expect(classifyCall(.bash, true, 1) == null);
-    try std.testing.expectEqualStrings("tool_unavailable", classifyCall(.edit, true, 2).?);
-    try std.testing.expectEqualStrings("unknown_tool", classifyCall(.edit, true, 1).?);
-    try std.testing.expectEqualStrings("unknown_tool", classifyCall(.unknown, true, 3).?);
+    const none: ToolSet = .empty;
+    const bash_only = ToolSet.initOne(.bash);
+    const edit_only = ToolSet.initOne(.edit);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, false, none).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, true, edit_only).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyCall(.bash, false, bash_only).?);
+    try std.testing.expect(classifyCall(.bash, true, bash_only) == null);
+    try std.testing.expectEqual(protocol.ProposalRejection.tool_unavailable, classifyCall(.edit, true, edit_only).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.edit, true, bash_only).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, .full).?);
 }
 
 pub fn validBashArguments(source: anytype) !bool {

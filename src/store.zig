@@ -8,13 +8,13 @@ const product_defaults = @import("product_defaults.zig");
 const tool_catalog = @import("tools.zig");
 const output_format = @import("output_format.zig");
 const provider_output = @import("provider_output.zig");
+const retry_policy = @import("retry_policy.zig");
 const turn_policy = @import("turn_policy.zig");
 
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 29;
-pub const maximum_model_attempts: u64 = 4;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -97,9 +97,11 @@ const session_stop_cutoff_sql =
     "SELECT admission_cutoff FROM session_stop WHERE session_ref=?1 ORDER BY admission_cutoff DESC LIMIT 1";
 const pending_message_count_sql =
     "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
+/// Matches the partial retry indexes' text, which the schema fixes.
+const retry_allowance_open_sql = std.fmt.comptimePrint("allowance_used<{d}", .{retry_policy.maximum_attempts});
 const retry_admission_select_sql =
     "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
-    "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 " ++
+    "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
     "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
 
 pub const Faults = struct {
@@ -411,16 +413,10 @@ pub const HistoricalContent = struct {
     }
 };
 
-pub const RetryPolicyInput = struct {
-    waits_ms: [3]u64,
-    retry_after_ms: ?u64 = null,
-    retry_after_deadline_ms: ?i64 = null,
-};
-
 pub const ModelFailureClass = union(enum) {
     ordinary,
     context_overflow,
-    retryable: RetryPolicyInput,
+    retryable: retry_policy.Input,
 };
 
 /// What the provider returned decides which provenance a failed Attempt's
@@ -470,11 +466,6 @@ pub const ModelFailure = union(enum) {
             .rejected => |*value| value.request_id.slice(),
         };
     }
-};
-
-const ModelRetryDecision = union(enum) {
-    schedule_at_ms: i64,
-    exhausted,
 };
 
 pub const ActiveOperationFilter = struct {
@@ -1064,7 +1055,7 @@ pub const ContentReader = struct {
     }
 };
 
-const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
+const Tool = tool_catalog.Tool;
 
 /// Persisted session.tools_mask bit for one tool.
 fn toolBit(tool: Tool) u8 {
@@ -1072,6 +1063,18 @@ fn toolBit(tool: Tool) u8 {
         .bash => 1,
         .edit => 2,
     };
+}
+
+/// Decodes a persisted tools_mask.
+fn toolSet(mask: c_int) !tool_catalog.ToolSet {
+    var set: tool_catalog.ToolSet = .empty;
+    var remaining = std.math.cast(u8, mask) orelse return error.CorruptStore;
+    inline for (comptime std.meta.tags(Tool)) |tool| {
+        if (remaining & toolBit(tool) != 0) set.insert(tool);
+        remaining &= ~toolBit(tool);
+    }
+    if (remaining != 0) return error.CorruptStore;
+    return set;
 }
 
 /// Persisted session.permission_mode for a validated mode name.
@@ -1550,15 +1553,10 @@ pub const Store = struct {
         self.* = undefined;
     }
 
-    pub fn validateRetryWaits(self: *Store, waits_ms: [3]u64) !void {
+    pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
         self.lockAdmin();
         defer self.mutex.unlock(self.io);
-        const now_ms = try readUnixMilliseconds(self.database);
-        for (waits_ms) |wait_ms| {
-            if (wait_ms == 0 or wait_ms > std.math.maxInt(i64)) return error.InvalidRetryWait;
-            _ = std.math.add(i64, now_ms, @intCast(wait_ms)) catch
-                return error.InvalidRetryWait;
-        }
+        try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.database));
     }
 
     /// The Host supplies its model capability; a configuration that requires
@@ -1583,24 +1581,15 @@ pub const Store = struct {
         try exec(self.database, "BEGIN IMMEDIATE");
 
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .configure or
-                !std.mem.eql(u8, existing.target.slice(), command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest))
-            {
-                return .conflict;
-            }
-            if (existing.accepted) return .{ .accepted = .{
+        switch (try self.classifyReplay(ConfigurationRejection, .configure, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => |existing| return .{ .accepted = .{
                 .replayed = true,
                 .revision = existing.revision,
                 .created = existing.created,
-            } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(ConfigurationRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
+            } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         if (command.require_model and !model_available) {
@@ -1755,12 +1744,10 @@ pub const Store = struct {
             .length = command.text.length,
             .digest = command.text.digest,
         };
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .message or
-                !std.mem.eql(u8, existing.target.slice(), command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (existing.accepted) {
+        switch (try self.classifyReplay(MessageRejection, .message, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => |existing| {
                 const content_id = existing.primary_content_id orelse return error.CorruptStore;
                 const metadata = try self.readContentMetadata(content_id);
                 const admission_id = try self.readMessageAdmission(
@@ -1773,10 +1760,8 @@ pub const Store = struct {
                     .admission_id = admission_id,
                     .content = .{ .length = metadata.length, .digest = metadata.digest },
                 } };
-            }
-            const code = std.meta.stringToEnum(MessageRejection, existing.code.slice()) orelse
-                return error.CorruptStore;
-            return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } };
+            },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } },
         }
         // An unknown sender has no sequence to record a failed send in; a
         // known one sees its own rejected send.
@@ -1856,23 +1841,19 @@ pub const Store = struct {
     ) !SessionStopReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .session_stop or
-                !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (!existing.accepted) return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(SessionStopRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
-            const selection = try self.readSessionStopSelection(command.key.slice());
-            return .{ .accepted = .{
-                .replayed = true,
-                .selection = selection,
-                .completion = try self.sessionStopCompletion(selection),
-                .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
-            } };
+        switch (try self.classifyReplay(SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => {
+                const selection = try self.readSessionStopSelection(command.key.slice());
+                return .{ .accepted = .{
+                    .replayed = true,
+                    .selection = selection,
+                    .completion = try self.sessionStopCompletion(selection),
+                    .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
+                } };
+            },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         if (command.session.len == 0) {
@@ -2037,21 +2018,18 @@ pub const Store = struct {
     ) !ModelInterruptionReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .model_interruption or
-                !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
+        const replay = try self.classifyReplay(ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
+        if (replay == .accepted or replay == .rejected) {
             const saved_target = try self.readModelInterruptionTarget(command.key.slice());
             if (!saved_target.session.eql(command.session.slice()) or
                 saved_target.turn_id != command.turn_id or
                 saved_target.operation_id != command.operation_id) return error.CorruptStore;
-            if (existing.accepted) return .{ .accepted = .{ .replayed = true } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(ModelInterruptionRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
+        }
+        switch (replay) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => return .{ .accepted = .{ .replayed = true } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         var rejection: ?ModelInterruptionRejection = null;
@@ -2210,14 +2188,6 @@ pub const Store = struct {
         return access.finishTransaction(Ordinary.none, faults, self.decidePermissionLocked(command, faults)) catch .infrastructure_failure;
     }
 
-    pub fn denyPermission(
-        self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
-        faults: Faults,
-    ) PermissionDecisionReply {
-        return self.decidePermission(command, faults);
-    }
-
     fn decidePermissionLocked(
         self: *Store,
         command: *const protocol.PermissionDecisionCommand,
@@ -2225,15 +2195,11 @@ pub const Store = struct {
     ) !PermissionDecisionReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .permission_decision or !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (existing.accepted) return .{ .accepted = .{ .replayed = true } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(PermissionDecisionRejection, existing.code.slice()) orelse return error.CorruptStore,
-            } };
+        switch (try self.classifyReplay(PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => return .{ .accepted = .{ .replayed = true } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
         var rejection: ?PermissionDecisionRejection = null;
         if (command.session.len == 0) rejection = .invalid_session_reference else if (command.action_id == 0 or
@@ -5015,7 +4981,7 @@ pub const Store = struct {
             const allowance_used = c.sqlite3_column_int64(select, 3);
             const due_at_ms = c.sqlite3_column_int64(select, 4);
             if (turn_id <= 0 or operation_id <= 0 or attempt_ordinal <= 0 or
-                allowance_used != attempt_ordinal or allowance_used >= maximum_model_attempts or
+                allowance_used != attempt_ordinal or allowance_used >= retry_policy.maximum_attempts or
                 due_at_ms < 0 or due_at_ms > snapshot_ms)
             {
                 return error.CorruptStore;
@@ -5037,13 +5003,13 @@ pub const Store = struct {
             try exec(self.database, "ROLLBACK");
             return null;
         };
-        if (current.attempt_ordinal >= maximum_model_attempts) return error.CorruptStore;
+        if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
         const replacement_ordinal = current.attempt_ordinal + 1;
         const update = try prepare(
             self.database,
             "UPDATE model_operation SET attempt_ordinal=?2,allowance_used=?2,uncertain=1,retry_due_at_ms=0 " ++
                 "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
-                "AND attempt_ordinal=?4 AND allowance_used=?4 AND allowance_used<4 AND retry_due_at_ms<=?5",
+                "AND attempt_ordinal=?4 AND allowance_used=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
         );
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, current.operation_id);
@@ -5743,7 +5709,7 @@ pub const Store = struct {
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 try self.recordTurnOutcomePosition(binding.turn_id);
             },
-            .retryable => |policy| switch (try decideModelRetry(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.database))) {
+            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.database))) {
                 .schedule_at_ms => |due_at_ms| {
                     const update = try prepare(
                         self.database,
@@ -5833,7 +5799,7 @@ pub const Store = struct {
             selected = .{
                 .turn_id = @intCast(turn_id),
                 .operation_id = @intCast(operation_id),
-                .attempt_ordinal = maximum_model_attempts,
+                .attempt_ordinal = retry_policy.maximum_attempts,
             };
             break;
         }
@@ -5850,7 +5816,7 @@ pub const Store = struct {
             );
             defer _ = c.sqlite3_finalize(update_operation);
             try bindI64(update_operation, 1, binding.operation_id);
-            try bindU64(update_operation, 2, maximum_model_attempts);
+            try bindU64(update_operation, 2, retry_policy.maximum_attempts);
             try expectDone(update_operation);
             if (c.sqlite3_changes(self.database) != 1) return error.SelectionChanged;
         }
@@ -5910,9 +5876,7 @@ pub const Store = struct {
         }
         var session_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(operation, 0, &session_ref);
-        const frozen_tools_value = c.sqlite3_column_int(operation, 1);
-        if (frozen_tools_value < 0 or frozen_tools_value > 3) return error.CorruptStore;
-        const frozen_tools: u8 = @intCast(frozen_tools_value);
+        const frozen_tools = try toolSet(c.sqlite3_column_int(operation, 1));
         var current = try self.readSession(session_ref.slice()) orelse return error.CorruptStore;
         const purpose = try self.readModelOperationKind(binding.operation_id);
         // Validate the explicit candidate before imports, projections or effects.
@@ -6061,7 +6025,7 @@ pub const Store = struct {
                 try bindI64(insert_call, 5, name_content_id);
                 try bindI64(insert_call, 6, call_id_content_id);
                 try bindI64(insert_call, 7, arguments_content_id);
-                try bindOptionalText(insert_call, 8, if (rejection_code) |code| code else "");
+                try bindOptionalText(insert_call, 8, if (rejection_code) |code| @tagName(code) else "");
                 try bindNullableI64(insert_call, 9, rejection_content_id);
                 try bindNullableU64(insert_call, 10, acceptance_position);
                 if (rejection_code == null) try bindI64(insert_call, 11, 1) else try bindNullableI64(insert_call, 11, null);
@@ -6495,6 +6459,35 @@ pub const Store = struct {
         created: bool,
         primary_content_id: ?i64,
     };
+
+    fn Replay(comptime Rejection: type) type {
+        return union(enum) {
+            /// No saved command; the caller's transaction stays open.
+            fresh,
+            conflict,
+            accepted: ExistingCommand,
+            rejected: Rejection,
+        };
+    }
+
+    /// Classifies a keyed command against its saved answer. Any saved answer
+    /// ends the caller's transaction before it returns.
+    fn classifyReplay(
+        self: *Store,
+        comptime Rejection: type,
+        kind: CommandKind,
+        key: []const u8,
+        target: []const u8,
+        digest: *const [32]u8,
+    ) !Replay(Rejection) {
+        const existing = try self.readExistingCommand(key) orelse return .fresh;
+        try exec(self.database, "ROLLBACK");
+        if (existing.kind != kind or !existing.target.eql(target) or
+            !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
+        if (existing.accepted) return .{ .accepted = existing };
+        return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse
+            return error.CorruptStore };
+    }
 
     fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
         const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
@@ -7279,8 +7272,10 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
         \\CREATE INDEX model_tool_call_rejections ON model_tool_call(operation_id,call_ordinal) WHERE rejection_code IS NOT NULL;
-        \\CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND allowance_used<4;
-        \\CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0;
+        \\
+    ++ "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND " ++
+        retry_allowance_open_sql ++ ";\n" ++
+        std.fmt.comptimePrint("CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used={d} AND retry_due_at_ms=0;\n", .{retry_policy.maximum_attempts}) ++
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\
@@ -7381,28 +7376,6 @@ fn readUnixMilliseconds(database: *c.sqlite3) !i64 {
     const value = c.sqlite3_column_int64(statement, 0);
     if (value <= 0) return error.ClockReadFailed;
     return value;
-}
-
-fn decideModelRetry(attempt_ordinal: u64, policy: RetryPolicyInput, now_ms: i64) !ModelRetryDecision {
-    if (attempt_ordinal == 0 or attempt_ordinal > maximum_model_attempts) {
-        return error.InvalidAttemptOrdinal;
-    }
-    for (policy.waits_ms) |wait_ms| {
-        if (wait_ms == 0 or wait_ms > std.math.maxInt(i64)) return error.InvalidRetryWait;
-    }
-    if (policy.retry_after_ms) |retry_after_ms| {
-        if (retry_after_ms > std.math.maxInt(i64)) return error.InvalidRetryWait;
-    }
-    if (attempt_ordinal == maximum_model_attempts) return .exhausted;
-    const index: usize = @intCast(attempt_ordinal - 1);
-    var due_at_ms = try std.math.add(i64, now_ms, @intCast(policy.waits_ms[index]));
-    if (policy.retry_after_ms) |delay_ms| {
-        // An external constraint that cannot name a deadline is invalid, not
-        // an infrastructure failure. Preserve normal backoff and valid dates.
-        const provider_due = std.math.add(i64, now_ms, @intCast(delay_ms)) catch due_at_ms;
-        due_at_ms = @max(due_at_ms, provider_due);
-    }
-    return .{ .schedule_at_ms = @max(due_at_ms, policy.retry_after_deadline_ms orelse 0) };
 }
 
 fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *const CurrentConfiguration) !void {
@@ -8626,12 +8599,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
     try deny.session.set("direct/actions");
-    const accepted = storage.denyPermission(&deny, .{});
+    const accepted = storage.decidePermission(&deny, .{});
     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
     try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(public_request)).count);
-    try std.testing.expect(storage.denyPermission(&deny, .{}).accepted.replayed);
+    try std.testing.expect(storage.decidePermission(&deny, .{}).accepted.replayed);
     deny.action_id += 1;
-    try std.testing.expect(storage.denyPermission(&deny, .{}) == .conflict);
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
 
     var permission_update: protocol.ConfigureCommand = .{};
     try permission_update.key.set("action-bypass");
@@ -8695,7 +8668,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
     stale.decision = .allow_once;
-    const rejected = storage.denyPermission(&stale, .{});
+    const rejected = storage.decidePermission(&stale, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
@@ -8819,7 +8792,7 @@ test "Current reports progress alongside an actionable sibling" {
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
     try allow.key.set("mixed-allow");
     try allow.session.set("direct/mixed");
-    try std.testing.expect(storage.denyPermission(&allow, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     const after = try testingSessionReport(&storage, &tmp, "direct/mixed", 1024 * 1024);
     defer std.testing.allocator.free(after);
     var mixed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{});
@@ -9106,7 +9079,7 @@ test "canonical report and Action read failures fence later commands" {
     var blocked_denial: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
     try blocked_denial.key.set("blocked-after-report-failure");
     try blocked_denial.session.set("direct/report-corrupt");
-    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, report_store.denyPermission(&blocked_denial, .{}));
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, report_store.decidePermission(&blocked_denial, .{}));
 
     var action_tmp = std.testing.tmpDir(.{});
     defer action_tmp.cleanup();
@@ -9344,7 +9317,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("mixed-deny");
     try deny.session.set("direct/mixed-calls");
-    try std.testing.expect(storage.denyPermission(&deny, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
     observation = try storage.inspectSession("direct/mixed-calls");
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
     {
@@ -9426,13 +9399,13 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var deny_second: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try deny_second.key.set("result-deny-second");
     try deny_second.session.set("direct/tool-results");
-    try std.testing.expect(storage.denyPermission(&deny_second, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny_second, .{}) == .accepted);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
     var deny_first: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny_first.key.set("result-deny-first");
     try deny_first.session.set("direct/tool-results");
-    try std.testing.expect(storage.denyPermission(&deny_first, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny_first, .{}) == .accepted);
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -9440,13 +9413,13 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expectEqual(first_binding.operation_id + 1, continuation.operation_id);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
-    const replayed_denial = storage.denyPermission(&deny_first, .{});
+    const replayed_denial = storage.decidePermission(&deny_first, .{});
     try std.testing.expect(replayed_denial == .accepted);
     try std.testing.expect(replayed_denial.accepted.replayed);
     var stale_denial: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try stale_denial.key.set("result-stale-denial");
     try stale_denial.session.set("direct/tool-results");
-    const stale_reply = storage.denyPermission(&stale_denial, .{});
+    const stale_reply = storage.decidePermission(&stale_denial, .{});
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
@@ -9731,7 +9704,7 @@ test "terminal call-result import and read failures preserve canonical authority
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
     try deny.key.set("result-import-deny");
     try deny.session.set("direct/result-import");
-    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, import_store.denyPermission(&deny, .{ .content_import = true }));
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, import_store.decidePermission(&deny, .{ .content_import = true }));
     try std.testing.expect(import_store.isFenced());
     try std.testing.expectEqual(@as(u64, 0), try queryU64(import_store.database, "SELECT count(*) FROM core_command WHERE command_key='result-import-deny'"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(import_store.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
@@ -9922,7 +9895,7 @@ test "missing canonical call outcome rows fence history and inspection" {
         };
         try denial.key.set(denial_keys[index]);
         try denial.session.set(session_ref);
-        try std.testing.expect(storage.denyPermission(&denial, .{}) == .accepted);
+        try std.testing.expect(storage.decidePermission(&denial, .{}) == .accepted);
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
@@ -14499,7 +14472,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expect(storage.submitMessage(&message, .{}) == .accepted);
 
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-    const retry_policy = RetryPolicyInput{
+    const policy = retry_policy.Input{
         .waits_ms = .{ 50, 1, 1 },
         // This valid integer cannot name a deadline at the settlement clock.
         .retry_after_ms = 9_223_372_036_854_775_000,
@@ -14509,7 +14482,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try storage.settleModelAttemptFailure(
         first,
         .{ .uncorrelated = "provider_temporary_http_429" },
-        .{ .retryable = retry_policy },
+        .{ .retryable = policy },
         .{},
     );
     try std.testing.expect(!storage.isFenced());
@@ -14552,7 +14525,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try storage.settleModelAttemptFailure(
         second,
         .{ .uncorrelated = "provider_transport_failure" },
-        .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
+        .{ .retryable = .{ .waits_ms = policy.waits_ms } },
         .{},
     );
     try std.testing.io.sleep(.fromMilliseconds(5), .awake);
@@ -14561,7 +14534,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try storage.settleModelAttemptFailure(
         third,
         .{ .uncorrelated = "provider_temporary_http_503" },
-        .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
+        .{ .retryable = .{ .waits_ms = policy.waits_ms } },
         .{},
     );
     try std.testing.io.sleep(.fromMilliseconds(5), .awake);
@@ -14570,7 +14543,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try storage.settleModelAttemptFailure(
         fourth,
         .{ .uncorrelated = "provider_transport_failure" },
-        .{ .retryable = .{ .waits_ms = retry_policy.waits_ms } },
+        .{ .retryable = .{ .waits_ms = policy.waits_ms } },
         .{},
     );
 
@@ -14600,92 +14573,6 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     var resolution: protocol.Bounded(96) = .{};
     try readText(statement, 5, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
-}
-
-test "model retry decision applies configured waits Retry-After and exhaustion" {
-    const defaults = RetryPolicyInput{ .waits_ms = .{ 2_000, 4_000, 8_000 } };
-    try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_at_ms = 2_000 },
-        try decideModelRetry(1, defaults, 0),
-    );
-    try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_at_ms = 4_000 },
-        try decideModelRetry(2, defaults, 0),
-    );
-    try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_at_ms = 8_000 },
-        try decideModelRetry(3, defaults, 0),
-    );
-    try std.testing.expectEqual(
-        ModelRetryDecision.exhausted,
-        try decideModelRetry(4, defaults, 0),
-    );
-
-    try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_at_ms = 6_000 },
-        try decideModelRetry(2, .{
-            .waits_ms = defaults.waits_ms,
-            .retry_after_ms = 6_000,
-        }, 0),
-    );
-    try std.testing.expectEqual(
-        ModelRetryDecision{ .schedule_at_ms = 8_000 },
-        try decideModelRetry(3, .{
-            .waits_ms = defaults.waits_ms,
-            .retry_after_ms = 6_000,
-        }, 0),
-    );
-
-    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(0, defaults, 0));
-    try std.testing.expectError(error.InvalidAttemptOrdinal, decideModelRetry(5, defaults, 0));
-    try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
-        .waits_ms = .{ 0, 4_000, 8_000 },
-    }, 0));
-    try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
-        .waits_ms = .{ @as(u64, @intCast(std.math.maxInt(i64))) + 1, 4_000, 8_000 },
-    }, 0));
-    try std.testing.expectError(error.InvalidRetryWait, decideModelRetry(1, .{
-        .waits_ms = defaults.waits_ms,
-        .retry_after_ms = @as(u64, @intCast(std.math.maxInt(i64))) + 1,
-    }, 0));
-}
-
-test "retry dates stay absolute across body transfer and checked settlement arithmetic" {
-    const now_ms: i64 = 1_700_000_015_000;
-    const waits = [3]u64{ 2_000, 4_000, 8_000 };
-    // Headers arrived fifteen seconds ago with a date ten seconds ahead.
-    // A progressing body crossed that deadline: only normal backoff remains.
-    for ([_]i64{ now_ms - 5_000, now_ms, now_ms + 1_000 }) |deadline| {
-        try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 2_000 }, try decideModelRetry(1, .{
-            .waits_ms = waits,
-            .retry_after_deadline_ms = deadline,
-        }, now_ms));
-    }
-    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 10_000 }, try decideModelRetry(1, .{
-        .waits_ms = waits,
-        .retry_after_deadline_ms = now_ms + 10_000,
-        .retry_after_ms = 6_000,
-    }, now_ms));
-    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 6_000 }, try decideModelRetry(1, .{
-        .waits_ms = waits,
-        .retry_after_deadline_ms = now_ms + 3_000,
-        .retry_after_ms = 6_000,
-    }, now_ms));
-    try std.testing.expectEqual(ModelRetryDecision.exhausted, try decideModelRetry(4, .{
-        .waits_ms = waits,
-        .retry_after_deadline_ms = std.math.maxInt(i64),
-    }, now_ms));
-    const extreme_delay: u64 = 9_223_372_036_854_775_000;
-    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 2_000 }, try decideModelRetry(1, .{
-        .waits_ms = waits,
-        .retry_after_ms = extreme_delay,
-    }, now_ms));
-    try std.testing.expectEqual(ModelRetryDecision{ .schedule_at_ms = now_ms + 10_000 }, try decideModelRetry(1, .{
-        .waits_ms = waits,
-        .retry_after_ms = extreme_delay,
-        .retry_after_deadline_ms = now_ms + 10_000,
-    }, now_ms));
-    try std.testing.expectError(error.Overflow, decideModelRetry(1, .{ .waits_ms = waits }, std.math.maxInt(i64) - 1));
 }
 
 test "canonical historical read failure fences dispatch without a fabricated outcome" {
