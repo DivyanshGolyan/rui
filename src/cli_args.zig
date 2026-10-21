@@ -59,11 +59,7 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets active capacity {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports.", .{product_defaults.active_capacity}), .options = destination },
             .host_stop => .{ .resource = .host, .name = "stop", .description = "Request whole-Host shutdown, affecting every Session in this Store. Retry lost acknowledgment with the original --instance only; acknowledgment is not retirement.", .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
-            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = &.{
-                // The managed endpoint and development endpoints are exclusive.
-                .{ "codex", "provider-endpoint" },                     .{ "codex", "provider-ca-file" }, .{ "codex", "test-codex-fixture-endpoint" },
-                .{ "test-codex-fixture-endpoint", "provider-endpoint" },
-            } },
+            .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Without --codex or a development endpoint it makes no model requests. --active-capacity defaults to {d}.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), flag("codex"), value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS") } ++ serve_test, .conflicts = endpoint_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults. Existing Sessions are unchanged. --clear-model removes only the saved model.", .options = destination ++ binding ++ &[_]Option{flag("clear-model")}, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
@@ -130,19 +126,48 @@ const settings = &[_]Option{
     value("output-schema", "FILE|-"), flag("text-output"),             value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
 };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
+/// The managed endpoint and development endpoints are exclusive.
+const endpoint_conflicts = &[_][2][]const u8{
+    .{ "codex", "provider-endpoint" },
+    .{ "codex", "provider-ca-file" },
+    .{ "codex", "test-codex-fixture-endpoint" },
+    .{ "test-codex-fixture-endpoint", "provider-endpoint" },
+};
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
-    hiddenValue("test-codex-fixture-endpoint"),         hiddenValue("test-bash-scratch-limit-bytes"),               hiddenValue("test-retention-entry-capacity"),
-    hiddenFlag("test-retention-removal-failure"),       .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true }, hiddenValue("test-provider-inactivity-seconds"),
-    hiddenValue("test-retry-waits-ms"),                 hiddenValue("test-before-launch-delay-ms"),                 hiddenValue("test-before-result-delay-ms"),
-    hiddenValue("test-model-result-gate-path"),         hiddenValue("test-inspection-reply-gate-path"),             hiddenValue("test-inspection-reply-delay-ms"),
-    hiddenValue("test-client-send-buffer-bytes"),       hiddenFlag("test-phase-trace"),                             hiddenValue("test-observation-fd"),
-    hiddenValue("test-observation-state-fd"),           hiddenValue("test-observation-plan"),                       hiddenValue("test-transition"),
-    hiddenValue("test-transition-gate-path"),           hiddenValue("test-response-capture-gate-path"),             hiddenValue("test-response-capture-gate-min-written-bytes"),
-    hiddenValue("test-bash-observed-exit-gate-path"),   hiddenValue("test-bash-cleanup-gate-path"),                 hiddenValue("test-control-gate-keys"),
-    hiddenValue("test-control-gate-path"),              hiddenFlag("test-suppress-first-control-hint"),             hiddenFlag("test-sqlite-diagnostics"),
-    hiddenFlag("test-sqlite-cache-spill-off"),          hiddenValue("test-sqlite-cache-kib"),                       hiddenValue("test-request-scratch-limit"),
-    hiddenValue("test-request-preparation-byte-allowance"), hiddenValue("test-request-preparation-item-allowance"), hiddenValue("test-request-preparation-advance-delay-ms"),
+    .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
+    hiddenValue("test-codex-fixture-endpoint"),
+    hiddenValue("test-bash-scratch-limit-bytes"),
+    hiddenValue("test-retention-entry-capacity"),
+    hiddenFlag("test-retention-removal-failure"),
+    hiddenValue("test-provider-inactivity-seconds"),
+    hiddenValue("test-retry-waits-ms"),
+    hiddenValue("test-before-launch-delay-ms"),
+    hiddenValue("test-before-result-delay-ms"),
+    hiddenValue("test-model-result-gate-path"),
+    hiddenValue("test-inspection-reply-gate-path"),
+    hiddenValue("test-inspection-reply-delay-ms"),
+    hiddenValue("test-client-send-buffer-bytes"),
+    hiddenFlag("test-phase-trace"),
+    hiddenValue("test-observation-fd"),
+    hiddenValue("test-observation-state-fd"),
+    hiddenValue("test-observation-plan"),
+    hiddenValue("test-transition"),
+    hiddenValue("test-transition-gate-path"),
+    hiddenValue("test-response-capture-gate-path"),
+    hiddenValue("test-response-capture-gate-min-written-bytes"),
+    hiddenValue("test-bash-observed-exit-gate-path"),
+    hiddenValue("test-bash-cleanup-gate-path"),
+    hiddenValue("test-control-gate-keys"),
+    hiddenValue("test-control-gate-path"),
+    hiddenFlag("test-suppress-first-control-hint"),
+    hiddenFlag("test-sqlite-diagnostics"),
+    hiddenFlag("test-sqlite-cache-spill-off"),
+    hiddenValue("test-sqlite-cache-kib"),
+    hiddenValue("test-request-scratch-limit"),
+    hiddenValue("test-request-preparation-byte-allowance"),
+    hiddenValue("test-request-preparation-item-allowance"),
+    hiddenValue("test-request-preparation-advance-delay-ms"),
 };
 
 /// The bare `rui [PROMPT]` entry, which has no resource help of its own.
@@ -345,7 +370,6 @@ pub const Parsed = struct {
         };
         return null;
     }
-
 };
 
 pub fn resourceHelp(resource: Resource, writer: *std.Io.Writer) !void {
