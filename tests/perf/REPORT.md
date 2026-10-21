@@ -20,7 +20,7 @@ Each N has 3 fresh Hosts; the IQR is (max − min)/2 over those three. Headline 
 | Before, earlier P2 single run (**measured**) | ≈88/s (5,300 in 60 s; two threads at ≈49.7/s and ≈38.7/s) | 3.07% of one core (1.84 CPU-s / 60.01 s) | `240aef2e` |
 | Before, P1 A1 (**measured**) | 87.88/s proxy (5,278 voluntary in 60.059 s: two threads at 2,955 and 2,323; 91 nonvoluntary) | 1.70 CPU-s / 60.059 s ≈ 2.83% of one core | `240aef2e` (binary `e2835cb2…3a50`) |
 | Before, P1 A2–A3 | pending (alternating with B) | pending | `240aef2e` |
-| After, P1 B1–B3 (intake deadline wait) | pending (B build started 19:50:44 UTC, outside measured windows) | pending | [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) (Sol review: no findings; selected suite pending; **not** a fixed claim) |
+| After, P1 B1–B3 (intake deadline wait) | pending (B ReleaseFast build from `4950c22e`, same options and caches as A, 42/42 steps, SHA-256 `ec840083…b439`; B1 started 19:57:22 UTC, then A2/B2/A3/B3 serially, no compiles or tests during windows) | pending | [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) (Sol review: no findings; selected suite pending; **not** a fixed claim) |
 | Failed candidate, not measured | — | — | [`f6a2df85`](https://github.com/DivyanshGolyan/rui/commit/f6a2df856fba8a68cb875f8b7432702910c734de): failed `admission-debug-integration`; review found the same defect (closed exchanges waited up to 1 s for removal) |
 | Pre-run napkin (**estimated**) | ≈90/s before; ≈40/s after (only the intake 20 ms timer is removed) | not estimated | — |
 
