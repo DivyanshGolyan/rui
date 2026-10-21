@@ -85,24 +85,69 @@ const compaction_help = compaction_policy ++
     \\
 ;
 
-const Option = struct { name: []const u8, argument: ?[]const u8 = null };
+const Option = struct {
+    name: []const u8,
+    argument: ?[]const u8 = null,
+    /// A hex spelling of this exact-identity option's bytes, which argv cannot
+    /// carry. Both spellings fill the named option; giving both conflicts.
+    hex_of: ?[]const u8 = null,
+    /// The identity's byte bound; `cli.zig` pins each to its protocol bound.
+    hex_limit: usize = 0,
+    /// Test-only: accepted by its owning operation but absent from help.
+    hidden: bool = false,
+    /// Accepted more than once; Parsed.all yields every value in order.
+    repeated: bool = false,
+};
 fn value(name: []const u8, argument: []const u8) Option {
     return .{ .name = name, .argument = argument };
 }
 fn flag(name: []const u8) Option {
     return .{ .name = name };
 }
-const destination = &[_]Option{ value("store", "PATH"), value("store-hex", "HEX") };
-const session = &[_]Option{ value("session", "REF"), value("session-hex", "HEX") };
-const key = &[_]Option{ value("key", "KEY"), value("key-hex", "HEX") };
-const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), value("key-hex", "HEX") };
+fn hex(name: []const u8, of: []const u8, limit: usize) Option {
+    return .{ .name = name, .argument = "HEX", .hex_of = of, .hex_limit = limit };
+}
+fn hiddenValue(name: []const u8) Option {
+    return .{ .name = name, .argument = "VALUE", .hidden = true };
+}
+fn hiddenFlag(name: []const u8) Option {
+    return .{ .name = name, .hidden = true };
+}
+const destination = &[_]Option{ value("store", "PATH"), hex("store-hex", "store", 492) };
+const session = &[_]Option{ value("session", "REF"), hex("session-hex", "session", 128) };
+const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
+const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{ "session", "session-hex" }};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
+/// Session settings shared by `session configure` and the live /configure.
+const settings = &[_]Option{
+    value("workspace", "PATH"),       value("instructions", "FILE|-"), value("tools", "bash|edit|none"),              value("permission-mode", "bypass|ask"),
+    value("output-schema", "FILE|-"), flag("text-output"),             value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
+};
+const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
+/// Host fault injection and observation, consumed only by host serve.
+const serve_test = &[_]Option{
+    hiddenValue("test-codex-fixture-endpoint"),         hiddenValue("test-bash-scratch-limit-bytes"),               hiddenValue("test-retention-entry-capacity"),
+    hiddenFlag("test-retention-removal-failure"),       .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true }, hiddenValue("test-provider-inactivity-seconds"),
+    hiddenValue("test-retry-waits-ms"),                 hiddenValue("test-before-launch-delay-ms"),                 hiddenValue("test-before-result-delay-ms"),
+    hiddenValue("test-model-result-gate-path"),         hiddenValue("test-inspection-reply-gate-path"),             hiddenValue("test-inspection-reply-delay-ms"),
+    hiddenValue("test-client-send-buffer-bytes"),       hiddenFlag("test-phase-trace"),                             hiddenValue("test-observation-fd"),
+    hiddenValue("test-observation-state-fd"),           hiddenValue("test-observation-plan"),                       hiddenValue("test-transition"),
+    hiddenValue("test-transition-gate-path"),           hiddenValue("test-response-capture-gate-path"),             hiddenValue("test-response-capture-gate-min-written-bytes"),
+    hiddenValue("test-bash-observed-exit-gate-path"),   hiddenValue("test-bash-cleanup-gate-path"),                 hiddenValue("test-control-gate-keys"),
+    hiddenValue("test-control-gate-path"),              hiddenFlag("test-suppress-first-control-hint"),             hiddenFlag("test-sqlite-diagnostics"),
+    hiddenFlag("test-sqlite-cache-spill-off"),          hiddenValue("test-sqlite-cache-kib"),                       hiddenValue("test-request-scratch-limit"),
+    hiddenValue("test-request-preparation-byte-allowance"), hiddenValue("test-request-preparation-item-allowance"), hiddenValue("test-request-preparation-advance-delay-ms"),
+};
 
-/// Exact-identity selectors whose hex spelling carries bytes argv cannot.
-pub const hex_selectors = [_][2][]const u8{ .{ "store-hex", "store" }, .{ "session-hex", "session" }, .{ "key-hex", "key" } };
+/// The bare `rui [PROMPT]` entry, which has no resource help of its own.
+pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1] }, .positional = "PROMPT" };
+/// The live Session's /configure: settings only; the Session is its address.
+pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings, .conflicts = settings_conflicts };
+/// The live Session's /setup: the defaults grammar, where none means inspect.
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model") }, .conflicts = &.{.{ "model", "clear-model" }} };
 
 pub const Definition = struct {
     resource: Resource,
