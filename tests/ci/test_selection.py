@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import CHECK_COVERS, RENDERER_HARNESSES, execution_batches, select, setup_requirements
+from select_tests import RENDERER_HARNESSES, execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -82,32 +82,14 @@ class SelectionTest(unittest.TestCase):
                         "review", AVAILABLE)
         self.assertNotIn("check", result["targets"] + result["native_targets"])
 
-    def test_renderer_diff_skips_check_before_landing_but_not_on_main_push(self):
+    def test_renderer_diff_skips_check_before_landing(self):
         for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
                       ["src/ConversationViewport.zig"], ["src/session_sequence_model_test.zig"],
                       ["src/request_encoding.zig"], ["README.md"]):
             with self.subTest(paths=paths):
                 landing = select(paths, "review", AVAILABLE)
-                main = select(paths, "review", AVAILABLE, main_push=True)
                 for family in ("targets", "native_targets"):
                     self.assertNotIn("check", landing[family])
-                    self.assertIn("check", main[family])
-                    # Only check is added; targets it does not cover stay as selected.
-                    self.assertEqual(set(main[family]) - {"check"},
-                                     set(landing[family]) - CHECK_COVERS)
-        # check-full already covers check on a main push.
-        main = select(["build.zig"], "review", AVAILABLE, main_push=True)
-        self.assertIn("check-full", main["targets"])
-        self.assertNotIn("check", main["targets"])
-        workflow = Path(".github/workflows/check.yml").read_text()
-        script = dedent(workflow.split("        run: |\n", 1)[1]).split("python3 tests/ci/select_tests.py", 1)[0]
-        for event, ref, expected in (("push", "main", True), ("push", "wip/land-9", False),
-                                     ("pull_request", "main", False)):
-            with self.subTest(event=event, ref=ref):
-                result = subprocess.run(["bash", "-c", script + 'echo "${fallback[@]}"'], capture_output=True,
-                                        text=True, check=True, env={**os.environ, "EVENT_NAME": event,
-                                                                    "REF_NAME": ref, "BASE": "HEAD"})
-                self.assertEqual("--main-push" in result.stdout.split(), expected)
 
     def test_strict_paths_never_retry(self):
         # Each of these selected retryable suites before strictness decided retries.
@@ -604,7 +586,7 @@ class SelectionTest(unittest.TestCase):
     def test_wip_pushes_qualify_the_complete_candidate_even_after_an_empty_commit(self):
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
-            r'(?s)        run: \|\n(          set -euo pipefail\n          fallback=\(\).*?)'
+            r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
             r'          python3 tests/ci/select_tests.py', workflow)[1])
         with tempfile.TemporaryDirectory() as directory:
             def git(*args):
@@ -633,35 +615,6 @@ class SelectionTest(unittest.TestCase):
                 sys.executable, str(Path('tests/ci/select_tests.py').resolve()),
                 '--base', result.stdout, '--phase', 'review'], cwd=directory, text=True)
             self.assertEqual(json.loads(selected)['targets'], ['test-logic'])
-
-    def test_unreachable_push_base_falls_back_without_hiding_review_errors(self):
-        with tempfile.TemporaryDirectory() as directory:
-            def git(*args):
-                return subprocess.check_output(
-                    ["git", "-c", "user.name=Selector test", "-c", "user.email=test@example.invalid",
-                     *args], cwd=directory, text=True, stderr=subprocess.DEVNULL).strip()
-            git("init", "-b", "main")
-            root = Path(directory)
-            (root / "build.zig").write_text(Path("build.zig").read_text())
-            git("add", "build.zig")
-            git("commit", "-m", "base")
-            git("checkout", "-b", "candidate")
-            (root / "src").mkdir()
-            (root / "src/request_encoding.zig").write_text("// changed owner\n")
-            git("add", ".")
-            git("commit", "-m", "candidate")
-            command = ["python3", str(Path("tests/ci/select_tests.py").resolve()),
-                       "--base", "1" * 40, "--phase", "development"]
-            missing = subprocess.run(command, cwd=directory, capture_output=True, text=True)
-            self.assertNotEqual(missing.returncode, 0)
-            for base in ("1" * 40, "0" * 40):
-                command[command.index("--base") + 1] = base
-                fallback = subprocess.run(command + ["--fallback-base", "main"],
-                                          cwd=directory, capture_output=True, text=True)
-                self.assertEqual(fallback.returncode, 0, fallback.stderr)
-                selected = json.loads(fallback.stdout)
-                self.assertEqual(selected["targets"], ["test-logic"])
-                self.assertEqual(selected["base"], git("rev-parse", "main"))
 
 
 class FullCheckPartitionTest(unittest.TestCase):

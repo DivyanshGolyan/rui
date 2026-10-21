@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Fast-forward main to a green wip/land-N tip, then start main's post-push CI.
+"""Fast-forward main and stable to a green wip/land-N tip.
 
 Runs from trusted main code when Selected checks or the upgrade check
 completes on a landing tip. The tip is fetched as data and pushed, never run.
-It lands only the branch's current tip, only as a non-force fast-forward, only
-while no `landing-freeze` issue is open, and only on the latest Selected run
-for that exact commit; a strict delta also needs its upgrade run and the Mac
-aggregate. Anything else waits for the next completion or for the lander lane
-to restack.
+It lands only the branch's current tip, only as a non-force fast-forward, and
+only on the latest Selected push run for that exact commit; a strict delta
+against main also needs its upgrade run and the Mac aggregate. One atomic
+push moves main and stable together, so stable is always the last landed
+tip. Anything else waits for the next completion or for the lander lane to
+restack.
 """
 import argparse
 import json
@@ -15,23 +16,40 @@ import os
 import re
 import subprocess
 
-from main_health import FREEZE, UPGRADE, changed, dispatch, gh, git, latest, pushes, required
+from select_tests import changed_paths
 from strict_paths import strict
 
 BRANCH = re.compile(r"wip/land-[0-9]+")
+UPGRADE = "previous-release-upgrade.yml"
 # GITHUB_TOKEN has no `workflows` permission, so GitHub rejects its push of
 # any commit that changes a workflow file.
 WORKFLOW_FILES = ".github/workflows/"
 
 
-def decide(frozen, fast_forward, selected, upgrade, changed):
-    """Return 'frozen', 'not-fast-forward', 'pending', 'red', 'manual' or 'land'.
+def git(*args):
+    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def gh(*args):
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+
+def latest(workflow, sha, branch):
+    """The newest push run of workflow on this exact commit and branch; reruns keep the run."""
+    repository = os.environ["GITHUB_REPOSITORY"]
+    rows = json.loads(gh("api", f"repos/{repository}/actions/workflows/{workflow}/runs"
+                                f"?head_sha={sha}&branch={branch}&event=push&per_page=100"))["workflow_runs"]
+    rows = [row for row in rows if row["head_sha"] == sha and row["head_branch"] == branch
+            and row["head_repository"]["full_name"] == repository]
+    return max(rows, key=lambda row: row["id"], default=None)
+
+
+def decide(fast_forward, selected, upgrade, changed):
+    """Return 'not-fast-forward', 'pending', 'red', 'manual' or 'land'.
 
     selected and upgrade are the latest runs on the tip, or None; selected
     carries its `macos` aggregate conclusion when the delta is strict.
     """
-    if frozen:
-        return "frozen"
     if not fast_forward:
         return "not-fast-forward"
     required = [selected, *([upgrade] if strict(changed) else [])]
@@ -76,16 +94,15 @@ def main():
 
 
 def land(branch, sha, main_sha):
-    """Decide one tip and land it; True when main is now sha."""
+    """Decide one tip and land it; True when main and stable are now sha."""
     fast_forward = subprocess.run(["git", "merge-base", "--is-ancestor", main_sha, sha]).returncode == 0
-    paths = changed(main_sha, sha) if fast_forward else []
-    frozen = json.loads(gh("issue", "list", "--repo", os.environ["GITHUB_REPOSITORY"], "--state", "open",
-                           "--label", FREEZE, "--json", "number"))
+    # NUL-delimited, so Git never quotes a strict path out of recognition.
+    paths = changed_paths(main_sha, sha)[0] if fast_forward else []
     selected = latest("check.yml", sha, branch)
     upgrade = latest(UPGRADE, sha, branch) if strict(paths) else None
     if selected and strict(paths):
         selected["macos"] = macos(selected)
-    verdict = decide(bool(frozen), fast_forward, selected, upgrade, paths)
+    verdict = decide(fast_forward, selected, upgrade, paths)
     links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
                       for name, run in (("Selected", selected), ("upgrade", upgrade)) if run)
     print(f"{branch} {sha} onto main {main_sha}: {verdict}\n{links}")
@@ -93,38 +110,18 @@ def land(branch, sha, main_sha):
         print("GITHUB_TOKEN cannot push workflow-file changes; this tip needs a manual push.")
     if verdict != "land":
         return False
-    repair(main_sha)
-    # Non-force: a moved main rejects the push instead of being overwritten.
-    pushed = subprocess.run(["git", "push", "origin", f"{sha}:refs/heads/main"], capture_output=True, text=True)
+    # Atomic and non-force: a moved main or a stable off main's line rejects
+    # both refs, so stable never names a tip that main did not take.
+    pushed = subprocess.run(["git", "push", "--atomic", "origin", f"{sha}:refs/heads/main",
+                             f"{sha}:refs/heads/stable"], capture_output=True, text=True)
     if pushed.returncode:
         git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main")
         if git("rev-parse", "origin/main") != main_sha:
             print(f"not a fast-forward: main moved from {main_sha}; restack {branch}")
             return False
-        raise SystemExit(f"Push of {sha} to main failed:\n{pushed.stderr}")
-    print(f"Fast-forwarded main {main_sha} to {sha}")
-    dispatch(sha, main_sha, required(main_sha, sha))
+        raise SystemExit(f"Push of {sha} to main and stable failed; neither moved:\n{pushed.stderr}")
+    print(f"Fast-forwarded main and stable from {main_sha} to {sha}")
     return True
-
-
-def repair(main_sha):
-    """Start main's missing post-push runs before landing on top of it.
-
-    Only main's head can get exact dispatched runs, so a push whose dispatch
-    failed is repaired here, before another push strands it.
-    """
-    subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/heads/stable:refs/remotes/origin/stable"],
-                   capture_output=True)
-    stable = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "origin/stable"],
-                            capture_output=True, text=True).stdout.strip() or None
-    if stable and subprocess.run(["git", "merge-base", "--is-ancestor", main_sha, stable]).returncode == 0:
-        return
-    # Fails, so nothing lands, until GitHub's activity shows every push since stable.
-    before = pushes(stable, main_sha)[main_sha]
-    missing = [workflow for workflow in required(before, main_sha) if latest(workflow, main_sha, "main") is None]
-    if missing:
-        print(f"main {main_sha} has no post-push {', '.join(missing)}; dispatching before landing on it")
-        dispatch(main_sha, before, missing)
 
 
 if __name__ == "__main__":

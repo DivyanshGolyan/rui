@@ -1,6 +1,6 @@
 name: Auto-land
-# Fast-forward main to a wip/land-N tip whose gates passed, then dispatch
-# main's post-push CI. See tests/ci/auto_land.py.
+# Fast-forward main and stable to a wip/land-N tip whose gates passed.
+# See tests/ci/auto_land.py.
 on:
   workflow_run:
     workflows: [Selected checks, Previous installed-release upgrade]
@@ -9,8 +9,7 @@ on:
 
 permissions:
   contents: write
-  actions: write
-  issues: read
+  actions: read
 
 concurrency:
   # One landing decision at a time; a running push is never cancelled. A newer
@@ -20,8 +19,8 @@ concurrency:
 
 jobs:
   land:
-    # Pushes and dispatches need write access; pull_request runs never land.
-    if: ${{ contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
+    # Only landing-tip pushes land; pull_request runs never do.
+    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

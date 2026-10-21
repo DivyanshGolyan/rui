@@ -1,15 +1,9 @@
 name: Selected checks
 on:
   push:
-    branches: [main, 'wip/land-*']
+    branches: ['wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Post-push runs for GITHUB_TOKEN pushes to main, which start no push runs.
-  workflow_dispatch:
-    inputs:
-      base:
-        description: Previous main commit; selection covers base..main like a push
-        required: true
 
 permissions:
   contents: read
@@ -17,9 +11,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
-  # Every main push keeps its own post-push result for the stable ref.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   plan:
@@ -42,25 +35,17 @@ jobs:
       - name: Select existing targets
         id: select
         env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before || inputs.base }}
+          BASE: ${{ github.event.pull_request.base.sha }}
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          fallback=()
-          if [ "$EVENT_NAME" != pull_request ]; then
-            # A dispatched base must resolve; only pushes may lose their predecessor.
-            if [ "$EVENT_NAME" = push ]; then fallback=(--fallback-base origin/main); fi
-            # Landing tips may skip check; every main push always runs it.
-            if [ "$REF_NAME" = main ]; then fallback+=(--main-push); fi
-            if [[ "$REF_NAME" = wip/* ]]; then
-              # A landing tip must cover its complete delta against main.
-              BASE=$(git merge-base HEAD origin/main)
-            fi
+          if [ "$EVENT_NAME" = push ]; then
+            # A landing tip must cover its complete delta against main.
+            BASE=$(git merge-base HEAD origin/main)
           fi
-          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" "${fallback[@]}" > selection.json
+          python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" > selection.json
           cat selection.json
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
           git diff --check "$BASE" HEAD
