@@ -346,7 +346,6 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Session-list resource census | `session_list_integration.py`, `session_list_release_proof.py` | Held-cleanup and leak negatives are opt-in, Linux |
 | Reply delivery inactivity and drain | `'reply delivery'`, `server-delivery-integration`, `PeerCensus` | Run apart from load. Not Mac drain or SIGPIPE |
 | Controls queue behind settlement | `'active model settlement'`, `control_integration.py` | Store hold proves exclusion, not latency. Unordered contention reports unavailable |
-| Delayed cleanup keeps custody generation | `'cleanup delay'` | None |
 | Control reply bounds | `'exact worst-case'` | Full 128-byte keys. No fixed 8 KiB allowance |
 | [Conversation pages](ARCHITECTURE.md#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `conversation_page_integration.py` | No earlier-prefix authentication or aggregate memory |
 | [Proposal reads](ARCHITECTURE.md#historical-proposal-reads) | `proposal-integration` | Not activity chronology. Cannot clear historical Mac reds |

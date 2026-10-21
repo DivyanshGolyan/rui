@@ -971,7 +971,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		return endpoint.server.Close()
 	})
 	deadline := measurement.NewDeadline(2 * time.Minute)
-	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "host-stderr.log"), deadline, "--test-cleanup-delay-ms", "500")
+	host, err := measurement.StartHost(binary, store, endpoint.URL(), 1, filepath.Join(directory, "host-stderr.log"), deadline)
 	if err != nil {
 		return result, err
 	}
@@ -1098,14 +1098,16 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		return result, err
 	}
 	result["inspection_ms"] = float64(time.Since(inspectStarted).Microseconds()) / 1000
-	recordPortableSample(result, "delayed_cleanup_sample", host)
-	result["delayed_cleanup_execution"] = inspection["execution"]
+	recordPortableSample(result, "classified_sample", host)
+	result["classified_execution"] = inspection["execution"]
+	// Classification settles the model Attempt and releases its custody;
+	// proposed Actions wait for permission without holding any.
 	execution, ok := inspection["execution"].(map[string]any)
-	if !ok || execution["custody_occupied"] != "1" {
-		return result, fmt.Errorf("delayed cleanup did not retain one custody slot: %v", inspection["execution"])
+	if !ok || execution["custody_occupied"] != "0" {
+		return result, fmt.Errorf("classified Attempt retained custody: %v", inspection["execution"])
 	}
 	if population, populationError := namedScratchPopulation(store); populationError == nil {
-		result["delayed_cleanup_named_scratch"] = population
+		result["classified_named_scratch"] = population
 	} else {
 		return result, populationError
 	}

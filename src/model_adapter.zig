@@ -1011,7 +1011,7 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
-    try std.testing.expect(storage.configure(&configuration, .{}) == .accepted);
+    try std.testing.expect(storage.configure(&configuration, true, .{}) == .accepted);
 
     const text = &@as([80]u8, @splat('x'));
     const file = try tmp.dir.createFile(std.testing.io, "prep-file", .{ .read = true });
@@ -1146,7 +1146,7 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
-        try std.testing.expect(self.storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(self.storage.configure(&command, true, .{}) == .accepted);
     }
 
     fn submit(self: *PreparationTestSetup, file_name: []const u8, key: []const u8, session: []const u8, text: []const u8) !void {
@@ -1502,7 +1502,7 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
             .digest = protocol.contentDigest(schema_json),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&command, true, .{}) == .accepted);
     }
     try setup.submit("composed-message-file", "composed-message", session, "do work");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -1576,7 +1576,7 @@ test "request preparation minimal golden is exact across schedules" {
             try update.session.set(golden_session);
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
-            try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+            try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
         }
         var file_name: [32]u8 = undefined;
         const file = try std.fmt.bufPrint(&file_name, "prep-golden-file-{d}", .{index});
@@ -1652,7 +1652,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(setup.storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&command, true, .{}) == .accepted);
     }
     try setup.submit("prep-escape-file", "prep-escape-message", "direct/prep-escape", user_text);
 
@@ -1699,7 +1699,7 @@ test "request preparation escapes instructions and user content" {
             .digest = protocol.contentDigest(instructions_text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(setup_two.storage.configure(&command, .{}) == .accepted);
+        try std.testing.expect(setup_two.storage.configure(&command, true, .{}) == .accepted);
     }
     try setup_two.submit("prep-escape2-file", "prep-escape2-message", "direct/prep-escape2", user_text);
     var admitted_two = (try setup_two.storage.admitNextModelAttempt(.{})).?;
@@ -1764,7 +1764,7 @@ test "request preparation freezes settings at admission" {
         update.configuration.tools.count = 2;
         update.configuration.tools.values[0] = .bash;
         update.configuration.tools.values[1] = .edit;
-        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", "direct/prep-settings", "hi");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -1778,7 +1778,7 @@ test "request preparation freezes settings at admission" {
         try update.session.set("direct/prep-settings");
         update.configuration.tools.state = .value;
         update.configuration.tools.count = 0;
-        try std.testing.expect(setup.storage.configure(&update, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
     }
     const view = try setup.storage.openHistoricalView(binding);
     var used: std.atomic.Value(u64) = .init(0);
@@ -2303,7 +2303,7 @@ test "request preparation authenticates the historical requested model binding" 
     var revision: protocol.ConfigureCommand = .{};
     try revision.key.set("binding-revision");
     try revision.session.set(session);
-    try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+    try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
     const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
@@ -2455,13 +2455,13 @@ test "compaction public preparation rejects incompatible selected base and suffi
         var revision: protocol.ConfigureCommand = .{};
         try revision.key.set("binding-revision-two");
         try revision.session.set(session);
-        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
         const suffix = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         // The suffix is produced against a distinct saved revision.
         try setup.submit("binding-two", "binding-two", session, "later");
         try settleComposedForTesting(&setup, suffix, "binding-suffix", .reasoning, "{\"type\":\"reasoning\",\"id\":\"suffix\",\"encrypted_content\":\"opaque\"}", "suffix", &.{});
         try revision.key.set("binding-revision-three");
-        try std.testing.expect(setup.storage.configure(&revision, .{}) == .accepted);
+        try std.testing.expect(setup.storage.configure(&revision, true, .{}) == .accepted);
         const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
         var used: std.atomic.Value(u64) = .init(0);
         var retained: ?named_scratch.Owner = null;

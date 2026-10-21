@@ -376,7 +376,6 @@ def main(mode="all", correlation_case="all"):
     continuation_thread = None
     proposal_milestones = None
     proposal_gate_keeper = None
-    rollback_milestones = None
     continuation_diagnostics = None
     completed = False
     try:
@@ -913,7 +912,7 @@ def main(mode="all", correlation_case="all"):
         success_thread.start()
         success_url = f"http://127.0.0.1:{success_endpoint.server_port}/responses"
         success_store = state / "success-store"
-        success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
+        success_host = start_host(success_store, success_url)
         processes.append(success_host)
         configure_lost_reply(
             state, success_store, "success-config", "direct/success", "model-a"
@@ -921,7 +920,7 @@ def main(mode="all", correlation_case="all"):
         stop_host(success_host)
         processes.remove(success_host)
 
-        success_host = start_host(success_store, success_url, "--test-cleanup-delay-ms", "2000")
+        success_host = start_host(success_store, success_url)
         processes.append(success_host)
         recovered_configuration = command(
             "request", "recover",
@@ -959,10 +958,6 @@ def main(mode="all", correlation_case="all"):
         assert hashlib.sha256(read_result(success_store, "success-first")).digest() == hashlib.sha256(
             first_answer
         ).digest()
-        cleanup_state = command(
-            "session", "inspect", "--store", success_store, "--session", "direct/success"
-        )["execution"]
-        assert cleanup_state["custody_occupied"] == "1", cleanup_state
         stop_host(success_host)
         processes.remove(success_host)
 
@@ -2414,8 +2409,6 @@ def main(mode="all", correlation_case="all"):
         host = start_host(
             store,
             url,
-            "--test-cleanup-delay-ms",
-            "3000",
             "--test-phase-trace", observations="control_peers",
         )
         processes.append(host)
@@ -2462,6 +2455,24 @@ def main(mode="all", correlation_case="all"):
             "session", "inspect", "--store", store, "--session", "direct/main"
         ))["execution"]
         assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
+        # Mutable settings accepted while the request is in flight apply only
+        # to the successor, never to the frozen request.
+        mutable_update = frozen_peers.call("configure", lambda: command(
+            "session", "configure",
+            "--store",
+            store,
+            "--record",
+            state / "mutable-during-flight.json",
+            "--key",
+            "mutable-during-flight",
+            "--session",
+            "direct/main",
+            "--tools",
+            "none",
+            "--text-output",
+        ))
+        assert mutable_update["answer"]["status"] == "accepted", mutable_update
+        assert len(endpoint.requests) == 1
         endpoint.release.set()
         frozen_deadline = time.monotonic() + 8
         failed = wait_for(
@@ -2492,24 +2503,15 @@ def main(mode="all", correlation_case="all"):
         ))
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
-        mutable_update = frozen_peers.call("configure", lambda: command(
-            "session", "configure",
-            "--store",
-            store,
-            "--record",
-            state / "mutable-after-failure.json",
-            "--key",
-            "mutable-after-failure",
-            "--session",
-            "direct/main",
-            "--tools",
-            "none",
-            "--text-output",
-        ))
-        assert mutable_update["answer"]["status"] == "accepted", mutable_update
-        later = frozen_peers.call("observe", lambda: observe(store, "message-b"))
-        assert later["queue"]["status"] == "queued", later
-        assert len(endpoint.requests) == 1, "a permit launched more than once"
+        # The queued Message starts its own Turn once the first one fails.
+        successor_deadline = time.monotonic() + 8
+        wait_for(
+            lambda: frozen_peers.call("observe", lambda: observe(
+                store, "message-b", deadline=successor_deadline,
+            ), deadline=successor_deadline).get("result", {}).get("code") == "provider_http_422",
+            "successor failure", deadline=successor_deadline,
+        )
+        assert len(endpoint.requests) == 2, "a permit launched more than once"
 
         observed = json.loads(endpoint.requests[0])
         expected = {
@@ -2568,21 +2570,17 @@ def main(mode="all", correlation_case="all"):
         frozen_peers.finish(time.monotonic() + 5)
         processes.remove(host)
 
-        # Killing the execution owner cannot erase the saved result or admit
-        # input beyond the first Operation's cutoff.
+        # Killing the execution owner cannot erase either saved result.
         offline = start_host(store, None)
         processes.append(offline)
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
-        assert observe(store, "message-b")["queue"]["status"] == "queued"
+        assert observe(store, "message-b")["result"]["code"] == "provider_http_422"
         stop_host(offline)
         processes.remove(offline)
 
-        # A successor reuses complete projected history in its original order.
-        # The prior failed Turn's messages and each distinct instruction update
-        # survive restart, including repeated equal text and reversals.
-        host = start_host(store, url)
-        processes.append(host)
-        wait_for(lambda: len(endpoint.requests) == 2, "successor history request")
+        # A successor reuses complete projected history in its original order:
+        # the prior failed Turn's messages and each distinct instruction
+        # update, including repeated equal text and reversals.
         successor = json.loads(endpoint.requests[1])
         assert successor["input"] == expected["input"] + [
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
@@ -2591,9 +2589,6 @@ def main(mode="all", correlation_case="all"):
         assert successor["model"] == "model-a", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
-        wait_for(lambda: observe(store, "message-b").get("result", {}).get("code") == "provider_http_422", "successor failure")
-        stop_host(host)
-        processes.remove(host)
 
         # A known live preparation failure saves future eligibility. Killing
         # the process before such a failure can settle leaves conservative
@@ -2934,8 +2929,6 @@ def main(mode="all", correlation_case="all"):
         committed_host = start_host(
             committed_store,
             f"http://127.0.0.1:{committed_endpoint.server_port}/responses",
-            "--test-cleanup-delay-ms",
-            "5000",
         )
         processes.append(committed_host)
         configure(
@@ -2993,8 +2986,6 @@ def main(mode="all", correlation_case="all"):
         durable_wait_host = start_host(
             durable_wait_store,
             f"http://127.0.0.1:{capacity_endpoint.server_port}/responses",
-            "--test-cleanup-delay-ms",
-            "1500",
             "--test-phase-trace", observations="control_peers",
         )
         processes.append(durable_wait_host)
@@ -3183,12 +3174,8 @@ def main(mode="all", correlation_case="all"):
         endpoints[backlog_endpoint] = backlog_thread
         backlog_thread.start()
         backlog_store = state / "retry-age-backlog-store"
-        backlog_host = start_host(
-            backlog_store,
-            f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
-            "--fault",
-            "attempt-before-commit",
-        )
+        # An offline Host queues the admission without dispatching it.
+        backlog_host = start_host(backlog_store, None)
         processes.append(backlog_host)
         configure(state, backlog_store, "backlog-config", "direct/backlog", "model-a")
         message(
@@ -3286,12 +3273,7 @@ def main(mode="all", correlation_case="all"):
         endpoints[recovery_endpoint] = recovery_thread
         recovery_thread.start()
         recovery_store = state / "exhausted-control-store"
-        recovery_host = start_host(
-            recovery_store,
-            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--fault",
-            "attempt-before-commit",
-        )
+        recovery_host = start_host(recovery_store, None)
         processes.append(recovery_host)
         for index in range(1, 101):
             configure(state, recovery_store, f"recovery-history-{index}", f"recovery-{index}", "model-a")
@@ -3349,12 +3331,7 @@ def main(mode="all", correlation_case="all"):
         )
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        recovery_host = start_host(
-            recovery_store,
-            f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
-            "--fault",
-            "attempt-before-commit",
-        )
+        recovery_host = start_host(recovery_store, None)
         processes.append(recovery_host)
         configure(
             state,
@@ -3758,39 +3735,23 @@ def main(mode="all", correlation_case="all"):
         assert retry[0] == 1 and retry[1] == 0 and retry[2] is not None, retry
         stop_endpoint(slow_endpoint, endpoints)
 
-        # A failed Attempt commit rolls back all provenance and cannot produce
-        # an endpoint launch.
+        # A failed Attempt commit rolls back all provenance, fences the Store
+        # like any canonical save fault, and cannot produce an endpoint launch.
         endpoint.received.clear()
         endpoint.release.clear()
         endpoint.requests.clear()
         rollback_store = state / "rollback-store"
-        host = start_host(
-            rollback_store,
-            url,
-            "--fault",
-            "attempt-before-commit",
-            "--test-phase-trace",
-            observations="dispatch",
-        )
+        host = start_host(rollback_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
-        rollback_milestones = HostDiagnostics(host)
+        rollback_diagnostics = HostDiagnostics(host)
         configure(state, rollback_store, "rollback-config", "direct/rollback", "model-a")
         message(state, rollback_store, "rollback-message", "direct/rollback", "rollback")
-        rollback = rollback_milestones.wait(
-            "attempt_admission_rolled_back",
-            subject_kind="attempt_kind",
-            subject="model",
-        )[0]
-        # The persistent fault leaves this Message eligible for another
-        # admission. Assert release at its owner boundary, not later idle.
-        assert rollback["custody_occupied"] == "0", rollback
+        host.wait(timeout=10)
+        assert host.returncode != 0, rollback_diagnostics.tail()
+        assert b"dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure" in rollback_diagnostics.tail()
         assert endpoint.requests == []
-        rollback_queued = observe(rollback_store, "rollback-message")
-        assert rollback_queued["queue"]["status"] == "queued", rollback_queued
-        assert "processing" not in rollback_queued, rollback_queued
         stop_host(host)
         processes.remove(host)
-        rollback_milestones = None
         with sqlite3.connect(rollback_store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT count(*),count(turn_id) FROM message_admission "
@@ -4136,7 +4097,7 @@ def main(mode="all", correlation_case="all"):
         # Store and Session names share one byte length across the three
         # cases: each request carries its own address.
         framing_store = state / "framing-meter-store"
-        host = start_host(framing_store, url, "--fault", "attempt-before-commit")
+        host = start_host(framing_store, None)
         processes.append(host)
         configure(state, framing_store, "framing-config", "direct/framing-meter", "model-a")
         for index in range(40):
@@ -4163,7 +4124,7 @@ def main(mode="all", correlation_case="all"):
         endpoint.requests.clear()
         endpoint.release.clear()
         framing_exact_store = state / "framing-exact-store"
-        host = start_host(framing_exact_store, url, "--fault", "attempt-before-commit")
+        host = start_host(framing_exact_store, None)
         processes.append(host)
         configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "model-a")
         for index in range(40):
@@ -4213,7 +4174,7 @@ def main(mode="all", correlation_case="all"):
         endpoint.requests.clear()
         endpoint.release.clear()
         framing_limit_store = state / "framing-limit-store"
-        host = start_host(framing_limit_store, url, "--fault", "attempt-before-commit")
+        host = start_host(framing_limit_store, None)
         processes.append(host)
         configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "model-a")
         for index in range(40):

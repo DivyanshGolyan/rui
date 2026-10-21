@@ -205,12 +205,8 @@ func execution(deadline measurement.Deadline, binary, store, session string) (an
 	return result["execution"], nil
 }
 
-func startHost(deadline measurement.Deadline, binary, store, endpointURL, artifacts string, capacity, cleanupMS int) (*measurement.Host, error) {
-	extra := []string{}
-	if cleanupMS != 0 {
-		extra = append(extra, "--test-cleanup-delay-ms", strconv.Itoa(cleanupMS))
-	}
-	return measurement.StartHost(binary, store, endpointURL, capacity, filepath.Join(artifacts, "host-stderr.log"), deadline, extra...)
+func startHost(deadline measurement.Deadline, binary, store, endpointURL, artifacts string, capacity int) (*measurement.Host, error) {
+	return measurement.StartHost(binary, store, endpointURL, capacity, filepath.Join(artifacts, "host-stderr.log"), deadline)
 }
 
 func sample(host *measurement.Host, directory, name string) (map[string]any, error) {
@@ -242,7 +238,7 @@ func idleCapacity(binary, root string, fixture *endpoint) ([]map[string]any, err
 			return nil, err
 		}
 		deadline := measurement.NewDeadline(45 * time.Second)
-		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, capacity, 0)
+		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, capacity)
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +287,7 @@ func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, er
 			return nil, err
 		}
 		deadline := measurement.NewDeadline(60 * time.Second)
-		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, 1, 3000)
+		host, err := startHost(deadline, binary, directory, fixture.URL(), directory, 1)
 		if err != nil {
 			return nil, err
 		}
@@ -321,18 +317,18 @@ func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, er
 			}
 			fixture.releaseAll()
 			time.Sleep(150 * time.Millisecond)
-			delayedExecution, err := execution(deadline, binary, directory, session)
+			savedExecution, err := execution(deadline, binary, directory, session)
 			if err != nil {
 				return err
 			}
-			delayed, err := sample(host, directory, "delayed")
+			saved, err := sample(host, directory, "saved-failure")
 			if err != nil {
 				return err
 			}
 			rows = append(rows, map[string]any{
 				"input_bytes": size, "endpoint_request_bytes": fixture.requestBytes(), "scratch_limit_bytes": host.Ready["scratch_limit_bytes"],
 				"in_flight_execution": inFlightExecution, "in_flight": inFlight,
-				"saved_failure_delayed_cleanup_execution": delayedExecution, "saved_failure_delayed_cleanup": delayed,
+				"saved_failure_execution": savedExecution, "saved_failure": saved,
 			})
 			return nil
 		}()
@@ -429,7 +425,7 @@ func main() {
 		"format": "rui-model-dispatch-v3-go", "scope": "issue-172 production frozen-request dispatch", "status": "passed",
 		"artifacts":            root,
 		"transport":            map[string]string{"curl": "8.22.0", "openssl": "3.6.3", "resolver": "threaded"},
-		"idle_capacity_growth": idle, "request_growth_and_delayed_cleanup": growth, "overlapping_transport": overlapping,
+		"idle_capacity_growth": idle, "request_growth_and_saved_failure": growth, "overlapping_transport": overlapping,
 		"elapsed_seconds": time.Since(started).Seconds(),
 		"limits":          []string{"macOS Apple Silicon runtime evidence only; supported Linux and x86 targets are compile-only", "idle and request-growth cases use loopback H1; overlapping transport uses trusted local TLS/H2, not a live provider", "request cases size aggregate context input; endpoint_request_bytes reports the complete serialized request including envelope", "idle CPU is process CPU-time growth over a two-second quiet interval and must remain below 1% of one core", "process termination is crash evidence, not power-loss qualification"},
 	}
