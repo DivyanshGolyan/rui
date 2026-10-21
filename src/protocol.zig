@@ -492,6 +492,29 @@ pub const CallActivity = struct {
     }
 };
 
+/// The Session's work as of its page's own Store read: what the live footer,
+/// consent and first Action show with that page.
+pub const PageWork = struct {
+    pub const Status = enum { idle, runnable, in_flight, waiting_for_permission, completed, cancelled, failed };
+    status: Status = .idle,
+    turn: ?u64 = null,
+    operation: ?u64 = null,
+    first_action: ?u64 = null,
+    revision: u64 = 0,
+    workspace: Bounded(max_workspace_bytes) = .{},
+
+    pub fn writeJson(self: *const PageWork, out: *std.Io.Writer) !void {
+        try out.print("{{\"status\":\"{s}\",\"turn\":", .{@tagName(self.status)});
+        inline for (.{ self.turn, self.operation, self.first_action }, .{ ",\"operation\":", ",\"first_action\":", ",\"revision\":" }) |id, next| {
+            if (id) |value| try out.print("\"{d}\"", .{value}) else try out.writeAll("null");
+            try out.writeAll(next);
+        }
+        try out.print("\"{d}\",\"workspace\":", .{self.revision});
+        try std.json.Stringify.value(self.workspace.slice(), .{}, out);
+        try out.writeByte('}');
+    }
+};
+
 pub const ActivityFacts = struct {
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,
@@ -499,6 +522,7 @@ pub const ActivityFacts = struct {
     count: usize = 0,
     more: bool = false,
     call_activity: CallActivity = .{},
+    work: PageWork = .{},
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
         try out.print("{{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"{d}\",\"direction\":\"{s}\",\"items\":[", .{ self.end, @tagName(self.direction) });
@@ -508,6 +532,8 @@ pub const ActivityFacts = struct {
         }
         try out.print("],\"more\":{},\"call_activity\":", .{self.more});
         try self.call_activity.writeJson(out);
+        try out.writeAll(",\"work\":");
+        try self.work.writeJson(out);
         try out.writeByte('}');
     }
 };
@@ -1759,7 +1785,9 @@ pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 
 // Worst row: four complete field references, identities, or an escaped key
 // or code with an escaped peer.
 pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes + max_peer_json_bytes) + max_tool_presentation_json_bytes) +
-    64 + 3 * (100 + max_tool_presentation_json_bytes);
+    64 + 3 * (100 + max_tool_presentation_json_bytes) +
+    // The page's work: four ids, its status and an escaped Workspace.
+    160 + 6 * max_workspace_bytes;
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
 const max_model_interruption_rejection_code_bytes = "invalid_session_reference".len;

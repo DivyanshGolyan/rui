@@ -523,7 +523,8 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls } };
+        const Work = struct { status: JsonEnum(protocol.PageWork.Status), turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, work: Work };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -592,6 +593,15 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
+        const work = &page.facts.work;
+        work.status = wire.work.status.value;
+        inline for (.{ &work.turn, &work.operation, &work.first_action }, .{ wire.work.turn, wire.work.operation, wire.work.first_action }) |fact, value| {
+            fact.* = if (value) |text| try id(text, false) else null;
+        }
+        // An operation belongs to its Turn; an Action to the active one.
+        if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        work.revision = try id(wire.work.revision, false);
+        work.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
         return page;
     }
 

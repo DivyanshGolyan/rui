@@ -2838,6 +2838,11 @@ pub const Store = struct {
         }
         const last = if (request.direction == .forward and page.more) page.items[page.count - 1] else null;
         page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
+        // Work as of this same read, so the footer, consent and first Action
+        // always describe the page they arrive with.
+        page.work = (try self.readWorkLocked(request.session.slice(), try self.countPendingMessages(request.session.slice()))).page;
+        page.work.revision = session.revision;
+        try page.work.workspace.set(session.workspace.slice());
         return page;
     }
 
@@ -3400,6 +3405,28 @@ pub const Store = struct {
     }
 
     fn appendCurrentWork(self: *Store, session_ref: []const u8, pending_messages: u64, capture: *SessionReportCapture) !void {
+        const work = try self.readWorkLocked(session_ref, pending_messages);
+        try capture.appendFmt("{{\"status\":\"{s}\"", .{@tagName(work.page.status)});
+        if (work.page.turn) |turn_id| try capture.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\"", .{ turn_id, work.page.operation.? });
+        const outcome = work.outcome orelse return capture.append(",\"latest_outcome\":null}");
+        try capture.append(",\"latest_outcome\":{\"code\":");
+        try capture.appendJsonString(outcome.code.slice());
+        try capture.append(",\"content\":");
+        if (outcome.content_id) |content_id| {
+            const metadata = try self.readContentMetadata(content_id);
+            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
+        } else {
+            try capture.append("null");
+        }
+        try capture.append("}}");
+    }
+
+    /// The Session's latest Turn as work: Current reports it, and each
+    /// activity page carries it from the same read as its items.
+    fn readWorkLocked(self: *Store, session_ref: []const u8, pending_messages: u64) !struct {
+        page: protocol.PageWork,
+        outcome: ?struct { code: protocol.Bounded(96), content_id: ?i64 } = null,
+    } {
         const statement = try prepare(
             self.database,
             "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.resolution_code " ++
@@ -3409,14 +3436,12 @@ pub const Store = struct {
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         const result = c.sqlite3_step(statement);
-        if (result == c.SQLITE_DONE) return capture.append(if (pending_messages == 0)
-            "{\"status\":\"idle\",\"latest_outcome\":null}"
-        else
-            "{\"status\":\"runnable\",\"latest_outcome\":null}");
+        if (result == c.SQLITE_DONE) return .{ .page = .{ .status = if (pending_messages == 0) .idle else .runnable } };
         if (result != c.SQLITE_ROW) return error.TurnReadFailed;
         const turn_id = c.sqlite3_column_int64(statement, 0);
         const operation_id = c.sqlite3_column_int64(statement, 1);
         if (turn_id <= 0 or operation_id <= 0) return error.CorruptStore;
+        var page: protocol.PageWork = .{ .turn = @intCast(turn_id), .operation = @intCast(operation_id) };
         if (c.sqlite3_column_type(statement, 2) == c.SQLITE_NULL) {
             const resolution = if (c.sqlite3_column_type(statement, 4) == c.SQLITE_NULL) null else blk: {
                 var code: protocol.Bounded(96) = .{};
@@ -3424,30 +3449,23 @@ pub const Store = struct {
                 break :blk code;
             };
             const progress = try self.activeMessageProgress(session_ref, resolution);
-            return capture.appendFmt("{{\"status\":\"{s}\",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":null}}", .{ @tagName(progress.status), turn_id, operation_id });
+            page.status = switch (progress.status) {
+                inline else => |status| @field(protocol.PageWork.Status, @tagName(status)),
+            };
+            page.first_action = progress.action_id;
+            return .{ .page = page };
         }
         var code: protocol.Bounded(96) = .{};
         try readText(statement, 2, &code);
-        const status = if (pending_messages != 0)
-            "runnable"
+        page.status = if (pending_messages != 0)
+            .runnable
         else if (code.eql("completed"))
-            "completed"
+            .completed
         else if (code.eql("cancelled"))
-            "cancelled"
+            .cancelled
         else
-            "failed";
-        try capture.append("{\"status\":");
-        try capture.appendJsonString(status);
-        try capture.appendFmt(",\"turn\":\"{d}\",\"operation\":\"{d}\",\"latest_outcome\":{{\"code\":", .{ turn_id, operation_id });
-        try capture.appendJsonString(code.slice());
-        try capture.append(",\"content\":");
-        if (try readNullablePositiveI64(statement, 3)) |content_id| {
-            const metadata = try self.readContentMetadata(content_id);
-            try capture.appendBareContentReference(.{ .length = metadata.length, .digest = metadata.digest });
-        } else {
-            try capture.append("null");
-        }
-        try capture.append("}}");
+            .failed;
+        return .{ .page = page, .outcome = .{ .code = code, .content_id = try readNullablePositiveI64(statement, 3) } };
     }
 
     fn appendSelectedMessage(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {

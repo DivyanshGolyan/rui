@@ -87,7 +87,6 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .colour = false,
                 .opening = false,
                 .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = self.screen, .output = self.output.handle, .active = false },
-                .current = std.mem.zeroes(client.Current),
             };
             self.front.init.io = std.testing.io;
             self.front.input.init();
@@ -377,7 +376,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                     if (event == .status) {
                         front.status_requested = true;
                         front.job.open_status = true;
-                        front.job.result = .{ .settled = true, .status = true, .current = std.mem.zeroes(client.Current) };
+                        front.job.result = .{ .status = true };
                     }
                 },
                 .complete => if (request) |pending| {
@@ -442,7 +441,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
 }
 
 fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
-    const Event = enum { deliver_old, deliver_new, accept_old, accept_new, silent, unsettled, evict, redraw };
+    const Event = enum { deliver_old, deliver_new, accept_old, accept_new, silent, evict, redraw };
     const events = std.enums.values(Event);
     for (0..512) |sequence| {
         var fixture: Fixture(Frontend, ops) = undefined;
@@ -465,17 +464,15 @@ fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
                     try ops.presentAdmission(front, .{ .accepted = .{ .kind = .message, .confirmed = false, .admission = admission } });
                     echo = if (admission > delivered) admission else null;
                 },
-                .deliver_old, .deliver_new, .silent, .unsettled => {
-                    const admission: u64 = if (event == .deliver_old) 7 else if (event == .deliver_new or event == .unsettled) 913 else 0;
+                .deliver_old, .deliver_new, .silent => {
+                    const admission: u64 = if (event == .deliver_old) 7 else if (event == .deliver_new) 913 else 0;
                     front.read_phase = .activity;
-                    front.job.result = .{ .settled = event != .unsettled, .delivered = admission, .current = std.mem.zeroes(client.Current) };
+                    front.job.result = .{ .delivered = admission };
                     try ops.applyReader(front, .complete);
-                    if (event != .unsettled) {
-                        delivered = @max(delivered, admission);
-                        if (echo) |value| if (value <= delivered) {
-                            echo = null;
-                        };
-                    }
+                    delivered = @max(delivered, admission);
+                    if (echo) |value| if (value <= delivered) {
+                        echo = null;
+                    };
                 },
                 .evict => {
                     const block: [4096]u8 = @splat('x');
@@ -518,7 +515,6 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     front.job = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
     try ops.scan(&front.job, &task);
-    try std.testing.expect(front.job.result.settled);
     try ops.showStaged(front);
     try ops.applyReader(front, .complete);
     try historyReachability(front, ops, 0);
@@ -529,7 +525,6 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     for (0..16) |prefix| {
         front.job = ops.freeze(front, .activity);
         try ops.scan(&front.job, &task);
-        try std.testing.expect(front.job.result.settled);
         try ops.showStaged(front);
         try ops.applyReader(front, .complete);
         try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
