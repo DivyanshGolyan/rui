@@ -1,0 +1,11 @@
+{
+  "read_only": true,
+  "source": "hold-population/store/rui.sqlite3",
+  "sessions": 100,
+  "messages": 100,
+  "actions": 0,
+  "unresolved_operations": 0,
+  "turn_outcomes": {
+    "cancelled": 100
+  }
+}
