@@ -4,6 +4,14 @@ on:
     branches: ['wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Qualification only: select a landing tip against an older base, such as
+  # a combined stack whose constituent already reached main. Auto-land counts
+  # push runs only.
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base commit; selection covers base..ref
+        required: true
 
 permissions:
   contents: read
@@ -32,10 +40,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Refuse a second open landing stack before native jobs start
+        if: ${{ github.event_name != 'pull_request' }}
+        run: python3 -B tests/ci/auto_land.py --preflight "$GITHUB_REF_NAME"
       - name: Select existing targets
         id: select
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}

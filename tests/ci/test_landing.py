@@ -141,6 +141,52 @@ class LandingTest(unittest.TestCase):
                 self.assertIn('neither moved', str(failure.exception))
                 self.assertEqual(refs(), (moved, side))
 
+    def test_preflight_allows_one_open_landing_stack(self):
+        with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
+            def git(*args):
+                return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def commit(path, parent):
+                git('checkout', '-q', '--detach', parent)
+                Path(path).write_text(path)
+                git('add', '-A')
+                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', path)
+                return git('rev-parse', 'HEAD')
+
+            def preflight(branch, sha):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    auto_land.preflight(branch, sha)
+            git('init', '-q', '--bare', '-b', 'main', 'remote.git')
+            git('clone', '-q', 'remote.git', 'work')
+            os.chdir('work')
+            Path('README.md').write_text('base')
+            git('add', '-A')
+            git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'base')
+            base = git('rev-parse', 'HEAD')
+            landed = commit('landed', base)
+            git('push', '-q', 'origin', f'{landed}:refs/heads/main', f'{landed}:refs/heads/wip/land-3')
+            # Zero open: a historical ref main contains never counts.
+            first = commit('first', landed)
+            preflight('wip/land-4', first)
+            git('push', '-q', 'origin', f'{first}:refs/heads/wip/land-4')
+            # One open: re-pushing it, or a higher stack containing it, passes.
+            preflight('wip/land-4', commit('first-fix', first))
+            stacked = commit('second', first)
+            preflight('wip/land-5', stacked)
+            # A parallel stack beside it, or a lower number, fails before any push.
+            beside = commit('beside', landed)
+            with self.assertRaisesRegex(SystemExit, 'wip/land-4 .* still open'):
+                preflight('wip/land-5', beside)
+            with self.assertRaisesRegex(SystemExit, 'below wip/land-4'):
+                preflight('wip/land-2', first)
+            # Multiple open (already violated): any further stack must contain all of them.
+            git('push', '-q', 'origin', f'{beside}:refs/heads/wip/land-5')
+            with self.assertRaisesRegex(SystemExit, 'wip/land-4 .* still open'):
+                preflight('wip/land-6', commit('third', beside))
+            # Retiring the abandoned stack restores one open stack.
+            git('push', '-q', 'origin', ':refs/heads/wip/land-4')
+            preflight('wip/land-6', commit('third', beside))
+
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.
         available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path('build.zig').read_text()))
@@ -163,6 +209,8 @@ class LandingTest(unittest.TestCase):
         text = workflow('check.yml')
         on = text.split('\npermissions:', 1)[0]
         self.assertIn("  push:\n    branches: ['wip/land-*']\n", on)
+        plan = re.search(r'(?ms)^  plan:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
+        self.assertLess(plan.index('auto_land.py --preflight "$GITHUB_REF_NAME"'), plan.index('select_tests.py'))
         for aggregate in ('linux', 'macos'):
             job = re.search(rf'(?ms)^  {aggregate}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution', job, 'cache proof is not gating')

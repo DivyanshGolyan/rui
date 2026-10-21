@@ -615,6 +615,12 @@ class SelectionTest(unittest.TestCase):
                 sys.executable, str(Path('tests/ci/select_tests.py').resolve()),
                 '--base', result.stdout, '--phase', 'review'], cwd=directory, text=True)
             self.assertEqual(json.loads(selected)['targets'], ['test-logic'])
+            # A dispatched qualification keeps its explicit base even when main already
+            # contains part of the stack, so a landed strict constituent stays selected.
+            with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', REF_NAME='wip/ci-1'):
+                result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
+                                        cwd=directory, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, '1' * 40)
 
 
 class FullCheckPartitionTest(unittest.TestCase):
