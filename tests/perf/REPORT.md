@@ -11,7 +11,20 @@ Status: **partial**. No Mac runner is connected, so the coordinator moved tonigh
 | 100 | **measured** median 13,596,672 B (IQR 8,704 B) | 0 B steady state; transient peaks unavailable | `240aef2e` |
 | Intercept (base) / slope (per session), linear fit | 9,024,073 B / 47,572 B per session. Residuals reach 1.85 MB, so this is **not** a constant per-session cost: the step from 0 to 10 sessions (≈398 KB/session) is far steeper than from 10 to 100 (≈25 KB/session) | — | — |
 
-Each N has 3 fresh Hosts; the IQR is (max − min)/2 over those three. Headline 1 data, measured Linux fixture: P1 raw evidence at `perf/linux-pss-20261021` [`ab9f3e41`](https://github.com/DivyanshGolyan/rui/commit/ab9f3e410e4d06ad77c8a2fea6b8db6ccd5513e0) (`.amp/p1/summary.json` and `.amp/p1/raw/`). All nine runs and HOLD A1 passed, and all ten Host/provider pairs were reaped. The final baseline audit by the same Sol reviewer is pending. The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe), and the baseline ReleaseFast binary SHA-256 is `e2835cb2…3a50`. The queue verified 102/102 hashes and all ten row identities and statuses at `ab9f3e41`; that is a hash and identity check, not a qualification verdict. STREAM in-window event rates and CPU/event are unavailable: provider totals publish only after the 120 s offer. They are null, not zero.
+Each N has 3 fresh Hosts; the IQR is (max − min)/2 over those three. Headline 1 data, measured Linux fixture: P1 raw evidence at `perf/linux-pss-20261021` [`ab9f3e41`](https://github.com/DivyanshGolyan/rui/commit/ab9f3e410e4d06ad77c8a2fea6b8db6ccd5513e0) (`.amp/p1/summary.json` and `.amp/p1/raw/`). All nine runs and HOLD A1 passed, and all ten Host/provider pairs were reaped. Review: the same Sol reviewer gave a bounded no-findings audit of `ab9f3e41`, covering the nine PSS runs and HOLD A1 only, not the later A/B runs. It verified:
+- 102 hashes with full file coverage, and the summary byte for byte;
+- all 20 PSS endpoints and all 13 counter fields;
+- the CPU arithmetic, identities, medians, IQRs and the exact OLS fit;
+- the HOLD five-thread switch counts (5,278 voluntary, 91 nonvoluntary).
+
+Audit limits:
+- The fit is descriptive and nonlinear; it does not attribute marginal cost to TLS or anything else.
+- The HOLD switch capture spans 60.05914–60.05957 s, while the 1.70 CPU-s comes from a separate 60.05890 s interval.
+- Counters are sequential and coarse.
+- STREAM rate and CPU/event stay null.
+- Nobody independently rebuilt the binary or rechecked provider liveness.
+
+The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe), and the baseline ReleaseFast binary SHA-256 is `e2835cb2…3a50`. The queue verified 102/102 hashes and all ten row identities and statuses at `ab9f3e41`; that is a hash and identity check, not a qualification verdict. STREAM in-window event rates and CPU/event are unavailable: provider totals publish only after the 120 s offer. They are null, not zero.
 
 ## Headline 2: HOLD100 waiting cost, before and after one deadline-wait fix (Linux fixture)
 
