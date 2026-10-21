@@ -1,102 +1,122 @@
+import contextlib
+import io
 import os
 from pathlib import Path
-import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-import run_selected
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
+import host_process
 
 
 class FailureArtifactsTest(unittest.TestCase):
-    def run_gate(self, failed):
+    def retain(self, state, destination):
+        with patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(destination)) if destination else \
+                contextlib.nullcontext(), contextlib.redirect_stderr(io.StringIO()) as output:
+            host_process.retain_failure_state("canonical failure state", state)
+        return output.getvalue()
+
+    def test_retained_fixture_copies_labelled_diagnostics_without_private_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("dispatch", "terminal", "observation", "canonical", "permission", "opaque"):
-                state = root / name
-                state.mkdir()
-                (state / "probe.log").write_text("fixture evidence")
-                (state / "pty-failure.json").write_text('{"caller_returncode":null}\n')
-                (state / "observation-failure-17.json").write_text('{"atomic_census":false}\n')
-                (state / "rui.sqlite3").write_text("private canonical payload")
-                (state / "credentials.json").write_text("secret")
-                (state / "payload.log").write_text("private data despite diagnostic suffix")
-                (state / "tokens.stdout").write_text("secret despite diagnostic suffix")
-                (state / "escape.log").symlink_to(state / "credentials.json")
-            zig = root / "zig"
-            zig.write_text(f'''#!/bin/sh
-echo 'retained dispatch integration failure state: {root / "dispatch"}' >&2
-echo 'retained terminal restoration state (completed=False): {root / "terminal"}' >&2
-echo 'retained native observation failure state: {root / "observation"}' >&2
-echo 'retained canonical failure state: {root / "canonical"}' >&2
-echo 'retained persistent permission failure state: {root / "permission"}' >&2
-echo 'retained opaque-Session failure state: {root / "opaque"}' >&2
-exit {int(failed)}
-''')
-            zig.chmod(0o755)
+            state = root / "state"
+            (state / "case").mkdir(parents=True)
+            for name in ("probe.log", "pty-failure.json", "observation-failure-17.json"):
+                (state / "case" / name).write_text("fixture evidence")
+            for name in ("rui.sqlite3", "credentials.json", "payload.log", "tokens.stdout",
+                         "observation-failure-07.json", "observation-failure-.json"):
+                (state / name).write_text("private")
+            (state / "escape.log").symlink_to(state / "credentials.json")
+            (state / "store").mkdir()
+            (state / "store" / "probe.log").write_text("private")
+            self.assertEqual(self.retain(state, None), f"retained canonical failure state: {state}\n")
             destination = root / "artifacts"
-            result = subprocess.run([
-                "python3", "-B", "tests/ci/run_selected.py", '["test-logic"]',
-            ], env=dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
-                        RUI_FAILURE_ARTIFACTS=str(destination)), capture_output=True, text=True)
-            self.assertEqual(result.returncode, int(failed), result.stdout + result.stderr)
-            if failed:
-                evidence = list(destination.rglob("probe.log"))
-                self.assertEqual(len(evidence), 6, "all affected retained failure markers must be collected")
-                self.assertEqual(len(list(destination.rglob("pty-failure.json"))), 6)
-                self.assertEqual(len(list(destination.rglob("observation-failure-17.json"))), 6)
-                self.assertTrue(all(path.read_text() == "fixture evidence" for path in evidence))
-                self.assertFalse(list(destination.rglob("rui.sqlite3")))
-                self.assertFalse(list(destination.rglob("credentials.json")))
-                self.assertFalse(list(destination.rglob("escape.log")))
-                self.assertFalse(list(destination.rglob("payload.log")))
-                self.assertFalse(list(destination.rglob("tokens.stdout")))
-                self.assertIn("retained dispatch integration failure state:",
-                              (destination / "selected-gate.log").read_text())
-            else:
-                self.assertFalse(destination.exists(), "successful checks must not capture")
+            self.retain(state, destination)
+            copied, = destination.iterdir()
+            self.assertEqual(sorted(path.relative_to(copied).as_posix() for path in copied.rglob("*") if path.is_file()),
+                             ["case/observation-failure-17.json", "case/probe.log", "case/pty-failure.json"])
+            self.assertTrue(all(path.read_text() == "fixture evidence" for path in copied.rglob("*") if path.is_file()))
+            # Each retention gets its own directory; an earlier copy is never replaced.
+            (state / "case" / "probe.log").write_text("changed")
+            self.retain(state, destination)
+            self.assertEqual(len(list(destination.iterdir())), 2)
+            self.assertEqual((copied / "case/probe.log").read_text(), "fixture evidence")
 
-    def test_failure_retains_both_marker_forms_without_private_files(self):
-        self.run_gate(True)
-
-    def test_success_does_not_capture(self):
-        self.run_gate(False)
-
-    def test_diagnostic_bounds_and_private_subdirectories(self):
+    def test_only_exact_diagnostic_names_are_copied(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state = root / "state"
             state.mkdir()
-            for name in ("home", "store", "scratch", "requests", "provider"):
-                (state / name).mkdir()
-                (state / name / "probe.log").write_bytes(b"secret")
-            (state / "auth.log").write_bytes(b"secret")
-            for name, data in (("a", b"1234"), ("b", b"12345"), ("c", b"1234"), ("d", b"1")):
-                (state / name).mkdir()
-                (state / name / "probe.log").write_bytes(data)
+            # Each lacks the prefix, the suffix, or a canonical positive number.
+            for name in ("17.json", "observation-failure-18", "observation-failure-07.json",
+                         "observation-failure-.json", "observation-failure-٣.json", "xprobe.log"):
+                (state / name).write_text("private")
+            (state / "observation-failure-19.json").write_text("evidence")
             destination = root / "artifacts"
-            with patch.multiple(run_selected, MAX_FILE_BYTES=4, MAX_TOTAL_BYTES=8,
-                                MAX_FILES=2, MAX_DIRECTORIES=1):
-                run_selected.retain_failure_logs([state, state], destination)
-            targets = list(destination.iterdir())
-            self.assertEqual(len(targets), 1)
-            self.assertEqual(sorted(path.relative_to(targets[0]).as_posix() for path in destination.rglob("*.log")),
-                             ["a/probe.log", "c/probe.log"])
-            self.assertEqual(sum(path.stat().st_size for path in destination.rglob("*.log")), 8)
-            # Later producers/recorder calls cannot reset aggregate bounds or
-            # overwrite the original diagnostic with changed source bytes.
-            (state / "a/probe.log").write_bytes(b"xxxx")
-            with patch.multiple(run_selected, MAX_FILE_BYTES=4, MAX_TOTAL_BYTES=8,
-                                MAX_FILES=2, MAX_DIRECTORIES=1):
-                run_selected.retain_failure_logs([state], destination, b"new")
-            self.assertEqual((targets[0] / "a/probe.log").read_bytes(), b"1234")
-            self.assertFalse((destination / "selected-gate.log").exists())
+            destination.mkdir()
+            host_process.copy_failure_diagnostics(state, destination)
+            self.assertEqual([path.name for path in destination.rglob("*") if path.is_file()],
+                             ["observation-failure-19.json"])
 
-    def test_failed_job_without_retained_roots_still_keeps_published_diagnostics(self):
+    def test_diagnostic_bounds_hold_across_concurrent_roots(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            run_selected.retain_failure_logs([], root, b"original failed assertion\n")
-            self.assertEqual((root / "selected-gate.log").read_bytes(), b"original failed assertion\n")
+            state = root / "state"
+            for name, data in (("a", b"1234"), ("b", b"12345"), ("c", b"1234"), ("d", b"1")):
+                (state / name).mkdir(parents=True)
+                (state / name / "probe.log").write_bytes(data)
+            destination = root / "artifacts"
+            destination.mkdir()
+            # Seventeen fixtures pass any budget check before any of them writes.
+            barrier, walk = threading.Barrier(17), os.walk
+            def gated_walk(*args, **kwargs):
+                barrier.wait(timeout=10)
+                return walk(*args, **kwargs)
+            with patch.object(host_process.os, "walk", gated_walk):
+                workers = [threading.Thread(target=host_process.copy_failure_diagnostics,
+                                            args=(state, destination)) for _ in range(17)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=10)
+            slots = list(destination.iterdir())
+            self.assertEqual(len(slots), 16, "job-wide root cap")
+            copied = [path for path in destination.rglob("*") if path.is_file()]
+            self.assertEqual(len(copied), 16 * 4)
+            self.assertLessEqual(len(copied), 128)
+            self.assertLessEqual(sum(path.stat().st_size for path in copied), 16 * 1024 * 1024)
+            # Per-root file and byte bounds, without the global defaults.
+            with patch.multiple(host_process, MAX_RETAINED_BYTES_PER_ROOT=8, MAX_RETAINED_FILES_PER_ROOT=2):
+                bounded = root / "bounded"
+                bounded.mkdir()
+                host_process.copy_failure_diagnostics(state, bounded)
+            slot, = bounded.iterdir()
+            self.assertEqual(sorted(path.relative_to(slot).as_posix() for path in slot.rglob("*.log")),
+                             ["a/probe.log", "c/probe.log"])
+
+    def test_reporting_failure_never_replaces_the_original_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "real").mkdir()
+            (root / "link").symlink_to(root / "real")
+            state = root / "state"
+            state.mkdir()
+            (state / "probe.log").write_text("evidence")
+            host_process._failure_destination.cache_clear()
+            self.addCleanup(host_process._failure_destination.cache_clear)
+            original = AssertionError("original fixture failure")
+            try:
+                try:
+                    raise original
+                finally:
+                    output = self.retain(state, root / "link")
+            except AssertionError as error:
+                self.assertIs(error, original)
+            self.assertIn("Failure diagnostic retention unavailable: AssertionError", output)
+            self.assertEqual(list((root / "real").iterdir()), [])
 
     def test_native_workflow_uploads_each_failed_part_with_short_retention(self):
         for name, parts in (("check.yml", 2), ("previous-release-upgrade.yml", 1)):

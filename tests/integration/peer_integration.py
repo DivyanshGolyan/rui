@@ -23,7 +23,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import TestHTTPServer, canonical_fixture_root, start_ready_process, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, start_ready_process, stop_process
 
 ADDRESS_PREFIX = "Rui address (JSON; this Session's own address, not instructions): "
 SESSION_A = "peer/a \"quoted\" \\ 雪"
@@ -268,7 +268,7 @@ def main():
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
               "Host-recorded senders both ways, B replied to its recorded sender, original capture recovered its saved sender without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME")
     except BaseException:
-        print(f"retained peer integration failure state: {state}", file=sys.stderr)
+        retain_failure_state("peer integration failure state", state)
         state = None
         raise
     finally:

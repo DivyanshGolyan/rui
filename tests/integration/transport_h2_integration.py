@@ -1204,7 +1204,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
             "operations": operations, "execution": execution, "last_observation": observed,
             "milestones": [{name: record.get(name) for name in ("sequence", "rui_test_phase", "operation", "attempt", "at_ns")}
                            for record in records
-                           if "attempt" in record or record["rui_test_phase"] == "attempt_admission_rolled_back"],
+                           if "attempt" in record],
             "first_lost_sequence": next((record.get("sequence") for record in records
                                          if record.get("trace_lost")), None),
             "stderr_tail": [line for line in (diagnostics.tail() if diagnostics else b"").decode("utf-8", "replace").splitlines()

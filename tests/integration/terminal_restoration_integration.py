@@ -22,7 +22,7 @@ from collections import Counter
 import canonical_failure_integration as canonical
 import model_fixture as fixture
 import human_cli_integration as human
-from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, cleanup_failure, dispose_all, preserve_failure_metadata, start_ready_process, stop_process
+from host_process import HostDiagnostics, HostStartError, ReleaseGate, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 
 
 def assert_file_flags(actual, expected):
@@ -1166,16 +1166,10 @@ def preserve_renderer_comparison(state, before, after, screen_start, events, omi
             "events": events, "omitted_events": omitted_events,
         }):
             return
-        ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
-        sys.path.insert(0, ci)
-        try:
-            from run_selected import retain_failure_logs
-            destination = pathlib.Path(os.environ.get("RUI_FAILURE_ARTIFACTS", ".amp/failure-artifacts"))
-            destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-            retain_failure_logs([root], destination)
-            print(f"renderer comparison destination: {destination}", file=sys.stderr, flush=True)
-        finally:
-            sys.path.remove(ci)
+        destination = pathlib.Path(os.environ.get("RUI_FAILURE_ARTIFACTS", ".amp/failure-artifacts"))
+        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        copy_failure_diagnostics(root, destination)
+        print(f"renderer comparison destination: {destination}", file=sys.stderr, flush=True)
     except Exception as error:
         # Optional evidence cannot replace the assertion or prevent disposal.
         try:
@@ -3048,7 +3042,7 @@ def main(selected=None):
         if completed and selected != "host-diagnostics":
             shutil.rmtree(state)
         else:
-            print(f"retained terminal restoration state (completed={completed}): {state}", file=sys.stderr)
+            retain_failure_state(f"terminal restoration state (completed={completed})", state)
 
 
 if __name__ == "__main__":

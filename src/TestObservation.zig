@@ -198,8 +198,7 @@ fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
         return false;
     }
     if (self.plan == .dispatch) {
-        if (std.mem.eql(u8, phase, "attempt_admission_rolled_back") or
-            std.mem.eql(u8, phase, "preparation_advance_completed"))
+        if (std.mem.eql(u8, phase, "preparation_advance_completed"))
             return self.dispatch_boundary_due.swap(false, .acq_rel);
         inline for (.{ "connection_request_session_stop", "connection_request_permission_decision", "control_store_queued", "control_lock_acquired", "control_gate_released" }) |name| {
             if (std.mem.eql(u8, phase, name)) return true;

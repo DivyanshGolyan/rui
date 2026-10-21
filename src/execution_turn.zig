@@ -46,7 +46,6 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     }
     if (context.advanceBashPreparation()) made_progress = true;
     if (context.advanceLiveBash()) made_progress = true;
-    if (context.advanceOrdinaryCleanup(now)) made_progress = true;
     if (state.retained_cleanup_at == null) state.retained_cleanup_at = now;
     if (context.advanceRetainedCleanup(now, &state.retained_cleanup_at.?)) made_progress = true;
     return made_progress;
@@ -130,7 +129,6 @@ const Phase = enum {
     completion,
     bash_preparation,
     live_bash,
-    ordinary_cleanup,
     retained_cleanup,
     reconcile,
     model_preparation,
@@ -171,7 +169,6 @@ const Recording = struct {
     reconcile_count: usize = 0,
     live_bash_count: usize = 0,
     bash_prep_count: usize = 0,
-    ordinary_cleanup_count: usize = 0,
     retained_cleanup_count: usize = 0,
     drive_count: usize = 0,
     now_samples: [32]i96 = undefined,
@@ -222,13 +219,6 @@ const Recording = struct {
         self.record(.live_bash);
         self.live_bash_now[self.live_bash_count] = self.now_ns;
         self.live_bash_count += 1;
-        return false;
-    }
-
-    fn advanceOrdinaryCleanup(self: *Recording, observed: std.Io.Clock.Timestamp) bool {
-        _ = observed;
-        self.record(.ordinary_cleanup);
-        self.ordinary_cleanup_count += 1;
         return false;
     }
 
@@ -430,7 +420,6 @@ test "progress from an earlier phase cannot skip a later lifecycle service" {
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
     try std.testing.expectEqual(@as(usize, 3), context.count(.live_bash));
-    try std.testing.expectEqual(@as(usize, 3), context.count(.ordinary_cleanup));
     try std.testing.expectEqual(@as(usize, 3), context.count(.retained_cleanup));
 }
 

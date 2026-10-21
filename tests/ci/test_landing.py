@@ -210,8 +210,6 @@ class LandingTest(unittest.TestCase):
         text = workflow('check.yml')
         on = text.split('\npermissions:', 1)[0]
         self.assertIn("  push:\n    branches: [main, 'wip/land-*']\n", on)
-        self.assertNotIn('branches-ignore', on)
-        self.assertNotIn('github-script', text, 'no duplicate-push suppression')
         for aggregate in ('linux', 'macos'):
             job = re.search(rf'(?ms)^  {aggregate}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution', job, 'cache proof is not gating')

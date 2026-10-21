@@ -14,7 +14,7 @@ import threading
 
 import bash_integration as bash_fixture
 import model_fixture as fixture
-from host_process import canonical_fixture_root, is_peer_disconnect
+from host_process import canonical_fixture_root, is_peer_disconnect, retain_failure_state
 
 
 def prove_pid_publication(root):
@@ -644,7 +644,7 @@ def main():
         if completed:
             shutil.rmtree(root)
         else:
-            print(f"retained Bash lifecycle failure state: {root}", file=sys.stderr)
+            retain_failure_state("Bash lifecycle failure state", root)
 
 
 if __name__ == "__main__":

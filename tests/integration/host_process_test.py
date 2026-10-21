@@ -932,7 +932,6 @@ def prove_intentional_crash_retirement():
 
 def prove_retention_does_not_own_teardown():
     import host_process
-    import run_selected  # Loaded by the preceding real retention helper call.
     # Sampling itself is optional, including failures before write_text/open.
     with tempfile.TemporaryDirectory() as directory:
         try:
@@ -970,7 +969,7 @@ def prove_retention_does_not_own_teardown():
                 return original_open(path, *args, **kwargs)
             try:
                 with patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination), \
-                        patch.object(run_selected, "retain_failure_logs", copy), \
+                        patch.object(host_process, "copy_failure_diagnostics", copy), \
                         patch.object(pathlib.Path, "open", open_path), patch.object(process, "kill", kill):
                     if case == "late-loss":
                         try:
@@ -1097,10 +1096,10 @@ def prove_execution_release_oracles():
 def prove_bash_cleanup_population():
     from bash_integration import assert_cleanup_population
 
-    records = []
-    for action in (None, "19"):
-        for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
-            records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action=action))
+    # A model owner completes once; the Bash owner starts, releases and completes.
+    records = [dict(rui_test_phase="cleanup_completed", turn="7", operation="11", attempt="1", action=None)]
+    for phase in ("cleanup_started", "cleanup_release_observed", "cleanup_completed"):
+        records.append(dict(rui_test_phase=phase, turn="7", operation="11", attempt="1", action="19"))
     records.append(dict(rui_test_phase="inspection_captured"))
     for case in ("normal", "missing", "duplicate", "wrong-owner", "extra-phase", "inspection-overflow"):
         values = [dict(r) for r in records]
@@ -1118,7 +1117,7 @@ def prove_bash_cleanup_population():
         diagnostics = HostDiagnostics(SimpleNamespace(stderr=io.BytesIO(), poll=lambda: 0, rui_observations=observations))
         diagnostics.close()
         try:
-            assert_cleanup_population(diagnostics, actions=[19], models=1, model_releases=True, inspection_limit=1)
+            assert_cleanup_population(diagnostics, actions=[19], models=1, inspection_limit=1)
         except AssertionError:
             assert case != "normal", case
         else:
@@ -1261,7 +1260,6 @@ def prove_renderer_comparison_retention():
 
     # Evidence failures must neither replace the primary assertion nor skip
     # mandatory disposal. The existing writer/copy caps also apply here.
-    import run_selected  # Loaded by the real retention helper above.
     for failure in ("write", "copy"):
         with tempfile.TemporaryDirectory() as state, \
                 patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(pathlib.Path(state) / "retained")), \
@@ -1269,7 +1267,7 @@ def prove_renderer_comparison_retention():
             if failure == "write":
                 patches.enter_context(patch.object(terminal, "preserve_failure_metadata", side_effect=OSError("write")))
             else:
-                patches.enter_context(patch.object(run_selected, "retain_failure_logs", side_effect=OSError("copy")))
+                patches.enter_context(patch.object(terminal, "copy_failure_diagnostics", side_effect=OSError("copy")))
             primary, disposed = AssertionError("original comparison"), []
             try:
                 try:

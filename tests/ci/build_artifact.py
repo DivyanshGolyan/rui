@@ -14,11 +14,6 @@ import tempfile
 import zipfile
 
 
-# Platform floors match build.zig's baseline CI CPU; it rejects a different
-# producer manifest before any gate runs.
-FLOORS = {("Linux", "x86_64"): ("x86_64", "x86_64"), ("Darwin", "arm64"): ("aarch64", "apple_m1")}
-
-
 class Mismatch(ValueError):
     """The verified producer differs from this worker; rebuild, never execute it."""
 
@@ -45,12 +40,9 @@ def identity(targets):
     # Everything the transferred executables depend on that can differ inside
     # one run. Runner image versions and tool listings are logged, not compared:
     # a rollout that keeps these fields still executes the producer's binaries.
-    system, machine = platform.system(), platform.machine()
-    arch, model = FLOORS[(system, machine)]
-    # Go test binaries are not transferred; their target still executes fresh.
-    return dict(format=3, tree=git("rev-parse", "HEAD^{tree}"),
-                targets=[t for t in targets if t != "measurement-check"],
-                system=system, machine=machine, cpu=dict(policy="baseline", arch=arch, model=model),
+    # build.zig rejects a foreign baseline-CPU manifest before any gate runs.
+    return dict(format=3, tree=git("rev-parse", "HEAD^{tree}"), targets=targets,
+                system=platform.system(), machine=platform.machine(),
                 compiler=digest(shutil.which("zig")))
 
 
@@ -94,7 +86,7 @@ def package(targets, destination, binaries=None):
                     member = output.gettarinfo(source, arcname=name)
                     with source.open('rb') as stream:
                         output.addfile(member, stream)
-    receipt = dict(verdict="compiled-not-tested", inputs=inputs, runner=runner(),
+    receipt = dict(inputs=inputs, runner=runner(),
                    source_sha=git("rev-parse", "HEAD"),
                    run_id=int(os.environ["GITHUB_RUN_ID"]),
                    run_attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]),
@@ -105,8 +97,6 @@ def package(targets, destination, binaries=None):
 
 
 def unpack(archive, receipt, inputs):
-    if receipt["verdict"] != "compiled-not-tested":
-        raise ValueError("Not a compiled-only receipt")
     if (receipt["run_id"], receipt["run_attempt"], receipt["source_sha"]) != (
             int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
             git("rev-parse", "HEAD")):

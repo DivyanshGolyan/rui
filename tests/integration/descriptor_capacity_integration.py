@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import bash_integration as bash
 import control_integration as control
 import model_fixture as fixture
-from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, start_ready_process, stop_process
+from host_process import HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
 
 
 RUI = pathlib.Path(sys.argv[1]).resolve()
@@ -902,7 +902,7 @@ def main():
         if incoming_error is None and not errors:
             shutil.rmtree(state)
         else:
-            print(f"retained descriptor fixture failure state: {state}", file=sys.stderr)
+            retain_failure_state("descriptor fixture failure state", state)
         if errors:
             if incoming_error is None:
                 raise errors[0]
