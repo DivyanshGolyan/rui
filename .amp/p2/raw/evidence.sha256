@@ -1,7 +1,8 @@
-fa9c6f90e2d993dbf519e9c8cd6115b4747c0c7cc7029ff7df9924aa95231eef  .amp/p2/ATTRIBUTION.md
-7e3c7de40d6d60293dceea8d3f2dfdce78821df4024feb0925470cdf1d6d6679  .amp/p2/COMMANDS.md
-4e659ee82c578904a7f24f5b9c96cae118c69df97c4668b9cf66fd0843ab5be7  .amp/p2/NOTES.md
+914fd4515a739f5ac52fc4db9a5940cd99aa2a1470c6eeba059c630df0932f3d  .amp/p2/ATTRIBUTION.md
+d03956164b00489e244ea44a839b04b4d9ea02680f35650d165f53d0902a413d  .amp/p2/COMMANDS.md
+df51443e1336bc5fbc7c4d064c5bdb7ad490853e74f29a3781e96ca9742303a5  .amp/p2/NOTES.md
 dfa5377b442f8cbf14b0fa5ffbf1b3ad95296219169d211011f48629f498a20f  .amp/p2/analyze.py
+6362db0d531b4949c50466a10d57dbb381c100aa9eca8a581830e9aad500418c  .amp/p2/bin/rui-candidate-strace
 c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
 fd72b0aaf6ef427387b78c853c96c2b940544ff0828c0a7dad2ea9c045547c98  .amp/p2/bin/rui-perf
 b5119beb8b888fbb4d27dfff3564c600d0e603d15536ab661ef92a642c54e3b1  .amp/p2/bin/rui-strace
@@ -17,6 +18,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/bu
 291981ca7d41c77ec246fc6aec01901819a4e0a42b4ea0943fd440b077749208  .amp/p2/raw/build-sql-phases.log.gz
 a038fc52844d84baf106039dbd22462995e7c35ab91b6420d89f69962ae6cb42  .amp/p2/raw/build-sql-research-attempt1.log
 ad80a92002dc4b2bd2d3be573118db7e82f035b86f72944a2a0df4f2ed2084f2  .amp/p2/raw/build-sql-research-attempt2.log
+412fe59db4c099c4a58daed10c25fbf1628a88cad0b85f926a076f3430d005a5  .amp/p2/raw/build-sse-candidate.log.gz
 7727ea269f21d233772c891551d59251644913522c81273afd421077ad8f902f  .amp/p2/raw/count-summary.json
 5b838e3186efc6105e4796c90698a500a071a99607c9e87a8315d9f9b178c3b0  .amp/p2/raw/cpu-binary-source-identity.sha256
 f1bc0915ada31b206873fd204ff1b44794ce6e9596cbf503ef841d9ee1d45739  .amp/p2/raw/cpu-stream1-summary.json
@@ -82,6 +84,9 @@ b26b21b8fe5338e740ab8cd325a65c6884f2cb12b06f5738730ce139b6e95fe8  .amp/p2/raw/sq
 e14fd7681f44dfbf973d464c64f97d8b398b3fbb8281e57eb6b099f62f50314c  .amp/p2/raw/sql100-host.log.gz
 8ef3f01cd86fc960a14a613bead304531e737fe23a8d9b38ae31061af0069638  .amp/p2/raw/sql100-schema-counts.txt
 2b8970518e3d1d42300cc43210fd481e5fb63fb490c3c348d87b2b79421ebc7a  .amp/p2/raw/sql100.json
+c99b8ba7a1a06dfbcd0f697825b1cfd5c8c957da7c17a564dcbd0cdec8367367  .amp/p2/raw/sse-candidate-comparison.json
+ad0a68f949cf9a9689ccb145948afc3c89812c4c5975bfdd167d40a269e70991  .amp/p2/raw/sse-candidate-identity.txt
+52cc4488dc0bf9e86866824f6095f30c265482dca26819e5c030e024222e967a  .amp/p2/raw/sse-candidate-postrun-verification.txt
 c44c44891bedbfb8fc8277d713dcaebe556ed8745963be677a02dbeb759671ec  .amp/p2/raw/sse-range-summary.json
 950cfb4db84d17a30b181ceb4b3e1882f52af4963069aa0520ac674c0412fca8  .amp/p2/raw/sse-replay-identity.sha256
 03500a8471b0ceaae9d8311347eb5cc4656cf28b1a6cf9e73f2c16b149b3a09b  .amp/p2/raw/sse-replay-preadv.txt.gz
@@ -109,6 +114,9 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/st
 70e24c093dfb4ee7db3e4f8aadcd42be3c1167027d048ea734809ea7d5c4844f  .amp/p2/raw/stream100-perf.data.gz
 58f073b5180a2ddfaa709ba3a5ffc92ed928920b78439c8401b0387ceabdc90e  .amp/p2/raw/stream100-perf.json
 af668e17dff9728725616e184e9ce1e1fbf29e8b7f21bead2b3298af810ce095  .amp/p2/raw/stream100-perf.stacks.gz
+8183b626d11a370f4f0ace09264dd2d62a7cd93c0a5d9ff01fcba3b21b822a49  .amp/p2/raw/stream100-sse-candidate-controller.log
+3e8ca4044fc1439866aca6cc7e35b23c6e80965ee18060a21bdde4ee8bca2c9c  .amp/p2/raw/stream100-sse-candidate-strace.txt
+dd056793bf3800fa9ce8fd3840ae0e77eff8ca33d86d7f10930963ec531e02cf  .amp/p2/raw/stream100-sse-candidate.json
 59869db34853933b239f1e2219cf7d431da006aa919635478511fabbfc8849d2  .amp/p2/raw/stream100-strace-host.log.gz
 d4bd6d5c2940cf6943aea82cc20b7f5ed685b80e6c876486a4ada2d584a83b0e  .amp/p2/raw/stream100-strace.json
 e9b4463182c04e4286dca4f12f24d7b5f89413a314398364ef65d36b4efe252b  .amp/p2/raw/stream100-strace.txt
@@ -119,4 +127,5 @@ af08d10cb9e13c49b89afa1abbc1b33d5fd4148662d8765047d3364ebe6ccfad  .amp/p2/sql-ph
 bec2a1b6c8f2c556d102a23fc3df07bda1f039acd0129a7c2b27dd5af3a59d78  .amp/p2/sql_phase_attribution.py
 72c51b98a7b517214dafc51e5dd1df78c5eca1dfaab631539f6514492b6ba475  .amp/p2/sql_read_attribution.py
 1de9f450b595a932791dcc492c46e3be2f5d9e93b4439c72cb414adc6b93c0c8  .amp/p2/sse-range-instrumentation.patch.gz
+58dc2827de0674b0c9578c64792c26032b9d3d9687df97a37f08d46db1a92dd7  .amp/p2/sse_candidate_comparison.py
 24c872c3b10816efe4632861b032748785f1226122cb43982dd60d61f35ffd55  .amp/p2/sse_range_attribution.py

@@ -1,0 +1,30 @@
+{
+  "rss_bytes": 7094272,
+  "virtual_bytes": 118472704,
+  "cpu_user_seconds": 0,
+  "cpu_system_seconds": 0,
+  "threads": 5,
+  "live_descendant_processes": 0,
+  "open_descriptors": 11,
+  "disk_read_bytes": 0,
+  "disk_write_bytes": 270336,
+  "linux_memory": {
+    "smaps_rollup_bytes": {
+      "AnonHugePages": 0,
+      "Anonymous": 1433600,
+      "Private_Clean": 5758976,
+      "Private_Dirty": 1433600,
+      "Pss": 7281664,
+      "Pss_Anon": 1433600,
+      "Pss_File": 5848064,
+      "Pss_Shmem": 0,
+      "Rss": 8642560,
+      "Shared_Clean": 1449984,
+      "Shared_Dirty": 0,
+      "Swap": 0,
+      "SwapPss": 0
+    },
+    "status_rss_high_water_bytes": 7094272,
+    "requested_glibc_tunables": ""
+  }
+}
