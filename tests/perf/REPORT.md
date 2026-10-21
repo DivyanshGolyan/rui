@@ -6,20 +6,21 @@ Status: **partial**. No Mac runner is connected, so the coordinator moved tonigh
 
 | N sessions | Host PSS (`smaps_rollup`) | Clients PSS | Source SHA |
 | ---: | --- | --- | --- |
-| 0 | r1 **measured**: 7,362,560 B at window end (estimate 8 MiB); Host CPU 0.00950 cores. r2–r3 pending | 0 steady-state (clients reaped); transient peaks unavailable | `240aef2e` |
-| 10 | r1 **measured**: 11,324,416 B at window end (estimate 8.9375 MiB); Host CPU 0.05428 cores. r2–r3 pending | 0 steady-state (clients reaped); transient peaks unavailable | `240aef2e` |
-| 100 | pending (P1 run) | pending | `240aef2e` |
-| Intercept (base) / slope (per session) | pending (no fit from 2 of 9 rows) | pending | — |
+| 0 | **measured** median 7,362,560 B (IQR 5,120 B) | 0 B steady state (clients reaped); transient peaks unavailable | `240aef2e` |
+| 10 | **measured** median 11,345,920 B (IQR 13,312 B) | 0 B steady state; transient peaks unavailable | `240aef2e` |
+| 100 | **measured** median 13,596,672 B (IQR 8,704 B) | 0 B steady state; transient peaks unavailable | `240aef2e` |
+| Intercept (base) / slope (per session), linear fit | 9,024,073 B / 47,572 B per session. Residuals reach 1.85 MB, so this is **not** a constant per-session cost: the step from 0 to 10 sessions (≈398 KB/session) is far steeper than from 10 to 100 (≈25 KB/session) | — | — |
 
-Headline 1 data, measured Linux fixture: P1 raw evidence at `perf/linux-pss-20261021` [`6f2c8c2f`](https://github.com/DivyanshGolyan/rui/commit/6f2c8c2f414503102517ebb518c0536c3b12fadb) (`.amp/p1/`). The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe), and the baseline ReleaseFast binary SHA-256 is `e2835cb2…3a50`. The queue verified 27/27 hashes. STREAM in-window event rates and CPU/event are unavailable: provider totals publish only after the 120 s offer. They are null, not zero.
+Each N has 3 fresh Hosts; the IQR is (max − min)/2 over those three. Headline 1 data, measured Linux fixture: P1 raw evidence at `perf/linux-pss-20261021` [`ab9f3e41`](https://github.com/DivyanshGolyan/rui/commit/ab9f3e410e4d06ad77c8a2fea6b8db6ccd5513e0) (`.amp/p1/summary.json` and `.amp/p1/raw/`). All nine runs and HOLD A1 passed, and all ten Host/provider pairs were reaped. The final baseline audit by the same Sol reviewer is pending. The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe), and the baseline ReleaseFast binary SHA-256 is `e2835cb2…3a50`. The queue verified 27/27 hashes. STREAM in-window event rates and CPU/event are unavailable: provider totals publish only after the 120 s offer. They are null, not zero.
 
 ## Headline 2: HOLD100 waiting cost, before and after one deadline-wait fix (Linux fixture)
 
 | Build | Host voluntary switches/s (Linux, not distinct wakeups) | Host CPU while waiting | Source SHA |
 | --- | --- | --- | --- |
 | Before, earlier P2 single run (**measured**) | ≈88/s (5,300 in 60 s; two threads at ≈49.7/s and ≈38.7/s) | 3.07% of one core (1.84 CPU-s / 60.01 s) | `240aef2e` |
-| Before, P1 A1–A3 | pending | pending | `240aef2e` |
-| After, P1 B1–B3 (intake deadline wait) | pending | pending | [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) (gates pending) |
+| Before, P1 A1 (**measured**) | 87.88/s proxy (5,278 voluntary in 60.059 s: two threads at 2,955 and 2,323; 91 nonvoluntary) | 1.70 CPU-s / 60.059 s ≈ 2.83% of one core | `240aef2e` (binary `e2835cb2…3a50`) |
+| Before, P1 A2–A3 | pending (alternating with B) | pending | `240aef2e` |
+| After, P1 B1–B3 (intake deadline wait) | pending (B build started 19:50:44 UTC, outside measured windows) | pending | [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) (Sol review: no findings; selected suite pending; **not** a fixed claim) |
 | Failed candidate, not measured | — | — | [`f6a2df85`](https://github.com/DivyanshGolyan/rui/commit/f6a2df856fba8a68cb875f8b7432702910c734de): failed `admission-debug-integration`; review found the same defect (closed exchanges waited up to 1 s for removal) |
 | Pre-run napkin (**estimated**) | ≈90/s before; ≈40/s after (only the intake 20 ms timer is removed) | not estimated | — |
 
