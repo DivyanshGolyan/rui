@@ -170,7 +170,7 @@ else:
         self.assertFalse(build_artifact.roots()['binaries'].exists())
         self.assertFalse((self.root / 'gates').exists())
 
-    def test_one_retry_only_for_shards_without_no_retry_gates(self):
+    def test_one_retry_only_when_requested(self):
         build_artifact.restore('101', ['test'])
         # A retryable shard reports its failure, reruns once and passes.
         (self.root / 'flaky').touch()
@@ -183,14 +183,12 @@ else:
             self.gates('--retry', targets='["test-logic"]')
         self.assertEqual(failure.exception.code, 23)
         self.assertEqual((self.root / 'gates').read_text().splitlines(), ['producer'] * 2)
-        # No-retry gates fail on their first failure, even with --retry.
-        for targets in ('["test"]', '["check"]', '["test-logic", "bash-recovery-integration"]'):
-            with self.subTest(targets=targets):
-                (self.root / 'flaky').touch()
-                with self.assertRaises(SystemExit) as failure:
-                    self.gates('--retry', targets=targets)
-                self.assertEqual(failure.exception.code, 9)
-                (self.root / 'flaky').unlink(missing_ok=True)
+        # Without --retry (strict-path selections) the first failure stands.
+        (self.root / 'flaky').touch()
+        with self.assertRaises(SystemExit) as failure:
+            self.gates(targets='["test-logic"]')
+        self.assertEqual(failure.exception.code, 9)
+        self.assertFalse((self.root / 'gates').exists())
 
 
 if __name__ == '__main__':

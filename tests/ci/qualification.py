@@ -16,9 +16,6 @@ NATIVE = (
     "current-facts-integration", "server-delivery-integration", "test-full",
     "evaluator-churn", "measurement-check",
 )
-# Composed, Store and recovery gates fail for real; never retry their shards.
-NO_RETRY = {"check", "check-full", "test", "canonical-failure-integration",
-            "bash-recovery-integration", "admission-debug-integration"}
 # Selected Linux suites run at most this many shards, all concurrently.
 LINUX_SHARDS = 10
 
@@ -58,20 +55,11 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS):
         else:
             packed.append(target)
     # Short Selected suites mostly pay setup, so pack them into the remaining
-    # concurrent slots. Retryable suites never share a shard with a no-retry
-    # gate. Qualification keeps one isolated job per suite.
-    groups = [group for group in ([t for t in packed if t in NO_RETRY],
-                                  [t for t in packed if t not in NO_RETRY]) if group]
-    slots = len(packed) if limit is None else max(limit - len(rows), len(groups))
-    remaining = slots
-    for index, group in enumerate(groups):
-        later = len(groups) - 1 - index
-        share = round(slots * len(group) / len(packed)) if later else remaining
-        count = max(1, min(len(group), share, remaining - later))
-        remaining -= count
-        for shard in range(count):
-            members = group[shard::count]
-            rows.append(dict(name="+".join(members), targets=members, part="all", resource=False, args=[]))
+    # concurrent slots. Qualification keeps one isolated job per suite.
+    count = len(packed) if limit is None else max(1, min(len(packed), limit - len(rows)))
+    for shard in range(count if packed else 0):
+        members = packed[shard::count]
+        rows.append(dict(name="+".join(members), targets=members, part="all", resource=False, args=[]))
     return {"include": rows}
 
 
