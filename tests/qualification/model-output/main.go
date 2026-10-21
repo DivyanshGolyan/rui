@@ -1965,6 +1965,14 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 		return result, err
 	}
 	result["host_window_start"] = initial
+	if sessions > 0 {
+		result["fixture_window_start_query_begin_unix_ns"] = time.Now().UnixNano()
+		result["fixture_window_start"], err = fixture.WaitReady(deadline)
+		result["fixture_window_start_query_end_unix_ns"] = time.Now().UnixNano()
+		if err != nil {
+			return result, err
+		}
+	}
 	if hold && runtime.GOOS == "linux" {
 		result["linux_thread_window_start"], err = captureLinuxThreads(host.Cmd.Process.Pid, filepath.Join(directory, "host-threads-start.txt"))
 		if err != nil {
@@ -2026,7 +2034,9 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	}
 	result["host_window_end"] = final
 	if sessions > 0 {
+		result["fixture_window_end_query_begin_unix_ns"] = time.Now().UnixNano()
 		snapshot, err := fixture.WaitReady(deadline)
+		result["fixture_window_end_query_end_unix_ns"] = time.Now().UnixNano()
 		if err != nil {
 			return result, err
 		}
