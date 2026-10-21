@@ -1,6 +1,6 @@
-e0887f8a8518c5e35acaebe71a775a08a9de35143e842f5e4ce65926d529c1ad  .amp/p2/ATTRIBUTION.md
+a3bfe95985a789fd73b8a219d3e39e7bc9560ac68cc2037148b22fd67673cac1  .amp/p2/ATTRIBUTION.md
 13c3883a52755fe6bd9d209093b28c3bce333811ab7bde38feea3a8664bd2418  .amp/p2/COMMANDS.md
-1acc7fd94f492cb9b720254e787fa27c767f53dd76d9fd675c9c0393bfe17fb8  .amp/p2/NOTES.md
+7f95cd4ac898d927590033eb0f3b128ad1a748afd055864d844d5e80e34321e2  .amp/p2/NOTES.md
 dfa5377b442f8cbf14b0fa5ffbf1b3ad95296219169d211011f48629f498a20f  .amp/p2/analyze.py
 c2382e83db86c4928bae57c12857784dfc806c831e259bf875a41e04fb5d7bb1  .amp/p2/bin/rui-heap
 fd72b0aaf6ef427387b78c853c96c2b940544ff0828c0a7dad2ea9c045547c98  .amp/p2/bin/rui-perf
@@ -101,3 +101,16 @@ e9b4463182c04e4286dca4f12f24d7b5f89413a314398364ef65d36b4efe252b  .amp/p2/raw/st
 90301c17042faf006c2795b189f3b14f301d7b9c83a903424d18f5a54079fe8c  .amp/p2/raw/stream100-uninstrumented.json
 5af211bb9ce0671578234f094a3a63d34a2c7844db7a23546f23bf037310f390  .amp/p2/raw/tool-capabilities.txt
 58b029cb34fbd105953fff18d53e7ec06ea96a489415cc5b183ee52a4550b3a5  .amp/p2/sql-instrumentation.patch.gz
+72c51b98a7b517214dafc51e5dd1df78c5eca1dfaab631539f6514492b6ba475  .amp/p2/sql_read_attribution.py
+bec2a1b6c8f2c556d102a23fc3df07bda1f039acd0129a7c2b27dd5af3a59d78  .amp/p2/sql_phase_attribution.py
+8bcbdaaf938bce53e1941cd0d06f9631732732a4f5a50cdf3e48bb0164096373  .amp/p2/p2_sql_phases_test.go.txt
+af08d10cb9e13c49b89afa1abbc1b33d5fd4148662d8765047d3364ebe6ccfad  .amp/p2/sql-phase-instrumentation.patch.gz
+49ecbffb009b243b2332d7e7ce79bc223a5ecb3a3ae9a4b929ebbb1c3e7bb6b2  .amp/p2/raw/sql-owner-summary.json
+bbf4e7403b44b9edccb87f24ac29c7ae5c6a951991f016e63c7d11bc8d46bf3e  .amp/p2/raw/sql-phase-summary.json
+0ef380fba5d7d6d647ac18afb92a5f86b50e58ac4279bbd2386be96a565b9886  .amp/p2/raw/sql-phase-store-facts.json
+8d895681ade1d5713c10111e588be7053ee711b31d172a3250d9c504bf8efa22  .amp/p2/raw/sql-phases-controller.log
+8205b240066a9b92f00664c7c96d7682885350f766c893755ae283521765b274  .amp/p2/raw/sql-phases-identity.sha256
+837ec115f9ce3c4efc7049c79e1010df7e388ec1740310472c95d77f6726cb1e  .amp/p2/raw/sql-phases-hold100/host-stderr.log.gz
+b26b21b8fe5338e740ab8cd325a65c6884f2cb12b06f5738730ce139b6e95fe8  .amp/p2/raw/sql-phases-hold100/evidence.json
+291981ca7d41c77ec246fc6aec01901819a4e0a42b4ea0943fd440b077749208  .amp/p2/raw/build-sql-phases.log.gz
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  .amp/p2/raw/build-sql-phases-go.log

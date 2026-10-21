@@ -109,3 +109,44 @@ Hardware cycles, instructions, branches, branch misses and cache misses are unsu
 The seven original instrumented streaming, SQL, heap and perf JSON reports remain `incomplete`, with process exit 1 because Mac physical footprint is unavailable. Capture, request integrity, result delivery, cleanup and post-reap durable audits pass in both rounds. The two new uninstrumented streaming reports retain the same missing-footprint limitation. Linux RSS, profile memory, CPU and switch counts do not replace Mac headline results. Normal-install, previous-release and live-provider qualification were not performed here.
 
 The failed SQL build caused by a dependency symlink and the failed perf post-processing field request remain in raw logs. Corrected infrastructure and post-processing did not rerun workloads for green. The original partial HOLD implementation remains frozen and unused by HOLD measurements. [Commands](COMMANDS.md) identify each executable, option, source export and post-processing step. [Count summary](raw/count-summary.json) is regenerated from the published raw evidence with `python3 .amp/p2/analyze.py`. Raw profiles and patches use gzip without deleting local originals. Final product-file hash verification is in [source-recheck-final.txt](raw/source-recheck-final.txt).
+
+## SELECT call-site attribution from existing traces
+
+The [SQL owner reduction](raw/sql-owner-summary.json), regenerated with `python3 .amp/p2/sql_read_attribution.py`, groups the original traces by exact statement text. No workload was repeated. SELECTs account for98.47% of8,909 first executions atN1 and98.23% of433,586 atN100. These remain whole-run counts, including startup, admission, streaming, result inspection and shutdown.
+
+| SELECT owner in baseline240 | N1,2 Messages | N100,200 Messages |
+| --- | ---: | ---: |
+| `recoverOneUncertainActionLocked` | 7,249 | 285,818 |
+| `operationSupersededByControlLocked` | 1,140 | 124,156 |
+| `recoverOneExhaustedModelAttemptLocked` | 123 | 139 |
+| `validateBlockedToolCalls` | 11 | 1,183 |
+| Bash admission probe | 7 | 692 |
+| Message admission probe | 7 | 692 |
+| Tool-continuation probe | 6 | 691 |
+| Retry admission probe | 3 | 18 |
+| Retry clock read | 4 | 19 |
+| Other work or observation SELECTs | 223 | 12,504 |
+
+The first two owners contribute8,389/8,909 and409,974/433,586 of all statement executions, about94% in both fixtures. `recoverOneUncertainActionLocked` at `src/store.zig:4568` executes the unresolved-Action SELECT on every execution turn through `src/execution_turn.zig:60`, before checking free capacity. Both retained fixture Stores contain zero Actions, so these scans find no Action to recover. No transaction begins on that empty return. They are repeated discovery, not Message or model-output mutation.
+
+`serviceLifecycle` reconciles controls every100ms or on a control hint. `cancelSupersededTransfers` at `src/server.zig:1769` calls `operationSupersededByControlLocked` at `src/store.zig:5606` once per active model slot. This explains the approximately100× population multiplier. The pre-reduction estimate was120,000 such SELECTs atN100 versus124,156 measured, and1,200 atN1 versus1,140 measured.
+
+The25ms transport wait is an upper bound, not an unconditional sleep. Network readiness and immediate-progress turns can cause more turns and uncertain-Action scans than40/second. The N100 trace contains285,818 scans, far above a40Hz×120second estimate. The older traces have no phase timestamps or turn markers, so they cannot partition those counts into timeout turns, readiness turns, admission or settled waiting. Additional phase instrumentation is being used for that distinction. SQL ownership is not CPU attribution, and no poll-driven optimization or durability change is implemented.
+
+## HOLD SQL phase counts distinguish waiting from admission
+
+One additional instrumented fixture ran from 20:07:32 to 20:09:22 UTC and passed. Its separately hashed ReleaseFast binary adds SQLite first-execution timestamps and execution-turn markers to an isolated baseline export. The existing P1 b13caa4 provider, Host and client owners supply 100 Messages, accepted HOLD streams, public cancellation and result drainage. No original count run was repeated.
+
+| Observed phase | Interval, seconds | SELECT first executions | SELECTs per observed second | BEGIN / COMMIT / ROLLBACK |
+| --- | ---: | ---: | ---: | --- |
+| Empty Host, no Messages | 10.00899 | 629 | 62.84 | 110 / 0 / 110 |
+| Configure and admit 100 Messages | 5.34185 | 5,655 | 1,058.62 | 436 / 300 / 136 |
+| 100 accepted streams, no response bytes | 60.00801 | 60,067 | 1,000.98 | 0 / 0 / 0 |
+| Explicit stop and result drain | 2.64845 | 6,137 | 2,317.20 | 232 / 100 / 132 |
+| All 100 Messages cancelled and settled | 20.01841 | 1,248 | 62.34 | 218 / 0 / 218 |
+
+The held window contains 57,700 control-reconciliation reads, 2,307 uncertain-Action scans and 60 exhausted-retry scans. All 2,307 recorded turns have zero free slots and return to transport wait. There are no admission probes, mutations or explicit transactions in that window. The pre-run estimate was 62,460 SELECTs, about 3.8% above the measured 60,067. This confirms approximately 1,000 SELECTs per second without any response bytes or model events, not a cost per completed Message.
+
+Once every Message is cancelled and settled, all 198 turn starts have 100 free slots and use the 100ms idle wait. Each turn performs one uncertain-Action scan, one Bash admission scan, one Message probe, one tool-continuation probe and two blocked-tool scans. Twenty retry-maintenance cycles add one exhausted-retry scan, one SQLite clock read and one retry-admission scan each. Empty Bash and retry admissions issue BEGIN/ROLLBACK even though no work is selected. These are statement executions, not fsync counts or successful commits.
+
+The cancelled-settled window is not successful model completion. Read-only Store inspection confirms 100 cancelled Turns, no unresolved model operations and zero Actions. The [phase summary](raw/sql-phase-summary.json) retains every exact SELECT text, phase boundaries, turn counts and free-slot histograms. [Raw host logging](raw/sql-phases-hold100/host-stderr.log.gz), [fixture evidence](raw/sql-phases-hold100/evidence.json), [source patch](sql-phase-instrumentation.patch.gz) and [temporary test](p2_sql_phases_test.go.txt) permit independent reduction with `python3 .amp/p2/sql_phase_attribution.py`. Interval lengths only normalize instrumented counts. They are not uninstrumented CPU or latency measurements, and the original streaming traces still have no exact historical phase split.

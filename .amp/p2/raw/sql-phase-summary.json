@@ -1,0 +1,677 @@
+{
+  "fixture": true,
+  "instrumented_counts_only": true,
+  "execution_tid": 1709093,
+  "windows": [
+    {
+      "name": "empty_idle",
+      "start_unix_ns": 1792613252733990148,
+      "end_unix_ns": 1792613262742981268,
+      "observed_seconds": 10.00899112,
+      "first_executions": 849,
+      "statement_verbs": {
+        "SELECT": 629,
+        "BEGIN": 110,
+        "ROLLBACK": 110
+      },
+      "select_owners": {
+        "exhausted_retry_recovery": 10,
+        "bash_admission_probe": 100,
+        "retry_clock": 10,
+        "retry_admission_probe": 10,
+        "message_admission_probe": 100,
+        "blocked_tool_validation": 200,
+        "tool_continuation_probe": 100,
+        "uncertain_action_recovery": 99
+      },
+      "select_first_executions_per_second": 62.843496658032805,
+      "turn_stages": {
+        "idle": 100,
+        "begin": 99
+      },
+      "free_slot_histogram_at_turn_start": {
+        "100": 99
+      },
+      "first_executions_by_tid": {
+        "1709093": 849
+      },
+      "select_texts": [
+        {
+          "sql": "SELECT operation.operation_id FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL AND operation.resolution_code='tool_proposals' ORDER BY operation.operation_id",
+          "count": 200,
+          "owner": "blocked_tool_validation"
+        },
+        {
+          "sql": "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action INDEXED BY action_operation_executable JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) ORDER BY action.action_id LIMIT 1",
+          "count": 100,
+          "owner": "bash_admission_probe"
+        },
+        {
+          "sql": "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL)))))))) LIMIT 1",
+          "count": 100,
+          "owner": "message_admission_probe"
+        },
+        {
+          "sql": "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND (current.resolution_code IN ('answer','compacted','context_overflow') OR current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))) AND NOT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=active.session_ref AND m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))))))) ORDER BY current.operation_id LIMIT 1",
+          "count": 100,
+          "owner": "tool_continuation_probe"
+        },
+        {
+          "sql": "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+          "count": 99,
+          "owner": "uncertain_action_recovery"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 ORDER BY operation_id LIMIT ?1",
+          "count": 10,
+          "owner": "exhausted_retry_recovery"
+        },
+        {
+          "sql": "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+          "count": 10,
+          "owner": "retry_clock"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
+          "count": 10,
+          "owner": "retry_admission_probe"
+        }
+      ]
+    },
+    {
+      "name": "configure_and_admit",
+      "start_unix_ns": 1792613262742983384,
+      "end_unix_ns": 1792613268084837955,
+      "observed_seconds": 5.341854571,
+      "first_executions": 7828,
+      "statement_verbs": {
+        "BEGIN": 436,
+        "SELECT": 5655,
+        "INSERT": 901,
+        "COMMIT": 300,
+        "ROLLBACK": 136,
+        "UPDATE": 300,
+        "WITH": 100
+      },
+      "select_owners": {
+        "other_work_or_observation": 3400,
+        "uncertain_action_recovery": 131,
+        "exhausted_retry_recovery": 6,
+        "bash_admission_probe": 130,
+        "retry_clock": 6,
+        "retry_admission_probe": 6,
+        "message_admission_probe": 130,
+        "blocked_tool_validation": 159,
+        "tool_continuation_probe": 129,
+        "control_reconciliation": 1558
+      },
+      "select_first_executions_per_second": 1058.6211071151229,
+      "turn_stages": {
+        "begin": 131,
+        "idle": 18,
+        "immediate": 100,
+        "transport": 13
+      },
+      "free_slot_histogram_at_turn_start": {
+        "100": 19,
+        "99": 1,
+        "98": 1,
+        "97": 1,
+        "96": 1,
+        "95": 1,
+        "94": 1,
+        "93": 1,
+        "92": 1,
+        "91": 1,
+        "90": 2,
+        "89": 1,
+        "88": 1,
+        "87": 1,
+        "86": 1,
+        "85": 1,
+        "84": 1,
+        "83": 1,
+        "82": 1,
+        "81": 2,
+        "80": 2,
+        "79": 1,
+        "78": 2,
+        "77": 1,
+        "76": 1,
+        "75": 1,
+        "74": 1,
+        "73": 1,
+        "72": 1,
+        "71": 1,
+        "70": 1,
+        "69": 1,
+        "68": 1,
+        "67": 1,
+        "66": 2,
+        "65": 1,
+        "64": 1,
+        "63": 1,
+        "62": 2,
+        "61": 1,
+        "60": 1,
+        "59": 1,
+        "58": 1,
+        "57": 1,
+        "56": 1,
+        "55": 1,
+        "54": 1,
+        "53": 2,
+        "52": 1,
+        "51": 1,
+        "50": 1,
+        "49": 2,
+        "48": 1,
+        "47": 1,
+        "46": 1,
+        "45": 2,
+        "44": 1,
+        "43": 2,
+        "42": 1,
+        "41": 1,
+        "40": 1,
+        "39": 1,
+        "38": 1,
+        "37": 1,
+        "36": 1,
+        "35": 1,
+        "34": 1,
+        "33": 1,
+        "32": 1,
+        "31": 1,
+        "30": 1,
+        "29": 1,
+        "28": 1,
+        "27": 1,
+        "26": 1,
+        "25": 1,
+        "24": 1,
+        "23": 1,
+        "22": 1,
+        "21": 1,
+        "20": 1,
+        "19": 1,
+        "18": 1,
+        "17": 1,
+        "16": 1,
+        "15": 1,
+        "14": 1,
+        "13": 1,
+        "12": 2,
+        "11": 1,
+        "10": 2,
+        "9": 1,
+        "8": 1,
+        "7": 1,
+        "6": 1,
+        "5": 1,
+        "4": 1,
+        "3": 1,
+        "2": 1,
+        "1": 1,
+        "0": 1
+      },
+      "first_executions_by_tid": {
+        "1709091": 1901,
+        "1709093": 5927
+      },
+      "select_texts": [
+        {
+          "sql": "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+          "count": 1558,
+          "owner": "control_reconciliation"
+        },
+        {
+          "sql": "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+          "count": 900,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1",
+          "count": 300,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+          "count": 300,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+          "count": 200,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=0",
+          "count": 200,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
+          "count": 200,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT position,kind,content_id,model,provider,item_kind,item_id_digest,valid_owner,sender FROM (SELECT * FROM (SELECT e.session_position AS position,e.entry_kind AS kind,e.content_id AS content_id,NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS valid_owner,(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref WHERE current.operation_id=?1 AND e.session_position>?2 AND e.session_position<current.admission_position AND e.entry_kind IN (1,2) ORDER BY e.session_position LIMIT 1) UNION ALL SELECT * FROM (SELECT item.session_position AS position,3 AS kind,item.content_id AS content_id,r.model AS model,r.provider AS provider,item.item_kind,item.item_id_digest,owner.resolution_code IN ('answer','compacted','tool_proposals') AND owner.session_ref=item.session_ref AND owner_turn.session_ref=item.session_ref AND owner.attempt_ordinal=item.attempt_ordinal AND owner.admission_position<item.session_position AND owner.admission_position<current.admission_position AND (item.item_kind!=3 OR owner.resolution_code='tool_proposals') AND ((owner.resolution_code='tool_proposals')=EXISTS(SELECT 1 FROM model_tool_call call WHERE call.operation_id=owner.operation_id)) AS valid_owner,NULL AS sender FROM model_operation current JOIN model_output_item item ON item.session_ref=current.session_ref LEFT JOIN model_operation owner ON owner.operation_id=item.operation_id LEFT JOIN turn owner_turn ON owner_turn.turn_id=owner.turn_id LEFT JOIN session_revision r ON r.session_ref=owner.session_ref AND r.revision=owner.settings_revision WHERE current.operation_id=?1 AND item.session_position>?2 AND item.session_position<current.admission_position ORDER BY item.session_position LIMIT 1)) ORDER BY position LIMIT 1",
+          "count": 200,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT operation.operation_id FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL AND operation.resolution_code='tool_proposals' ORDER BY operation.operation_id",
+          "count": 159,
+          "owner": "blocked_tool_validation"
+        },
+        {
+          "sql": "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+          "count": 131,
+          "owner": "uncertain_action_recovery"
+        },
+        {
+          "sql": "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action INDEXED BY action_operation_executable JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) ORDER BY action.action_id LIMIT 1",
+          "count": 130,
+          "owner": "bash_admission_probe"
+        },
+        {
+          "sql": "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL)))))))) LIMIT 1",
+          "count": 130,
+          "owner": "message_admission_probe"
+        },
+        {
+          "sql": "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND (current.resolution_code IN ('answer','compacted','context_overflow') OR current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))) AND NOT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=active.session_ref AND m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))))))) ORDER BY current.operation_id LIMIT 1",
+          "count": 129,
+          "owner": "tool_continuation_probe"
+        },
+        {
+          "sql": "SELECT admission_id FROM message_admission ORDER BY admission_id DESC LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code,latest.first_admission_id FROM turn latest INDEXED BY turn_session_latest LEFT JOIN model_operation current ON current.operation_id=latest.operation_id WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT turn_id FROM turn ORDER BY turn_id DESC LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT operation_id FROM model_operation ORDER BY operation_id DESC LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT count(*) FROM session_revision r WHERE r.session_ref=?1 AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) AND r.revision<=?2 AND r.instructions_updated=1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT purpose FROM model_operation WHERE operation_id=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT current.admission_position,coalesce((SELECT base.admission_position FROM model_operation base INDEXED BY model_operation_compaction_bases WHERE base.session_ref=current.session_ref AND base.purpose=1 AND base.resolution_code='compacted' AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1),0) FROM model_operation current WHERE current.operation_id=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT source.operation_id,source.admission_position,source.output_item_count,source.purpose FROM model_operation current JOIN model_operation source INDEXED BY model_operation_context_history ON source.session_ref=current.session_ref WHERE current.operation_id=?1 AND source.admission_position>=?2 AND (source.admission_position,source.operation_id)>(?3,?5) AND source.admission_position<?4 AND source.resolution_code IN ('answer','compacted','tool_proposals') ORDER BY source.admission_position,source.operation_id LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT base.operation_id FROM model_operation current JOIN model_operation base INDEXED BY model_operation_compaction_bases ON base.session_ref=current.session_ref WHERE current.operation_id=?1 AND base.purpose=1 AND base.resolution_code='compacted' AND base.admission_position<current.admission_position ORDER BY base.admission_position DESC LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT source.operation_id,current.admission_position,source.resolution_code='tool_proposals',source.admission_position,source.output_item_count FROM model_operation current JOIN model_operation source INDEXED BY model_operation_session_history ON source.session_ref=current.session_ref WHERE current.operation_id=?1 AND source.operation_id>?2 AND source.operation_id<current.operation_id ORDER BY source.operation_id LIMIT 1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 ORDER BY operation_id LIMIT ?1",
+          "count": 6,
+          "owner": "exhausted_retry_recovery"
+        },
+        {
+          "sql": "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+          "count": 6,
+          "owner": "retry_clock"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
+          "count": 6,
+          "owner": "retry_admission_probe"
+        }
+      ]
+    },
+    {
+      "name": "held_100",
+      "start_unix_ns": 1792613278094967038,
+      "end_unix_ns": 1792613338102976000,
+      "observed_seconds": 60.008008962,
+      "first_executions": 60067,
+      "statement_verbs": {
+        "SELECT": 60067
+      },
+      "select_owners": {
+        "control_reconciliation": 57700,
+        "uncertain_action_recovery": 2307,
+        "exhausted_retry_recovery": 60
+      },
+      "select_first_executions_per_second": 1000.9830527461319,
+      "turn_stages": {
+        "begin": 2307,
+        "transport": 2307
+      },
+      "free_slot_histogram_at_turn_start": {
+        "0": 2307
+      },
+      "first_executions_by_tid": {
+        "1709093": 60067
+      },
+      "select_texts": [
+        {
+          "sql": "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+          "count": 57700,
+          "owner": "control_reconciliation"
+        },
+        {
+          "sql": "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+          "count": 2307,
+          "owner": "uncertain_action_recovery"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 ORDER BY operation_id LIMIT ?1",
+          "count": 60,
+          "owner": "exhausted_retry_recovery"
+        }
+      ]
+    },
+    {
+      "name": "stop_and_drain",
+      "start_unix_ns": 1792613338103084441,
+      "end_unix_ns": 1792613340751538827,
+      "observed_seconds": 2.648454386,
+      "first_executions": 7301,
+      "statement_verbs": {
+        "BEGIN": 232,
+        "SELECT": 6137,
+        "INSERT": 200,
+        "UPDATE": 500,
+        "COMMIT": 100,
+        "ROLLBACK": 132
+      },
+      "select_owners": {
+        "other_work_or_observation": 1000,
+        "uncertain_action_recovery": 130,
+        "control_reconciliation": 4354,
+        "bash_admission_probe": 129,
+        "retry_clock": 3,
+        "retry_admission_probe": 3,
+        "tool_continuation_probe": 129,
+        "blocked_tool_validation": 258,
+        "message_admission_probe": 129,
+        "exhausted_retry_recovery": 2
+      },
+      "select_first_executions_per_second": 2317.200565145017,
+      "turn_stages": {
+        "begin": 130,
+        "immediate": 63,
+        "transport": 64,
+        "idle": 3
+      },
+      "free_slot_histogram_at_turn_start": {
+        "0": 1,
+        "1": 3,
+        "2": 2,
+        "4": 2,
+        "5": 2,
+        "6": 2,
+        "8": 2,
+        "9": 2,
+        "11": 2,
+        "12": 2,
+        "13": 2,
+        "14": 2,
+        "15": 2,
+        "16": 2,
+        "18": 2,
+        "19": 2,
+        "21": 2,
+        "25": 2,
+        "27": 2,
+        "29": 2,
+        "31": 2,
+        "34": 2,
+        "35": 2,
+        "37": 2,
+        "39": 2,
+        "40": 2,
+        "42": 2,
+        "43": 2,
+        "44": 2,
+        "45": 2,
+        "47": 2,
+        "48": 2,
+        "49": 2,
+        "51": 2,
+        "52": 2,
+        "53": 2,
+        "55": 2,
+        "56": 2,
+        "57": 2,
+        "59": 2,
+        "60": 2,
+        "61": 2,
+        "63": 2,
+        "64": 2,
+        "66": 2,
+        "67": 2,
+        "69": 2,
+        "73": 2,
+        "75": 2,
+        "77": 2,
+        "78": 2,
+        "79": 2,
+        "80": 2,
+        "82": 2,
+        "83": 3,
+        "85": 2,
+        "86": 2,
+        "91": 2,
+        "92": 2,
+        "94": 2,
+        "96": 2,
+        "97": 2,
+        "98": 2,
+        "100": 3
+      },
+      "first_executions_by_tid": {
+        "1709092": 1600,
+        "1709093": 5401,
+        "1709091": 300
+      },
+      "select_texts": [
+        {
+          "sql": "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+          "count": 4354,
+          "owner": "control_reconciliation"
+        },
+        {
+          "sql": "SELECT operation.operation_id FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL AND operation.resolution_code='tool_proposals' ORDER BY operation.operation_id",
+          "count": 258,
+          "owner": "blocked_tool_validation"
+        },
+        {
+          "sql": "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+          "count": 200,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+          "count": 130,
+          "owner": "uncertain_action_recovery"
+        },
+        {
+          "sql": "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action INDEXED BY action_operation_executable JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) ORDER BY action.action_id LIMIT 1",
+          "count": 129,
+          "owner": "bash_admission_probe"
+        },
+        {
+          "sql": "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND (current.resolution_code IN ('answer','compacted','context_overflow') OR current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))) AND NOT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=active.session_ref AND m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))))))) ORDER BY current.operation_id LIMIT 1",
+          "count": 129,
+          "owner": "tool_continuation_probe"
+        },
+        {
+          "sql": "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL)))))))) LIMIT 1",
+          "count": 129,
+          "owner": "message_admission_probe"
+        },
+        {
+          "sql": "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT t.turn_id,t.operation_id,o.resolution_code FROM turn t JOIN model_operation o ON o.operation_id=t.operation_id WHERE t.session_ref=?1 AND t.outcome_code IS NULL",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=0",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT session_ref FROM turn WHERE turn_id=?1 AND outcome_code IS NOT NULL AND outcome_position IS NULL",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT outcome_code FROM turn WHERE turn_id=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT m.session_ref,m.content_id,m.admission_id,m.command_key,m.turn_id,t.operation_id,o.attempt_ordinal,t.outcome_code,t.outcome_content_id,CASE WHEN m.turn_id IS NULL THEN (SELECT stopped.command_key FROM session_stop stopped JOIN core_command stop_command ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.rowid LIMIT 1) END FROM message_admission m LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN model_operation o ON o.operation_id=t.operation_id WHERE m.command_key=?1",
+          "count": 100,
+          "owner": "other_work_or_observation"
+        },
+        {
+          "sql": "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+          "count": 3,
+          "owner": "retry_clock"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
+          "count": 3,
+          "owner": "retry_admission_probe"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 ORDER BY operation_id LIMIT ?1",
+          "count": 2,
+          "owner": "exhausted_retry_recovery"
+        }
+      ]
+    },
+    {
+      "name": "cancelled_settled_idle",
+      "start_unix_ns": 1792613342752601912,
+      "end_unix_ns": 1792613362771013796,
+      "observed_seconds": 20.018411884,
+      "first_executions": 1684,
+      "statement_verbs": {
+        "SELECT": 1248,
+        "BEGIN": 218,
+        "ROLLBACK": 218
+      },
+      "select_owners": {
+        "uncertain_action_recovery": 198,
+        "bash_admission_probe": 198,
+        "tool_continuation_probe": 198,
+        "blocked_tool_validation": 396,
+        "message_admission_probe": 198,
+        "exhausted_retry_recovery": 20,
+        "retry_clock": 20,
+        "retry_admission_probe": 20
+      },
+      "select_first_executions_per_second": 62.34260775688614,
+      "turn_stages": {
+        "begin": 198,
+        "idle": 198
+      },
+      "free_slot_histogram_at_turn_start": {
+        "100": 198
+      },
+      "first_executions_by_tid": {
+        "1709093": 1684
+      },
+      "select_texts": [
+        {
+          "sql": "SELECT operation.operation_id FROM turn active JOIN model_operation operation ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL AND operation.resolution_code='tool_proposals' ORDER BY operation.operation_id",
+          "count": 396,
+          "owner": "blocked_tool_validation"
+        },
+        {
+          "sql": "SELECT action_id,parent_operation_id FROM action_operation INDEXED BY action_operation_unresolved_attempt WHERE resolution_code IS NULL AND attempt_ordinal=1 ORDER BY action_id LIMIT ?1",
+          "count": 198,
+          "owner": "uncertain_action_recovery"
+        },
+        {
+          "sql": "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action INDEXED BY action_operation_executable JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) ORDER BY action.action_id LIMIT 1",
+          "count": 198,
+          "owner": "bash_admission_probe"
+        },
+        {
+          "sql": "SELECT active.session_ref,active.first_admission_id,active.input_cutoff,0,s.revision,s.next_position,active.turn_id FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id JOIN session s ON s.session_ref=active.session_ref WHERE active.outcome_code IS NULL AND (current.resolution_code IN ('answer','compacted','context_overflow') OR current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))) AND NOT EXISTS(SELECT 1 FROM message_admission m WHERE m.session_ref=active.session_ref AND m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL))))))))) ORDER BY current.operation_id LIMIT 1",
+          "count": 198,
+          "owner": "tool_continuation_probe"
+        },
+        {
+          "sql": "SELECT 1 FROM message_admission m INDEXED BY message_admission_pending WHERE m.turn_id IS NULL AND NOT EXISTS( SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref  AND m.admission_id<=stopped.admission_cutoff) AND (NOT EXISTS( SELECT 1 FROM turn active WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL) OR EXISTS( SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id  WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL  AND (current.resolution_code IN ('answer','compacted','interrupted','context_overflow') OR (current.resolution_code='tool_proposals' AND EXISTS( SELECT 1 FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND (SELECT count(*) FROM model_tool_call call WHERE call.operation_id=current.operation_id)=( SELECT count(*) FROM model_output_item item WHERE item.operation_id=current.operation_id AND item.item_kind=3) AND NOT EXISTS( SELECT 1 FROM model_output_item item LEFT JOIN model_tool_call call  ON call.operation_id=item.operation_id AND call.item_ordinal=item.item_ordinal  LEFT JOIN action_operation action ON action.parent_operation_id=call.operation_id  AND action.call_ordinal=call.call_ordinal WHERE item.operation_id=current.operation_id AND item.item_kind=3 AND ( call.operation_id IS NULL OR (call.rejection_code IS NULL AND (action.action_id IS NULL OR action.resolution_code IS NULL)))))))) LIMIT 1",
+          "count": 198,
+          "owner": "message_admission_probe"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 ORDER BY operation_id LIMIT ?1",
+          "count": 20,
+          "owner": "exhausted_retry_recovery"
+        },
+        {
+          "sql": "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
+          "count": 20,
+          "owner": "retry_clock"
+        },
+        {
+          "sql": "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND allowance_used<4 AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2",
+          "count": 20,
+          "owner": "retry_admission_probe"
+        }
+      ]
+    }
+  ],
+  "limits": "SQL first executions, not completions; logged wall-clock intervals are count denominators, not CPU cost. Settled idle follows explicit cancellation of all Messages, not successful model completion."
+}
