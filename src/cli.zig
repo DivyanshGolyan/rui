@@ -68,52 +68,33 @@ fn run(init: std.process.Init) !void {
         return error.InvalidArguments;
     };
     const definition = command.definition();
-    const help_requested = definition.validate(args[3..]) catch |err| {
+    // The arena outlives this invocation, so decoded identities do too.
+    const parsed = definition.parse(args[3..], init.arena.allocator()) catch |err| {
         const problem = switch (err) {
             error.DuplicateArgument => "an option was repeated",
             error.UnknownArgument => "unknown option",
             error.MissingArgumentValue => "an option is missing its value",
             error.ConflictingArguments => "conflicting selectors or input sources",
             error.InvalidArguments => "unexpected argument (use -- before literal text)",
+            error.InvalidHexIdentity => "a hex selector is not even-length UTF-8 hex within its bound",
+            error.OutOfMemory => "out of memory",
         };
         TerminalText.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
         return err;
     };
-    if (help_requested) {
+    if (parsed.help) {
         try definition.help(&help_writer.interface);
         return help_writer.flush();
     }
-    if (definition.missing(args[3..])) |group| {
+    if (parsed.missing()) |group| {
         var missing_buffer: [256]u8 = undefined;
         var missing_writer: std.Io.Writer = .fixed(&missing_buffer);
         try definition.writeGroup(&missing_writer, group);
         TerminalText.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, missing_writer.buffered(), @tagName(resource), definition.name });
         return error.InvalidArguments;
     }
-    // Decode only selector arguments, never an option-looking value or literal
-    // message. Handlers consume the same bounded identities regardless of their
-    // shell-safe spelling; the arena outlives this invocation.
-    var selector_index: usize = 3;
-    while (selector_index < args.len) : (selector_index += 1) {
-        const arg = args[selector_index];
-        if (std.mem.eql(u8, arg, "--")) break;
-        if (!std.mem.startsWith(u8, arg, "--")) continue;
-        for (definition.options) |option| {
-            if (!std.mem.eql(u8, arg[2..], option.name)) continue;
-            if (option.argument == null) break;
-            inline for (cli_args.hex_selectors, .{ protocol.max_store_bytes, protocol.max_session_bytes, protocol.max_key_bytes }) |selector, limit| {
-                if (std.mem.eql(u8, option.name, selector[0])) {
-                    const storage = try init.arena.allocator().alloc(u8, limit);
-                    args[selector_index + 1] = try decodeHexIdentity(args[selector_index + 1], storage);
-                    args[selector_index] = "--" ++ selector[1];
-                }
-            }
-            selector_index += 1;
-            break;
-        }
-    }
     dispatching = true;
-    dispatch(init, command, args) catch |err| {
+    dispatch(init, command, &parsed, args) catch |err| {
         if (err == error.InvalidArguments) {
             TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return err;
@@ -133,38 +114,34 @@ fn run(init: std.process.Init) !void {
     try postCommandHold(init);
 }
 
-fn dispatch(init: std.process.Init, command: cli_args.Command, args: [][]const u8) !void {
-    const operands = args[3..];
+fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
     switch (command) {
-        .session_configure => try configure(init, .{ .io = init.io }, operands, false),
-        .session_send => try message(init, operands),
-        .session_inspect => try inspect(init, operands),
-        .session_list => try sessions(init, operands),
-        .session_stop => try stopSession(init, operands),
-        .session_interrupt_model => try interruptModel(init, operands),
-        .session_read_conversation => try readConversation(init, operands),
-        .session_resume => try resumeSession(init, operands),
-        .request_inspect => try observe(init, operands),
-        .request_recover => try recover(init, operands),
-        .request_read_result => try readResult(init, operands),
-        .request_list => try requests(init, operands),
-        .action_inspect => try inspectAction(init, .{ .io = init.io }, operands, false),
-        .action_allow => try decideAction(init, operands, .allow_once),
-        .action_deny => try decideAction(init, operands, .deny),
-        .action_read_call_id => try readActionContent(init, operands, .call_id),
-        .action_read_arguments => try readActionContent(init, operands, .arguments),
-        .host_start, .host_stop, .host_status => try host(init, args[2..]),
+        .session_configure => try configure(init, .{ .io = init.io }, parsed, null),
+        .session_send => try message(init, parsed),
+        .session_inspect => try inspect(init, parsed),
+        .session_list => try sessions(init, parsed),
+        .session_stop => try stopSession(init, parsed),
+        .session_interrupt_model => try interruptModel(init, parsed),
+        .session_read_conversation => try readConversation(init, parsed),
+        .session_resume => try resumeSession(init, parsed),
+        .request_inspect => try observe(init, parsed),
+        .request_recover => try recover(init, parsed),
+        .request_read_result => try readResult(init, parsed),
+        .request_list => try requests(init),
+        .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?, false),
+        .action_allow => try decideAction(init, parsed, .allow_once),
+        .action_deny => try decideAction(init, parsed, .deny),
+        .action_read_call_id => try readActionContent(init, parsed, .call_id),
+        .action_read_arguments => try readActionContent(init, parsed, .arguments),
+        .host_start, .host_stop, .host_status => try host(init, command, parsed),
         .host_serve => {
             try configureHostAllocator(init, args);
-            try serve(init, operands);
+            try serve(init, parsed);
         },
-        .defaults_inspect => try setup(init, operands, false),
-        .defaults_configure => {
-            // Inspection has its own read-only operation; configure must edit.
-            if (operands.len == 0) return usage();
-            try setup(init, operands, false);
-        },
-        .auth_login => try login(init, operands, false, codex_auth.login),
+        // Inspection has its own read-only operation; configure's grammar
+        // requires an edit.
+        .defaults_inspect, .defaults_configure => try setup(init, parsed, false),
+        .auth_login => try login(init, &.{parsed.positional.?}, false, codex_auth.login),
     }
 }
 
@@ -229,27 +206,16 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
     return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
 }
 
-fn setup(init: std.process.Init, args: []const []const u8, interactive: bool) !void {
+fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
     const home = init.environ_map.get("HOME") orelse {
         TerminalText.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
     };
     var edit: preferences.Edit = .{};
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const flag = args[index];
-        if (std.mem.eql(u8, flag, "--store")) {
-            edit.store = .{ .set = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, flag, "--provider")) {
-            edit.provider = .{ .set = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, flag, "--model")) {
-            if (edit.model == .clear) return error.ConflictingPreferenceModelEdit;
-            edit.model = .{ .set = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, flag, "--clear-model")) {
-            if (edit.model == .set) return error.ConflictingPreferenceModelEdit;
-            edit.model = .clear;
-        } else return usage();
-    }
+    if (parsed.get("store")) |store| edit.store = .{ .set = store };
+    if (parsed.get("provider")) |name| edit.provider = .{ .set = name };
+    if (parsed.get("model")) |model| edit.model = .{ .set = model };
+    if (parsed.has("clear-model")) edit.model = .clear;
     var credential_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const now = codex_auth.nowSeconds(init.io);
     const readiness: provider_selection.Readiness = blk: {
@@ -418,25 +384,11 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
     return preferences.defaultStore(home, buffer);
 }
 
-fn host(init: std.process.Init, args: []const []const u8) !void {
-    if (args.len == 0) return usage();
-    const start = std.mem.eql(u8, args[0], "start");
-    const stop = std.mem.eql(u8, args[0], "stop");
-    if (!start and !stop and !std.mem.eql(u8, args[0], "status")) return usage();
-    var explicit: ?[]const u8 = null;
-    var target: ?protocol.InstanceId = null;
-    var index: usize = 1;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store") and explicit == null) {
-            explicit = try takeValue(args, &index);
-        } else if (stop and std.mem.eql(u8, args[index], "--instance") and target == null) {
-            target = try protocol.parseInstanceId(try takeValue(args, &index));
-        } else return usage();
-    }
+fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected = try selectedStore(init, explicit, &fallback);
-    if (start) return startHost(init, selected, false);
-    if (stop) return stopHost(init.io, selected, target);
+    const selected = try selectedStore(init, parsed.get("store"), &fallback);
+    if (command == .host_start) return startHost(init, selected, false);
+    if (command == .host_stop) return stopHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
     switch (status) {
@@ -977,14 +929,13 @@ const NewSessionOptions = struct {
     model: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
 
-    fn parse(args: []const []const u8) !NewSessionOptions {
-        var options: NewSessionOptions = .{};
-        var literal = false;
-        var index: usize = 0;
-        while (index < args.len) : (index += 1) {
-            const arg = args[index];
-            if (!literal and std.mem.eql(u8, arg, "--store") and options.store == null) options.store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--provider") and options.provider == null) options.provider = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--model") and options.model == null) options.model = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (options.prompt == null and (literal or !std.mem.startsWith(u8, arg, "-"))) options.prompt = arg else return usage();
-        }
+    /// Null when the invocation asks for help.
+    fn parse(args: []const []const u8) !?NewSessionOptions {
+        // The fresh-session grammar has no hex spellings to allocate.
+        var nothing = std.heap.FixedBufferAllocator.init(&.{});
+        const parsed = cli_args.fresh_session.parse(args, nothing.allocator()) catch return usage();
+        if (parsed.help) return null;
+        const options: NewSessionOptions = .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model"), .prompt = parsed.positional };
         if (options.prompt) |prompt| {
             if (prompt.len == 0) return error.EmptyPrompt;
             if (prompt.len > @import("SessionInput.zig").capacity) return error.StreamTooLong;
@@ -1008,7 +959,7 @@ fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void
 }
 
 fn newSession(init: std.process.Init, args: []const []const u8) !void {
-    const options = try NewSessionOptions.parse(args);
+    const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     try requireInteractiveTerminal(init, "to create a Session");
     const saved = (try createSession(init, options)) orelse return;
     runSession(init, saved.store.slice(), saved.session.slice(), options.prompt) catch |err| {
@@ -1127,129 +1078,92 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     }
 }
 
-fn serve(init: std.process.Init, args: []const []const u8) !void {
+fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var store_path: ?[]const u8 = null;
-    var provider_endpoint: ?[]const u8 = null;
-    var provider_ca_file: ?[]const u8 = null;
-    var managed = false;
-    var fixture_endpoint: ?[]const u8 = null;
-    var bash_path: []const u8 = server.default_bash_path;
-    var bash_timeout_ms: u64 = server.default_bash_timeout_ms;
-    var active_capacity: usize = product_defaults.active_capacity;
+    const store_path = parsed.get("store");
+    const provider_endpoint = parsed.get("provider-endpoint");
+    const provider_ca_file = parsed.get("provider-ca-file");
+    const managed = parsed.has("codex");
+    const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
+    const bash_path = parsed.get("bash-path") orelse server.default_bash_path;
+    if (bash_path.len == 0) return error.InvalidBashPath;
+    const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
+    if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
+    const active_capacity = try parsed.number(usize, "active-capacity") orelse product_defaults.active_capacity;
     var faults: server.Faults = .{};
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) {
-            store_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--codex")) {
-            managed = true;
-        } else if (std.mem.eql(u8, arg, "--test-codex-fixture-endpoint")) {
-            fixture_endpoint = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--provider-endpoint")) {
-            provider_endpoint = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--provider-ca-file")) {
-            provider_ca_file = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--bash-path")) {
-            bash_path = try takeValue(args, &index);
-            if (bash_path.len == 0) return error.InvalidBashPath;
-        } else if (std.mem.eql(u8, arg, "--bash-timeout-ms")) {
-            bash_timeout_ms = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-            if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-        } else if (std.mem.eql(u8, arg, "--test-bash-scratch-limit-bytes")) {
-            faults.bash_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-        } else if (std.mem.eql(u8, arg, "--test-retention-entry-capacity")) {
-            faults.retention_entry_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.retention_entry_capacity.? < 2 or
-                faults.retention_entry_capacity.? > server.default_retention_entry_capacity)
-            {
-                return error.InvalidRetentionEntryCapacity;
-            }
-        } else if (std.mem.eql(u8, arg, "--test-retention-removal-failure")) {
-            faults.retention_removal = true;
-        } else if (std.mem.eql(u8, arg, "--active-capacity")) {
-            active_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-        } else if (std.mem.eql(u8, arg, "--fault")) {
-            const fault = try takeValue(args, &index);
-            if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "completion-private-missing")) faults.completion_identity_fault = .missing else if (std.mem.eql(u8, fault, "completion-private-foreign")) faults.completion_identity_fault = .foreign else if (std.mem.eql(u8, fault, "completion-private-mismatch")) faults.completion_identity_fault = .mismatched else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-on-resume")) faults.response_write_on_resume = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-script")) faults.bash_preparation_after_script = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
-        } else if (std.mem.eql(u8, arg, "--test-provider-inactivity-seconds")) {
-            faults.provider_inactivity_seconds = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.provider_inactivity_seconds < 1) return error.InvalidProviderInactivity;
-            _ = std.math.mul(i64, faults.provider_inactivity_seconds, std.time.ns_per_s) catch
-                return error.InvalidProviderInactivity;
-        } else if (std.mem.eql(u8, arg, "--test-retry-waits-ms")) {
-            faults.retry_waits_ms = try parseRetryWaits(try takeValue(args, &index));
-        } else if (std.mem.eql(u8, arg, "--test-before-launch-delay-ms")) {
-            faults.before_launch_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.before_launch_delay_ms < 0 or faults.before_launch_delay_ms > 10_000) return error.InvalidLaunchDelay;
-        } else if (std.mem.eql(u8, arg, "--test-before-result-delay-ms")) {
-            faults.before_result_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.before_result_delay_ms < 0 or faults.before_result_delay_ms > 10_000) return error.InvalidResultDelay;
-        } else if (std.mem.eql(u8, arg, "--test-model-result-gate-path")) {
-            faults.model_result_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-inspection-reply-gate-path")) {
-            faults.inspection_reply_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-inspection-reply-delay-ms")) {
-            faults.inspection_reply_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.inspection_reply_delay_ms < 0 or faults.inspection_reply_delay_ms > 60_000) return error.InvalidInspectionReplyDelay;
-        } else if (std.mem.eql(u8, arg, "--test-client-send-buffer-bytes")) {
-            faults.client_send_buffer_bytes = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
-            if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
-        } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
-            faults.test_phase_trace = true;
-        } else if (std.mem.eql(u8, arg, "--test-observation-fd")) {
-            faults.test_observation_fd = try std.fmt.parseInt(c_int, try takeValue(args, &index), 10);
-            faults.test_phase_trace = true;
-        } else if (std.mem.eql(u8, arg, "--test-observation-state-fd")) {
-            faults.test_observation_state_fd = try std.fmt.parseInt(c_int, try takeValue(args, &index), 10);
-        } else if (std.mem.eql(u8, arg, "--test-observation-plan")) {
-            faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, try takeValue(args, &index)) orelse
-                return error.InvalidTestObservationPlan;
-        } else if (std.mem.eql(u8, arg, "--test-transition")) {
-            const transition = try takeValue(args, &index);
-            if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
-        } else if (std.mem.eql(u8, arg, "--test-transition-gate-path")) {
-            faults.test_transition_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-path")) {
-            faults.response_capture_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-response-capture-gate-min-written-bytes")) {
-            faults.response_capture_gate_min_written_bytes = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-        } else if (std.mem.eql(u8, arg, "--test-bash-observed-exit-gate-path")) {
-            faults.bash_observed_exit_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-bash-cleanup-gate-path")) {
-            faults.bash_cleanup_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-control-gate-keys")) {
-            faults.control_gate_keys = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-control-gate-path")) {
-            faults.control_gate_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--test-suppress-first-control-hint")) {
-            faults.suppress_first_control_hint = true;
-        } else if (std.mem.eql(u8, arg, "--test-sqlite-diagnostics")) {
-            faults.sqlite_diagnostics = true;
-        } else if (std.mem.eql(u8, arg, "--test-sqlite-cache-spill-off")) {
-            faults.sqlite_cache_spill = false;
-        } else if (std.mem.eql(u8, arg, "--test-sqlite-cache-kib")) {
-            faults.sqlite_cache_kib = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
-            if (faults.sqlite_cache_kib == 0 or faults.sqlite_cache_kib > 4096) return error.InvalidSqliteCacheSize;
-        } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
-            faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-        } else if (std.mem.eql(u8, arg, "--test-request-preparation-byte-allowance")) {
-            faults.request_preparation_byte_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.request_preparation_byte_allowance == 0) return error.InvalidRequestPreparationAllowance;
-        } else if (std.mem.eql(u8, arg, "--test-request-preparation-item-allowance")) {
-            faults.request_preparation_item_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.request_preparation_item_allowance == 0) return error.InvalidRequestPreparationAllowance;
-        } else if (std.mem.eql(u8, arg, "--test-request-preparation-advance-delay-ms")) {
-            faults.request_preparation_advance_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.request_preparation_advance_delay_ms < 0) return error.InvalidRequestPreparationDelay;
-        } else return error.UnknownArgument;
-        index += 1;
+    if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| faults.bash_scratch_limit_bytes = limit;
+    if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
+        if (capacity < 2 or capacity > server.default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
+        faults.retention_entry_capacity = capacity;
+    }
+    if (parsed.has("test-retention-removal-failure")) faults.retention_removal = true;
+    for (parsed.all("fault")) |fault| {
+        if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "completion-private-missing")) faults.completion_identity_fault = .missing else if (std.mem.eql(u8, fault, "completion-private-foreign")) faults.completion_identity_fault = .foreign else if (std.mem.eql(u8, fault, "completion-private-mismatch")) faults.completion_identity_fault = .mismatched else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-on-resume")) faults.response_write_on_resume = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-script")) faults.bash_preparation_after_script = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
+    }
+    if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
+        if (seconds < 1) return error.InvalidProviderInactivity;
+        _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
+        faults.provider_inactivity_seconds = seconds;
+    }
+    if (parsed.get("test-retry-waits-ms")) |waits| faults.retry_waits_ms = try parseRetryWaits(waits);
+    if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
+        if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
+        faults.before_launch_delay_ms = delay;
+    }
+    if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
+        if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
+        faults.before_result_delay_ms = delay;
+    }
+    faults.model_result_gate_path = parsed.get("test-model-result-gate-path");
+    faults.inspection_reply_gate_path = parsed.get("test-inspection-reply-gate-path");
+    if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
+        if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
+        faults.inspection_reply_delay_ms = delay;
+    }
+    if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
+        if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
+        faults.client_send_buffer_bytes = bytes;
+    }
+    if (parsed.has("test-phase-trace")) faults.test_phase_trace = true;
+    if (try parsed.number(c_int, "test-observation-fd")) |fd| {
+        faults.test_observation_fd = fd;
+        faults.test_phase_trace = true;
+    }
+    if (try parsed.number(c_int, "test-observation-state-fd")) |fd| faults.test_observation_state_fd = fd;
+    if (parsed.get("test-observation-plan")) |plan| faults.test_observation_plan = std.meta.stringToEnum(TestObservation.Plan, plan) orelse
+        return error.InvalidTestObservationPlan;
+    if (parsed.get("test-transition")) |transition| {
+        if (std.mem.eql(u8, transition, "action-attempt-admitted")) faults.test_transition = .action_attempt_admitted else if (std.mem.eql(u8, transition, "prepared-before-handoff")) faults.test_transition = .prepared_before_handoff else if (std.mem.eql(u8, transition, "action-result-ready")) faults.test_transition = .action_result_ready else if (std.mem.eql(u8, transition, "action-result-committed")) faults.test_transition = .action_result_committed else return error.UnknownTestTransition;
+    }
+    faults.test_transition_gate_path = parsed.get("test-transition-gate-path");
+    faults.response_capture_gate_path = parsed.get("test-response-capture-gate-path");
+    if (try parsed.number(usize, "test-response-capture-gate-min-written-bytes")) |bytes| faults.response_capture_gate_min_written_bytes = bytes;
+    faults.bash_observed_exit_gate_path = parsed.get("test-bash-observed-exit-gate-path");
+    faults.bash_cleanup_gate_path = parsed.get("test-bash-cleanup-gate-path");
+    faults.control_gate_keys = parsed.get("test-control-gate-keys");
+    faults.control_gate_path = parsed.get("test-control-gate-path");
+    if (parsed.has("test-suppress-first-control-hint")) faults.suppress_first_control_hint = true;
+    if (parsed.has("test-sqlite-diagnostics")) faults.sqlite_diagnostics = true;
+    if (parsed.has("test-sqlite-cache-spill-off")) faults.sqlite_cache_spill = false;
+    if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
+        if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
+        faults.sqlite_cache_kib = kib;
+    }
+    if (try parsed.number(u64, "test-request-scratch-limit")) |limit| faults.request_scratch_limit_bytes = limit;
+    if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| {
+        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
+        faults.request_preparation_byte_allowance = allowance;
+    }
+    if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| {
+        if (allowance == 0) return error.InvalidRequestPreparationAllowance;
+        faults.request_preparation_item_allowance = allowance;
+    }
+    if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
+        if (delay < 0) return error.InvalidRequestPreparationDelay;
+        faults.request_preparation_advance_delay_ms = delay;
     }
     if ((faults.control_gate_keys == null) != (faults.control_gate_path == null)) return error.IncompleteControlGate;
     if ((faults.test_transition == null) != (faults.test_transition_gate_path == null)) return error.IncompleteTestTransitionGate;
-    if ((managed and (provider_endpoint != null or provider_ca_file != null or fixture_endpoint != null)) or
-        (fixture_endpoint != null and provider_endpoint != null)) return error.ManagedDevelopmentEndpointConflict;
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1282,48 +1196,38 @@ fn parseRetryWaits(value: []const u8) ![3]u64 {
     return waits;
 }
 
-fn setPolicyArgument(field: *client.OptionalPolicy, text: []const u8) !void {
-    if (field.present) return error.DuplicateArgument;
-    field.* = .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
+fn policyArgument(text: []const u8) client.OptionalPolicy {
+    return .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
 }
 
-test "policy arguments reset preserve spelling and reject duplicates" {
-    var reset: client.OptionalPolicy = .{};
-    try setPolicyArgument(&reset, "default");
+test "policy arguments reset and preserve spelling" {
+    const reset = policyArgument("default");
     try std.testing.expect(reset.present and reset.value == null);
-    try std.testing.expectError(error.DuplicateArgument, setPolicyArgument(&reset, "42"));
-    var value: client.OptionalPolicy = .{};
-    try setPolicyArgument(&value, "00042");
-    try std.testing.expectEqualStrings("00042", value.value.?);
+    try std.testing.expectEqualStrings("00042", policyArgument("00042").value.?);
 }
 
-fn configure(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
+/// The live Session addresses its own /configure.
+const LiveAddress = struct { store: []const u8, session: []const u8 };
+
+fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress) !void {
     const io = init.io;
+    const interactive = live != null;
+    const named = if (live) |address| address.session else parsed.get("session");
     var input = client.ConfigureInput{
         .store = "",
-        .session = .from_capture_key,
+        .session = if (named) |reference| .{ .named = reference } else .from_capture_key,
     };
-    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
-    var drop_reply: ?[]const u8 = null;
-    var explicit_store: ?[]const u8 = null;
-    var key_seen = false;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            location.key = try takeValue(args, &index);
-            key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--provider")) {
-            input.provider = .{ .present = true, .value = try takeValue(args, &index) };
-        } else if (std.mem.eql(u8, arg, "--compaction-trigger")) {
-            try setPolicyArgument(&input.compaction_trigger, try takeValue(args, &index));
-        } else if (std.mem.eql(u8, arg, "--output-reservation")) {
-            try setPolicyArgument(&input.output_reservation, try takeValue(args, &index));
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = .{ .named = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--workspace")) input.workspace = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--model")) input.model = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--instructions")) input.instructions = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--tools")) input.tools = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--permission-mode")) input.permission_mode = .{ .present = true, .value = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--output-schema")) input.output_schema = .{ .state = .value, .path = try takeValue(args, &index) } else if (std.mem.eql(u8, arg, "--text-output")) input.output_schema = .{ .state = .explicit_null } else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
-        index += 1;
-    }
-    if ((location.record.len == 0) != !key_seen) return usage();
-    if (input.session == .named and input.session.named.len == 0) return usage();
+    if (named != null and named.?.len == 0) return usage();
+    if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
+    if (parsed.get("model")) |model| input.model = .{ .present = true, .value = model };
+    if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
+    if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
+    input.tools = parsed.get("tools");
+    if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
+    if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
+    if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
+    if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
+    if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
     var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
@@ -1354,10 +1258,11 @@ fn configure(init: std.process.Init, requester: client.Requests, args: []const [
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const human = !key_seen;
-    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    const human = target == .generated;
+    const drop_reply = parsed.get("test-drop-reply");
     var captured = try client.captureConfigure(io, input, target);
     const saved = captured.identity().*;
     var admitted: ?bool = null;
@@ -1390,34 +1295,16 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
     TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
 }
 
-fn message(init: std.process.Init, args: []const []const u8) !void {
+fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var input = client.MessageInput{ .store = "", .session = "", .text_path = "" };
-    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
-    var drop_reply: ?[]const u8 = null;
-    var explicit_store: ?[]const u8 = null;
-    var positional: ?[]const u8 = null;
-    var literal = false;
-    var key_seen = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (literal or (positional == null and (arg.len == 0 or arg[0] != '-' or std.mem.eql(u8, arg, "-")))) {
-            if (positional != null) return usage();
-            positional = arg;
-        } else if (std.mem.eql(u8, arg, "--")) literal = true else if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            location.key = try takeValue(args, &index);
-            key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--text")) input.text_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
-    }
-    if (positional) |value| {
-        if (input.text_path.len != 0) return usage();
+    var input = client.MessageInput{ .store = "", .session = parsed.get("session").?, .text_path = parsed.get("text") orelse "" };
+    if (parsed.positional) |value| {
         // Only an unescaped dash selects stdin; after -- it is literal text.
-        if (!literal and std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
+        if (!parsed.literal_positional and std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
     }
-    if (input.session.len == 0 or (input.text_path.len == 0 and input.text == null) or (location.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     // An agent's tool process names its own Session; the Host records it.
     var address_buffer: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
     if (init.environ_map.get("RUI_ADDRESS")) |address| input.sender = client.Address.parse(address, &address_buffer) catch |err| {
@@ -1425,20 +1312,19 @@ fn message(init: std.process.Init, args: []const []const u8) !void {
         return err;
     };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const human = !key_seen;
-    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = client.captureMessage(io, input, target) catch |err| {
         if (err == error.CrossStoreSend) TerminalText.diagnostic("rui: This Session's Store is not the selected Store; a peer can message only Sessions in its own Store. Nothing was sent.\n", .{});
         return err;
     };
-    const saved = captured.identity().*;
-    var reply_buffer: client.ReplyBuffer = .{};
-    const reply = blk: {
-        defer captured.close(io);
-        if (human) try announceCapture(io, saved.key.slice());
-        break :blk try client.sendCaptured(io, &captured, drop_reply, &reply_buffer);
-    };
-    try writeMutationReply(io, reply, .json);
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
+}
+
+/// An explicit --record and --key identity, which the grammar requires
+/// together, or a generated capture in the request directory.
+fn captureTarget(init: std.process.Init, parsed: *const cli_args.Parsed, directory_buffer: []u8) !client.CaptureTarget {
+    if (parsed.get("record")) |record| return .{ .explicit = .{ .record = record, .key = parsed.get("key").? } };
+    return .{ .generated = try requestDirectory(init, directory_buffer) };
 }
 
 /// Entry only confirms configuration; /status renders inside the Session.
@@ -1566,20 +1452,12 @@ fn runSession(init: std.process.Init, destination: []const u8, reference: []cons
     };
 }
 
-fn resumeSession(init: std.process.Init, args: []const []const u8) !void {
-    var store: ?[]const u8 = null;
-    var reference: ?[]const u8 = null;
-    var last = false;
-    var literal = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (!literal and std.mem.eql(u8, arg, "--store")) store = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--session")) reference = try takeValue(args, &index) else if (!literal and std.mem.eql(u8, arg, "--last")) last = true else if (!literal and std.mem.eql(u8, arg, "--")) literal = true else if (literal or !std.mem.startsWith(u8, arg, "-")) reference = arg else return usage();
-    }
-    if (last == (reference != null)) return usage();
+fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    // The grammar admits exactly one of REF, --session and --last.
+    const reference = parsed.positional orelse parsed.get("session");
     try requireInteractiveTerminal(init, "to resume a Session");
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, store, &fallback));
+    const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
     try startHost(init, destination, true);
     var selected: protocol.Bounded(protocol.max_session_bytes) = .{};
@@ -1624,7 +1502,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             var buffer: [20]u8 = undefined;
             const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
             try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
-            try inspectAction(init, requests_context, &.{ "--store", destination, "--session", reference, "--action", id }, true);
+            try inspectAction(init, requests_context, destination, reference, action, true);
             try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
             inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
                 try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
@@ -1641,12 +1519,17 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         return;
     }
     if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
+        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model " ++ product_defaults.recommended_model ++ " | --clear-model]; no changes saved.\n";
         var setup_args: [6][]const u8 = undefined;
-        const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Usage: /setup [--store PATH] [--provider codex] [--model " ++ product_defaults.recommended_model ++ " | --clear-model]; no changes saved.\n");
+        const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
+            return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+        var nothing = std.heap.FixedBufferAllocator.init(&.{});
+        const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
+            TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
             return;
         };
-        setup(init, setup_args[0..count], true) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+        if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
+        setup(init, &parsed, true) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
@@ -1657,53 +1540,19 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             TerminalText.diagnostic("rui: result: {s}\n", .{@errorName(err)});
         };
     } else if (std.mem.eql(u8, text, "/configure") or std.mem.startsWith(u8, text, "/configure ")) {
-        var config_args: [24][]const u8 = undefined;
-        config_args[0..4].* = .{ "--store", destination, "--session", reference };
-        var count: usize = 4;
         var arguments: [20][]const u8 = undefined;
-        const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch {
-            try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
-            return;
+        const argument_count = interactiveTokens(input_buffer["/configure".len..text.len], &arguments) catch
+            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+        var nothing = std.heap.FixedBufferAllocator.init(&.{});
+        const parsed = cli_args.live_configure.parse(arguments[0..argument_count], nothing.allocator()) catch
+            return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+        if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
+        for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
+            return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
+        configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }) catch |err| {
+            TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+            if (err == error.CanonicalStoreFailure) return err;
         };
-        var next: usize = 0;
-        var valid = true;
-        while (next < argument_count) {
-            const flag = arguments[next];
-            next += 1;
-            const takes_value = std.mem.eql(u8, flag, "--workspace") or std.mem.eql(u8, flag, "--provider") or
-                std.mem.eql(u8, flag, "--model") or std.mem.eql(u8, flag, "--instructions") or
-                std.mem.eql(u8, flag, "--tools") or std.mem.eql(u8, flag, "--permission-mode") or
-                std.mem.eql(u8, flag, "--compaction-trigger") or std.mem.eql(u8, flag, "--output-reservation") or
-                std.mem.eql(u8, flag, "--output-schema");
-            if (!takes_value and !std.mem.eql(u8, flag, "--text-output")) {
-                valid = false;
-                break;
-            }
-            const value = if (takes_value and next < argument_count) arguments[next] else null;
-            if (takes_value and value != null) next += 1;
-            if ((takes_value and value == null) or count + (if (takes_value) @as(usize, 2) else 1) > config_args.len) {
-                valid = false;
-                break;
-            }
-            config_args[count] = flag;
-            count += 1;
-            if (value) |setting| {
-                if (std.mem.eql(u8, setting, "-") and
-                    (std.mem.eql(u8, flag, "--instructions") or std.mem.eql(u8, flag, "--output-schema")))
-                {
-                    try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
-                    return;
-                }
-                config_args[count] = setting;
-                count += 1;
-            }
-        }
-        if (valid and count > 4) {
-            configure(init, requests_context, config_args[0..count], true) catch |err| {
-                TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
-                if (err == error.CanonicalStoreFailure) return err;
-            };
-        } else try std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
     } else return error.UnknownArgument; // The Session frontend admits only the commands above.
 }
 
@@ -1801,60 +1650,28 @@ test "local recovery enumeration observes cancellation before skipping invalid r
     try std.testing.expectError(error.Cancelled, sessionRequests(init, requester, store, "original/session", &out));
 }
 
-fn stopSession(init: std.process.Init, args: []const []const u8) !void {
+fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var input = client.SessionStopInput{ .store = "", .session = "" };
-    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
-    var drop_reply: ?[]const u8 = null;
-    var explicit_store: ?[]const u8 = null;
-    var key_seen = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            location.key = try takeValue(args, &index);
-            key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
-    }
-    if (input.session.len == 0 or (location.record.len == 0) != !key_seen) return usage();
+    var input = client.SessionStopInput{ .store = "", .session = parsed.get("session").? };
+    if (input.session.len == 0) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const target: client.CaptureTarget = if (key_seen) .{ .explicit = location } else .{ .generated = try requestDirectory(init, &directory_buffer) };
+    const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(io, &captured, !key_seen, drop_reply);
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
 }
 
-fn interruptModel(init: std.process.Init, args: []const []const u8) !void {
+fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var input = client.ModelInterruptionInput{ .store = "", .session = "", .turn_id = 0, .operation_id = 0 };
-    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
-    var drop_reply: ?[]const u8 = null;
-    var explicit_store: ?[]const u8 = null;
-    var key_seen = false;
-    var turn_seen = false;
-    var operation_seen = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            location.key = try takeValue(args, &index);
-            key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) input.session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--turn")) {
-            input.turn_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-            turn_seen = true;
-        } else if (std.mem.eql(u8, arg, "--operation")) {
-            input.operation_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-            operation_seen = true;
-        } else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
-    }
-    if (input.session.len == 0 or (location.record.len == 0) != !key_seen or !turn_seen or !operation_seen) return usage();
+    var input = client.ModelInterruptionInput{ .store = "", .session = parsed.get("session").?, .turn_id = (try parsed.number(u64, "turn")).?, .operation_id = (try parsed.number(u64, "operation")).? };
+    if (input.session.len == 0) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const target: client.CaptureTarget = if (key_seen) .{ .explicit = location } else .{ .generated = try requestDirectory(init, &directory_buffer) };
+    const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(io, &captured, !key_seen, drop_reply);
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
 }
 
 // One-shot mutations announce a generated handle on stderr before original
@@ -1869,61 +1686,26 @@ fn sendCapturedMutation(io: std.Io, captured: *client.CapturedRecord, generated:
     try writeMutationReply(io, reply, .json);
 }
 
-fn decideAction(init: std.process.Init, args: []const []const u8, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
+fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
     const io = init.io;
     var input = client.PermissionDecisionInput{
         .store = "",
-        .session = "",
-        .action_id = 0,
+        .session = parsed.get("session").?,
+        .action_id = (try parsed.number(u64, "action")).?,
         .decision = decision,
     };
-    var location: @FieldType(client.CaptureTarget, "explicit") = .{ .record = "", .key = "" };
-    var drop_reply: ?[]const u8 = null;
-    var explicit_store: ?[]const u8 = null;
-    var key_seen = false;
-    var action_seen = false;
-    var session: ?[]const u8 = null;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) explicit_store = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) location.record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--key")) {
-            location.key = try takeValue(args, &index);
-            key_seen = true;
-        } else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) {
-            input.action_id = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
-            action_seen = true;
-        } else if (std.mem.eql(u8, arg, "--test-drop-reply")) drop_reply = try takeValue(args, &index) else return error.UnknownArgument;
-        index += 1;
-    }
-    input.session = session orelse return usage();
-    if (input.session.len == 0 or !action_seen or (location.record.len == 0) != !key_seen) return usage();
+    if (input.session.len == 0) return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, explicit_store, &selected_buffer);
+    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const human = !key_seen;
-    const target: client.CaptureTarget = if (human) .{ .generated = try requestDirectory(init, &directory_buffer) } else .{ .explicit = location };
+    const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(io, &captured, human, drop_reply);
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
 }
 
-fn retry(io: std.Io, args: []const []const u8) !void {
-    var store_path: ?[]const u8 = null;
-    var record: ?[]const u8 = null;
-    var kind: ?[]const u8 = null;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--record")) record = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--kind")) kind = try takeValue(args, &index) else return error.UnknownArgument;
-        index += 1;
-    }
-    var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.retry(io, store_path orelse return usage(), record orelse return usage(), kind orelse return usage(), &reply_buffer);
-    try writeMutationReply(io, reply, .json);
-}
-
-fn observe(init: std.process.Init, args: []const []const u8) !void {
+fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    const identity = try requestIdentity(init, args);
+    const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.observeCommand(io, identity.store.slice(), target, &reply_buffer);
@@ -1938,32 +1720,15 @@ fn observe(init: std.process.Init, args: []const []const u8) !void {
     try output.finish();
 }
 
-fn inspect(init: std.process.Init, args: []const []const u8) !void {
+fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var store_path: ?[]const u8 = null;
-    var session: ?[]const u8 = null;
-    var profile: protocol.ReportProfile = .current;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) {
-            store_path = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--session")) {
-            session = try takeValue(args, &index);
-        } else if (std.mem.eql(u8, arg, "--profile")) {
-            const value = try takeValue(args, &index);
-            profile = if (std.mem.eql(u8, value, "current"))
-                .current
-            else if (std.mem.eql(u8, value, "full"))
-                .full
-            else
-                return error.UnknownReportProfile;
-        } else return error.UnknownArgument;
-        index += 1;
-    }
-    const reference = session orelse return usage();
+    const profile: protocol.ReportProfile = if (parsed.get("profile")) |value|
+        std.meta.stringToEnum(protocol.ReportProfile, value) orelse return error.UnknownReportProfile
+    else
+        .current;
+    const reference = parsed.get("session").?;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected_store = try selectedStore(init, store_path, &selected_buffer);
+    const selected_store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     if (profile == .current) {
         const file = try renderScratch(init);
         defer file.close(io);
@@ -1996,38 +1761,27 @@ fn inspect(init: std.process.Init, args: []const []const u8) !void {
     }
 }
 
-fn readConversation(init: std.process.Init, args: []const []const u8) !void {
-    var store_path: ?[]const u8 = null;
-    var session: ?[]const u8 = null;
-    var position: ?u64 = null;
-    var ordinal: ?u64 = null;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--position")) position = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else if (std.mem.eql(u8, arg, "--ordinal")) ordinal = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
-        index += 1;
-    }
-    const reference = session orelse return usage();
-    const target = position orelse return usage();
-    const item = ordinal orelse return usage();
+fn readConversation(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const reference = parsed.get("session").?;
+    const target = (try parsed.number(u64, "position")).?;
+    const item = (try parsed.number(u64, "ordinal")).?;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const requests_: client.Requests = .{ .io = init.io };
-    if (try requests_.readConversationContent(try selectedStore(init, store_path, &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
+    if (try requests_.readConversationContent(try selectedStore(init, parsed.get("store"), &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
         try writeReadFailure(init.io, failure, reference, .stderr);
         return failure.err();
     }
 }
 
-fn decodeHexIdentity(encoded: []const u8, buffer: []u8) ![]const u8 {
-    if (encoded.len == 0 or encoded.len % 2 != 0 or encoded.len / 2 > buffer.len) return error.InvalidHexIdentity;
-    const value = std.fmt.hexToBytes(buffer[0 .. encoded.len / 2], encoded) catch return error.InvalidHexIdentity;
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidHexIdentity;
-    return value;
+test "hex selector bounds are the protocol's identity bounds" {
+    inline for (comptime std.meta.tags(cli_args.Command)) |command| for (command.definition().options) |option| {
+        if (option.hex_of) |named| try std.testing.expectEqual(@as(usize, if (std.mem.eql(u8, named, "store")) protocol.max_store_bytes else if (std.mem.eql(u8, named, "session")) protocol.max_session_bytes else protocol.max_key_bytes), option.hex_limit);
+    };
 }
 
-fn readResult(init: std.process.Init, args: []const []const u8) !void {
+fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    const identity = try requestIdentity(init, args);
+    const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = try client.readResult(
@@ -2046,21 +1800,12 @@ fn readResult(init: std.process.Init, args: []const []const u8) !void {
     }
 }
 
-fn readActionContent(init: std.process.Init, args: []const []const u8, field: enum { call_id, arguments }) !void {
+fn readActionContent(init: std.process.Init, parsed: *const cli_args.Parsed, field: enum { call_id, arguments }) !void {
     const io = init.io;
-    var store_path: ?[]const u8 = null;
-    var session: ?[]const u8 = null;
-    var action: ?u64 = null;
-    var index: usize = 0;
-    while (index < args.len) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--store")) store_path = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, arg, "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
-        index += 1;
-    }
-    const reference = session orelse return usage();
-    const target = action orelse return usage();
+    const reference = parsed.get("session").?;
+    const target = (try parsed.number(u64, "action")).?;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const selected = try selectedStore(init, store_path, &selected_buffer);
+    const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = switch (field) {
         .call_id => try client.readActionCallId(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer),
@@ -2397,19 +2142,12 @@ fn savedRequest(init: std.process.Init, handle: []const u8) !SavedRequest {
     return client.inspectCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
 }
 
-fn requestIdentity(init: std.process.Init, args: []const []const u8) !SavedRequest {
-    if (args.len == 1 and !std.mem.startsWith(u8, args[0], "-")) return savedRequest(init, args[0]);
-    if (args.len == 2 and std.mem.eql(u8, args[0], "--")) return savedRequest(init, args[1]);
-    var store: ?[]const u8 = null;
-    var key: ?[]const u8 = null;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--key")) key = try takeValue(args, &index) else return error.UnknownArgument;
-    }
+fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !SavedRequest {
+    if (parsed.positional) |handle| return savedRequest(init, handle);
     var identity: SavedRequest = .{};
-    try identity.key.set(key orelse return usage());
+    try identity.key.set(parsed.get("key").?);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    try identity.store.set(try selectedStore(init, store, &selected_buffer));
+    try identity.store.set(try selectedStore(init, parsed.get("store"), &selected_buffer));
     return identity;
 }
 
@@ -2435,17 +2173,11 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
     return .{ .count = page.count, .next = page.next };
 }
 
-fn sessions(init: std.process.Init, args: []const []const u8) !void {
-    var explicit: ?[]const u8 = null;
-    var all = false;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) explicit = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--all")) all = true else return error.UnknownArgument;
-    }
+fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = try selectedStore(init, explicit, &selected_buffer);
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    const workspace: ?[]const u8 = if (all) null else blk: {
+    const workspace: ?[]const u8 = if (parsed.has("all")) null else blk: {
         var directory = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
         defer directory.close(init.io);
         const length = try directory.realPath(init.io, &workspace_buffer);
@@ -2467,8 +2199,7 @@ fn sessions(init: std.process.Init, args: []const []const u8) !void {
     try output.finish();
 }
 
-fn requests(init: std.process.Init, args: []const []const u8) !void {
-    if (args.len != 0) return usage();
+fn requests(init: std.process.Init) !void {
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
     var dir = std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true }) catch |err| switch (err) {
@@ -2494,8 +2225,13 @@ fn requests(init: std.process.Init, args: []const []const u8) !void {
     try output.flush();
 }
 
-fn recover(init: std.process.Init, args: []const []const u8) !void {
-    const handle = if (args.len == 1) args[0] else if (args.len == 2 and std.mem.eql(u8, args[0], "--")) args[1] else return retry(init.io, args);
+fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const handle = parsed.positional orelse {
+        // The grammar requires --store, --record and --kind together.
+        var reply_buffer: client.ReplyBuffer = .{};
+        const reply = try client.retry(init.io, parsed.get("store").?, parsed.get("record").?, parsed.get("kind").?, &reply_buffer);
+        return writeMutationReply(init.io, reply, .json);
+    };
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var captured = try client.openCaptured(init.io, try requestDirectory(init, &directory_buffer), handle);
     var buffer: client.ReplyBuffer = .{};
@@ -2607,17 +2343,8 @@ fn renderActionable(io: std.Io, current: *const client.Current, file: std.Io.Fil
     try current.traverse(io, file, &sink);
 }
 
-fn inspectAction(init: std.process.Init, requester: client.Requests, args: []const []const u8, interactive: bool) !void {
+fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]const u8, reference: []const u8, target: u64, interactive: bool) !void {
     const io = init.io;
-    var store: ?[]const u8 = null;
-    var session: ?[]const u8 = null;
-    var action: ?u64 = null;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--store")) store = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--session")) session = try takeValue(args, &index) else if (std.mem.eql(u8, args[index], "--action")) action = try std.fmt.parseInt(u64, try takeValue(args, &index), 10) else return error.UnknownArgument;
-    }
-    const target = action orelse return usage();
-    const reference = session orelse return usage();
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, store, &selected_buffer);
     const file = try renderScratch(init);
@@ -2688,12 +2415,6 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
     }
     if (carry != 0) return error.TruncatedResult;
     try writer.flush();
-}
-
-fn takeValue(args: []const []const u8, index: *usize) ![]const u8 {
-    index.* += 1;
-    if (index.* >= args.len) return error.MissingArgumentValue;
-    return args[index.*];
 }
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
