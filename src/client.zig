@@ -523,7 +523,22 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls } };
+        const Peers = struct {
+            values: [3]JsonPeer = undefined,
+            count: usize = 0,
+            pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.values.len) return error.LengthMismatch;
+                    result.values[result.count] = try std.json.innerParse(JsonPeer, a, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, working_peers: struct { total: JsonString(20), refs: Peers } };
         var storage: [2 * protocol.max_activity_page_response_bytes]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{}) catch return error.InvalidActivityPage;
@@ -592,6 +607,11 @@ pub const ActivityPage = struct {
                 p == boundary_position and (boundary_ordinal == null or fact.ordinal + 1 <= boundary_ordinal.?)) return error.InvalidActivityPage;
             previous = fact.*;
         }
+        const working = &page.facts.working_peers;
+        working.total = try id(wire.working_peers.total, true);
+        working.count = wire.working_peers.refs.count;
+        if (working.count != @min(3, working.total)) return error.InvalidActivityPage;
+        for (wire.working_peers.refs.values[0..working.count], working.refs[0..working.count]) |*peer, *fact| fact.* = try peer.peer();
         return page;
     }
 
@@ -2227,12 +2247,26 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
+    // Three peers whose references escape to six bytes each.
+    facts.working_peers = .{ .total = std.math.maxInt(i64), .count = 3 };
+    for (&facts.working_peers.refs) |*peer| {
+        peer.* = .{ .session = .{} };
+        try peer.session.set(&@as([protocol.max_session_bytes]u8, @splat(1)));
+    }
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeJson(&page_writer);
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
     try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
+    try std.testing.expectEqual(facts.working_peers.total, page.facts.working_peers.total);
+    try std.testing.expectEqualStrings(facts.working_peers.refs[2].session.slice(), page.facts.working_peers.refs[2].session.slice());
+    // Refs must match the count the total implies.
+    for ([_][]const u8{ "\"working_peers\":{\"total\":\"2\",\"refs\":[]}", "\"working_peers\":{\"total\":\"0\",\"refs\":[{\"session\":\"a\",\"prefix\":\"0\"}]}" }) |field| {
+        const valid = "{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"0\",\"direction\":\"forward\",\"items\":[],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},";
+        var invalid: [256]u8 = undefined;
+        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(try std.fmt.bufPrint(&invalid, "{s}{s}}}", .{ valid, field }), .{}));
+    }
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);

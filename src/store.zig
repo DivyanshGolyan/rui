@@ -2838,7 +2838,31 @@ pub const Store = struct {
         }
         const last = if (request.direction == .forward and page.more) page.items[page.count - 1] else null;
         page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
+        page.working_peers = try self.readWorkingPeersLocked(request.session.slice());
         return page;
+    }
+
+    /// The Sessions this one sent Messages to whose requests are not yet
+    /// complete: neither their Turn's outcome nor a stop covering them is
+    /// recorded. Each peer counts once, ordered by its oldest such send.
+    fn readWorkingPeersLocked(self: *Store, session: []const u8) !protocol.WorkingPeers {
+        const statement = try prepare(self.database, "SELECT m.session_ref,min(m.admission_id) AS first FROM message_admission m " ++
+            "LEFT JOIN turn t ON t.turn_id=m.turn_id WHERE m.sender_session_ref=?1 AND t.outcome_code IS NULL " ++
+            "AND NOT EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id) " ++
+            "GROUP BY m.session_ref ORDER BY first");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        var result: protocol.WorkingPeers = .{};
+        while (true) {
+            const step = c.sqlite3_step(statement);
+            if (step == c.SQLITE_DONE) break;
+            if (step != c.SQLITE_ROW) return error.ActivityReadFailed;
+            result.total = try std.math.add(u64, result.total, 1);
+            if (result.count == result.refs.len) continue;
+            result.refs[result.count] = (try self.readPeer(statement, 0)) orelse return error.CorruptStore;
+            result.count += 1;
+        }
+        return result;
     }
 
     // This projection shares the page's canonical capture, not Current's active
@@ -12378,6 +12402,104 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     const entry = (try view.nextEntry(0)).?;
     try std.testing.expect(entry.kind == .user);
     try std.testing.expectEqualStrings(sender, entry.sender.?.slice());
+}
+
+test "working peers are the sender's recipients whose requests the Host has not completed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const sender = "direct/sender";
+    const recipients = [_][]const u8{ "direct/r1", "direct/r2", "direct/r3", "direct/r4" };
+    try configureTestSession(&storage, "configure-sender", sender);
+    for (recipients, 0..) |recipient, index| {
+        var key: [32]u8 = undefined;
+        try configureTestSession(&storage, try std.fmt.bufPrint(&key, "configure-{d}", .{index}), recipient);
+    }
+    var count: usize = 0;
+    const Send = struct {
+        fn run(store: *Store, dir: std.Io.Dir, sent: *usize, from: []const u8, target: []const u8) !void {
+            var key: [32]u8 = undefined;
+            const name = try std.fmt.bufPrint(&key, "send-{d}", .{sent.*});
+            sent.* += 1;
+            const file = try dir.createFile(std.testing.io, name, .{ .read = true });
+            try file.writeStreamingAll(std.testing.io, "work");
+            try file.sync(std.testing.io);
+            var command = try completeMessage(name, target, file, "work");
+            defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+            command.sender = .{};
+            try command.sender.?.set(from);
+            try std.testing.expect(store.submitMessage(&command, .{}) == .accepted);
+        }
+    };
+    // Sent in reverse, so oldest-first order differs from name order.
+    var index = recipients.len;
+    while (index > 0) : (index -= 1) try Send.run(&storage, tmp.dir, &count, sender, recipients[index - 1]);
+    // Another Session's sends never count as this one's.
+    try Send.run(&storage, tmp.dir, &count, recipients[0], recipients[1]);
+    var session: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try session.set(sender);
+    const Expect = struct {
+        fn peers(store: *Store, ref: protocol.Bounded(protocol.max_session_bytes), expected: []const []const u8) !void {
+            const working = (try store.activityPage(.{ .session = ref })).working_peers;
+            try std.testing.expectEqual(@as(u64, expected.len), working.total);
+            try std.testing.expectEqual(@min(3, expected.len), working.count);
+            for (working.refs[0..working.count], expected[0..working.count]) |peer, name| try std.testing.expectEqualStrings(name, peer.session.slice());
+        }
+    };
+    var remaining: std.ArrayList([]const u8) = .empty;
+    defer remaining.deinit(std.testing.allocator);
+    index = recipients.len;
+    while (index > 0) : (index -= 1) try remaining.append(std.testing.allocator, recipients[index - 1]);
+    try Expect.peers(&storage, session, remaining.items);
+    // One request answers, the next fails: each recipient stops working.
+    for (0..2) |settled| {
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const statement = try prepare(storage.database, "SELECT session_ref FROM turn WHERE turn_id=?1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.turn_id);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        var ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 0, &ref);
+        if (settled == 0) {
+            const answer = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}";
+            const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ answer ++ "}\n\n" ++
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n";
+            const source = try tmp.dir.createFile(std.testing.io, "working-answer", .{ .read = true });
+            defer source.close(std.testing.io);
+            try source.writeStreamingAll(std.testing.io, sse);
+            var root: [protocol.max_store_bytes]u8 = undefined;
+            const length = try tmp.dir.realPath(std.testing.io, &root);
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "working-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+            defer metadata.deinit();
+            var rejection: @import("provider_output.zig").Rejection = .{};
+            const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .assistant_response, &rejection, .{});
+            try storage.settleModelSuccess(binding, &.{
+                .source = source,
+                .source_length = sse.len,
+                .metadata = metadata.file,
+                .item_count = validated.item_count,
+                .call_count = validated.call_count,
+                .answer_length = validated.answer_length,
+                .answer_digest = validated.answer_digest,
+                .response_id = validated.evidence.response_id,
+                .model_evidence = testing_absent_model_evidence,
+                .request_id = .{},
+            }, .{});
+        } else try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
+        for (remaining.items, 0..) |name, at| if (std.mem.eql(u8, name, ref.slice())) {
+            _ = remaining.orderedRemove(at);
+            break;
+        };
+    }
+    try Expect.peers(&storage, session, remaining.items);
+    try std.testing.expectEqual(@as(usize, 2), remaining.items.len);
+    // A stop ends the rest of a recipient's requests too.
+    var stop = try completeSessionStop("working-stop", remaining.items[0]);
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try Expect.peers(&storage, session, remaining.items[1..]);
 }
 
 test "message observation validates accepted admission references independently" {

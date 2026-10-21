@@ -625,6 +625,8 @@ fn drawFrame(self: *Self) !void {
     var context = std.Io.Writer.fixed(&context_buffer);
     if (choosing and screen.actionVisible())
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
+    else if (self.live.peers.total != 0)
+        try self.live.peersLine(&context)
     else if (self.tmux and projection.approval == .absent and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;

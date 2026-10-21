@@ -169,7 +169,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             job.result.status = true;
         }
     }
-    job.result.live = View.Live.init(page.facts.call_activity);
+    job.result.live = View.Live.init(&page.facts);
     // Admission ids follow Session positions, so the newest one shown
     // means every earlier Message was delivered too.
     for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {

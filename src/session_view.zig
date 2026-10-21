@@ -132,6 +132,29 @@ test "a peer reference shows a generated ID's distinguishing prefix and caps at 
     try std.testing.expectEqualStrings(family ++ family, peerRef(exact, &buffer));
 }
 
+test "the status names working peers oldest first and counts the rest" {
+    var live: Live = .{};
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try live.peersLine(&out);
+    try std.testing.expectEqualStrings("", out.buffered());
+    for ([_][]const u8{ "rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "a-very-long-session-name" }, &live.peers.refs) |name, *peer| {
+        peer.* = .{ .session = .{}, .prefix = if (protocol.Peer.generated(name)) 6 else 0 };
+        try peer.session.set(name);
+    }
+    for ([_]struct { total: u64, text: []const u8 }{
+        .{ .total = 1, .text = "1 peer working · 1a2b3c" },
+        .{ .total = 3, .text = "3 peers working · 1a2b3c, reviewer, a-very-long-ses…" },
+        .{ .total = 5, .text = "5 peers working · 1a2b3c, reviewer, a-very-long-ses…, …" },
+    }) |case| {
+        live.peers.total = case.total;
+        live.peers.count = @min(3, case.total);
+        out = std.Io.Writer.fixed(&buffer);
+        try live.peersLine(&out);
+        try std.testing.expectEqualStrings(case.text, out.buffered());
+    }
+}
+
 test "peer Messages render as one dim line each, with size and time in the margin" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
@@ -727,9 +750,25 @@ pub const Live = struct {
     entries: [3]Entry = undefined,
     count: usize = 0,
     total: u64 = 0,
+    peers: protocol.WorkingPeers = .{},
 
-    pub fn init(facts: protocol.CallActivity) Live {
-        return .{ .entries = facts.entries, .count = facts.count, .total = facts.total };
+    pub fn init(facts: *const protocol.ActivityFacts) Live {
+        const calls = facts.call_activity;
+        return .{ .entries = calls.entries, .count = calls.count, .total = calls.total, .peers = facts.working_peers };
+    }
+
+    /// `3 peers working · a, b, c`: the peers this Session sent to whose
+    /// requests the Host has not completed, as the page counted them.
+    pub fn peersLine(self: *const Live, out: *std.Io.Writer) !void {
+        const peers = &self.peers;
+        if (peers.total == 0) return;
+        try out.print("{d} peer{s} working", .{ peers.total, if (peers.total == 1) "" else "s" });
+        var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
+        for (peers.refs[0..peers.count], 0..) |peer, index| {
+            try out.writeAll(if (index == 0) " · " else ", ");
+            try out.writeAll(peerRef(peer, &buffer));
+        }
+        if (peers.total > peers.count) try out.writeAll(", …");
     }
 
     // Worst terminal escaping is four bytes per input byte; allow glyph/suffix.
