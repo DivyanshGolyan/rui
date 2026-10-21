@@ -2237,12 +2237,17 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
+    facts.work = .{ .status = .waiting_for_permission, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2, .revision = std.math.maxInt(i64) };
+    // Every workspace byte escapes to its widest JSON form.
+    @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
+    facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
     try facts.writeJson(&page_writer);
     const page = try ActivityPage.parse(page_writer.buffered(), .{});
     try std.testing.expectEqual(@as(usize, 16), page.facts.count);
     try std.testing.expectEqualDeep(facts.call_activity, page.facts.call_activity);
+    try std.testing.expectEqualDeep(facts.work, page.facts.work);
     for (page.facts.items) |item| {
         try std.testing.expectEqual(@as(usize, 100), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
