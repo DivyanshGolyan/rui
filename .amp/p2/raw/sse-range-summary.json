@@ -1,0 +1,212 @@
+{
+  "fixture": true,
+  "instrumented_counts_only": true,
+  "nonterminal_events": 3,
+  "event_bytes": 260,
+  "source_bytes_including_terminal": 1215,
+  "instrumented_calls_matched_to_preadv": 56,
+  "events": [
+    {
+      "ordinal": 0,
+      "byte_range": [
+        0,
+        260
+      ],
+      "reread_calls": 7,
+      "reread_bytes": 283,
+      "reads": [
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 258,
+          "count": 1,
+          "consumed_frontier": 259,
+          "already_consumed": true
+        },
+        {
+          "role": "line_cr_check",
+          "fd": 3,
+          "offset": 257,
+          "count": 1,
+          "consumed_frontier": 259,
+          "already_consumed": true
+        },
+        {
+          "role": "line_prefix",
+          "fd": 3,
+          "offset": 0,
+          "count": 5,
+          "consumed_frontier": 259,
+          "already_consumed": true
+        },
+        {
+          "role": "leading_space",
+          "fd": 3,
+          "offset": 5,
+          "count": 1,
+          "consumed_frontier": 259,
+          "already_consumed": true
+        },
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 259,
+          "count": 1,
+          "consumed_frontier": 260,
+          "already_consumed": true
+        },
+        {
+          "role": "json_fields",
+          "fd": 3,
+          "offset": 6,
+          "count": 252,
+          "consumed_frontier": 260,
+          "already_consumed": true
+        },
+        {
+          "role": "json_string",
+          "fd": 3,
+          "offset": 14,
+          "count": 22,
+          "consumed_frontier": 260,
+          "already_consumed": true
+        }
+      ]
+    },
+    {
+      "ordinal": 1,
+      "byte_range": [
+        260,
+        520
+      ],
+      "reread_calls": 7,
+      "reread_bytes": 283,
+      "reads": [
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 518,
+          "count": 1,
+          "consumed_frontier": 519,
+          "already_consumed": true
+        },
+        {
+          "role": "line_cr_check",
+          "fd": 3,
+          "offset": 517,
+          "count": 1,
+          "consumed_frontier": 519,
+          "already_consumed": true
+        },
+        {
+          "role": "line_prefix",
+          "fd": 3,
+          "offset": 260,
+          "count": 5,
+          "consumed_frontier": 519,
+          "already_consumed": true
+        },
+        {
+          "role": "leading_space",
+          "fd": 3,
+          "offset": 265,
+          "count": 1,
+          "consumed_frontier": 519,
+          "already_consumed": true
+        },
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 519,
+          "count": 1,
+          "consumed_frontier": 520,
+          "already_consumed": true
+        },
+        {
+          "role": "json_fields",
+          "fd": 3,
+          "offset": 266,
+          "count": 252,
+          "consumed_frontier": 520,
+          "already_consumed": true
+        },
+        {
+          "role": "json_string",
+          "fd": 3,
+          "offset": 274,
+          "count": 22,
+          "consumed_frontier": 520,
+          "already_consumed": true
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "byte_range": [
+        520,
+        780
+      ],
+      "reread_calls": 7,
+      "reread_bytes": 283,
+      "reads": [
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 778,
+          "count": 1,
+          "consumed_frontier": 779,
+          "already_consumed": true
+        },
+        {
+          "role": "line_cr_check",
+          "fd": 3,
+          "offset": 777,
+          "count": 1,
+          "consumed_frontier": 779,
+          "already_consumed": true
+        },
+        {
+          "role": "line_prefix",
+          "fd": 3,
+          "offset": 520,
+          "count": 5,
+          "consumed_frontier": 779,
+          "already_consumed": true
+        },
+        {
+          "role": "leading_space",
+          "fd": 3,
+          "offset": 525,
+          "count": 1,
+          "consumed_frontier": 779,
+          "already_consumed": true
+        },
+        {
+          "role": "line_last",
+          "fd": 3,
+          "offset": 779,
+          "count": 1,
+          "consumed_frontier": 780,
+          "already_consumed": true
+        },
+        {
+          "role": "json_fields",
+          "fd": 3,
+          "offset": 526,
+          "count": 252,
+          "consumed_frontier": 780,
+          "already_consumed": true
+        },
+        {
+          "role": "json_string",
+          "fd": 3,
+          "offset": 534,
+          "count": 22,
+          "consumed_frontier": 780,
+          "already_consumed": true
+        }
+      ]
+    }
+  ],
+  "scope": "One completed-response validate call. Five framing rereads plus JSON-object and type-string rereads per nonterminal event. No repeated whole-response validation per network event, CPU cost or timing claim."
+}
