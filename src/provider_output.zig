@@ -1615,15 +1615,6 @@ fn processEvent(
     if (!knownNonterminal(kind.slice())) return error.UnsupportedEventType;
 }
 
-fn linePrefix(io: std.Io, file: std.Io.File, line: Range, prefix: []const u8) !bool {
-    if (line.length < prefix.len) return false;
-    var buffer: [32]u8 = undefined;
-    std.debug.assert(prefix.len <= buffer.len);
-    const count = try file.readPositionalAll(io, buffer[0..prefix.len], line.start);
-    if (count != prefix.len) return error.ShortSealedRead;
-    return std.mem.eql(u8, buffer[0..prefix.len], prefix);
-}
-
 fn rangeEquals(io: std.Io, file: std.Io.File, range: Range, expected: []const u8) !bool {
     if (range.length != expected.len) return false;
     var buffer: [32]u8 = undefined;
@@ -1659,6 +1650,7 @@ pub fn validate(
     if (faults.metadata) metadata.fail_writes = true;
     var source = try FileSource.init(io, source_file, .{ .start = 0, .length = source_length });
     var data: ?Range = null;
+    var data_is_done = false;
     var completed = false;
     var done_marker = false;
     var item_count: u64 = 0;
@@ -1672,25 +1664,28 @@ pub fn validate(
     var added: Added = .{};
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
+        // Keep what framing needs from the one buffered scan: the line's
+        // head and its last two bytes. Event JSON is parsed separately.
         const line_start = source.offset();
+        var head: [16]u8 = undefined;
+        var tail: [2]u8 = .{ 0, 0 };
         while (try source.peek()) |byte| {
+            const index = source.offset() - line_start;
+            if (index < head.len) head[@intCast(index)] = byte;
+            tail = .{ tail[1], byte };
             _ = try source.take();
             if (byte == '\n') break;
         }
         var line_end = source.offset();
-        if (line_end > line_start) {
-            var last: [1]u8 = undefined;
-            _ = try source_file.readPositionalAll(io, &last, line_end - 1);
-            if (last[0] == '\n') line_end -= 1;
-            if (line_end > line_start) {
-                _ = try source_file.readPositionalAll(io, &last, line_end - 1);
-                if (last[0] == '\r') line_end -= 1;
-            }
-        }
+        if (line_end > line_start and tail[1] == '\n') {
+            line_end -= 1;
+            if (line_end > line_start and tail[0] == '\r') line_end -= 1;
+        } else if (line_end > line_start and tail[1] == '\r') line_end -= 1;
         const line = Range{ .start = line_start, .length = line_end - line_start };
+        const shown = head[0..@intCast(@min(line.length, head.len))];
         if (line.length == 0) {
             if (data) |payload| {
-                if (try rangeEquals(io, source_file, payload, "[DONE]")) {
+                if (data_is_done) {
                     if (!completed or done_marker) return error.ContradictoryProviderOutput;
                     done_marker = true;
                 } else {
@@ -1718,24 +1713,18 @@ pub fn validate(
             }
             continue;
         }
-        if (try linePrefix(io, source_file, line, "data:")) {
+        if (std.mem.startsWith(u8, shown, "data:")) {
             if (data != null) return error.UnsupportedMultilineSseData;
-            var start = line.start + "data:".len;
-            var length = line.length - "data:".len;
-            if (length != 0) {
-                var first: [1]u8 = undefined;
-                _ = try source_file.readPositionalAll(io, &first, start);
-                if (first[0] == ' ') {
-                    start += 1;
-                    length -= 1;
-                }
-            }
+            var skip: usize = "data:".len;
+            if (shown.len > skip and shown[skip] == ' ') skip += 1;
+            const length = line.length - skip;
             if (length == 0) return error.EmptySseData;
-            data = .{ .start = start, .length = length };
-        } else if (!try linePrefix(io, source_file, line, ":") and
-            !try linePrefix(io, source_file, line, "event:") and
-            !try linePrefix(io, source_file, line, "id:") and
-            !try linePrefix(io, source_file, line, "retry:"))
+            data = .{ .start = line.start + skip, .length = length };
+            data_is_done = length == "[DONE]".len and std.mem.eql(u8, shown[skip..], "[DONE]");
+        } else if (!std.mem.startsWith(u8, shown, ":") and
+            !std.mem.startsWith(u8, shown, "event:") and
+            !std.mem.startsWith(u8, shown, "id:") and
+            !std.mem.startsWith(u8, shown, "retry:"))
         {
             return error.MalformedSse;
         }
@@ -1881,6 +1870,37 @@ test "compaction rejects missing double malformed unknown and Action candidates"
     try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingOperation(&tmp, duplicate, 4096, .compaction));
     const disagreement = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"different\"}]}}\n\n";
     try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, disagreement, 4096, .compaction));
+}
+
+test "SSE line framing accepts CRLF, field lines and DONE, and rejects malformed lines" {
+    const item = "{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}";
+    const completed = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}";
+    const accepted = [_][]const u8{
+        "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n",
+        "data: " ++ done ++ "\r\n\r\ndata: " ++ completed ++ "\r\n\r\n",
+        "data:" ++ done ++ "\n\ndata:" ++ completed ++ "\n\n",
+        ": comment\nevent: x\nid: 1\nretry: 5\ndata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\ndata: [DONE]\n\n",
+        "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\r\n\r\ndata:[DONE]\r\n\r\n",
+        // A final carriage return without a newline still ends the line.
+        "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\r",
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (accepted) |stream| {
+        const result = try validateTestingSse(&tmp, stream, 4096);
+        try std.testing.expectEqual(@as(u64, 2), result.output.answer_length);
+    }
+    const rejected = [_]struct { anyerror, []const u8 }{
+        .{ error.MalformedSse, "bogus: x\ndata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n" },
+        .{ error.MalformedSse, "dat: " ++ done ++ "\n\n" },
+        .{ error.EmptySseData, "data:\n\n" },
+        .{ error.EmptySseData, "data: \r\n\r\n" },
+        .{ error.UnsupportedMultilineSseData, "data: " ++ done ++ "\ndata: " ++ done ++ "\n\n" },
+        .{ error.ContradictoryProviderOutput, "data: " ++ done ++ "\n\ndata: [DONE]\n\n" },
+        .{ error.LateProviderOutput, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\ndata: [DONE]\n\ndata: " ++ done ++ "\n\n" },
+    };
+    for (rejected) |case| try std.testing.expectError(case[0], validateTestingSse(&tmp, case[1], 4096));
 }
 
 test "context overflow requires exact valid provider code over HTTP and SSE" {
