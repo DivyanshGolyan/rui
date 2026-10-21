@@ -4,8 +4,9 @@
 Runs from trusted main code when Selected checks or the upgrade check
 completes on a landing tip. The tip is fetched as data and pushed, never run.
 It lands only the branch's current tip, only as a non-force fast-forward, and
-only on the latest Selected push run for that exact commit; a strict delta
-against main also needs its upgrade run and the Mac aggregate. One atomic
+only on the latest Selected push or dispatched run for that exact commit; a
+dispatched Selected run counts only when main contains its base. A strict
+delta against main also needs its upgrade run and the Mac aggregate. One atomic
 push moves main and stable together, so stable is always the last landed
 tip. Anything else waits for the next completion or for the lander lane to
 restack.
@@ -21,6 +22,8 @@ from strict_paths import strict
 
 BRANCH = re.compile(r"wip/land-[0-9]+")
 UPGRADE = "previous-release-upgrade.yml"
+# check.yml's run-name for a dispatch; the base it selected from.
+DISPATCH_BASE = re.compile(r"Selected checks from base ([0-9a-f]{40})")
 # GITHUB_TOKEN has no `workflows` permission, so GitHub rejects its push of
 # any commit that changes a workflow file.
 WORKFLOW_FILES = ".github/workflows/"
@@ -35,23 +38,31 @@ def gh(*args):
 
 
 def latest(workflow, sha, branch):
-    """The newest push run of workflow on this exact commit and branch; reruns keep the run."""
+    """The newest push or dispatched run of workflow on this exact commit and branch.
+
+    A dispatch can replace a cancelled push run; reruns keep the run.
+    """
     repository = os.environ["GITHUB_REPOSITORY"]
-    rows = json.loads(gh("api", f"repos/{repository}/actions/workflows/{workflow}/runs"
-                                f"?head_sha={sha}&branch={branch}&event=push&per_page=100"))["workflow_runs"]
+    rows = [row for event in ("push", "workflow_dispatch") for row in json.loads(gh(
+        "api", f"repos/{repository}/actions/workflows/{workflow}/runs"
+               f"?head_sha={sha}&branch={branch}&event={event}&per_page=100"))["workflow_runs"]]
     rows = [row for row in rows if row["head_sha"] == sha and row["head_branch"] == branch
             and row["head_repository"]["full_name"] == repository]
     return max(rows, key=lambda row: row["id"], default=None)
 
 
 def decide(fast_forward, selected, upgrade, changed):
-    """Return 'not-fast-forward', 'pending', 'red', 'manual' or 'land'.
+    """Return 'not-fast-forward', 'unqualified', 'pending', 'red', 'manual' or 'land'.
 
     selected and upgrade are the latest runs on the tip, or None; selected
-    carries its `macos` aggregate conclusion when the delta is strict.
+    carries `covers`, whether its selection base spans main to the tip, and
+    its `macos` aggregate conclusion when the delta is strict.
     """
     if not fast_forward:
         return "not-fast-forward"
+    if selected is not None and not selected["covers"]:
+        # A dispatch from a base main does not contain may have skipped owners.
+        return "unqualified"
     required = [selected, *([upgrade] if strict(changed) else [])]
     if any(run is None or run["status"] != "completed" for run in required):
         return "pending"
@@ -78,7 +89,8 @@ def number(branch):
 
 
 def contains(sha, ancestor):
-    return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, sha]).returncode == 0
+    return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, sha],
+                          stderr=subprocess.DEVNULL).returncode == 0
 
 
 def tips():
@@ -138,6 +150,8 @@ def land(branch, sha, main_sha):
     # NUL-delimited, so Git never quotes a strict path out of recognition.
     paths = changed_paths(main_sha, sha)[0] if fast_forward else []
     selected = latest("check.yml", sha, branch)
+    if selected:
+        selected["covers"] = covers(selected, sha, main_sha, paths)
     upgrade = latest(UPGRADE, sha, branch) if strict(paths) else None
     if selected and strict(paths):
         selected["macos"] = macos(selected)
@@ -165,6 +179,21 @@ def land(branch, sha, main_sha):
         raise SystemExit(f"Push of {sha} to main and stable failed; neither moved:\n{pushed.stderr}")
     print(f"Fast-forwarded main and stable from {main_sha} to {sha}")
     return True
+
+
+def covers(selected, sha, main_sha, paths):
+    """Whether the Selected run's selection spans every path main..sha changes.
+
+    A push run selects from the main merge base, which the one open stack keeps
+    equal to main. A dispatch selects from its recorded base, which main must
+    contain and whose delta to sha must include every path main..sha changes.
+    """
+    if selected["event"] == "push":
+        return True
+    base = DISPATCH_BASE.fullmatch(selected.get("display_title") or "")
+    if not base or not contains(main_sha, base[1]):
+        return False
+    return set(paths) <= set(changed_paths(base[1], sha)[0])
 
 
 def moved(main_sha, branch):
