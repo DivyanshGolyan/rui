@@ -234,7 +234,8 @@ def main():
             # Page work is closed: an operation belongs to its Turn, an Action to an active one.
             for work, ok in (({"turn": "1", "operation": "2", "first_action": "3", "status": "waiting_for_permission"}, True),
                              ({"turn": "1"}, False), ({"operation": "2"}, False), ({"first_action": "3"}, False),
-                             ({"revision": "0"}, False), ({"status": "settled"}, False), (None, False)):
+                             ({"revision": "0"}, False), ({"status": "settled"}, False), (None, False),
+                             ({"workspace": ""}, False), ({"workspace": "relative/w"}, False)):
                 wire = copy.deepcopy(valid)
                 if work is None: del wire["work"]
                 else: wire["work"].update(work)

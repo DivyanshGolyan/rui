@@ -601,6 +601,8 @@ pub const ActivityPage = struct {
         // An operation belongs to its Turn; an Action to the active one.
         if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
         work.revision = try id(wire.work.revision, false);
+        // The permission prompt shows this Workspace, so it keeps Current's rule.
+        if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
         work.workspace.set(wire.work.workspace.slice()) catch return error.InvalidActivityPage;
         return page;
     }
@@ -2238,8 +2240,9 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
     facts.work = .{ .status = .waiting_for_permission, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2, .revision = std.math.maxInt(i64) };
-    // Every workspace byte escapes to its widest JSON form.
+    // An absolute Workspace whose other bytes escape to their widest JSON form.
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
+    facts.work.workspace.bytes[0] = '/';
     facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);

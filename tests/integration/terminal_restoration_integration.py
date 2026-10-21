@@ -2138,9 +2138,9 @@ def startup_reporting_cases(state, library):
                     assert release.wait(15), "startup observation not released"
                     return response
                 if proxy is None:
-                    proxy = canonical.ReplyProxy(host, "/v1/inspect-session", hold)
+                    proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold)
                 else:
-                    proxy.route, proxy.rewrite = "/v1/inspect-session", hold
+                    proxy.route, proxy.rewrite = "/v1/activity-page", hold
                 human.terminal_gate(caller, master, held, "startup borrower held")
                 event = b"\x12" if kind == "retry" else "definitely unsent café!\n".encode()
             records = home / ".config/rui/requests"
