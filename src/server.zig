@@ -17,10 +17,10 @@ const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const provider = @import("provider.zig");
 const protocol = @import("protocol.zig");
+const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 
-pub const default_retry_waits_ms = [3]u64{ 2_000, 4_000, 8_000 };
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
@@ -30,6 +30,21 @@ pub const default_retention_entry_capacity =
 // Only the two shared workers reserve these stacks, independent of exchanges.
 const intake_worker_stack_bytes = 1024 * 1024;
 
+/// Real operating limits. Tests may narrow them; production uses the defaults.
+pub const Limits = struct {
+    request_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    request_preparation_byte_allowance: usize = model_adapter.preparation_byte_allowance,
+    request_preparation_item_allowance: usize = model_adapter.preparation_item_allowance,
+    bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
+    retention_entry_capacity: ?usize = null,
+    provider_inactivity_seconds: i64 = 5 * 60,
+    retry_waits_ms: retry_policy.Waits = retry_policy.default_waits_ms,
+    client_send_buffer_bytes: ?u32 = null,
+    sqlite_cache_spill: bool = true,
+    sqlite_cache_kib: u32 = (store_module.OpenOptions{}).cache_kib,
+};
+
+/// Injected failures, delays, gates and test observation only.
 pub const Faults = struct {
     content_acquire: bool = false,
     content_write: bool = false,
@@ -45,9 +60,6 @@ pub const Faults = struct {
     request_write: bool = false,
     request_seal: bool = false,
     request_scratch_acquire: bool = false,
-    request_scratch_limit_bytes: u64 = scratch_limit_bytes,
-    request_preparation_byte_allowance: usize = model_adapter.preparation_byte_allowance,
-    request_preparation_item_allowance: usize = model_adapter.preparation_item_allowance,
     request_preparation_advance_delay_ms: i64 = 0,
     request_read: bool = false,
     request_unlink: bool = false,
@@ -75,18 +87,13 @@ pub const Faults = struct {
     bash_cleanup: bool = false,
     bash_lifecycle_fault: bash.LifecycleFault = .none,
     bash_fault_gated: bool = false,
-    bash_scratch_limit_bytes: u64 = scratch_limit_bytes,
-    retention_entry_capacity: ?usize = null,
     retention_removal: bool = false,
-    provider_inactivity_seconds: i64 = 5 * 60,
-    retry_waits_ms: [3]u64 = default_retry_waits_ms,
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
     model_result_gate_path: ?[]const u8 = null,
     inspection_reply_delay_ms: i64 = 0,
     inspection_reply_gate_path: ?[]const u8 = null,
     report_unlink: bool = false,
-    client_send_buffer_bytes: ?u32 = null,
     test_phase_trace: bool = false,
     test_observation_fd: ?c_int = null,
     test_observation_state_fd: ?c_int = null,
@@ -99,8 +106,6 @@ pub const Faults = struct {
     control_gate_path: ?[]const u8 = null,
     suppress_first_control_hint: bool = false,
     sqlite_diagnostics: bool = false,
-    sqlite_cache_spill: bool = true,
-    sqlite_cache_kib: u32 = (store_module.OpenOptions{}).cache_kib,
 };
 
 const TestTransition = enum {
@@ -117,6 +122,7 @@ const Host = struct {
     store: *store_module.Store,
     instance: protocol.InstanceId = undefined,
     faults: Faults,
+    limits: Limits = .{},
     provider_endpoint: ?[]const u8 = null,
     provider_ca_file: ?[]const u8 = null,
     authentication: ?model_adapter.Authentication = null,
@@ -785,7 +791,7 @@ const Intake = struct {
     }
 
     fn accept(self: *Intake, fd: std.posix.fd_t) !void {
-        if (self.host.faults.client_send_buffer_bytes) |bytes| {
+        if (self.host.limits.client_send_buffer_bytes) |bytes| {
             var value: c_int = @intCast(bytes);
             try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&value));
         }
@@ -811,6 +817,7 @@ pub fn serve(
     allocator: std.mem.Allocator,
     store_path: []const u8,
     active_capacity: usize,
+    limits: Limits,
     faults: Faults,
     provider_endpoint: ?[]const u8,
     provider_ca_file: ?[]const u8,
@@ -907,7 +914,7 @@ pub fn serve(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .cache_spill = faults.sqlite_cache_spill, .cache_kib = faults.sqlite_cache_kib, .found_schema_version = &found_schema_version },
+        .{ .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
             var message: [4 * protocol.max_store_bytes + 512]u8 = undefined;
@@ -930,7 +937,7 @@ pub fn serve(
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    try storage.validateRetryWaits(faults.retry_waits_ms);
+    try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(faults.startup_cleanup);
 
     const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
@@ -953,7 +960,7 @@ pub fn serve(
     defer allocator.free(custody_records);
     const retention_capacity = @min(
         default_retention_entry_capacity,
-        faults.retention_entry_capacity orelse default_retention_entry_capacity,
+        limits.retention_entry_capacity orelse default_retention_entry_capacity,
     );
     const retention_entries = try allocator.alloc(output_retention.Entry, retention_capacity);
     defer allocator.free(retention_entries);
@@ -965,6 +972,7 @@ pub fn serve(
         .lease = &lease,
         .store = &storage,
         .faults = faults,
+        .limits = limits,
         .provider_endpoint = provider_endpoint,
         .provider_ca_file = provider_ca_file,
         .authentication = authentication,
@@ -1621,8 +1629,8 @@ const NativeTurn = struct {
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
         return .{
-            .bytes = self.host.faults.request_preparation_byte_allowance,
-            .items = self.host.faults.request_preparation_item_allowance,
+            .bytes = self.host.limits.request_preparation_byte_allowance,
+            .items = self.host.limits.request_preparation_item_allowance,
         };
     }
 
@@ -1907,7 +1915,7 @@ fn admitBashAttempt(
         fenceDispatch(host, "Bash canonical input", err);
         return .admitted;
     };
-    const bash_budget = host.retention.sharedBudget().narrowed(host.faults.bash_scratch_limit_bytes);
+    const bash_budget = host.retention.sharedBudget().narrowed(host.limits.bash_scratch_limit_bytes);
     const started = bash.startPreparation(
         host.io,
         host.allocator,
@@ -2324,7 +2332,7 @@ fn beginAdmittedAttempt(
         return .admitted;
     };
     const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
+        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
     );
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
@@ -2471,14 +2479,12 @@ fn launchPreparedRequest(
         return;
     }
     const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.faults.request_scratch_limit_bytes,
+        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
     );
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
         request.deinit();
-        settleUnansweredFailure(host, token, binding, "provider_transport_failure", .{ .retryable = .{
-            .waits_ms = host.faults.retry_waits_ms,
-        } });
+        settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
         finishCustodyNow(host, slot, token);
         return;
     }
@@ -2503,7 +2509,7 @@ fn launchPreparedRequest(
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
         .observation_names = model_adapter.observation_names,
-        .inactivity_seconds = @intCast(host.faults.provider_inactivity_seconds),
+        .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
         .response_acquire_fault = host.faults.response_acquire,
         .response_unlink_fault = host.faults.response_unlink,
@@ -2602,26 +2608,19 @@ fn completeTransfer(
         }) catch unreachable;
         writeTestTrace(host, &trace, &publication);
     }
-    var error_response: model_adapter.ErrorResponse = .ordinary;
+    var error_response: execution.ErrorResponse = .ordinary;
     switch (completion.outcome) {
-        .transport_finished => |evidence| switch (evidence.disposition) {
-            .permanent_http, .temporary_http => {
-                // The transport has sealed this HTTP answer. Interpretation
-                // borrows it; this owner still disposes it before settlement.
-                var response = active.transfer.takeResponse();
-                defer response.deinit();
-                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
-                if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
-            },
-            else => {},
+        .transport_finished => |evidence| if (evidence.disposition.answered()) {
+            // The transport has sealed this HTTP answer. Interpretation
+            // borrows it; this owner still disposes it before settlement.
+            var response = active.transfer.takeResponse();
+            defer response.deinit();
+            error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+            if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
         },
         else => {},
     }
-    switch (execution.transferDecision(completion.outcome, switch (error_response) {
-        .ordinary => .ordinary,
-        .context_overflow => .context_overflow,
-        .unreadable => .unreadable,
-    })) {
+    switch (execution.transferDecision(completion.outcome, error_response)) {
         .interpret_output => {
             switch (completeSuccessfulTransfer(host, active)) {
                 .cleanup => finishCustodyNow(host, slot, owner.token),
@@ -2639,15 +2638,7 @@ fn completeTransfer(
         .fail => |failure| {
             var code_buffer: [96]u8 = undefined;
             const code = failure.codeText(&code_buffer);
-            const disposition: store_module.ModelFailureClass = switch (failure.kind) {
-                .permanent => .ordinary,
-                .context_overflow => .context_overflow,
-                .temporary => .{ .retryable = .{
-                    .waits_ms = host.faults.retry_waits_ms,
-                    .retry_after_ms = failure.retry_after_ms,
-                    .retry_after_deadline_ms = failure.retry_after_deadline_ms,
-                } },
-            };
+            const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 answered.fail(code, disposition);
@@ -2658,6 +2649,23 @@ fn completeTransfer(
     }
     active.transfer.deinit();
     finishCustodyNow(host, slot, owner.token);
+}
+
+fn failureClass(
+    host: *const Host,
+    kind: execution.FailureKind,
+    retry_after_ms: ?u64,
+    retry_after_deadline_ms: ?i64,
+) store_module.ModelFailureClass {
+    return switch (kind) {
+        .permanent => .ordinary,
+        .context_overflow => .context_overflow,
+        .temporary => .{ .retryable = .{
+            .waits_ms = host.limits.retry_waits_ms,
+            .retry_after_ms = retry_after_ms,
+            .retry_after_deadline_ms = retry_after_deadline_ms,
+        } },
+    };
 }
 
 const SuccessfulCompletion = union(enum) {
@@ -2688,7 +2696,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         owner.binding.attempt_ordinal,
     }) catch unreachable;
     var retained_metadata: ?named_scratch.Owner = null;
-    const metadata_budget = host.retention.sharedBudget().narrowed(host.faults.request_scratch_limit_bytes);
+    const metadata_budget = host.retention.sharedBudget().narrowed(host.limits.request_scratch_limit_bytes);
     var metadata = output_format.OutputMetadataWriter.init(
         host.io,
         host.lease.paths.scratch.slice(),
@@ -2722,10 +2730,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             traceOperation(host, "validation_failed", owner.binding);
             stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
             var detail: [512]u8 = undefined;
-            answered.reject(rejection.code, rejection.format(&detail), switch (rejection.kind) {
-                .invalid_output => .ordinary,
-                .context_overflow => .context_overflow,
-            });
+            answered.reject(rejection.code, rejection.format(&detail), failureClass(host, rejection.kind, null, null));
             return .cleanup;
         },
     };
@@ -5026,12 +5031,9 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
 }
 
 test "model retry and inactivity defaults match the owning resource contract" {
-    try std.testing.expectEqual([3]u64{ 2_000, 4_000, 8_000 }, default_retry_waits_ms);
-    try std.testing.expectEqual(@as(i64, 5 * 60), (Faults{}).provider_inactivity_seconds);
-    try std.testing.expectEqual(
-        store_module.maximum_model_attempts,
-        @as(u64, default_retry_waits_ms.len + 1),
-    );
+    try std.testing.expectEqual([3]u64{ 2_000, 4_000, 8_000 }, retry_policy.default_waits_ms);
+    try std.testing.expectEqual(@as(u64, 4), retry_policy.maximum_attempts);
+    try std.testing.expectEqual(@as(i64, 5 * 60), (Limits{}).provider_inactivity_seconds);
 }
 
 test "authentication handoff borrows the sole credential lease and releases it once" {
@@ -7423,8 +7425,8 @@ test "Host fences dispose admitted preparation without touching canonical state"
             null,
             &slots,
             &preparation,
-            host.faults.request_preparation_byte_allowance,
-            host.faults.request_preparation_item_allowance,
+            host.limits.request_preparation_byte_allowance,
+            host.limits.request_preparation_item_allowance,
         ));
         try std.testing.expect(!preparation.active and !preparation.view.active);
         try std.testing.expect(slots[0] == .free);
