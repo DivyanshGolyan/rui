@@ -19,8 +19,8 @@ concurrency:
 
 jobs:
   land:
-    # Only landing-tip pushes land; pull_request runs never do.
-    if: ${{ github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
+    # Landing-tip pushes and dispatched qualifications wake the lander; pull_request runs never do.
+    if: ${{ contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

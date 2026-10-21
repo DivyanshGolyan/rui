@@ -1,6 +1,7 @@
 """Landing-rule wiring: strict paths, auto-land decisions and pushes, CI triggers."""
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -40,8 +41,8 @@ class LandingTest(unittest.TestCase):
             'tests/integration/bash_recovery_integration.py'])
 
     def test_auto_land_decisions(self):
-        def run(status='completed', conclusion='success', mac=None):
-            return dict(status=status, conclusion=conclusion, macos=mac)
+        def run(status='completed', conclusion='success', mac=None, covers=True):
+            return dict(status=status, conclusion=conclusion, macos=mac, covers=covers)
 
         def decide_tip(selected=run(), upgrade=None, changed=('src/cli.zig',), fast_forward=True):
             return auto_land.decide(fast_forward, selected, upgrade, list(changed))
@@ -65,6 +66,30 @@ class LandingTest(unittest.TestCase):
         self.assertEqual(decide_tip(changed=('.github/workflows/check.yml',)), 'manual')
         self.assertEqual(decide_tip(selected=run(conclusion='failure'), changed=('.github/workflows/check.yml',)),
                          'red')
+        # A green Selected run whose selection does not span main..tip never lands.
+        self.assertEqual(decide_tip(selected=run(mac='success', covers=False), upgrade=run(), changed=store),
+                         'unqualified')
+
+    def test_latest_takes_the_newest_push_or_dispatch_run_on_the_exact_commit(self):
+        sha, other = 'a' * 40, 'b' * 40
+
+        def row(id, event, head=sha, branch='wip/land-1', repo='o/r', conclusion='success'):
+            return dict(id=id, event=event, head_sha=head, head_branch=branch, conclusion=conclusion,
+                        head_repository=dict(full_name=repo))
+        rows = {'push': [row(1, 'push', conclusion='cancelled')],
+                'workflow_dispatch': [row(2, 'workflow_dispatch'), row(5, 'workflow_dispatch', head=other),
+                                      row(6, 'workflow_dispatch', branch='wip/land-2'),
+                                      row(7, 'workflow_dispatch', repo='fork/r')]}
+
+        def gh(*args):
+            event = args[1].rsplit('event=', 1)[1].split('&', 1)[0]
+            self.assertIn(f'head_sha={sha}&branch=wip/land-1', args[1])
+            return json.dumps(dict(workflow_runs=rows[event]))
+        with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh):
+            # A dispatch replaces the cancelled push run; other commits, branches and forks never count.
+            self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 2)
+            rows['workflow_dispatch'] = rows['workflow_dispatch'][1:]
+            self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 1)
 
     def test_auto_land_moves_main_and_stable_together_or_not_at_all(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
@@ -92,16 +117,32 @@ class LandingTest(unittest.TestCase):
             tip = commit('src/store_é.zig', base)
             git('push', '-q', 'origin', f'{base}:refs/heads/main', f'{base}:refs/heads/stable',
                 f'{tip}:refs/heads/wip/land-1')
-            green = dict(status='completed', conclusion='success', html_url='u')
+            green = dict(status='completed', conclusion='success', html_url='u', event='push')
+
+            def dispatched(from_base=None, **run):
+                title = f'Selected checks from base {from_base}' if from_base else 'Selected checks'
+                return dict(green, event='workflow_dispatch', display_title=title, **run)
             # Runs are keyed by exact workflow, commit and branch, as latest() filters them.
             runs = {('check.yml', tip, 'wip/land-1'): green}
-            with mock.patch.object(auto_land, 'latest', lambda workflow, sha, branch: runs.get((workflow, sha, branch))), \
+            with mock.patch.object(auto_land, 'latest',
+                                   lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
                     mock.patch.object(auto_land, 'macos', lambda run: 'success'), \
                     mock.patch.object(sys, 'argv', ['auto_land.py']), contextlib.redirect_stdout(io.StringIO()):
                 # Strict without its upgrade run: nothing moves.
                 auto_land.main()
                 self.assertEqual(refs(), (base, base))
-                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = green
+                # A cancelled push upgrade run does not land.
+                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = dict(green, conclusion='cancelled')
+                auto_land.main()
+                self.assertEqual(refs(), (base, base))
+                # A dispatched upgrade run on the exact tip replaces it, but a dispatched
+                # Selected run lands only with a recorded base main contains.
+                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = dispatched()
+                for unqualified in (dispatched(), dispatched(tip), dispatched('f' * 40)):
+                    runs[('check.yml', tip, 'wip/land-1')] = unqualified
+                    auto_land.main()
+                    self.assertEqual(refs(), (base, base))
+                runs[('check.yml', tip, 'wip/land-1')] = dispatched(base)
                 auto_land.main()
                 self.assertEqual(refs(), (tip, tip))
                 # A landed tip is skipped, not pushed again.
@@ -127,6 +168,11 @@ class LandingTest(unittest.TestCase):
                 runs[('check.yml', restored, 'wip/land-4')] = green
                 self.assertFalse(auto_land.land('wip/land-4', restored, moved))
                 self.assertEqual(refs(), (ahead, tip))
+                # A dispatch from a base main contains still misses the strict path that
+                # moved..restored hides; only a base whose delta spans main..tip covers it.
+                paths = auto_land.changed_paths(ahead, restored)[0]
+                self.assertFalse(auto_land.covers(dispatched(moved), restored, ahead, paths))
+                self.assertTrue(auto_land.covers(dispatched(ahead), restored, ahead, paths))
                 git('push', '-q', '--force', 'origin', f'{moved}:refs/heads/main')
 
                 # stable off main's line: main alone could fast-forward, but the
@@ -203,7 +249,11 @@ class LandingTest(unittest.TestCase):
         self.assertIn("branches: ['wip/land-*']", on)
         self.assertIn('auto_land.py', workflow('auto-land.yml'))
         self.assertIn('group: auto-land\n  cancel-in-progress: false', workflow('auto-land.yml'))
-        self.assertIn("github.event.workflow_run.event == 'push'", workflow('auto-land.yml'))
+        self.assertIn("""contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)""",
+                      workflow('auto-land.yml'))
+        # Auto-land parses the dispatch base from Selected's run name.
+        name = re.search(r"(?m)^run-name: .*format\('([^']*)', inputs\.base\)", workflow('check.yml'))[1]
+        self.assertTrue(auto_land.DISPATCH_BASE.fullmatch(name.format('0' * 40)))
         self.assertTrue(auto_land.BRANCH.fullmatch('wip/land-12'))
         self.assertFalse(auto_land.BRANCH.fullmatch('wip/land-12x'))
 

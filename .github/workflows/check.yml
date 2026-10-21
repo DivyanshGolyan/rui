@@ -1,12 +1,14 @@
 name: Selected checks
+# Auto-land reads a dispatched run's base from this title to bind its coverage.
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
 on:
   push:
     branches: ['wip/land-*']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Qualification only: select a landing tip against an older base, such as
-  # a combined stack whose constituent already reached main. Auto-land counts
-  # push runs only.
+  # Qualify a landing tip again, or against an older base such as a combined
+  # stack whose constituent already reached main. Auto-land accepts it only
+  # when main contains the base.
   workflow_dispatch:
     inputs:
       base:
