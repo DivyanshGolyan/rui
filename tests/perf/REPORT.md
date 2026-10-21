@@ -60,6 +60,18 @@ Notable measured findings, not acted on:
 - At N1 heaptrack, SQLite malloc and realloc account for 83.43% of allocation calls and OpenSSL `CRYPTO_malloc` for 14.59%. This is allocation traffic, not retained bytes.
 - With phase-trace diagnostics on, N1 makes 284,834 syscalls versus 170,960 quiet. That difference of 113,874 is within 276 of the estimated 114,150, which supports diagnostic amplification as the cause.
 
+### Uninstrumented Host CPU (measured, Linux fixture, partial)
+
+Source: P2 [`3c522068`](https://github.com/DivyanshGolyan/rui/commit/3c522068a2b7c11922c0925c3fe4256501341d77), merged into this branch. These runs use the same frozen ReleaseFast binary (`b843b47a…`) and the existing Go capacity runner. No strace, perf, heaptrack, SQL callback or phase diagnostics ran. This CPU evidence is **not** covered by the Sol count review of `e8a8cc9f`. The CPU figure is Host user+system time over the complete work: Message admission, paced offer, result delivery and drain. It excludes Configure, Host startup, and the provider, controller and CLI processes. Linux `CLK_TCK` is 100, so values are coarse at 10 ms. There is one fresh Host with two rounds, which gives no repeat statistics. Raw files: [stream1-uninstrumented.json](../../.amp/p2/raw/stream1-uninstrumented.json) and [cpu-stream1-summary.json](../../.amp/p2/raw/cpu-stream1-summary.json).
+
+| Fixture | Pre-run estimate (**estimated**) | Host CPU (**measured**) | Events | CPU/event |
+| --- | ---: | ---: | ---: | ---: |
+| STREAM N=1 | ≈0.158 CPU-s (≈44 µs/event) | 1.53 CPU-s (0.77 + 0.76) | 3,600 | 425 µs (≈9.7× the estimate) |
+| STREAM N=100 | ≈14.12 CPU-s (≈11.77 µs/event) | pending publication | pending | pending |
+| HOLD N=100, 60 s interior window | ≈0.054 CPU-s | pending publication | 0 | undefined |
+
+In the 40 s interior windows of N=1, the Host used 0.51 and 0.48 CPU-s, about 0.0127 and 0.0120 average cores. Both rounds pass the functional and offline durable audits. The harness verdict is `incomplete` only because Mac footprint is unavailable.
+
 ### N100 on-CPU sampled user stacks (measured, Linux fixture, one profile)
 
 The profile has 4,466 `cpu-clock:u` samples. The families below overlap, so they are not exclusive CPU shares. In 567 samples the leaf symbol is unresolved (540 in the vDSO), 4,294 samples contain an unknown frame, and kernel stacks are unavailable. Flamegraph: [stream100-flamegraph.svg](../../.amp/p2/raw/stream100-flamegraph.svg).
