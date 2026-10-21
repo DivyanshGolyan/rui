@@ -30,8 +30,8 @@ def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def gh(*args):
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+def gh(*args, timeout=None):
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True, timeout=timeout).stdout
 
 
 def changed(base, sha):
@@ -140,17 +140,18 @@ def post(workflow, inputs, failure):
             time.sleep(10)
 
 
-def dispatch(sha, before, workflows):
+def dispatch(sha, before, workflows, existing=()):
     """Start main's post-push workflows for a GITHUB_TOKEN push of before..sha.
 
     Selected diffs from before like a push. A dispatch runs on main's head, so
     if main moved first the run is kept but sha has no exact post-push run,
     and this fails instead of claiming one. A dispatched run's completion
     starts no workflow_run, so this also dispatches main health, which waits
-    for exactly these runs to finish, however they end, and then decides.
+    for these runs and the existing run IDs of sha's post-push CI to finish,
+    however they end, and then decides.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
-    moved, ids = [], []
+    moved, ids = [], [str(run_id) for run_id in existing]
     for workflow in workflows:
         base = ["-f", f"inputs[base]={before}"] if workflow == "check.yml" else []
         run = post(workflow, base, f"main {sha} landed, but dispatching {workflow} failed; the next auto-land "
@@ -173,23 +174,33 @@ def dispatch(sha, before, workflows):
 def wait(sha, run_ids, limit=WAIT):
     """Return once every given run, sha's own post-push CI on main, has completed.
 
-    The deadline covers the first read, queueing and API retries. A run that
-    is not sha's post-push CI on main, or that does not finish in time, fails
-    here so that no decision is made from it. A completed failure or
-    cancellation is evidence for the decision, not a reason to skip it.
+    The deadline covers the first read, queueing and API retries: each read
+    is cut off at the deadline, and a read that returns after it counts for
+    nothing. A run that is not sha's post-push CI on main, or that does not
+    finish in time, fails here so that no decision is made from it. A
+    completed failure or cancellation is evidence for the decision, not a
+    reason to skip it.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
     deadline = time.monotonic() + limit
     if not run_ids or not all(run_id.isdigit() for run_id in run_ids):
         raise SystemExit(f"Expected numeric run IDs, got {run_ids!r}")
     waiting = list(run_ids)
+
+    def late():
+        return SystemExit(f"Runs {' '.join(waiting)} for {sha} did not complete within {limit}s; "
+                          "no decision. The next main health run decides them.")
     while waiting:
         for run_id in list(waiting):
+            if (remaining := deadline - time.monotonic()) <= 0:
+                raise late()
             try:
-                run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}"))
-            except subprocess.CalledProcessError as error:
+                run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}", timeout=remaining))
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 print(f"Reading run {run_id} failed; retrying until the deadline:\n{error.stderr}")
                 continue
+            if time.monotonic() > deadline:
+                raise late()
             identity = (run["path"], run["head_repository"]["full_name"], run["head_branch"], run["event"],
                         run["head_sha"])
             if not (run["path"] in EMITTERS and identity[1:3] == (repository, "main")
@@ -199,10 +210,9 @@ def wait(sha, run_ids, limit=WAIT):
                 print(f"Run {run_id} ({run['path']}) completed: {run['conclusion']}")
                 waiting.remove(run_id)
         if waiting:
-            if time.monotonic() >= deadline:
-                raise SystemExit(f"Runs {' '.join(waiting)} for {sha} did not complete within {limit}s; "
-                                 "no decision. The next main health run decides them.")
-            time.sleep(30)
+            if (remaining := deadline - time.monotonic()) <= 0:
+                raise late()
+            time.sleep(min(30, remaining))
 
 
 def decide(results, changed, own=()):

@@ -121,10 +121,13 @@ def repair(main_sha):
         return
     # Fails, so nothing lands, until GitHub's activity shows every push since stable.
     before = pushes(stable, main_sha)[main_sha]
-    missing = [workflow for workflow in required(before, main_sha) if latest(workflow, main_sha, "main") is None]
+    runs = {workflow: latest(workflow, main_sha, "main") for workflow in required(before, main_sha)}
+    missing = [workflow for workflow, run in runs.items() if run is None]
     if missing:
         print(f"main {main_sha} has no post-push {', '.join(missing)}; dispatching before landing on it")
-        dispatch(main_sha, before, missing)
+    # main's health waiter may never have started (a failed dispatch), so a new one waits
+    # for every required run, existing ones included, not only those started here.
+    dispatch(main_sha, before, missing, [run["id"] for run in runs.values() if run])
 
 
 if __name__ == "__main__":
