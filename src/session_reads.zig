@@ -833,6 +833,21 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, messages: []const Staged, 
     var page: MessagePage = .{ .io = io, .file = file };
     // The Message the display limit cut, and whether it cut its heading.
     var cut: ?struct { index: usize, heading: bool, before: u64 } = null;
+    // A cut appends a notice and the cut Message's export command, so the
+    // limit leaves room for the longest of either any target needs.
+    const Counter = struct {
+        bytes: u64 = 0,
+        pub fn feed(self: *@This(), text: []const u8) !void {
+            self.bytes += text.len;
+        }
+    };
+    var footer: u64 = 0;
+    for (messages) |message| if (message.target.row) {
+        var counter: Counter = .{};
+        try History.writeExport(&counter, store, session, message.target.position, message.target.ordinal);
+        footer = @max(footer, counter.bytes + 1);
+    };
+    footer += 160;
     for (messages, 0..) |message, index| {
         const target = message.target;
         const before = page.offset;
@@ -853,8 +868,9 @@ fn writeMessagePage(io: std.Io, scratch: std.Io.File, messages: []const Staged, 
             try page.feed("\n");
         }
         try page.feed("\n");
-        // Room for the first heading again covers the notice and its command.
-        if (index == 0) page.limit = Viewport.capacity - 2 * page.offset - 128;
+        // Room for the first heading again, and for any target's notice and
+        // export command, covers what a cut appends.
+        if (index == 0) page.limit = Viewport.capacity - @max(2 * page.offset + 128, page.offset + footer);
         if (page.full) {
             cut = .{ .index = index, .heading = true, .before = before };
             break;
@@ -979,6 +995,26 @@ test "a Message page past the display limit keeps what fits and says what it cut
     try std.testing.expect(std.mem.indexOf(u8, cut, "first\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, cut, "third") == null);
     try std.testing.expect(std.mem.indexOf(u8, cut, "lines of message 2 not shown in full, nor 1 later · /history shows them\n") != null);
+    // A short first heading must not size the room a later Message's long
+    // export needs: the cut second Message keeps its whole command in view.
+    try scratch.setLength(io, 0);
+    try scratch.writePositionalAll(io, "first\n", 0);
+    try scratch.writePositionalAll(io, wide, 6);
+    try scratch.writePositionalAll(io, "third", 6 + wide.len);
+    parts[0].target.row = false;
+    parts[1].target.row = true;
+    parts[1].target.content.length = wide.len;
+    parts[1].lines = 1;
+    parts[1].last = wide[wide.len - 1];
+    parts[2].start = 6 + wide.len;
+    const store: [492]u8 = @splat('s');
+    const session: [128]u8 = @splat('n');
+    try writeMessagePage(io, scratch, &parts, &store, &session, file);
+    const long = page[0..try file.readPositionalAll(io, page, 0)];
+    try std.testing.expect(long.len <= Viewport.capacity);
+    const notice = std.mem.indexOf(u8, long, "1 line of message 2 not shown in full, nor 1 later").?;
+    try std.testing.expect(std.mem.endsWith(u8, long, " --position 11 --ordinal 0\n"));
+    try std.testing.expect(std.mem.indexOfPos(u8, long, notice, "Raw export: ") != null);
 }
 
 /// A Message page's file. Body bytes stop at `limit`; `line_end` is where
