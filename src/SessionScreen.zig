@@ -41,6 +41,10 @@ memory: Memory = .{},
 // times; pages loaded from files use the full width.
 live: Document = .{ .sidenotes = true },
 browsing: Document = .{},
+// The Messages of each document's collapsed blocks. Every change to a
+// document's blocks updates its list here, so Ctrl-O names a Message directly.
+live_blocks: View.Blocks = .{},
+transcript_blocks: View.Blocks = .{},
 staging: Document = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
 composer: [65_536]u8 = undefined,
@@ -99,6 +103,11 @@ pub fn deinit(self: *Self) void {
 
 pub fn append(self: *Self, bytes: []const u8) !void {
     try self.live.append(bytes);
+}
+
+/// The Messages of the collapsed blocks text just appended shows, in order.
+pub fn appendCollapsed(self: *Self, blocks: []const View.Collapsed) void {
+    for (blocks) |block| self.live_blocks.append(block);
 }
 
 /// Absolute live offsets: bytes before `origin` left the retained view.
@@ -254,6 +263,7 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
     self.browsing = self.live;
     self.browsing.discardFront(front);
     try self.browsing.prepare();
+    self.transcript_blocks = self.live_blocks.newest(self.transcriptCollapsed());
     // Moves apply to the transcript's own height, which its heading and the
     // absent calls make differ from the live view's: start at its end so the
     // same rows down as up return to live output.
@@ -286,9 +296,10 @@ pub fn transcriptAtTop(self: *const Self) bool {
     return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
 }
 
-/// Prepends one older canonical page, rendered to `file`, above the
-/// transcript without moving the rows in view.
-pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
+/// Prepends one older canonical page, rendered to `file` with the Messages
+/// of its collapsed blocks in order, above the transcript without moving
+/// the rows in view.
+pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File, blocks: []const View.Collapsed) !void {
     std.debug.assert(self.view == .transcript);
     try self.load(&self.staging, io, file, false);
     if (self.staging.origin != 0) {
@@ -310,12 +321,15 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
     const first = self.browsing.first(self.textLayout(), self.height);
     self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
     self.overscroll = 0;
-    return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
+    // The page's kept rows show its newest blocks; one cut above them is
+    // unknown. Prepended newest first, each lands before the last.
+    for (0..older) |from_end| {
+        const block: ?View.Collapsed = if (from_end < blocks.len) blocks[blocks.len - 1 - from_end] else null;
+        self.transcript_blocks.prepend(&.{block});
+    }
+    // Newer rows the page pushed off the end take their blocks with them.
+    self.transcript_blocks.dropNewest(before + older - self.transcriptCollapsed());
 }
-
-/// Collapsed blocks an older page kept, its newest, and those newer rows
-/// lost from the transcript's end.
-pub const Prepended = struct { older: usize, trimmed: usize };
 
 /// Collapsed blocks in the transcript.
 pub fn transcriptCollapsed(self: *const Self) usize {
@@ -323,18 +337,18 @@ pub fn transcriptCollapsed(self: *const Self) usize {
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
-/// Returns the collapsed blocks newer rows lost from the transcript's end.
-pub fn markBeginning(self: *Self) !usize {
-    return self.boundary("Start of conversation\n");
+pub fn markBeginning(self: *Self) !void {
+    try self.boundary("Start of conversation\n");
 }
 
 /// Shows that live rows above this point left the view and older saved
-/// pages cannot join here without a gap. Returns as markBeginning does.
-pub fn markGap(self: *Self) !usize {
-    return self.boundary("Earlier rows left this view.\n");
+/// pages cannot join here without a gap.
+pub fn markGap(self: *Self) !void {
+    try self.boundary("Earlier rows left this view.\n");
 }
 
-fn boundary(self: *Self, text: []const u8) !usize {
+/// A label can push newer rows, and their blocks, off the transcript's end.
+fn boundary(self: *Self, text: []const u8) !void {
     std.debug.assert(self.view == .transcript);
     var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
     try marker.append(View.Style.quiet.code(self.colour));
@@ -342,21 +356,27 @@ fn boundary(self: *Self, text: []const u8) !usize {
     try marker.append(View.Style.normal.code(self.colour));
     const before = self.transcriptCollapsed();
     if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
-    return before - self.transcriptCollapsed();
+    self.transcript_blocks.dropNewest(before - self.transcriptCollapsed());
 }
 
-/// The lowest collapsed user block the latest frame drew in the live view
-/// or transcript, as how many collapsed blocks follow it in that document.
+/// What the lowest collapsed user block the latest frame drew in the live
+/// view or transcript shows: its Message, or that none was drawn, or that
+/// its Message is no longer held here.
+pub const InView = union(enum) { none, released, message: View.Collapsed };
+
 /// Call right after drawing: later text moves what the frame drew.
-pub fn collapsedInView(self: *Self) ?usize {
-    if (self.view != .live and self.view != .transcript) return null;
+pub fn collapsedInView(self: *Self) InView {
+    if (self.view != .live and self.view != .transcript) return .none;
     const document = self.viewed();
     const text = document.text().len;
     const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
     // A line cut at the bottom shows its first rows, which hold the mark.
     const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
-    const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return null;
-    return document.collapsed(last + 1, text).count;
+    const last = document.collapsed(@min(self.drawn.first.offset, text), end).last orelse return .none;
+    // Each block is counted by how many follow it in its document.
+    const blocks = if (self.view == .live) &self.live_blocks else &self.transcript_blocks;
+    const message = blocks.fromEnd(document.collapsed(last + 1, text).count) orelse return .released;
+    return .{ .message = message };
 }
 
 /// Shows one Message's full text over the live view or the transcript.
@@ -1000,7 +1020,7 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     const older = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer older.close(io);
     try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
-    _ = try screen.prependFile(io, older);
+    try screen.prependFile(io, older, &.{});
     _ = try screen.render(&out.writer, size, "", 0, "", &.{});
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
     // Resize keeps the first browsed line in view.
@@ -1092,7 +1112,7 @@ test "a Message page returns to the view and position it came from" {
     try std.testing.expectEqual(ViewKind.action, screen.view);
 }
 
-test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
+test "Ctrl-O names the Message of the lowest collapsed block drawn as pages join and leave" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -1103,6 +1123,20 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const Content = @FieldType(View.Collapsed, "content");
+    const content: Content = .{ .length = 0, .digest = @splat(0) };
+    const Message = struct {
+        fn at(position: u64, body: Content) View.Collapsed {
+            return .{ .source = .activity, .position = position, .ordinal = 0, .content = body, .row = false };
+        }
+        fn shown(in_view: InView) ?u64 {
+            return switch (in_view) {
+                .none => null,
+                .released => 0,
+                .message => |message| message.position,
+            };
+        }
+    };
     // A ┄ the user typed is body text, not a block's summary.
     try screen.append("\n› " ++ View.Mark.body ++ "typed ┄ 3" ++ View.Mark.reset ++ "\n");
     for (0..3) |block| {
@@ -1110,48 +1144,53 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
         try screen.append(try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines · 2.0 KB" ++ View.Mark.reset ++ "\n", .{block}));
         for (0..12) |row| try screen.append(try std.fmt.bufPrint(&line, "answer {d} row {d}\n", .{ block, row }));
     }
+    screen.appendCollapsed(&.{ Message.at(10, content), Message.at(11, content), Message.at(12, content) });
     _ = try screen.render(&out.writer, size, "", 0, "", &.{});
     // The newest block scrolled off with its answer's rows below it.
-    try std.testing.expectEqual(@as(?usize, null), screen.collapsedInView());
+    try std.testing.expectEqual(InView.none, screen.collapsedInView());
     try screen.beginTranscript(0);
     for (0..10) |_| _ = screen.browse(false, true);
     // Line by line down from the top, the lowest block drawn names each
-    // block in turn, oldest (two newer follow it) first, and only those.
-    var seen: [8]?usize = undefined;
+    // block's own Message in turn, oldest first, and only those.
+    var seen: [8]?u64 = undefined;
     var count: usize = 0;
     while (true) {
         _ = try screen.render(&out.writer, size, "", 0, "", &.{});
-        const index = screen.collapsedInView();
-        if (count == 0 or !std.meta.eql(seen[count - 1], index)) {
-            seen[count] = index;
+        const position = Message.shown(screen.collapsedInView());
+        if (count == 0 or seen[count - 1] != position) {
+            seen[count] = position;
             count += 1;
         }
         if (screen.browse(true, false)) break;
     }
-    try std.testing.expectEqualSlices(?usize, &.{ 2, null, 1, null, 0, null }, seen[0..count]);
+    try std.testing.expectEqualSlices(?u64, &.{ 10, null, 11, null, 12, null }, seen[0..count]);
     try screen.latest();
     try screen.beginTranscript(0);
     try std.testing.expectEqual(@as(usize, 3), screen.transcriptCollapsed());
-    // An older page keeps its newest block; its own count says so.
+    // An older page's kept block takes its newest Message, before the copy's.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const older = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer older.close(io);
     try older.writePositionalAll(io, "\n› " ++ View.Mark.summary ++ "┄ 59 KB" ++ View.Mark.reset ++ "\n", 0);
-    const prepended = try screen.prependFile(io, older);
-    try std.testing.expectEqual(Prepended{ .older = 1, .trimmed = 0 }, prepended);
+    try screen.prependFile(io, older, &.{ Message.at(2, content), Message.at(3, content) });
     try std.testing.expectEqual(@as(usize, 4), screen.transcriptCollapsed());
+    try std.testing.expectEqual(@as(u64, 3), screen.transcript_blocks.fromEnd(3).?.position);
+    try std.testing.expectEqual(@as(u64, 10), screen.transcript_blocks.fromEnd(2).?.position);
     // A full transcript ending in a block: either label pushes that block
-    // off the end and says so, so its Message leaves the map with it.
+    // off the end, so its Message leaves with it and the one before stays.
     for (0..2) |label| {
         try screen.latest();
         var line: [64]u8 = undefined;
         for (0..Viewport.capacity / 32) |row| try screen.append(try std.fmt.bufPrint(&line, "filler row {d:0>20}\n", .{row}));
         try screen.append("\n› " ++ View.Mark.summary ++ "┄ 9 more lines · 2.0 KB" ++ View.Mark.reset ++ "\n");
+        screen.appendCollapsed(&.{Message.at(20 + label, content)});
         try screen.beginTranscript(try screen.liveStart());
         try std.testing.expectEqual(@as(usize, 1), screen.transcriptCollapsed());
-        try std.testing.expectEqual(@as(usize, 1), if (label == 0) try screen.markBeginning() else try screen.markGap());
+        try std.testing.expectEqual(@as(u64, 20 + label), screen.transcript_blocks.fromEnd(0).?.position);
+        if (label == 0) try screen.markBeginning() else try screen.markGap();
         try std.testing.expectEqual(@as(usize, 0), screen.transcriptCollapsed());
+        try std.testing.expect(screen.transcript_blocks.fromEnd(0) == null);
     }
 }
 

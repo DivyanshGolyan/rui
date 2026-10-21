@@ -89,9 +89,6 @@ lowest: ?u64 = null,
 // A failed older load waits for the next scroll rather than retrying at once.
 older_failed: bool = false,
 history_requested: ?enum { older, latest } = null,
-// The Messages of collapsed blocks in live output and in the transcript.
-live_blocks: View.Blocks = .{},
-transcript_blocks: View.Blocks = .{},
 // A Message page asked for and not yet being read. Ctrl-O waits for the frame
 // it names a block in; the read then waits for the reader.
 message_wanted: ?MessageWanted = null,
@@ -809,14 +806,16 @@ fn expand(self: *Self) !void {
         self.notice = "! Ctrl-O opens a collapsed message from the conversation.";
         return;
     }
-    const index = screen.collapsedInView() orelse {
-        self.notice = "No collapsed message in view; scroll to one, then Ctrl-O.";
-        return;
-    };
-    const blocks = if (screen.view == .live) &self.live_blocks else &self.transcript_blocks;
-    const target = blocks.fromEnd(index) orelse {
-        self.notice = "! That message's full text is no longer held here; /history shows it again.";
-        return;
+    const target = switch (screen.collapsedInView()) {
+        .none => {
+            self.notice = "No collapsed message in view; scroll to one, then Ctrl-O.";
+            return;
+        },
+        .released => {
+            self.notice = "! That message's full text is no longer held here; /history shows it again.";
+            return;
+        },
+        .message => |message| message,
     };
     self.message_wanted = .{ .target = .{ .block = target, .page_epoch = screen.page_epoch } };
     self.notice = "Opening message…";
@@ -831,7 +830,6 @@ fn beginTranscript(self: *Self) !void {
     const front = try screen.liveStart();
     self.transcript_plan = reads.plan(&self.marks, &self.echoes, front, self.lowest);
     try screen.beginTranscript(self.transcript_plan.start);
-    self.transcript_blocks = self.live_blocks.newest(screen.transcriptCollapsed());
     self.transcript_older = self.transcript_plan.older;
     // Without any boundary, where the conversation starts is unknown.
     self.transcript_beginning = self.transcript_older == null and !(self.transcript_plan.gap and self.marks.count == 0);
@@ -844,12 +842,11 @@ fn showOlderLabels(self: *Self) !void {
     const screen = self.terminal.screen;
     const plan = &self.transcript_plan;
     if (plan.gap and plan.echo_count == 0 and plan.dropped == null) {
-        // A label can push newer rows, and their blocks, off the end.
-        self.transcript_blocks.dropNewest(try screen.markGap());
+        try screen.markGap();
         plan.gap = false;
     }
     if (self.transcript_beginning and self.transcript_plan.next() == null and self.transcript_older == null) {
-        self.transcript_blocks.dropNewest(try screen.markBeginning());
+        try screen.markBeginning();
         self.transcript_beginning = false;
     }
 }
@@ -1080,17 +1077,7 @@ fn settleReader(self: *Self) !void {
     const current = self.job.page_epoch == screen.page_epoch;
     if (end == .complete and self.read_phase == .history) {
         if (current) {
-            const prepended = try screen.prependFile(self.init.io, self.inspection_file);
-            // The page's newest blocks are those its kept rows show.
-            const collapsed = self.job.result.collapsed.slice();
-            var older: [@typeInfo(@FieldType(reads.Collected, "items")).array.len]?View.Collapsed = @splat(null);
-            const kept = @min(prepended.older, older.len);
-            for (0..kept) |index| {
-                const from_end = kept - index;
-                older[index] = if (from_end <= collapsed.len) collapsed[collapsed.len - from_end] else null;
-            }
-            self.transcript_blocks.prepend(older[0..kept]);
-            self.transcript_blocks.dropNewest(prepended.trimmed);
+            try screen.prependFile(self.init.io, self.inspection_file, self.job.result.collapsed.slice());
             if (self.job.listing) |listed| self.transcript_plan.listed(listed, self.job.result.listing) else {
                 self.transcript_older = self.job.result.history_cursor;
                 self.transcript_beginning = self.transcript_older == null;
@@ -1157,7 +1144,7 @@ fn showStaged(self: *Self) !void {
         }
     }
     _ = try staged.to(staged.length);
-    for (result.collapsed.slice()) |block| self.live_blocks.append(block);
+    self.terminal.screen.appendCollapsed(result.collapsed.slice());
     if (staged.length != 0) self.reader_output_started = true;
 }
 
