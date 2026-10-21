@@ -56,6 +56,266 @@
       "voluntary_switches_per_second_upper": 87.88004443173487
     },
     {
+      "file": "run-hold-A2.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "e2835cb25a7e45851df6dac35de0977de8a88b9d2861eea8ee5b43bd993b3a50",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13499392,
+      "host_pss_end_bytes": 13499392,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.6400000000000001,
+      "window_seconds": 60.056500495,
+      "host_average_cores": 0.027307618434020114,
+      "host_threads": 5,
+      "host_pid": 114089,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "114089": [
+          2957,
+          1
+        ],
+        "114090": [
+          0,
+          0
+        ],
+        "114091": [
+          0,
+          0
+        ],
+        "114092": [
+          2322,
+          118
+        ],
+        "114094": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 5279,
+      "nonvoluntary_switches": 119,
+      "voluntary_switches_per_second_lower": 87.8997814764577,
+      "voluntary_switches_per_second_upper": 87.9002184057476
+    },
+    {
+      "file": "run-hold-A3.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "e2835cb25a7e45851df6dac35de0977de8a88b9d2861eea8ee5b43bd993b3a50",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13519872,
+      "host_pss_end_bytes": 13519872,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.6099999999999999,
+      "window_seconds": 60.013847787,
+      "host_average_cores": 0.026827141724259724,
+      "host_threads": 5,
+      "host_pid": 115802,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "115802": [
+          2955,
+          3
+        ],
+        "115803": [
+          0,
+          0
+        ],
+        "115804": [
+          0,
+          0
+        ],
+        "115805": [
+          2324,
+          63
+        ],
+        "115807": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 5279,
+      "nonvoluntary_switches": 66,
+      "voluntary_switches_per_second_lower": 87.96202453728728,
+      "voluntary_switches_per_second_upper": 87.96253779310854
+    },
+    {
+      "file": "run-hold-B1.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "ec8400832970ba2d4f13a8ffdb706c2b4513615a6abbafe0a3335562d973b439",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13450240,
+      "host_pss_end_bytes": 13450240,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.5599999999999996,
+      "window_seconds": 60.05613421,
+      "host_average_cores": 0.025975697911975203,
+      "host_threads": 5,
+      "host_pid": 113301,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "113301": [
+          60,
+          0
+        ],
+        "113302": [
+          0,
+          0
+        ],
+        "113303": [
+          0,
+          0
+        ],
+        "113304": [
+          2324,
+          68
+        ],
+        "113305": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 2384,
+      "nonvoluntary_switches": 68,
+      "voluntary_switches_per_second_lower": 39.6958469413544,
+      "voluntary_switches_per_second_upper": 39.69604744530229
+    },
+    {
+      "file": "run-hold-B2.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "ec8400832970ba2d4f13a8ffdb706c2b4513615a6abbafe0a3335562d973b439",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13431808,
+      "host_pss_end_bytes": 13431808,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.5399999999999998,
+      "window_seconds": 60.000421808,
+      "host_average_cores": 0.025666486227846286,
+      "host_threads": 5,
+      "host_pid": 114930,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "114930": [
+          60,
+          0
+        ],
+        "114931": [
+          0,
+          0
+        ],
+        "114932": [
+          0,
+          0
+        ],
+        "114933": [
+          2318,
+          97
+        ],
+        "114934": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 2378,
+      "nonvoluntary_switches": 97,
+      "voluntary_switches_per_second_lower": 39.632419725472744,
+      "voluntary_switches_per_second_upper": 39.6327752688486
+    },
+    {
+      "file": "run-hold-B3.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "ec8400832970ba2d4f13a8ffdb706c2b4513615a6abbafe0a3335562d973b439",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13450240,
+      "host_pss_end_bytes": 13450240,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.4700000000000002,
+      "window_seconds": 60.025972648,
+      "host_average_cores": 0.02448939909096132,
+      "host_threads": 5,
+      "host_pid": 116701,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "116701": [
+          60,
+          1
+        ],
+        "116702": [
+          0,
+          0
+        ],
+        "116703": [
+          0,
+          0
+        ],
+        "116704": [
+          2328,
+          137
+        ],
+        "116706": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 2388,
+      "nonvoluntary_switches": 138,
+      "voluntary_switches_per_second_lower": 39.7823921010833,
+      "voluntary_switches_per_second_upper": 39.782636247137766
+    },
+    {
       "file": "run-n0-r1.json",
       "status": "passed",
       "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
