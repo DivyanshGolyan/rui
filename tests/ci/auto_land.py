@@ -73,29 +73,70 @@ def macos(run):
     return next((job["conclusion"] for job in jobs if job["name"] == "macos"), None)
 
 
-def main():
-    argparse.ArgumentParser(description=__doc__).parse_args()
-    # The triggering event only wakes the lander: GitHub drops a pending run
-    # when a newer one queues, so every run decides each branch's current tip.
+def number(branch):
+    return int(branch.rsplit("-", 1)[1])
+
+
+def contains(sha, ancestor):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, sha]).returncode == 0
+
+
+def tips():
+    """Fetch main and every wip/land-N; return [(branch, sha)], lowest N first."""
     git("fetch", "--quiet", "--prune", "origin", "+refs/heads/main:refs/remotes/origin/main",
         "+refs/heads/wip/land-*:refs/remotes/origin/wip/land-*")
-    main_sha = git("rev-parse", "origin/main")
-    tips = [line.split() for line in git("for-each-ref", "--format=%(refname:lstrip=3) %(objectname)",
+    refs = [line.split() for line in git("for-each-ref", "--format=%(refname:lstrip=3) %(objectname)",
                                          "refs/remotes/origin/wip/land-*").splitlines()]
-    for branch, sha in sorted((tip for tip in tips if BRANCH.fullmatch(tip[0])),
-                              key=lambda tip: int(tip[0].rsplit("-", 1)[1])):
-        if subprocess.run(["git", "merge-base", "--is-ancestor", sha, main_sha]).returncode == 0:
-            print(f"{branch} {sha} is already in main")
-            continue
-        if land(branch, sha, main_sha):
-            main_sha = sha
-        elif git("rev-parse", "origin/main") != main_sha:
-            return
+    return sorted((ref for ref in refs if BRANCH.fullmatch(ref[0])), key=lambda ref: number(ref[0]))
+
+
+def preflight(branch, sha):
+    """Fail a landing-tip push before it qualifies a second open stack.
+
+    At most one wip/land-N is open. Refs main already contains are landed and
+    never count. Every other ref must have a lower number and be contained in
+    this push, so it adds to that stack instead of qualifying beside it. An
+    abandoned stack is retired (backed up, then deleted) before a new one.
+    """
+    if not BRANCH.fullmatch(branch):
+        raise SystemExit(f"{branch} is not a wip/land-N landing branch")
+    refs = tips()
+    main_sha = git("rev-parse", "origin/main")
+    open_refs = [(other, tip) for other, tip in refs if other != branch and not contains(main_sha, tip)]
+    newer = [other for other, _ in refs if number(other) > number(branch)]
+    if newer:
+        raise SystemExit(f"{branch} is below {newer[-1]}; land numbers only increase")
+    beside = [f"{other} {tip}" for other, tip in open_refs if not contains(sha, tip)]
+    if beside:
+        raise SystemExit(f"{', '.join(beside)} still open and {branch} does not contain it; "
+                         "stack onto it, wait until it lands, or retire it")
+    print(f"{branch} {sha} is the only open landing stack")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--preflight", metavar="BRANCH",
+                        help="fail unless BRANCH at HEAD is the only open landing stack")
+    args = parser.parse_args()
+    if args.preflight:
+        return preflight(args.preflight, git("rev-parse", "HEAD"))
+    # The triggering event only wakes the lander: GitHub drops a pending run
+    # when a newer one queues, so every run decides the current open stack.
+    refs = tips()
+    if not refs:
+        return
+    # Only the highest-numbered tip is open; lower ones landed or were superseded.
+    branch, sha = refs[-1]
+    main_sha = git("rev-parse", "origin/main")
+    if contains(main_sha, sha):
+        print(f"{branch} {sha} is already in main")
+        return
+    land(branch, sha, main_sha)
 
 
 def land(branch, sha, main_sha):
     """Decide one tip and land it; True when main and stable are now sha."""
-    fast_forward = subprocess.run(["git", "merge-base", "--is-ancestor", main_sha, sha]).returncode == 0
+    fast_forward = contains(sha, main_sha)
     # NUL-delimited, so Git never quotes a strict path out of recognition.
     paths = changed_paths(main_sha, sha)[0] if fast_forward else []
     selected = latest("check.yml", sha, branch)

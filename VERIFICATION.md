@@ -41,7 +41,7 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using tar
 | [Strict paths](AGENTS.md#landing) | Also the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS | `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate |
 | CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap |
 
-`test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`. Neither composed gate covers that root, so run it with a selected composed gate. The compiler and dependency setup action is bootstrap, not CI policy. An unavailable review base is an error. `wip/land-*` pushes select the tip's complete delta against the main merge base.
+`test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`. Neither composed gate covers that root, so run it with a selected composed gate. The compiler and dependency setup action is bootstrap, not CI policy. An unavailable review base is an error. `wip/land-*` pushes select the tip's complete delta against the main merge base. Dispatching Selected with an older `base` qualifies a combined stack's full delta; Auto-land counts push runs only.
 
 Qualification Go changes select `measurement-check`. Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux. Other qualification changes state manual syntax or compilation requirements. Stored historical results select no product suites. Syntax checks, probe compilation and unrelated product tests do not qualify a resource claim.
 

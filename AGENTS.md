@@ -47,7 +47,7 @@ Ask before publishing to a different destination, expanding scope, force-pushing
 
 Standing grant: an item ready for main lands under these rules without further approval. Passing their gates is the authority; there is no separate human approval or qualification stage.
 
-- Stack ready items on `wip/land-N` and gate only the tip.
+- Stack ready items on `wip/land-N` and gate only the tip. At most one `wip/land-N` is open; later ready work waits for the next stack. Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when another unlanded `wip/land-*` exists that the tip does not contain, or a higher number exists. Retire an abandoned stack (back it up, then delete it) before starting another. Selected's plan job repeats the check.
 - If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
 - Only [Auto-land](.github/workflows/auto-land.yml) pushes `main`: one atomic non-force fast-forward of a passing tip to both `main` and `stable`. Agents only assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so Auto-land holds such tips for the user.
 - Main is not re-tested after the push. Daily full runs on main file an issue when red; fix forward.
