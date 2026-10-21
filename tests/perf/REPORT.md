@@ -132,6 +132,16 @@ The profile has 4,466 `cpu-clock:u` samples. The families below overlap, so they
 
 In the untraced HOLD100 run, Host threads made 5,300 voluntary context switches in a 60 s interior window, about 88/s. All of them come from two threads: 2,980 (≈49.7/s) and 2,320 (≈38.7/s). The other three threads made 0 ([thread-deltas.json](../../.amp/p2/raw/hold100-untraced/thread-deltas.json)). The pre-run estimate was 6,200. These per-thread rates are close to the estimated intake 20 ms `poll` (50/s) and execution `curl_multi_poll` 25 ms (40/s) timers. This match is a **hypothesis**: the raw file retains all five TIDs and their switch deltas, but which TID is the intake loop and which is the execution loop is unverified, and a Linux switch count is not Mac `IDLEW` or a count of distinct timer wakeups. The traced HOLD run made 7,200 `poll` calls and 1,212,768 voluntary switches. Those switches are ptrace distortion and are not reported as natural.
 
+### Where the SELECTs come from (measured counts, Linux fixture)
+
+Source: P2 [`352ea142`](https://github.com/DivyanshGolyan/rui/commit/352ea142df47ca1c6c006b3bf165a23200ac3e07), merged here: [sql-owner-summary.json](../../.amp/p2/raw/sql-owner-summary.json), [sql-phase-summary.json](../../.amp/p2/raw/sql-phase-summary.json), call sites in [ATTRIBUTION.md](../../.amp/p2/ATTRIBUTION.md). P2 verified the 116-entry manifest and both reducers itself; an independent audit is pending. These are statement counts and rates from instrumented runs, not CPU cost and not proof of successful completion.
+
+- **Existing logs, by caller:** uncertain-Action recovery accounts for 7,249 SELECTs at N=1 and 285,818 at N=100. Control reconciliation accounts for 1,140 and 124,156. Together that is 8,389 of 8,909 and 409,974 of 433,586 statements, about 94%. Neither fixture Store has any Action rows. These old logs have no phase clocks, so they do not show how much of that is polling.
+- **New HOLD100 phase run** (60.008 s window, 0 events, 0 bytes, no admissions, mutations or transactions; every one of 2,307 execution turns had all slots full): 60,067 SELECTs, **1,000.98 per second**. That is 57,700 control reads, 2,307 uncertain-Action scans and 60 retry scans. Pre-run estimate: 62,460. So while 100 streams wait with nothing arriving, the Host still runs about 1,000 SELECTs a second, none of them part of an admission, mutation or transaction.
+- **Cancelled-and-settled idle** (20.018 s, all 100 outcomes cancelled, none unresolved): 1,248 SELECTs, 62.34 per second, plus 218 `BEGIN` and 218 `ROLLBACK` with no `COMMIT`.
+
+This polling is **found, not fixed**: removing it needs a Store-commit wake or a SELECT redesign, both out of scope tonight. P2 also reports that a small isolated SSE replay shows 7 rereads behind the consumed position for each 260-byte event; that evidence is not yet packaged or audited, so it is not reported here as a result.
+
 ### Appendix limits and retained failures
 
 - **Incomplete reports:** all seven canonical streaming, SQL, heap and perf reports remain `incomplete` with exit 1, because Mac physical footprint is unavailable. Their functional and post-reap audit dimensions pass.
