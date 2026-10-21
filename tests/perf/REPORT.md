@@ -60,17 +60,21 @@ Notable measured findings, not acted on:
 - At N1 heaptrack, SQLite malloc and realloc account for 83.43% of allocation calls and OpenSSL `CRYPTO_malloc` for 14.59%. This is allocation traffic, not retained bytes.
 - With phase-trace diagnostics on, N1 makes 284,834 syscalls versus 170,960 quiet. That difference of 113,874 is within 276 of the estimated 114,150, which supports diagnostic amplification as the cause.
 
-### Uninstrumented Host CPU (measured, Linux fixture, partial)
+### Uninstrumented Host CPU (measured, Linux fixture)
 
-Source: P2 [`3c522068`](https://github.com/DivyanshGolyan/rui/commit/3c522068a2b7c11922c0925c3fe4256501341d77), merged into this branch. These runs use the same frozen ReleaseFast binary (`b843b47a…`) and the existing Go capacity runner. No strace, perf, heaptrack, SQL callback or phase diagnostics ran. This CPU evidence is **not** covered by the Sol count review of `e8a8cc9f`. The CPU figure is Host user+system time over the complete work: Message admission, paced offer, result delivery and drain. It excludes Configure, Host startup, and the provider, controller and CLI processes. Linux `CLK_TCK` is 100, so values are coarse at 10 ms. There is one fresh Host with two rounds, which gives no repeat statistics. Raw files: [stream1-uninstrumented.json](../../.amp/p2/raw/stream1-uninstrumented.json) and [cpu-stream1-summary.json](../../.amp/p2/raw/cpu-stream1-summary.json).
+Source: P2 [`3c522068`](https://github.com/DivyanshGolyan/rui/commit/3c522068a2b7c11922c0925c3fe4256501341d77) and [`19fedb86`](https://github.com/DivyanshGolyan/rui/commit/19fedb861b2ba6b44292ca34edb4586ad85f83e8), merged into this branch. These runs use the same frozen ReleaseFast binary (`b843b47a…`) and the existing Go capacity runner. No strace, perf, heaptrack, SQL callback or phase diagnostics ran. This CPU evidence is **not** covered by the Sol count review of `e8a8cc9f`. The CPU figure is Host user+system time over the complete work: Message admission, paced offer, result delivery and drain. It excludes Configure, Host startup, and the provider, controller and CLI processes. Linux `CLK_TCK` is 100, so values are coarse at 10 ms. Each case has one fresh Host (two rounds for streaming, one HOLD window), which gives no repeat statistics. Raw files: [stream1-uninstrumented.json](../../.amp/p2/raw/stream1-uninstrumented.json) and [cpu-stream1-summary.json](../../.amp/p2/raw/cpu-stream1-summary.json).
 
 | Fixture | Pre-run estimate (**estimated**) | Host CPU (**measured**) | Events | CPU/event |
 | --- | ---: | ---: | ---: | ---: |
 | STREAM N=1 | ≈0.158 CPU-s (≈44 µs/event) | 1.53 CPU-s (0.77 + 0.76) | 3,600 | 425 µs (≈9.7× the estimate) |
-| STREAM N=100 | ≈14.12 CPU-s (≈11.77 µs/event) | pending publication | pending | pending |
-| HOLD N=100, 60 s interior window | ≈0.054 CPU-s | pending publication | 0 | undefined |
+| STREAM N=100 | ≈14.12 CPU-s (≈11.77 µs/event) | 42.40 CPU-s (20.62 + 21.78) | 1,200,000 | 35.3 µs (≈3.0× the estimate) |
+| HOLD N=100, 60.01 s interior window | ≈0.054 CPU-s | 1.84 CPU-s (0.90 → 2.74), ≈0.0307 cores = 3.07% of one core (≈34× the estimate) | 0 | undefined |
 
-In the 40 s interior windows of N=1, the Host used 0.51 and 0.48 CPU-s, about 0.0127 and 0.0120 average cores. Both rounds pass the functional and offline durable audits. The harness verdict is `incomplete` only because Mac footprint is unavailable.
+In the 40 s interior windows, the Host used about 0.0127 and 0.0120 average cores at N=1, and about 0.310 and 0.300 at N=100. All four streaming rounds pass capture, request integrity, result delivery, cleanup and post-reap durable audits. Both streaming verdicts are `incomplete` only because Mac footprint is unavailable. HOLD passes (exit 0) with 100 held streams on one H2 connection, 0 events and 0 offer bytes. Its figure is waiting CPU only: not admission or settlement CPU, and not a count of distinct wakeups or Mac `IDLEW`. Runs were serial and compiles happened between measured intervals, not during them. Run times (UTC): N=1 18:58:49–19:00:51, N=100 19:01:24–19:03:42, HOLD 19:04:20–19:05:33.
+
+Finding (measured, Linux fixture): with nothing to do, 100 held streams cost the Host about 3% of one core, roughly 34× the estimate built from the 20 ms and 25 ms timers. This is relevant waiting-cost evidence for the deadline-wait fix, but it is Linux, a single run, and has no before/after. The fix stays **found, not fixed** unless the coordinator accepts this as the baseline.
+
+Additional raw files from P2 [`19fedb86`](https://github.com/DivyanshGolyan/rui/commit/19fedb861b2ba6b44292ca34edb4586ad85f83e8): [stream100-uninstrumented.json](../../.amp/p2/raw/stream100-uninstrumented.json), [cpu-stream100-summary.json](../../.amp/p2/raw/cpu-stream100-summary.json), [hold100-cpu/evidence.json](../../.amp/p2/raw/hold100-cpu/evidence.json), [cpu-binary-source-identity.sha256](../../.amp/p2/raw/cpu-binary-source-identity.sha256).
 
 ### N100 on-CPU sampled user stacks (measured, Linux fixture, one profile)
 
