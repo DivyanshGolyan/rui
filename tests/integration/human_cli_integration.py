@@ -20,7 +20,7 @@ import termios
 import threading
 import time
 
-from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, stop_process
+from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -1199,7 +1199,7 @@ def command_entry_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained command-entry failure state: {state}", file=sys.stderr)
+            retain_failure_state("command-entry failure state", state)
 
 
 def scroll_return_case():
@@ -1585,7 +1585,7 @@ def persistent_opening_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent opening failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent opening failure state", state)
 
 
 def persistent_pending_case():
@@ -1652,7 +1652,7 @@ def persistent_pending_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent pending failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent pending failure state", state)
 
 
 def persistent_input_cases():
@@ -1838,7 +1838,7 @@ def persistent_input_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent input failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent input failure state", state)
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
@@ -2463,7 +2463,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained persistent permission failure state: {state}", file=sys.stderr)
+            retain_failure_state("persistent permission failure state", state)
 
 
 def store_selection_cases(state, workspace, valid_store):
@@ -2822,7 +2822,7 @@ def silent_read_edit_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained silent-edit failure state: {state}", file=sys.stderr)
+            retain_failure_state("silent-edit failure state", state)
 
 
 def opaque_session_commands_case():
@@ -2945,7 +2945,7 @@ def opaque_session_commands_case():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained opaque-Session failure state: {state}", file=sys.stderr)
+            retain_failure_state("opaque-Session failure state", state)
 
 
 def long_input_case(home, store, workspace, endpoint, host):
@@ -4891,7 +4891,7 @@ def renderer_cases():
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained renderer failure state: {state}", file=sys.stderr)
+            retain_failure_state("renderer failure state", state)
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
@@ -6412,7 +6412,7 @@ def main(selected="all"):
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained human CLI failure state: {state}", file=sys.stderr)
+            retain_failure_state("human CLI failure state", state)
 
 
 if __name__ == "__main__":

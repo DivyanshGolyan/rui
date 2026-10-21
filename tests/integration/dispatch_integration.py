@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, dispose_all, preserve_failure_metadata, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -4653,7 +4653,7 @@ def main(mode="all", correlation_case="all"):
             raise
         finally:
             dispose_all(lambda: shutil.rmtree(state) if completed and incoming_error is None else
-                        print(f"retained dispatch integration failure state: {state}", file=sys.stderr))
+                        retain_failure_state("dispatch integration failure state", state))
 
 
 if __name__ == "__main__":

@@ -932,7 +932,6 @@ def prove_intentional_crash_retirement():
 
 def prove_retention_does_not_own_teardown():
     import host_process
-    import run_selected  # Loaded by the preceding real retention helper call.
     # Sampling itself is optional, including failures before write_text/open.
     with tempfile.TemporaryDirectory() as directory:
         try:
@@ -970,7 +969,7 @@ def prove_retention_does_not_own_teardown():
                 return original_open(path, *args, **kwargs)
             try:
                 with patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=destination), \
-                        patch.object(run_selected, "retain_failure_logs", copy), \
+                        patch.object(host_process, "copy_failure_diagnostics", copy), \
                         patch.object(pathlib.Path, "open", open_path), patch.object(process, "kill", kill):
                     if case == "late-loss":
                         try:
@@ -1261,7 +1260,6 @@ def prove_renderer_comparison_retention():
 
     # Evidence failures must neither replace the primary assertion nor skip
     # mandatory disposal. The existing writer/copy caps also apply here.
-    import run_selected  # Loaded by the real retention helper above.
     for failure in ("write", "copy"):
         with tempfile.TemporaryDirectory() as state, \
                 patch.dict(os.environ, RUI_FAILURE_ARTIFACTS=str(pathlib.Path(state) / "retained")), \
@@ -1269,7 +1267,7 @@ def prove_renderer_comparison_retention():
             if failure == "write":
                 patches.enter_context(patch.object(terminal, "preserve_failure_metadata", side_effect=OSError("write")))
             else:
-                patches.enter_context(patch.object(run_selected, "retain_failure_logs", side_effect=OSError("copy")))
+                patches.enter_context(patch.object(terminal, "copy_failure_diagnostics", side_effect=OSError("copy")))
             primary, disposed = AssertionError("original comparison"), []
             try:
                 try:
