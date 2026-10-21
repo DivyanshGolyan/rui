@@ -135,6 +135,9 @@ pub const MessageCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
+    // The sending Session in the same Store, captured from its tool process's
+    // RUI_ADDRESS; null when a human or script sends.
+    sender: ?Bounded(max_session_bytes) = null,
     text: ContentField = .{},
 
     pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
@@ -143,8 +146,10 @@ pub const MessageCommand = struct {
 
     pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/message/v1");
+        hashField(&hash, "rui/core/message/v2");
         hashField(&hash, self.session.slice());
+        hash.update(&.{@intFromBool(self.sender != null)});
+        if (self.sender) |sender| hashField(&hash, sender.slice());
         hashContent(&hash, &self.text);
         return hash.finalResult();
     }
@@ -349,10 +354,39 @@ pub const max_tool_presentation_json_bytes =
     "{\"description\":".len + maximumJsonStringBytes(max_tool_description_bytes) +
     ",\"code\":\"infrastructure_shutdown\",\"publication_position\":\"".len + 20 + "\"}".len;
 
+/// A peer Session named on a Message, in the same Store. `prefix` is, for a
+/// generated `rui/` reference, how many leading characters of its ID no other
+/// Session in the Store shares (at least six); zero for any other reference.
+pub const Peer = struct {
+    session: Bounded(max_session_bytes),
+    prefix: u8 = 0,
+
+    /// `session configure` without a name generates `rui/` and a lowercase
+    /// hyphenated UUID; only such a reference has an ID prefix.
+    pub const generated_prefix = "rui/";
+
+    pub fn generated(ref: []const u8) bool {
+        if (ref.len != generated_prefix.len + 36 or !std.mem.startsWith(u8, ref, generated_prefix)) return false;
+        for (ref[generated_prefix.len..], 0..) |byte, index| switch (index) {
+            8, 13, 18, 23 => if (byte != '-') return false,
+            else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
+        };
+        return true;
+    }
+
+    pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
+        try out.writeAll("{\"session\":");
+        try std.json.Stringify.value(self.session.slice(), .{}, out);
+        try out.print(",\"prefix\":\"{d}\"}}", .{self.prefix});
+    }
+};
+
+pub const max_peer_json_bytes = "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) + ",\"prefix\":\"255\"}".len;
+
 pub const ActivityItem = struct {
     position: u64,
     ordinal: u64 = 0,
-    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop },
+    value: union(enum) { admission: Message, user: Message, assistant: Content, call: Call, tool_result: struct { content: Content, presentation: ToolPresentation }, outcome: Outcome, stop: Stop, sent: Sent, send_failed: SendFailed },
     pub const Content = struct {
         length: u64,
         digest: [32]u8,
@@ -361,10 +395,14 @@ pub const ActivityItem = struct {
         }
     };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
-    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64 };
+    // A null `sender` means a human or script sent the Message.
+    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?Peer = null };
     pub const Call = ProposalMetadata;
     pub const Outcome = struct { turn: u64, operation: u64, code: Bounded(96), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: enum { pending, completed } };
+    /// A Message this Session sent: admitted to `target`, or rejected there.
+    pub const Sent = struct { admission: u64, target: Peer, content: Content, admitted_at: u64 };
+    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: Peer, code: Bounded(96) };
 
     pub fn writeJson(self: *const ActivityItem, out: *std.Io.Writer) !void {
         try out.print("{{\"position\":\"{d}\",\"ordinal\":\"{d}\",\"value\":{{\"{s}\":", .{ self.position, self.ordinal, @tagName(self.value) });
@@ -374,8 +412,26 @@ pub const ActivityItem = struct {
                 try std.json.Stringify.value(message.key.slice(), .{}, out);
                 try out.writeAll(",\"turn\":");
                 if (message.turn) |turn| try out.print("\"{d}\"", .{turn}) else try out.writeAll("null");
-                try out.print(",\"state\":\"{s}\",\"admitted_at\":\"{d}\",\"content\":", .{ @tagName(message.state), message.admitted_at });
+                try out.print(",\"state\":\"{s}\",\"admitted_at\":\"{d}\",\"sender\":", .{ @tagName(message.state), message.admitted_at });
+                if (message.sender) |sender| try sender.writeJson(out) else try out.writeAll("null");
+                try out.writeAll(",\"content\":");
                 try message.content.writeJson(out);
+                try out.writeByte('}');
+            },
+            .sent => |sent| {
+                try out.print("{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\",\"target\":", .{ sent.admission, sent.admitted_at });
+                try sent.target.writeJson(out);
+                try out.writeAll(",\"content\":");
+                try sent.content.writeJson(out);
+                try out.writeByte('}');
+            },
+            .send_failed => |failed| {
+                try out.writeAll("{\"key\":");
+                try std.json.Stringify.value(failed.key.slice(), .{}, out);
+                try out.writeAll(",\"target\":");
+                try failed.target.writeJson(out);
+                try out.writeAll(",\"code\":");
+                try std.json.Stringify.value(failed.code.slice(), .{}, out);
                 try out.writeByte('}');
             },
             .assistant => |content| try content.writeJson(out),
@@ -950,6 +1006,16 @@ const Parser = struct {
         try self.expectByte(',');
         try self.expectKey("session");
         try self.readSmallString(&request.session);
+        try self.expectByte(',');
+        try self.expectKey("sender");
+        try self.skipWhitespace();
+        if (try self.source.readByte() == 'n') {
+            for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        } else {
+            self.source.start -= 1;
+            request.sender = .{};
+            try self.readSmallString(&request.sender.?);
+        }
         try self.expectByte(',');
         try self.expectKey("text");
         try self.readContent(&request.text, false);
@@ -1690,8 +1756,9 @@ pub const max_client_request_bytes = @max(
 // Both proposal requests are smaller than the existing Conversation page
 // maximum (two shorter cursor keys or one position and a closed field).
 pub const max_proposal_page_response_bytes = 160 + proposal_page_items * (240 + 4 * 144);
-// Worst row: four complete field references, identities, or escaped key/code.
-pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes) + max_tool_presentation_json_bytes) +
+// Worst row: four complete field references, identities, or an escaped key
+// or code with an escaped peer.
+pub const max_activity_page_response_bytes = 256 + 16 * (400 + @max(4 * 144, 6 * max_key_bytes + max_peer_json_bytes) + max_tool_presentation_json_bytes) +
     64 + 3 * (100 + max_tool_presentation_json_bytes);
 
 const max_session_stop_rejection_code_bytes = "invalid_session_reference".len;
@@ -1815,7 +1882,8 @@ pub const max_conversation_page_response_bytes =
     "{\"version\":\"1\",\"type\":\"conversation_page\",\"direction\":\"newest_first\",\"end\":\"".len + 20 +
     "\",\"items\":[".len + public_conversation_page_items * ("{\"position\":\"".len + 20 + "\",\"ordinal\":\"".len + 20 +
         "\",\"kind\":\"tool_result\",\"content\":{\"bytes\":\"".len + 20 +
-        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len + 16 + max_tool_presentation_json_bytes) +
+        "\",\"sha256\":\"".len + 64 + "\",\"display\":\"omitted\"}},".len + 16 +
+        @max(max_tool_presentation_json_bytes, ",\"admitted_at\":\"\",\"sender\":".len + 20 + max_peer_json_bytes)) +
     "],\"more\":true,\"before_position\":\"".len + 20 +
     "\",\"before_ordinal\":\"".len + 20 + "\"}".len;
 
@@ -2376,7 +2444,7 @@ test "incremental ingress streams fragmented content and transfers charged custo
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";

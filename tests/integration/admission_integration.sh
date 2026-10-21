@@ -508,6 +508,7 @@ body = json.dumps({
     "store": store,
     "key": "partial-message-key",
     "session": "direct/main",
+    "sender": None,
     "text": {"state": "value", "value": "unterminated"},
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)
@@ -835,11 +836,10 @@ wait_host_failure
 # Persisted identity/journal settings remain readable after the owner closes.
 # The production client never opens this database; this is a fixture. The
 # connection-local settings are asserted through the production Store tests.
-python3 - "$store/rui.sqlite3" "$root/src/store.zig" <<'PY'
-import re, sqlite3, sys
+PYTHONPATH="$root/tests/integration" python3 - "$store/rui.sqlite3" <<'PY'
+import sqlite3, sys
+from host_process import STORE_SCHEMA as schema
 db = sqlite3.connect(sys.argv[1])
-with open(sys.argv[2]) as source:
-    schema = int(re.search(r"pub const schema_version: u32 = (\d+);", source.read())[1])
 expected = {
     "journal_mode": "delete",
     "mmap_size": 0,

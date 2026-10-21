@@ -135,8 +135,6 @@ def mixed_effect_drain(provider_first):
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         gate = ReleaseGate(state / "capture-gate")
-        cleanup_gate = state / "model-cleanup-gate"
-        cleanup_gate.write_text("held")
         host = None
         diagnostics = None
         try:
@@ -144,14 +142,13 @@ def mixed_effect_drain(provider_first):
                 store, f"http://127.0.0.1:{endpoint.server_port}/responses",
                 "--test-response-capture-gate-path", gate.path,
                 "--test-response-capture-gate-min-written-bytes", "4096",
-                "--test-model-cleanup-gate-path", cleanup_gate,
                 "--test-phase-trace", active_capacity=3, observations="stop", stderr_pipe=stderr_pipe,
             )
             diagnostics = HostDiagnostics(host)
             bash_fixture.configure(state, store, "configure-bash", "bash/session")
             fixture.message(state, store, "message-bash", "bash/session", "bash")
             action = fixture.wait_for(lambda: bash_fixture.action_for(store, "bash/session"), "Bash proposal")
-            proposal_cleanup = diagnostics.wait("cleanup_started")[0]["operation"]
+            proposal_cleanup = diagnostics.wait("cleanup_completed")[0]["operation"]
             fixture.configure(state, store, "configure-provider", "provider/session", "model-a")
 
             def launch_bash():
@@ -172,7 +169,7 @@ def mixed_effect_drain(provider_first):
                 hold_provider()
 
             occupied = fixture.command("session", "inspect", "--store", store, "--session", "bash/session")["execution"]
-            assert int(occupied["custody_occupied"]) == 3, occupied
+            assert int(occupied["custody_occupied"]) == 2, occupied
             assert actor("stop", store, instance(store)) == "acknowledged"
             fixture.wait_for(lambda: not socket_path(store).exists(), "listener closure with held capture")
             assert status(store) == "owned_unavailable"
@@ -189,16 +186,13 @@ def mixed_effect_drain(provider_first):
                                        capture_output=True, timeout=10)
             assert contender.returncode != 0 and b"ready store=" not in contender.stdout, contender
             gate.release()
-            diagnostics.wait("cleanup_started", count=3)  # proposal, Bash, discarded provider
-            assert not [record for record in diagnostics.matching("cleanup_completed", operation=proposal_cleanup)
-                        if "action" not in record]
-            assert host.poll() is None and status(store) == "owned_unavailable"
-            cleanup_gate.unlink()
             assert host.wait(timeout=10) == 1, host.returncode
             stop_process(host)
             assert len(diagnostics.matching("cleanup_completed", action=action["action"])) == 1
             model_cleanups = [record for record in diagnostics.matching("cleanup_completed") if "action" not in record]
+            # The proposal and the discarded provider each release once.
             assert len(model_cleanups) == 2 and len({record["operation"] for record in model_cleanups}) == 2
+            assert proposal_cleanup in {record["operation"] for record in model_cleanups}
             assert status(store) == "unavailable"
             assert list((store / "scratch").iterdir()) == [], "mixed shutdown retained scratch"
             # Stopped-Store audit: infrastructure cleanup must not become a
@@ -207,15 +201,14 @@ def mixed_effect_drain(provider_first):
             assert bash_fixture.rows(store, "SELECT session_ref,attempt_ordinal,resolution_code FROM model_operation ORDER BY session_ref") == [
                 ("bash/session", 1, "tool_proposals"), ("provider/session", 1, None),
             ]
-            print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; retained model cleanup, lease held, scratch=0")
+            print(f"mixed Host stop passed: {order}, TERM and exactly-once Bash cleanup before capture release; lease held, scratch=0")
         finally:
             incoming_error = sys.exc_info()[1]
             if diagnostics is not None:
                 diagnostics.snapshot_failure(lambda: {"case": "mixed_effect_drain", "order": order,
-                    "capture_gate_exists": gate.path.exists(), "capture_held": gate.fd is not None,
-                    "cleanup_gate_exists": cleanup_gate.exists()})
+                    "capture_gate_exists": gate.path.exists(), "capture_held": gate.fd is not None})
             errors = []
-            for release in (gate.release, lambda: cleanup_gate.unlink(missing_ok=True)):
+            for release in (gate.release,):
                 try:
                     release()
                 except BaseException as error:
@@ -299,7 +292,7 @@ def main():
             # work that an explicit restart would later execute.
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
-                    fields = {"text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
+                    fields = {"sender": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
                         "configuration": {name: {"state": "omitted"} for name in
                             ("workspace", "provider", "model", "tools", "permission_mode", "output_schema")}}
                     if kind == "configure":

@@ -21,7 +21,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import canonical_fixture_root, preserve_failure_metadata
+from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 
 ERROR = {"version": "1", "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -934,7 +934,7 @@ def main(selected="all"):
         if completed:
             shutil.rmtree(state)
         else:
-            print(f"retained canonical failure state: {state}", file=sys.stderr)
+            retain_failure_state("canonical failure state", state)
 
 
 if __name__ == "__main__":

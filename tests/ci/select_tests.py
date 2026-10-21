@@ -17,6 +17,9 @@ FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSub
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
+# Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
+RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
+                      "tests/integration/terminal_input_replay.py")
 
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
@@ -40,6 +43,7 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
     (("src/session_sequence_model_test.zig",), ("test-logic",), ("test-logic",),
      "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
     (("src/Terminal*",), ("test-logic", "admission-debug-integration", *PTY_TARGETS),
@@ -196,9 +200,7 @@ def select(paths, phase, available, main_push=False):
             continue
         if (path.startswith((".github/", "tests/ci/")) and path != ".github/actions/setup/action.yml"
                 or path == "tests/integration/previous_release_upgrade.py"):
-            reasons.add("CI policy: selector and workflow checks")
-            targets.add("test-logic")
-            native_targets.add("test-logic")
+            reasons.add("CI policy: the policy job runs selector and workflow checks")
             continue
         matched = False
         for patterns, checks, native_checks, reason in RULES:

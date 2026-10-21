@@ -377,7 +377,7 @@ func churn(binary, root string, e *retryEndpoint) (result map[string]any, result
 	}
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(8 * time.Minute)
-	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-cleanup-delay-ms", "250")
+	host, err := startHost(deadline, binary, store, e.URL(), directory, capacity)
 	if err != nil {
 		return nil, err
 	}

@@ -494,7 +494,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                     assert configured["answer"]["status"] == "accepted", configured
                 submitted = requests.call(
                     "message", key=f"message-{capacity}-{round_number}-{index}",
-                    session=session, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
+                    session=session, sender=None, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             expected = (round_number + 1) * capacity
@@ -635,7 +635,7 @@ def queued_h1(root):
                     assert configured["answer"]["status"] == "accepted", configured
                 submitted = requests.call(
                     "message", key=f"h1-message-{round_number}-{index}",
-                    session=session, text={"state": "value", "value": f"h1-{round_number}-{index}"},
+                    session=session, sender=None, text={"state": "value", "value": f"h1-{round_number}-{index}"},
                 )
                 assert submitted["answer"]["status"] == "accepted", submitted
             if round_number == 0:
@@ -1204,7 +1204,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
             "operations": operations, "execution": execution, "last_observation": observed,
             "milestones": [{name: record.get(name) for name in ("sequence", "rui_test_phase", "operation", "attempt", "at_ns")}
                            for record in records
-                           if "attempt" in record or record["rui_test_phase"] == "attempt_admission_rolled_back"],
+                           if "attempt" in record],
             "first_lost_sequence": next((record.get("sequence") for record in records
                                          if record.get("trace_lost")), None),
             "stderr_tail": [line for line in (diagnostics.tail() if diagnostics else b"").decode("utf-8", "replace").splitlines()

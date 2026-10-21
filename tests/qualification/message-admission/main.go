@@ -41,6 +41,7 @@ type messageCommand struct {
 	Store   string        `json:"store"`
 	Key     string        `json:"key"`
 	Session string        `json:"session"`
+	Sender  *string       `json:"sender"`
 	Text    optionalField `json:"text"`
 }
 type observeCommand struct {

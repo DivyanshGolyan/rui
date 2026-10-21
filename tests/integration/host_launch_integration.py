@@ -26,7 +26,8 @@ import termios
 import time
 
 from host_process import (canonical_fixture_root, start_ready_process, stop_process,
-                          dispose_all, preserve_failure_metadata, _failure_destination)
+                          dispose_all, preserve_failure_metadata, _failure_destination,
+                          copy_failure_diagnostics, STORE_SCHEMA)
 import codex_integration as codex_fixture
 from product_defaults import DEFAULTS
 
@@ -34,8 +35,7 @@ from product_defaults import DEFAULTS
 RUI = pathlib.Path(sys.argv[1]).resolve()
 COMMAND_TIMEOUT = 16
 # The format this build supports; older formats are refused, never migrated.
-SCHEMA = int(re.search(r"pub const schema_version: u32 = (\d+);",
-    (pathlib.Path(__file__).resolve().parents[2] / "src/store.zig").read_text())[1])
+SCHEMA = STORE_SCHEMA
 # Every unflagged start path (bare rui, host start, host serve) must resolve
 # the module's capacity; the fixture budgets below follow the same values.
 DEFAULT_ACTIVE_CAPACITY = DEFAULTS.active_capacity
@@ -629,13 +629,7 @@ def launch_fixture_root():
                 return dict(failure=failure_name, host_diagnostics=diagnostics)
             preserve_failure_metadata(root / f"observation-failure-{os.getpid()}.json", metadata)
             destination = _failure_destination(os.environ.get("RUI_FAILURE_ARTIFACTS"))
-            ci = str(pathlib.Path(__file__).resolve().parents[1] / "ci")
-            sys.path.insert(0, ci)
-            try:
-                from run_selected import retain_failure_logs
-                retain_failure_logs([root], destination)
-            finally:
-                sys.path.remove(ci)
+            copy_failure_diagnostics(root, destination)
             print(f"bounded fixture failure destination: {destination}", file=sys.stderr, flush=True)
 
         # Select only this executable's Hosts beneath the private root, even

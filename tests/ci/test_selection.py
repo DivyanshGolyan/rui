@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import CHECK_COVERS, execution_batches, select, setup_requirements
+from select_tests import CHECK_COVERS, RENDERER_HARNESSES, execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -383,8 +383,23 @@ class SelectionTest(unittest.TestCase):
                      "tests/ci/select_tests.py", "tests/ci/run_selected.py",
                      "tests/integration/previous_release_upgrade.py"):
             result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["test-logic"])
-            self.assertEqual(result["native_targets"], ["test-logic"])
+            self.assertEqual(result["targets"], [])
+            self.assertEqual(result["native_targets"], [])
+
+    def test_renderer_harnesses_select_no_blocking_target(self):
+        workflow = Path(".github/workflows/renderer-contracts.yml").read_text()
+        filters = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", workflow)
+        self.assertEqual(len(filters), 2)
+        for block in filters:
+            harnesses = {p for p in re.findall(r"'([^']+)'", block) if p.startswith("tests/integration/")}
+            # The restoration fixture is also a blocking gate, so it keeps its own selection.
+            self.assertEqual(harnesses - {"tests/integration/terminal_restoration_integration.py"},
+                             set(RENDERER_HARNESSES))
+        for path in ("tests/integration/input_equivalence.py", "tests/integration/session_sequence_model.py",
+                     "tests/integration/session_sequence_model_test.py", "tests/integration/terminal_input_replay.py"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                self.assertEqual(result["targets"] + result["native_targets"], [])
 
     def test_missing_required_target_is_an_error_not_a_skip(self):
         with self.assertRaisesRegex(ValueError, "absent"):

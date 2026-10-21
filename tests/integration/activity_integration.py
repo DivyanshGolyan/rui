@@ -17,7 +17,7 @@ import time
 from control_integration import command, configure, inspect_execution, message, observe, start_host, stop_session, successful_sse, wait_for
 from conversation_page_integration import host_resources, idle_resources
 from model_fixture import sse_tool_calls
-from host_process import TestHTTPServer, canonical_fixture_root, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, stop_process
 from proposal_integration import digest
 from one_reply import one_reply
 
@@ -212,7 +212,7 @@ def main():
             valid = {"version": "1", "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "items": [{"position": str(i+1), "ordinal": "0", "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
-                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
+                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
             for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
                 wire = copy.deepcopy(valid)
@@ -234,7 +234,13 @@ def main():
                 wire = copy.deepcopy(valid)
                 wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
-            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp"):
+            # A peer prefix exists only for a generated reference, from six characters.
+            generated = "rui/1a2b3c4d-0000-4000-8000-000000000001"
+            for session, prefix, ok in ((generated, "6", True), (generated, "5", False), ("rui/" + "a" * 36, "6", False), ("reviewer", "0", True), ("reviewer", "6", False)):
+                wire = copy.deepcopy(valid)
+                wire["items"][0]["value"]["admission"]["sender"] = {"session": session, "prefix": prefix}
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+            for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender"):
                 wire = copy.deepcopy(valid)
                 if fault == "order": wire["items"][1]["position"] = "1"
                 if fault == "union": wire["items"][0]["value"]["stop"] = {}
@@ -243,6 +249,7 @@ def main():
                 if fault == "integer": wire["end"] = str(2**63)
                 if fault == "field": del wire["items"][0]["value"]["admission"]["key"]
                 if fault == "stamp": wire["items"][0]["value"]["admission"]["admitted_at"] = "0"
+                if fault == "sender": del wire["items"][0]["value"]["admission"]["sender"]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             encoded = json.dumps(valid).encode()
             mock_reply(fields["socket"], store, "page", encoded[:-1], len(encoded))
@@ -261,7 +268,7 @@ def main():
         if completed:
             shutil.rmtree(root)
         else:
-            print(f"retained activity failure state: {root}", file=sys.stderr)
+            retain_failure_state("activity failure state", root)
 
 
 def performance_case(item_bytes):
@@ -440,7 +447,7 @@ def performance_case(item_bytes):
             shutil.rmtree(root)
             print("performance native receipts, cancellation, disposal and fixture removal complete", flush=True)
         else:
-            print(f"retained performance failure state: {root}", file=sys.stderr)
+            retain_failure_state("performance failure state", root)
         if disposal_errors:
             primary = incoming_error if incoming_error is not None else disposal_errors[0]
             primary.add_note("Performance fixture disposal failed: " + ", ".join(str(error) for error in disposal_errors))

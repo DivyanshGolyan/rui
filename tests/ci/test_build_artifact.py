@@ -32,7 +32,7 @@ class HandoffTest(unittest.TestCase):
             GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
             PATH=str(self.root) + os.pathsep + os.environ['PATH'])))
         self.inputs = dict(format=3, tree='same-tree', targets=['test'], system='Linux', machine='x86_64',
-                           cpu=dict(policy='baseline', arch='x86_64', model='x86_64'), compiler='b' * 64)
+                           compiler='b' * 64)
         self.enterContext(patch.object(build_artifact, 'git', return_value='source'))
         self.enterContext(patch.object(build_artifact, 'identity', side_effect=lambda _: copy.deepcopy(self.inputs)))
         binary = build_artifact.roots()['binaries'] / 'test-tests'
@@ -117,7 +117,7 @@ else:
         original = copy.deepcopy(self.receipt)
         mismatches = [('inputs', field, value) for field, value in [
             ('tree', 'foreign-tree'), ('targets', ['test-full']), ('system', 'Darwin'),
-            ('machine', 'arm64'), ('cpu', dict(policy='native')), ('compiler', 'd' * 64), ('format', 2)]]
+            ('machine', 'arm64'), ('compiler', 'd' * 64), ('format', 2)]]
         mismatches += [(None, 'source_sha', 'foreign'), (None, 'run_id', 456), (None, 'run_attempt', 1)]
         for scope, field, value in mismatches:
             with self.subTest(field=field):
@@ -139,7 +139,6 @@ else:
         corruptions = [
             ('archive digest', dict(original, archive='0' * 64), None),
             ('executable hash', dict(original, executables={'binaries/test-tests': ['wrong', 0o751]}), None),
-            ('verdict', dict(original, verdict='passed'), None),
             ('missing field', {k: v for k, v in original.items() if k != 'executables'}, None),
             ('unsafe path', dict(original, archive=hashlib.sha256(unsafe.getvalue()).hexdigest()), unsafe.getvalue()),
         ]
