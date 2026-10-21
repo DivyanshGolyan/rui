@@ -1,36 +1,36 @@
 # Rui overnight performance report (WIP, partial)
 
-Status: **partial**. All three headline results need Mac execution, and no Mac runner is connected. They are **UNAVAILABLE**, not zero. No production fix has been made. Baseline source: main/stable [`240aef2e`](https://github.com/DivyanshGolyan/rui/commit/240aef2e46d7240ce31a02ce4cefceb695551a56). Labels: **measured** or **estimated**, and **fixture** or **live**. A number without a label is an error in this report.
+Status: **partial**. No Mac runner is connected, so the coordinator moved tonight's headlines to Linux. Headlines 1 and 2 are Linux fixture runs by P1; their rows are **pending** until P1 publishes them. macOS footprint remains pending and is not substituted. Headline 3 (live) is **skipped** tonight. Baseline source: main/stable [`240aef2e`](https://github.com/DivyanshGolyan/rui/commit/240aef2e46d7240ce31a02ce4cefceb695551a56). Labels: **measured** or **estimated**, and **fixture** or **live**. A number without a label is an error in this report.
 
-## Headline 1: Mac fixture footprint, Host and clients (N = 0/10/100)
+## Headline 1: Linux PSS (macOS footprint pending), Host and clients, N = 0/10/100
 
-| N streams | Host current phys_footprint | Host peak phys_footprint | Clients footprint | Source SHA |
-| ---: | --- | --- | --- | --- |
-| 0 | UNAVAILABLE | UNAVAILABLE | UNAVAILABLE | — |
-| 10 | UNAVAILABLE | UNAVAILABLE | UNAVAILABLE | — |
-| 100 | UNAVAILABLE | UNAVAILABLE | UNAVAILABLE | — |
-| Intercept (base) / slope (per session) | UNAVAILABLE | UNAVAILABLE | UNAVAILABLE | — |
+| N sessions | Host PSS (`smaps_rollup`) | Clients PSS | Source SHA |
+| ---: | --- | --- | --- |
+| 0 | pending (P1 run) | pending | `240aef2e` |
+| 10 | pending (P1 run) | pending | `240aef2e` |
+| 100 | pending (P1 run) | pending | `240aef2e` |
+| Intercept (base) / slope (per session) | pending | pending | — |
 
-## Headline 2: HOLD100 waiting wakeups/s, before and after one deadline-wait fix
+## Headline 2: HOLD100 waiting cost, before and after one deadline-wait fix (Linux fixture)
 
-| Build | Host wakeups/s (Mac) | Host CPU while waiting (Mac) | Source SHA |
+| Build | Host voluntary switches/s (Linux, not distinct wakeups) | Host CPU while waiting | Source SHA |
 | --- | --- | --- | --- |
-| Before (baseline) | UNAVAILABLE | UNAVAILABLE | `240aef2e` |
-| After (deadline wait, capped at 1 s) | NOT BUILT: no measured Mac baseline | NOT BUILT | — |
-| Pre-run napkin, **estimated** from source timeouts | ≈90/s at HOLD100 (intake `poll` 20 ms ≈50/s + execution `curl_multi_poll` 25 ms ≈40/s); ≈60/s at N0; ≈1–2/s after the fix | not estimated | `240aef2e` |
+| Before, earlier P2 single run (**measured**) | ≈88/s (5,300 in 60 s; two threads at ≈49.7/s and ≈38.7/s) | 3.07% of one core (1.84 CPU-s / 60.01 s) | `240aef2e` |
+| Before, P1 A1–A3 | pending | pending | `240aef2e` |
+| After, P1 B1–B3 (intake deadline wait) | pending | pending | candidate pending |
+| Pre-run napkin (**estimated**) | ≈90/s before; ≈40/s after (only the intake 20 ms timer is removed) | not estimated | — |
 
 ## Headline 3: one illustrative live Mac 100 × gpt-6-luna wave
 
 | Quantity | Value |
 | --- | --- |
-| Total Host + Bash + clients footprint (current, peak) | UNAVAILABLE: not run |
-| Total CPU | UNAVAILABLE: not run |
-| 429 / retry / error counts | UNAVAILABLE: not run |
-| Luna auth | Untested |
+| All quantities | **SKIPPED tonight**: the credentials exist only on the offline 1993-X2 Mac runner. No credential probe was made. |
 
-**Method.** Headlines 1 and 2 use the existing Go qualification harness and measurement samplers at P1's [`b13caa4b`](https://github.com/DivyanshGolyan/rui/commit/b13caa4b603e44de482694e241f18b4d752a5456): `tests/qualification/model-output --sessions 0|10|100 --expectation '<estimate>'` (fixed Host capacity 100), plus `--hold` with `--sessions 100` for Headline 2 (`main.go:2049–2051`). The plan is a ReleaseFast build, warmup, a 60 s steady state, at most three fresh-process repeats, and the commit SHA on every row. Headline 2 alternates A/B/A/B on the same Mac with the same build mode. Headline 3 is one live wave in a throwaway clone with a fresh Store and a 60-minute cap. Sol does all Mac execution. Before each run, a one-line estimate goes into that run's artifact; any gap is reported as a finding. The appendix below is a separate **measured Linux fixture** study and does not supply any headline.
+**Method.** Headlines 1 and 2 use the existing Go qualification harness and measurement samplers at P1's [`b13caa4b`](https://github.com/DivyanshGolyan/rui/commit/b13caa4b603e44de482694e241f18b4d752a5456): `tests/qualification/model-output --sessions 0|10|100 --expectation '<estimate>'` (fixed Host capacity 100), plus `--hold` with `--sessions 100` for Headline 2 (`main.go:2049–2051`). P1 runs on Linux in its own 2-vCPU orb, with Host and client PSS from the existing `smaps_rollup` sampler. Each run is a ReleaseFast build from `240aef2e` sources: capacity 100, TLS, 30 events/s/stream, a 10 s warmup and a 60 s window, 3 fresh Hosts per N, with the commit SHA on every row. Headline 2 alternates A1/B1/A2/B2/A3/B3 in the same orb with the same harness and observer, both binaries built identically, and no builds during measured windows. Before each run, a one-line estimate goes into that run's artifact; any gap is reported as a finding. The appendix below is a separate **measured Linux fixture** attribution study.
 
-**Limits.** No Mac runner has been connected tonight. The only approved route, the 1993-X2 runner, must be reconnected by the user. Until then, no Mac footprint, Mac wakeup, before/after or live result exists, and Linux numbers do not substitute for any of them. The single production fix (wait until the next deadline, capped at 1 s) is **found, not fixed**. It waits for a measured Mac baseline, the full suite and recovery/qualification passing, and one Sol correctness review. Linux context switches are not accepted as that baseline. P1 reports that transient client footprint is unavailable and that steady-state clients are reaped, so the clients column may stay empty even on a Mac. SQLite synchronous/journal settings are out of scope: they are measured and reported only, and any change is the user's decision.
+**Fix (candidate, not yet validated).** The intake loop's fixed 20 ms `poll` becomes a wait until its earliest owned deadline, capped at 1 s. Those deadlines are header/body inactivity, reply deadline, delivery `not_before`, `accept_retry_at` and `cleanup_retry_at`. Worker completion, `fenceDispatch` and `host_stop` already write the intake wake pipe. A test FIFO delivery gate keeps the 20 ms check. The execution loop's 25 ms (curl/Bash) and 100 ms (idle) waits are **found, not fixed**: newly admitted Messages are discovered only by polling. A 1 s cap would add up to 1 s of admission latency unless a Store-commit wake were added, and that is out of scope tonight.
+
+**Limits.** No Mac runner is connected; the only approved route, 1993-X2, needs the user to reconnect it. So there is no macOS footprint or Mac wakeup result, and Linux PSS and switch counts are labelled as Linux, not as Mac results. Linux voluntary context switches are not distinct timer wakeups, and scheduler wakeup tracepoints appear unavailable. P1 reports that transient client footprint is unavailable and that steady-state clients are reaped. The fix counts as fixed only if the full suite, recovery/qualification and one Sol review all pass; otherwise it is reported as found, not fixed. SQLite synchronous/journal settings are measured and reported only; any change is the user's decision.
 
 ---
 
