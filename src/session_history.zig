@@ -284,6 +284,60 @@ test "history body limit preserves contextual tool outcomes" {
     }
 }
 
+test "a transcript page folds its run of peer Messages into one block of all of them, oldest first" {
+    const Sink = struct {
+        bytes: [4096]u8 = undefined,
+        length: usize = 0,
+        blocks: [8]View.Collapsed = undefined,
+        count: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+        pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
+            self.blocks[self.count] = value;
+            self.count += 1;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    try scratch.writePositionalAll(io, "peer one\nanswer\nlast", 0);
+    var peer: protocol.Peer = .{ .session = .{} };
+    try peer.session.set("reviewer");
+    // Newest first: four peer Messages (one too large to stage) after an
+    // answer that ends the earlier peer Message's run.
+    var prepared: Prepared = .{ .page = .{ .end = 9, .count = 6, .more = false } };
+    const text = struct {
+        fn f(position: u64, bytes: u64, sender: protocol.Peer) client.ConversationPage.Item {
+            return .{ .position = position, .ordinal = 0, .kind = .user, .content = .{ .bytes = bytes, .digest = @splat(@intCast(position)) }, .admitted_at = 1, .sender = sender };
+        }
+    }.f;
+    for ([_]u64{ 6, 5, 4, 3 }, prepared.page.items[0..4]) |position, *item| item.* = text(position, if (position == 5) item_bytes + 1 else 4, peer);
+    prepared.page.items[4] = .{ .position = 2, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 6, .digest = @splat(0) } };
+    prepared.page.items[5] = text(1, 8, peer);
+    prepared.offsets[0] = 18;
+    prepared.offsets[2] = 18;
+    prepared.offsets[3] = 18;
+    prepared.offsets[4] = 9;
+    prepared.offsets[5] = 0;
+    var sink: Sink = .{};
+    try prepared.render(io, scratch, "store", "session", &sink, .transcript, false);
+    const output = sink.bytes[0..sink.length];
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "← reviewer · peer one"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, "┈ 4 from peers"));
+    try std.testing.expect(std.mem.indexOf(u8, output, "answer").? < std.mem.indexOf(u8, output, "┈ 4 from peers").?);
+    try std.testing.expect(std.mem.indexOf(u8, output, "last") == null);
+    try std.testing.expectEqual(@as(usize, 4), sink.count);
+    for (sink.blocks[0..4], [_]u64{ 3, 4, 5, 6 }, 0..) |block, position, index| {
+        try std.testing.expectEqual(position, block.position);
+        try std.testing.expectEqual(index != 0, block.joined);
+        try std.testing.expect(block.row and block.source == .conversation);
+    }
+}
+
 test "history preparation binds wire and staged bytes before exposure" {
     const Peer = struct {
         var clients: [2]std.posix.fd_t = undefined;

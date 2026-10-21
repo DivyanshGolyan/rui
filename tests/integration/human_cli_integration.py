@@ -4424,6 +4424,58 @@ def renderer_cases():
             tty.finish()
         print("renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows", flush=True)
 
+        # Three peer Messages in a row on one page draw one fold row. Ctrl-O
+        # opens all three as one page through the Host, and a wrong digest
+        # on the middle one opens none of them.
+        session, peer = "renderer/peer-fold", "renderer/peer-a"
+        configure(session)
+        configure(peer)
+        address = {"RUI_ADDRESS": json.dumps({"store": os.path.realpath(store), "session": peer})}
+        first_release = threading.Event()
+        endpoint.responses.append((fixture.sse_answer("fold-first", "reason", "message", "FOLD-FIRST-ANSWER")[0], first_release))
+        requests = len(endpoint.requests)
+        admit(home, "session", "send", "--store", store, "--session", session, "PEER-FOLD-0", environment=address)
+        fixture.wait_for(lambda: len(endpoint.requests) > requests, "first peer Turn", timeout=20)
+        # Queued behind the held Turn, the next three apply together.
+        for index in (1, 2, 3):
+            admit(home, "session", "send", "--store", store, "--session", session, f"PEER-FOLD-{index} first\nPEER-FOLD-{index} second", environment=address)
+        endpoint.responses.append(fixture.sse_answer("fold-second", "reason", "message", "FOLD-SECOND-ANSWER")[0])
+        first_release.set()
+        fixture.wait_for(lambda: (lambda work: work["work"]["status"] == "completed" and work["pending_messages"] == "0")(
+            fixture.command("session", "inspect", "--store", store, "--session", session)), "both peer Turns", timeout=30)
+        with terminal(session, rows=40) as tty:
+            tty.wait("┈ 3 from peers", timeout=20)
+            shown = tty.capture.completed
+            # The answer between them leaves the first Message its own line.
+            assert "← renderer/peer-a · PEER-FOLD-0" in shown and "FOLD-SECOND-ANSWER" in shown, shown
+            assert "PEER-FOLD-1" not in shown and "PEER-FOLD-3" not in shown, shown
+            assert shown.index("FOLD-FIRST-ANSWER") < shown.index("┈ 3 from peers") < shown.index("FOLD-SECOND-ANSWER"), shown
+            before = shown
+            tty.send("\x0f", "Message 3 of 3")
+            page = tty.capture.completed
+            order = [page.index(text) for text in ("Message 1 of 3", "PEER-FOLD-1 first", "PEER-FOLD-1 second",
+                "Message 2 of 3", "PEER-FOLD-2 second", "Message 3 of 3", "PEER-FOLD-3 first")]
+            assert order == sorted(order), page
+            tty.send("\x1b", predicate=lambda: "Message 1 of 3" not in tty.capture.completed)
+            assert tty.capture.completed == before, (before, tty.capture.completed)
+            # Every Message is checked before any shows: a wrong middle
+            # Message opens no page, not even the first one's text.
+            proxy = canonical.ReplyProxy(host, "/v1/activity-content", lambda response: response.replace(b"PEER-FOLD-2 first", b"PEER-FOLD-X first"))
+            try:
+                tty.send("\x0f", "Message unavailable; Ctrl-O to retry")
+                shown = tty.capture.completed
+                assert "Message 1 of 3" not in shown and "PEER-FOLD-1" not in shown and "┈ 3 from peers" in shown, shown
+                assert any(b"PEER-FOLD-2 first" in response for _, response in proxy.exchanges), "the middle Message's read never crossed the proxy"
+            finally:
+                proxy.close()
+                proxy = None
+            # The same fold opens once its Messages read back intact.
+            tty.send("\x0f", "Message 3 of 3")
+            tty.send("\x1b", predicate=lambda: "Message 1 of 3" not in tty.capture.completed)
+            tty.caller.send_signal(signal.SIGINT)
+            tty.finish()
+        print("renderer: a page's peer run folds; Ctrl-O opens every Message through the Host, and a wrong middle digest opens none", flush=True)
+
         def traverse(tty, steps=10):
             tty.send("\x1b[A", "Browsing · Esc returns")
             # Each step loads one older page or one listed Message.
