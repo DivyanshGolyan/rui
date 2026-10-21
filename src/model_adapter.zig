@@ -1595,11 +1595,11 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
     var second_deny: protocol.PermissionDecisionCommand = .{ .action_id = 2 };
     try second_deny.key.set("composed-deny-second");
     try second_deny.session.set(session);
-    try std.testing.expect(setup.storage.denyPermission(&second_deny, .{}) == .accepted);
+    try std.testing.expect(setup.storage.decidePermission(&second_deny, .{}) == .accepted);
     var first_deny: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
     try first_deny.key.set("composed-deny-first");
     try first_deny.session.set(session);
-    try std.testing.expect(setup.storage.denyPermission(&first_deny, .{}) == .accepted);
+    try std.testing.expect(setup.storage.decidePermission(&first_deny, .{}) == .accepted);
     var successor = (try setup.storage.admitNextModelAttempt(.{})) orelse return error.ExpectedSuccessorAdmission;
     return successor.permit.consume();
 }

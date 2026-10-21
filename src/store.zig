@@ -1583,24 +1583,15 @@ pub const Store = struct {
         try exec(self.database, "BEGIN IMMEDIATE");
 
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .configure or
-                !std.mem.eql(u8, existing.target.slice(), command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest))
-            {
-                return .conflict;
-            }
-            if (existing.accepted) return .{ .accepted = .{
+        switch (try self.classifyReplay(ConfigurationRejection, .configure, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => |existing| return .{ .accepted = .{
                 .replayed = true,
                 .revision = existing.revision,
                 .created = existing.created,
-            } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(ConfigurationRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
+            } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         if (command.require_model and !model_available) {
@@ -1755,12 +1746,10 @@ pub const Store = struct {
             .length = command.text.length,
             .digest = command.text.digest,
         };
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .message or
-                !std.mem.eql(u8, existing.target.slice(), command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (existing.accepted) {
+        switch (try self.classifyReplay(MessageRejection, .message, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => |existing| {
                 const content_id = existing.primary_content_id orelse return error.CorruptStore;
                 const metadata = try self.readContentMetadata(content_id);
                 const admission_id = try self.readMessageAdmission(
@@ -1773,10 +1762,8 @@ pub const Store = struct {
                     .admission_id = admission_id,
                     .content = .{ .length = metadata.length, .digest = metadata.digest },
                 } };
-            }
-            const code = std.meta.stringToEnum(MessageRejection, existing.code.slice()) orelse
-                return error.CorruptStore;
-            return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } };
+            },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } },
         }
         // An unknown sender has no sequence to record a failed send in; a
         // known one sees its own rejected send.
@@ -1856,23 +1843,19 @@ pub const Store = struct {
     ) !SessionStopReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .session_stop or
-                !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (!existing.accepted) return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(SessionStopRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
-            const selection = try self.readSessionStopSelection(command.key.slice());
-            return .{ .accepted = .{
-                .replayed = true,
-                .selection = selection,
-                .completion = try self.sessionStopCompletion(selection),
-                .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
-            } };
+        switch (try self.classifyReplay(SessionStopRejection, .session_stop, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => {
+                const selection = try self.readSessionStopSelection(command.key.slice());
+                return .{ .accepted = .{
+                    .replayed = true,
+                    .selection = selection,
+                    .completion = try self.sessionStopCompletion(selection),
+                    .interrupted_operation_id = try self.readInterruptedOperation(command.key.slice()),
+                } };
+            },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         if (command.session.len == 0) {
@@ -2037,21 +2020,18 @@ pub const Store = struct {
     ) !ModelInterruptionReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .model_interruption or
-                !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
+        const replay = try self.classifyReplay(ModelInterruptionRejection, .model_interruption, command.key.slice(), command.session.slice(), &digest);
+        if (replay == .accepted or replay == .rejected) {
             const saved_target = try self.readModelInterruptionTarget(command.key.slice());
             if (!saved_target.session.eql(command.session.slice()) or
                 saved_target.turn_id != command.turn_id or
                 saved_target.operation_id != command.operation_id) return error.CorruptStore;
-            if (existing.accepted) return .{ .accepted = .{ .replayed = true } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(ModelInterruptionRejection, existing.code.slice()) orelse
-                    return error.CorruptStore,
-            } };
+        }
+        switch (replay) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => return .{ .accepted = .{ .replayed = true } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
 
         var rejection: ?ModelInterruptionRejection = null;
@@ -2210,14 +2190,6 @@ pub const Store = struct {
         return access.finishTransaction(Ordinary.none, faults, self.decidePermissionLocked(command, faults)) catch .infrastructure_failure;
     }
 
-    pub fn denyPermission(
-        self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
-        faults: Faults,
-    ) PermissionDecisionReply {
-        return self.decidePermission(command, faults);
-    }
-
     fn decidePermissionLocked(
         self: *Store,
         command: *const protocol.PermissionDecisionCommand,
@@ -2225,15 +2197,11 @@ pub const Store = struct {
     ) !PermissionDecisionReply {
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
-        if (try self.readExistingCommand(command.key.slice())) |existing| {
-            try exec(self.database, "ROLLBACK");
-            if (existing.kind != .permission_decision or !existing.target.eql(command.session.slice()) or
-                !std.mem.eql(u8, &existing.digest, &digest)) return .conflict;
-            if (existing.accepted) return .{ .accepted = .{ .replayed = true } };
-            return .{ .rejected = .{
-                .replayed = true,
-                .code = std.meta.stringToEnum(PermissionDecisionRejection, existing.code.slice()) orelse return error.CorruptStore,
-            } };
+        switch (try self.classifyReplay(PermissionDecisionRejection, .permission_decision, command.key.slice(), command.session.slice(), &digest)) {
+            .fresh => {},
+            .conflict => return .conflict,
+            .accepted => return .{ .accepted = .{ .replayed = true } },
+            .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
         }
         var rejection: ?PermissionDecisionRejection = null;
         if (command.session.len == 0) rejection = .invalid_session_reference else if (command.action_id == 0 or
@@ -6478,6 +6446,35 @@ pub const Store = struct {
         primary_content_id: ?i64,
     };
 
+    fn Replay(comptime Rejection: type) type {
+        return union(enum) {
+            /// No saved command; the caller's transaction stays open.
+            fresh,
+            conflict,
+            accepted: ExistingCommand,
+            rejected: Rejection,
+        };
+    }
+
+    /// Classifies a keyed command against its saved answer. Any saved answer
+    /// ends the caller's transaction before it returns.
+    fn classifyReplay(
+        self: *Store,
+        comptime Rejection: type,
+        kind: CommandKind,
+        key: []const u8,
+        target: []const u8,
+        digest: *const [32]u8,
+    ) !Replay(Rejection) {
+        const existing = try self.readExistingCommand(key) orelse return .fresh;
+        try exec(self.database, "ROLLBACK");
+        if (existing.kind != kind or !existing.target.eql(target) or
+            !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
+        if (existing.accepted) return .{ .accepted = existing };
+        return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse
+            return error.CorruptStore };
+    }
+
     fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
         const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
         defer _ = c.sqlite3_finalize(statement);
@@ -8608,12 +8605,12 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("deny-first");
     try deny.session.set("direct/actions");
-    const accepted = storage.denyPermission(&deny, .{});
+    const accepted = storage.decidePermission(&deny, .{});
     try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
     try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(public_request)).count);
-    try std.testing.expect(storage.denyPermission(&deny, .{}).accepted.replayed);
+    try std.testing.expect(storage.decidePermission(&deny, .{}).accepted.replayed);
     deny.action_id += 1;
-    try std.testing.expect(storage.denyPermission(&deny, .{}) == .conflict);
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .conflict);
 
     var permission_update: protocol.ConfigureCommand = .{};
     try permission_update.key.set("action-bypass");
@@ -8677,7 +8674,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     try stale.key.set("stale-denial");
     try stale.session.set("direct/actions");
     stale.decision = .allow_once;
-    const rejected = storage.denyPermission(&stale, .{});
+    const rejected = storage.decidePermission(&stale, .{});
     try std.testing.expect(rejected == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, rejected.rejected.code);
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
@@ -8801,7 +8798,7 @@ test "Current reports progress alongside an actionable sibling" {
     var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
     try allow.key.set("mixed-allow");
     try allow.session.set("direct/mixed");
-    try std.testing.expect(storage.denyPermission(&allow, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     const after = try testingSessionReport(&storage, &tmp, "direct/mixed", 1024 * 1024);
     defer std.testing.allocator.free(after);
     var mixed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, after, .{});
@@ -9088,7 +9085,7 @@ test "canonical report and Action read failures fence later commands" {
     var blocked_denial: protocol.PermissionDecisionCommand = .{ .action_id = 1 };
     try blocked_denial.key.set("blocked-after-report-failure");
     try blocked_denial.session.set("direct/report-corrupt");
-    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, report_store.denyPermission(&blocked_denial, .{}));
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, report_store.decidePermission(&blocked_denial, .{}));
 
     var action_tmp = std.testing.tmpDir(.{});
     defer action_tmp.cleanup();
@@ -9326,7 +9323,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny.key.set("mixed-deny");
     try deny.session.set("direct/mixed-calls");
-    try std.testing.expect(storage.denyPermission(&deny, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
     observation = try storage.inspectSession("direct/mixed-calls");
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
     {
@@ -9408,13 +9405,13 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var deny_second: protocol.PermissionDecisionCommand = .{ .action_id = second_action_id };
     try deny_second.key.set("result-deny-second");
     try deny_second.session.set("direct/tool-results");
-    try std.testing.expect(storage.denyPermission(&deny_second, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny_second, .{}) == .accepted);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
     var deny_first: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try deny_first.key.set("result-deny-first");
     try deny_first.session.set("direct/tool-results");
-    try std.testing.expect(storage.denyPermission(&deny_first, .{}) == .accepted);
+    try std.testing.expect(storage.decidePermission(&deny_first, .{}) == .accepted);
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -9422,13 +9419,13 @@ test "complete call outcomes continue once in call order ahead of pending input"
     try std.testing.expectEqual(first_binding.operation_id + 1, continuation.operation_id);
     try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
 
-    const replayed_denial = storage.denyPermission(&deny_first, .{});
+    const replayed_denial = storage.decidePermission(&deny_first, .{});
     try std.testing.expect(replayed_denial == .accepted);
     try std.testing.expect(replayed_denial.accepted.replayed);
     var stale_denial: protocol.PermissionDecisionCommand = .{ .action_id = first_action_id };
     try stale_denial.key.set("result-stale-denial");
     try stale_denial.session.set("direct/tool-results");
-    const stale_reply = storage.denyPermission(&stale_denial, .{});
+    const stale_reply = storage.decidePermission(&stale_denial, .{});
     try std.testing.expect(stale_reply == .rejected);
     try std.testing.expectEqual(PermissionDecisionRejection.action_not_pending, stale_reply.rejected.code);
 
@@ -9713,7 +9710,7 @@ test "terminal call-result import and read failures preserve canonical authority
     var deny: protocol.PermissionDecisionCommand = .{ .action_id = try queryU64(import_store.database, "SELECT action_id FROM action_operation") };
     try deny.key.set("result-import-deny");
     try deny.session.set("direct/result-import");
-    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, import_store.denyPermission(&deny, .{ .content_import = true }));
+    try std.testing.expectEqual(PermissionDecisionReply.infrastructure_failure, import_store.decidePermission(&deny, .{ .content_import = true }));
     try std.testing.expect(import_store.isFenced());
     try std.testing.expectEqual(@as(u64, 0), try queryU64(import_store.database, "SELECT count(*) FROM core_command WHERE command_key='result-import-deny'"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(import_store.database, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL"));
@@ -9904,7 +9901,7 @@ test "missing canonical call outcome rows fence history and inspection" {
         };
         try denial.key.set(denial_keys[index]);
         try denial.session.set(session_ref);
-        try std.testing.expect(storage.denyPermission(&denial, .{}) == .accepted);
+        try std.testing.expect(storage.decidePermission(&denial, .{}) == .accepted);
         const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
         try exec(storage.database, "PRAGMA foreign_keys=OFF");
