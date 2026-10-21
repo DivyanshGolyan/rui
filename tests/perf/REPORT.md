@@ -6,10 +6,12 @@ Status: **partial**. No Mac runner is connected, so the coordinator moved tonigh
 
 | N sessions | Host PSS (`smaps_rollup`) | Clients PSS | Source SHA |
 | ---: | --- | --- | --- |
-| 0 | pending (P1 run) | pending | `240aef2e` |
-| 10 | pending (P1 run) | pending | `240aef2e` |
+| 0 | r1 **measured**: 7,362,560 B at window end (estimate 8 MiB); Host CPU 0.00950 cores. r2–r3 pending | 0 steady-state (clients reaped); transient peaks unavailable | `240aef2e` |
+| 10 | r1 **measured**: 11,324,416 B at window end (estimate 8.9375 MiB); Host CPU 0.05428 cores. r2–r3 pending | 0 steady-state (clients reaped); transient peaks unavailable | `240aef2e` |
 | 100 | pending (P1 run) | pending | `240aef2e` |
-| Intercept (base) / slope (per session) | pending | pending | — |
+| Intercept (base) / slope (per session) | pending (no fit from 2 of 9 rows) | pending | — |
+
+Headline 1 data, measured Linux fixture: P1 raw evidence at `perf/linux-pss-20261021` [`6f2c8c2f`](https://github.com/DivyanshGolyan/rui/commit/6f2c8c2f414503102517ebb518c0536c3b12fadb) (`.amp/p1/`). The harness source is [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe), and the baseline ReleaseFast binary SHA-256 is `e2835cb2…3a50`. The queue verified 27/27 hashes. STREAM in-window event rates and CPU/event are unavailable: provider totals publish only after the 120 s offer. They are null, not zero.
 
 ## Headline 2: HOLD100 waiting cost, before and after one deadline-wait fix (Linux fixture)
 
@@ -17,7 +19,8 @@ Status: **partial**. No Mac runner is connected, so the coordinator moved tonigh
 | --- | --- | --- | --- |
 | Before, earlier P2 single run (**measured**) | ≈88/s (5,300 in 60 s; two threads at ≈49.7/s and ≈38.7/s) | 3.07% of one core (1.84 CPU-s / 60.01 s) | `240aef2e` |
 | Before, P1 A1–A3 | pending | pending | `240aef2e` |
-| After, P1 B1–B3 (intake deadline wait) | pending | pending | candidate pending |
+| After, P1 B1–B3 (intake deadline wait) | pending | pending | [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) (gates pending) |
+| Failed candidate, not measured | — | — | [`f6a2df85`](https://github.com/DivyanshGolyan/rui/commit/f6a2df856fba8a68cb875f8b7432702910c734de): failed `admission-debug-integration`; review found the same defect (closed exchanges waited up to 1 s for removal) |
 | Pre-run napkin (**estimated**) | ≈90/s before; ≈40/s after (only the intake 20 ms timer is removed) | not estimated | — |
 
 ## Headline 3: one illustrative live Mac 100 × gpt-6-luna wave
