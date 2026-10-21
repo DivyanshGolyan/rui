@@ -128,6 +128,6 @@ jobs:
           MUTATIONS: ${{ needs.mutations.result }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          python3 -B tests/ci/main_health.py report \
+          python3 -B tests/ci/report_issue.py \
             --title "Nightly renderer contracts failed on ${GITHUB_SHA::12}" \
             --body "Nightly renderer contracts on main $GITHUB_SHA: contracts $CONTRACTS, mutations $MUTATIONS. $URL"

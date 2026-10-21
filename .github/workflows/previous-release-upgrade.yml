@@ -14,7 +14,7 @@ on:
       - 'build.zig.zon'
       - 'install.sh'
   push:
-    branches: ['wip/land-*', 'main']
+    branches: ['wip/land-*']
     paths:
       - 'src/store*'
       - 'src/*schema*'
@@ -35,9 +35,8 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'latest' }}
-  # Every main push keeps its own post-push result for the stable ref.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: previous-release-upgrade-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   upgrade:

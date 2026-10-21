@@ -29,3 +29,25 @@ jobs:
       # explicit until platform counters and shared-runner behavior qualify.
       # Linux cannot qualify macOS footprint. Never mask a resource gate's exit.
       suite: ${{ inputs.suite || 'native' }}
+  report:
+    needs: qualify
+    # Daily runs on main catch drift and flakes after landing; red files an issue.
+    if: ${{ always() && !github.event.repository.private && github.event_name == 'schedule' && needs.qualify.result != 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: File an issue for the failed daily run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.qualify.result }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -B tests/ci/report_issue.py \
+            --title "Daily Linux qualification failed on ${GITHUB_SHA::12}" \
+            --body "Daily Linux native qualification on main $GITHUB_SHA: $RESULT. $URL"
