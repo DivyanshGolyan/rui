@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 
-from main_health import FREEZE, UPGRADE, changed, dispatch, gh, git, latest, pushes, required
+from main_health import FREEZE, UPGRADE, changed, dispatch, gh, git, latest, repair, required
 from strict_paths import strict
 
 BRANCH = re.compile(r"wip/land-[0-9]+")
@@ -105,29 +105,6 @@ def land(branch, sha, main_sha):
     print(f"Fast-forwarded main {main_sha} to {sha}")
     dispatch(sha, main_sha, required(main_sha, sha))
     return True
-
-
-def repair(main_sha):
-    """Start main's missing post-push runs before landing on top of it.
-
-    Only main's head can get exact dispatched runs, so a push whose dispatch
-    failed is repaired here, before another push strands it.
-    """
-    subprocess.run(["git", "fetch", "--quiet", "origin", "+refs/heads/stable:refs/remotes/origin/stable"],
-                   capture_output=True)
-    stable = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "origin/stable"],
-                            capture_output=True, text=True).stdout.strip() or None
-    if stable and subprocess.run(["git", "merge-base", "--is-ancestor", main_sha, stable]).returncode == 0:
-        return
-    # Fails, so nothing lands, until GitHub's activity shows every push since stable.
-    before = pushes(stable, main_sha)[main_sha]
-    runs = {workflow: latest(workflow, main_sha, "main") for workflow in required(before, main_sha)}
-    missing = [workflow for workflow, run in runs.items() if run is None]
-    if missing:
-        print(f"main {main_sha} has no post-push {', '.join(missing)}; dispatching before landing on it")
-    # main's health waiter may never have started (a failed dispatch), so a new one waits
-    # for every required run, existing ones included, not only those started here.
-    dispatch(main_sha, before, missing, [run["id"] for run in runs.values() if run])
 
 
 if __name__ == "__main__":

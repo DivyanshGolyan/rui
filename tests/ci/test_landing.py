@@ -191,6 +191,10 @@ class LandingTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             run_wait({'1': [emitter(status='in_progress', takes=50), emitter(takes=1000)]}, ['1'], limit=90)
         self.assertEqual(timeouts, [(0, 90), (80, 10)])
+        # The real gh wrapper hands that bound to the subprocess.
+        with mock.patch.object(main_health.subprocess, 'run') as run:
+            main_health.gh('api', 'x', timeout=12)
+        self.assertEqual(run.call_args.kwargs['timeout'], 12)
         for run_ids in ([], ['1 2'], ['x']):
             with self.assertRaises(SystemExit):
                 run_wait({}, run_ids)
@@ -235,8 +239,7 @@ class LandingTest(unittest.TestCase):
             with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
                     mock.patch.object(main_health, 'gh', lambda *args: json.dumps([activity])), \
                     mock.patch.object(main_health, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
-                    mock.patch.object(auto_land, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
-                    mock.patch.object(auto_land, 'dispatch', lambda *args: dispatched.append(args)), \
+                    mock.patch.object(main_health, 'dispatch', lambda *args: dispatched.append(args)), \
                     mock.patch.object(main_health, 'filed', lambda title: title.startswith('Landing frozen')), \
                     mock.patch.object(main_health, 'report', lambda title, body, label=None: reports.append(title)), \
                     mock.patch.object(sys, 'argv', ['main_health.py', 'check']), \
@@ -270,10 +273,61 @@ class LandingTest(unittest.TestCase):
                 dispatched.clear()
                 auto_land.repair(store)
                 self.assertEqual(dispatched, [(store, stable, ['previous-release-upgrade.yml'], [41])])
+                # Every required run exists but its waiter never started: a new waiter still covers them all.
+                exact.update({('check.yml', store): dict(red, id=41, status='in_progress'),
+                              ('previous-release-upgrade.yml', store): dict(green, id=42, status='queued')})
+                dispatched.clear()
+                auto_land.repair(store)
+                self.assertEqual(dispatched, [(store, stable, [], [41, 42])])
                 exact.update(saved)
                 exact.update({('previous-release-upgrade.yml', revert): green, ('check.yml', cli): green})
                 main_health.main()
                 self.assertEqual(stable_ref(), cli)
+
+    def test_revert_first_repairs_the_main_head_it_displaces(self):
+        with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
+            def git(*args):
+                return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
+
+            def commit(path):
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                Path(path).write_text(path)
+                git('add', '-A')
+                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', path)
+                return git('rev-parse', 'HEAD')
+            git('init', '-q', '--bare', '-b', 'main', 'remote.git')
+            git('clone', '-q', 'remote.git', 'work')
+            os.chdir('work')
+            stable, strict_push = commit('README.md'), commit('src/store.zig')
+            landed = commit('src/cli.zig')
+            git('push', '-q', 'origin', f'{stable}:refs/heads/stable', f'{landed}:refs/heads/main')
+            # The strict push is red; the push after it landed with Selected running but its
+            # health dispatch failed, so nothing waits on that run.
+            activity = [[dict(before=strict_push, after=landed), dict(before=stable, after=strict_push)]]
+            done = dict(status='completed', html_url='u')
+            exact = {('check.yml', strict_push): dict(done, conclusion='failure'),
+                     ('previous-release-upgrade.yml', strict_push): dict(done, conclusion='success'),
+                     ('check.yml', landed): dict(id=55, status='in_progress', conclusion=None, html_url='u')}
+            dispatched = []
+
+            def dispatch(sha, before, workflows, existing=()):
+                main = git('ls-remote', 'origin', 'refs/heads/main').split()[0]
+                dispatched.append((sha, list(workflows), list(existing), main))
+            with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                    mock.patch.object(main_health, 'gh', lambda *args: json.dumps(activity)), \
+                    mock.patch.object(main_health, 'latest', lambda workflow, sha, branch: exact.get((workflow, sha))), \
+                    mock.patch.object(main_health, 'dispatch', dispatch), \
+                    mock.patch.object(main_health, 'filed', lambda title: False), \
+                    mock.patch.object(main_health, 'report', lambda *args, **kwargs: None), \
+                    mock.patch.object(sys, 'argv', ['main_health.py', 'check']), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                main_health.main()
+            reverted = git('ls-remote', 'origin', 'refs/heads/main').split()[0]
+            self.assertNotEqual(reverted, landed)
+            # The displaced head's running Selected run gets a waiter while main is still that head,
+            # then the revert gets its own CI, strict because it undoes a strict change.
+            self.assertEqual(dispatched, [(landed, [], [55], landed),
+                                          (reverted, ['check.yml', 'previous-release-upgrade.yml'], [], reverted)])
 
     def test_selected_runs_mac_for_every_strict_path(self):
         # Auto-land relies on Selected's Mac aggregate for strict tips.
