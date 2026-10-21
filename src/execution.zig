@@ -2,18 +2,19 @@ const std = @import("std");
 const attempt = @import("attempt.zig");
 const transport_policy = @import("transport_policy.zig");
 
-pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
+const CaptureFailure = transport_policy.CaptureFailure;
+const TransferOutcome = transport_policy.TransferOutcome;
 
-pub const TransferOutcome = union(enum) {
-    response_capture_failed: CaptureFailure,
-    request_source_failed,
-    transport_finished: transport_policy.Evidence,
-};
+/// How a failed model Attempt settles: the Store owns the retry allowance.
+pub const FailureKind = enum { permanent, temporary, context_overflow };
+
+/// A sealed HTTP error answer, interpreted before settlement.
+pub const ErrorResponse = union(enum) { ordinary, context_overflow, unreadable: anyerror };
 
 pub const TransferFailure = struct {
     code: union(enum) { named: []const u8, http: u16, temporary_http: u16 },
     answered: bool = false,
-    kind: enum { permanent, temporary, context_overflow } = .permanent,
+    kind: FailureKind = .permanent,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
 
@@ -32,13 +33,11 @@ pub const TransferDecision = union(enum) {
     fail: TransferFailure,
 };
 
-pub const ErrorResponseKind = enum { ordinary, context_overflow, unreadable };
-
 /// Failure facts only: Store owns retry allowance, eligibility and Turn
 /// scheduling. No decision here delivers a result or releases resources.
 pub fn transferDecision(
     outcome: TransferOutcome,
-    error_response: ErrorResponseKind,
+    error_response: ErrorResponse,
 ) TransferDecision {
     const evidence = switch (outcome) {
         .response_capture_failed => |failure| return .{ .fail = .{ .code = .{ .named = switch (failure) {
@@ -50,7 +49,7 @@ pub fn transferDecision(
         .transport_finished => |evidence| evidence,
     };
     if (evidence.disposition == .success) return .interpret_output;
-    const answered = evidence.disposition == .permanent_http or evidence.disposition == .temporary_http;
+    const answered = evidence.disposition.answered();
     if (answered) switch (error_response) {
         .context_overflow => return .{ .fail = .{
             .code = .{ .named = "provider_context_overflow" },
@@ -83,6 +82,8 @@ pub fn transferDecision(
     } };
 }
 
+const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .unreadable = error.TestUnreadable } };
+
 test "transfer decisions exhaust transport dispositions and error response precedence" {
     const cases = [_]struct {
         disposition: transport_policy.Disposition,
@@ -101,7 +102,7 @@ test "transfer decisions exhaust transport dispositions and error response prece
         .{ .disposition = .unsupported_http_version, .code = "provider_http2_required" },
     };
     try std.testing.expectEqual(std.enums.values(transport_policy.Disposition).len - 1, cases.len);
-    for (std.enums.values(ErrorResponseKind)) |response| {
+    for (testing_error_responses) |response| {
         try std.testing.expect(transferDecision(.{ .transport_finished = .{ .disposition = .success } }, response) == .interpret_output);
         for (cases) |case| {
             const decision = transferDecision(.{ .transport_finished = .{
@@ -129,7 +130,7 @@ test "transfer decisions exhaust transport dispositions and error response prece
 }
 
 test "transfer decisions never correlate capture failure or settle request source corruption" {
-    for (std.enums.values(ErrorResponseKind)) |response| {
+    for (testing_error_responses) |response| {
         try std.testing.expect(transferDecision(.request_source_failed, response) == .fence_request_source);
         for (std.enums.values(CaptureFailure), [_][]const u8{ "response_scratch_exhausted", "response_write_failed", "response_seal_failed" }) |capture, expected| {
             const decision = transferDecision(.{ .response_capture_failed = capture }, response);

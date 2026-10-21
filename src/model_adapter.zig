@@ -1,6 +1,7 @@
 const std = @import("std");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
+const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
 const platform = @import("platform.zig");
@@ -35,7 +36,7 @@ pub const OutputRejection = struct {
     reason: anyerror,
     code: []const u8,
     location: Output.Rejection,
-    kind: enum { invalid_output, context_overflow } = .invalid_output,
+    kind: execution.FailureKind = .permanent,
 
     pub fn format(self: OutputRejection, buffer: *[512]u8) []const u8 {
         return self.location.format(self.reason, buffer);
@@ -81,7 +82,7 @@ pub fn interpretOutput(
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
-        .kind = if (err == error.ContextOverflow) .context_overflow else .invalid_output,
+        .kind = if (err == error.ContextOverflow) .context_overflow else .permanent,
     } };
     if (!modelObservationsAgree(validated.evidence.served_model.slice(), models)) return .{ .rejected = .{
         .reason = error.ContradictoryProviderOutput,
@@ -115,9 +116,7 @@ fn modelObservationsAgree(body: []const u8, models: ModelObservations) bool {
     return true;
 }
 
-pub const ErrorResponse = union(enum) { ordinary, context_overflow, unreadable: anyerror };
-
-pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16) ErrorResponse {
+pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16) execution.ErrorResponse {
     const overflow = Output.contextOverflow(io, source, length, status) catch |err| return .{ .unreadable = err };
     return if (overflow) .context_overflow else .ordinary;
 }

@@ -16,6 +16,7 @@ const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
+const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
 const product_defaults = @import("product_defaults.zig");
 
@@ -1138,6 +1139,7 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
     var bash_timeout_ms: u64 = server.default_bash_timeout_ms;
     var active_capacity: usize = product_defaults.active_capacity;
     var faults: server.Faults = .{};
+    var limits: server.Limits = .{};
     var index: usize = 0;
     while (index < args.len) {
         const arg = args[index];
@@ -1158,11 +1160,11 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
             bash_timeout_ms = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
             if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
         } else if (std.mem.eql(u8, arg, "--test-bash-scratch-limit-bytes")) {
-            faults.bash_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+            limits.bash_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--test-retention-entry-capacity")) {
-            faults.retention_entry_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.retention_entry_capacity.? < 2 or
-                faults.retention_entry_capacity.? > server.default_retention_entry_capacity)
+            limits.retention_entry_capacity = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
+            if (limits.retention_entry_capacity.? < 2 or
+                limits.retention_entry_capacity.? > server.default_retention_entry_capacity)
             {
                 return error.InvalidRetentionEntryCapacity;
             }
@@ -1174,12 +1176,12 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
             const fault = try takeValue(args, &index);
             if (std.mem.eql(u8, fault, "content-acquire")) faults.content_acquire = true else if (std.mem.eql(u8, fault, "content-write")) faults.content_write = true else if (std.mem.eql(u8, fault, "content-seal")) faults.content_seal = true else if (std.mem.eql(u8, fault, "content-read")) faults.content_read = true else if (std.mem.eql(u8, fault, "content-import")) faults.content_import = true else if (std.mem.eql(u8, fault, "before-commit")) faults.before_commit = true else if (std.mem.eql(u8, fault, "startup-cleanup")) faults.startup_cleanup = true else if (std.mem.eql(u8, fault, "shutdown-after-accept")) faults.shutdown_after_accept = true else if (std.mem.eql(u8, fault, "attempt-before-commit")) faults.attempt_before_commit = true else if (std.mem.eql(u8, fault, "result-before-commit")) faults.result_before_commit = true else if (std.mem.eql(u8, fault, "request-first-step")) faults.request_first_step = true else if (std.mem.eql(u8, fault, "request-write")) faults.request_write = true else if (std.mem.eql(u8, fault, "request-seal")) faults.request_seal = true else if (std.mem.eql(u8, fault, "request-scratch-acquire")) faults.request_scratch_acquire = true else if (std.mem.eql(u8, fault, "request-read")) faults.request_read = true else if (std.mem.eql(u8, fault, "request-unlink")) faults.request_unlink = true else if (std.mem.eql(u8, fault, "provider-prepare")) faults.provider_prepare = true else if (std.mem.eql(u8, fault, "completion-private-missing")) faults.completion_identity_fault = .missing else if (std.mem.eql(u8, fault, "completion-private-foreign")) faults.completion_identity_fault = .foreign else if (std.mem.eql(u8, fault, "completion-private-mismatch")) faults.completion_identity_fault = .mismatched else if (std.mem.eql(u8, fault, "response-acquire")) faults.response_acquire = true else if (std.mem.eql(u8, fault, "response-unlink")) faults.response_unlink = true else if (std.mem.eql(u8, fault, "response-write")) faults.response_write = true else if (std.mem.eql(u8, fault, "response-write-on-resume")) faults.response_write_on_resume = true else if (std.mem.eql(u8, fault, "response-seal")) faults.response_seal = true else if (std.mem.eql(u8, fault, "response-metadata")) faults.response_metadata = true else if (std.mem.eql(u8, fault, "response-metadata-unlink")) faults.response_metadata_unlink = true else if (std.mem.eql(u8, fault, "response-read")) faults.response_read = true else if (std.mem.eql(u8, fault, "response-import")) faults.response_import = true else if (std.mem.eql(u8, fault, "response-commit")) faults.response_commit = true else if (std.mem.eql(u8, fault, "bash-preparation")) faults.bash_preparation = true else if (std.mem.eql(u8, fault, "bash-preparation-after-script")) faults.bash_preparation_after_script = true else if (std.mem.eql(u8, fault, "bash-spawn")) faults.bash_spawn = true else if (std.mem.eql(u8, fault, "bash-service")) faults.bash_service = true else if (std.mem.eql(u8, fault, "bash-capture-read")) faults.bash_capture_read = true else if (std.mem.eql(u8, fault, "bash-capture-write")) faults.bash_capture_write = true else if (std.mem.eql(u8, fault, "bash-seal")) faults.bash_seal = true else if (std.mem.eql(u8, fault, "bash-cleanup")) faults.bash_cleanup = true else if (std.mem.eql(u8, fault, "bash-observe")) faults.bash_lifecycle_fault = .observe else if (std.mem.eql(u8, fault, "bash-reap")) faults.bash_lifecycle_fault = .reap else if (std.mem.eql(u8, fault, "bash-reap-watchdog")) faults.bash_lifecycle_fault = .reap_watchdog else if (std.mem.eql(u8, fault, "bash-group-probe")) faults.bash_lifecycle_fault = .group_probe else if (std.mem.eql(u8, fault, "bash-tail-snapshot")) faults.bash_lifecycle_fault = .tail_snapshot else if (std.mem.eql(u8, fault, "bash-signal")) faults.bash_lifecycle_fault = .signal else if (std.mem.eql(u8, fault, "bash-cleanup-watchdog")) faults.bash_lifecycle_fault = .cleanup_watchdog else if (std.mem.eql(u8, fault, "bash-fault-gated")) faults.bash_fault_gated = true else if (std.mem.eql(u8, fault, "report-unlink")) faults.report_unlink = true else return error.UnknownFault;
         } else if (std.mem.eql(u8, arg, "--test-provider-inactivity-seconds")) {
-            faults.provider_inactivity_seconds = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
-            if (faults.provider_inactivity_seconds < 1) return error.InvalidProviderInactivity;
-            _ = std.math.mul(i64, faults.provider_inactivity_seconds, std.time.ns_per_s) catch
+            limits.provider_inactivity_seconds = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
+            if (limits.provider_inactivity_seconds < 1) return error.InvalidProviderInactivity;
+            _ = std.math.mul(i64, limits.provider_inactivity_seconds, std.time.ns_per_s) catch
                 return error.InvalidProviderInactivity;
         } else if (std.mem.eql(u8, arg, "--test-retry-waits-ms")) {
-            faults.retry_waits_ms = try parseRetryWaits(try takeValue(args, &index));
+            limits.retry_waits_ms = try parseRetryWaits(try takeValue(args, &index));
         } else if (std.mem.eql(u8, arg, "--test-before-launch-delay-ms")) {
             faults.before_launch_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.before_launch_delay_ms < 0 or faults.before_launch_delay_ms > 10_000) return error.InvalidLaunchDelay;
@@ -1194,8 +1196,8 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
             faults.inspection_reply_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.inspection_reply_delay_ms < 0 or faults.inspection_reply_delay_ms > 60_000) return error.InvalidInspectionReplyDelay;
         } else if (std.mem.eql(u8, arg, "--test-client-send-buffer-bytes")) {
-            faults.client_send_buffer_bytes = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
-            if (faults.client_send_buffer_bytes.? == 0 or faults.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
+            limits.client_send_buffer_bytes = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
+            if (limits.client_send_buffer_bytes.? == 0 or limits.client_send_buffer_bytes.? > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
         } else if (std.mem.eql(u8, arg, "--test-phase-trace")) {
             faults.test_phase_trace = true;
         } else if (std.mem.eql(u8, arg, "--test-observation-fd")) {
@@ -1228,18 +1230,18 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--test-sqlite-diagnostics")) {
             faults.sqlite_diagnostics = true;
         } else if (std.mem.eql(u8, arg, "--test-sqlite-cache-spill-off")) {
-            faults.sqlite_cache_spill = false;
+            limits.sqlite_cache_spill = false;
         } else if (std.mem.eql(u8, arg, "--test-sqlite-cache-kib")) {
-            faults.sqlite_cache_kib = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
-            if (faults.sqlite_cache_kib == 0 or faults.sqlite_cache_kib > 4096) return error.InvalidSqliteCacheSize;
+            limits.sqlite_cache_kib = try std.fmt.parseInt(u32, try takeValue(args, &index), 10);
+            if (limits.sqlite_cache_kib == 0 or limits.sqlite_cache_kib > 4096) return error.InvalidSqliteCacheSize;
         } else if (std.mem.eql(u8, arg, "--test-request-scratch-limit")) {
-            faults.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
+            limits.request_scratch_limit_bytes = try std.fmt.parseInt(u64, try takeValue(args, &index), 10);
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-byte-allowance")) {
-            faults.request_preparation_byte_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.request_preparation_byte_allowance == 0) return error.InvalidRequestPreparationAllowance;
+            limits.request_preparation_byte_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
+            if (limits.request_preparation_byte_allowance == 0) return error.InvalidRequestPreparationAllowance;
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-item-allowance")) {
-            faults.request_preparation_item_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
-            if (faults.request_preparation_item_allowance == 0) return error.InvalidRequestPreparationAllowance;
+            limits.request_preparation_item_allowance = try std.fmt.parseInt(usize, try takeValue(args, &index), 10);
+            if (limits.request_preparation_item_allowance == 0) return error.InvalidRequestPreparationAllowance;
         } else if (std.mem.eql(u8, arg, "--test-request-preparation-advance-delay-ms")) {
             faults.request_preparation_advance_delay_ms = try std.fmt.parseInt(i64, try takeValue(args, &index), 10);
             if (faults.request_preparation_advance_delay_ms < 0) return error.InvalidRequestPreparationDelay;
@@ -1260,6 +1262,7 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
         std.heap.c_allocator,
         try selectedStore(init, store_path, &selected_buffer),
         active_capacity,
+        limits,
         faults,
         if (managed) model_adapter.managed_endpoint else fixture_endpoint orelse provider_endpoint,
         provider_ca_file,
@@ -1270,15 +1273,16 @@ fn serve(init: std.process.Init, args: []const []const u8) !void {
     );
 }
 
-fn parseRetryWaits(value: []const u8) ![3]u64 {
-    var waits: [3]u64 = undefined;
+fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
+    var waits: retry_policy.Waits = undefined;
     var parts = std.mem.splitScalar(u8, value, ',');
     for (&waits) |*wait| {
         const part = parts.next() orelse return error.InvalidRetryWaits;
         wait.* = std.fmt.parseInt(u64, part, 10) catch return error.InvalidRetryWaits;
-        if (wait.* == 0 or wait.* > std.math.maxInt(i64)) return error.InvalidRetryWaits;
     }
     if (parts.next() != null) return error.InvalidRetryWaits;
+    // The Store rechecks the deadlines against its clock at startup.
+    retry_policy.validateWaits(waits, 0) catch return error.InvalidRetryWaits;
     return waits;
 }
 

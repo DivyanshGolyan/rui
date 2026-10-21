@@ -78,23 +78,24 @@ fn metadataStringEql(io: std.Io, file: std.Io.File, record: output_format.Output
     return try source.next() == null;
 }
 
-pub fn rejectionResult(io: std.Io, source_file: std.Io.File, code: []const u8, name: output_format.OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
-    if (std.mem.eql(u8, code, "unknown_tool")) {
-        var decoded = try output_format.EncodedStringReader.init(io, source_file, name);
-        var prefix: [32]u8 = undefined;
-        var prefix_length: usize = 0;
-        while (prefix_length < prefix.len) {
-            prefix[prefix_length] = (try decoded.next()) orelse break;
-            prefix_length += 1;
-        }
-        while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
-        if (name.decoded_length <= prefix.len) return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
-        const digest_hex = std.fmt.bytesToHex(name.content_digest, .lower);
-        return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{ prefix[0..prefix_length], &digest_hex });
+pub fn rejectionResult(io: std.Io, source_file: std.Io.File, code: protocol.ProposalRejection, name: output_format.OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+    switch (code) {
+        .invalid_arguments => return "Invalid arguments for tool 'bash'.",
+        .tool_unavailable => return "Tool 'edit' is unavailable.",
+        .unknown_tool => {
+            var decoded = try output_format.EncodedStringReader.init(io, source_file, name);
+            var prefix: [32]u8 = undefined;
+            var prefix_length: usize = 0;
+            while (prefix_length < prefix.len) {
+                prefix[prefix_length] = (try decoded.next()) orelse break;
+                prefix_length += 1;
+            }
+            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
+            if (name.decoded_length <= prefix.len) return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
+            const digest_hex = std.fmt.bytesToHex(name.content_digest, .lower);
+            return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{ prefix[0..prefix_length], &digest_hex });
+        },
     }
-    if (std.mem.eql(u8, code, "invalid_arguments")) return "Invalid arguments for tool 'bash'.";
-    if (std.mem.eql(u8, code, "tool_unavailable")) return "Tool 'edit' is unavailable.";
-    return error.CorruptStore;
 }
 
 const Range = struct { start: u64, length: u64 };
