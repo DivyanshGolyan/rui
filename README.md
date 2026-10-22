@@ -202,7 +202,7 @@ If a Host is running, let its work finish before stopping it. `host stop` interr
 "$RUI" host status --store "$STORE"
 ```
 
-Wait until status reports `Host: unavailable`. A stop acknowledgment alone is not enough. Then copy the entire stopped Store into a new private backup directory:
+Wait until status reports `Host: unavailable`. A stop acknowledgment alone is not enough. Then copy the entire stopped Store into a new private backup directory. After a crash, committed work may still be only in `rui.sqlite3-wal`, so never copy or restore `rui.sqlite3` by itself:
 
 ```sh
 BACKUP=$(mktemp -d "$HOME/rui-store-backup.XXXXXX")
