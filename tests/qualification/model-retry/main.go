@@ -272,9 +272,12 @@ func replaceDue(binary, directory, store, session, operation, marker string, mod
 	if err != nil || facts != "2,2,provider_http_422" {
 		return nil, fmt.Errorf("unexpected replacement facts %s: %w", facts, err)
 	}
-	database, _ := os.Stat(filepath.Join(store, "rui.sqlite3"))
+	database, err := measurement.DatabaseSize(store)
+	if err != nil {
+		return nil, err
+	}
 	discoveryMS := admitted - started
-	return map[string]any{"status": discoveryStatus(discoveryMS), "qualification_limit_ms": 2000, "model_operations": modelOperations, "older_unresolved_future_retries": future, "replacement_admitted_after_start_ms": discoveryMS, "replacement_launched_after_start_ms": launched - started, "database_bytes": database.Size()}, nil
+	return map[string]any{"status": discoveryStatus(discoveryMS), "qualification_limit_ms": 2000, "model_operations": modelOperations, "older_unresolved_future_retries": future, "replacement_admitted_after_start_ms": discoveryMS, "replacement_launched_after_start_ms": launched - started, "database_bytes": database["database_logical_bytes"]}, nil
 }
 
 func history(binary, root string, e *retryEndpoint) (map[string]any, error) {

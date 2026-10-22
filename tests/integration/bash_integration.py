@@ -991,7 +991,9 @@ def main():
         "same-group-timeout",
         f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & child=$!; "
         f"{publish_pid(same_group_pid, '$child')}; wait \"$child\"",
-        timeout_ms=100,
+        # The budget only has to outlast launch and PID publication: under CPU
+        # load the shell can wait tens of ms for a CPU before it starts.
+        timeout_ms=1000,
     )
     add_exchange(
         responses,

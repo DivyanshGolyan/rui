@@ -1023,6 +1023,9 @@ pub const ContentReader = struct {
     representation: union(enum) { raw, projection: ProjectionCursor },
     store: *Store,
     reference: ContentReference,
+    /// Kept open until close so each window seeks through SQLite's cached
+    /// overflow-page list instead of rewalking the chain from the start.
+    blob: ContentBlob = .{},
     active: bool = true,
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
@@ -1050,10 +1053,27 @@ pub const ContentReader = struct {
     }
 
     pub fn close(self: *ContentReader) void {
+        if (self.blob.handle == null) return self.closeHeld();
+        self.store.lockAdmin();
+        defer self.store.mutex.unlock(self.store.io);
+        self.closeHeld();
+    }
+
+    /// Close from Store code that already holds the Store mutex.
+    fn closeHeld(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
+        // Close reports only an earlier read failure, already returned.
+        if (self.blob.handle) |handle| _ = c.sqlite3_blob_close(handle);
         if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
+};
+
+/// One open read handle and its current row, owned by one ContentReader.
+/// Its overflow-page index costs SQLite heap of about length/1024 bytes.
+const ContentBlob = struct {
+    handle: ?*c.sqlite3_blob = null,
+    content_id: i64 = 0,
 };
 
 const Tool = tool_catalog.Tool;
@@ -1259,6 +1279,11 @@ pub const Store = struct {
     selector: protocol.Bounded(protocol.max_store_bytes),
     mutex: std.Io.Mutex = .init,
     fenced: std.atomic.Value(bool) = .init(false),
+    /// Advances before `release` of any entry point that changed rows, so
+    /// after every successful COMMIT. An unchanged value proves no canonical
+    /// fact changed since it was read; a rolled-back change also advances it.
+    commit_generation: std.atomic.Value(u64) = .init(0),
+    hot_statements: std.EnumArray(HotStatement, ?*c.sqlite3_stmt) = .initFill(null),
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) struct { decoded: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
@@ -1336,6 +1361,7 @@ pub const Store = struct {
     const Access = struct {
         store: *Store,
         trace: AccessTrace,
+        changes: i64,
 
         fn finish(self: Access, comptime Expected: type, result: anytype) @TypeOf(result) {
             comptime Ordinary.produced(Expected, @TypeOf(result));
@@ -1365,6 +1391,10 @@ pub const Store = struct {
         }
 
         fn release(self: Access) void {
+            // Counts autocommit and explicit-transaction writes alike.
+            if (c.sqlite3_total_changes64(self.store.database) != self.changes) {
+                _ = self.store.commit_generation.fetchAdd(1, .release);
+            }
             self.trace.mark(.complete);
             self.store.mutex.unlock(self.store.io);
         }
@@ -1379,7 +1409,7 @@ pub const Store = struct {
         if (self.isFenced()) return error.StoreFenced;
         trace.mark(.requested);
         self.mutex.lockUncancelable(self.io);
-        const access: Access = .{ .store = self, .trace = trace };
+        const access: Access = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database) };
         trace.mark(.acquired);
         if (self.isFenced()) {
             access.release();
@@ -1474,6 +1504,9 @@ pub const Store = struct {
         try setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
         try dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
         try dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
+        // Before the first read: the Host keeps the file lock until close, and
+        // WAL then keeps its index in heap memory, so no -shm file exists.
+        try exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
         if (existing) {
             if (options.found_schema_version) |found| found.* = try pragmaInt(database.?, "PRAGMA user_version");
             try validateExisting(database.?, selector);
@@ -1486,10 +1519,14 @@ pub const Store = struct {
         const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
         try exec(database.?, cache_size);
         try exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
-        try exec(database.?, "PRAGMA synchronous=EXTRA");
+        try exec(database.?, "PRAGMA synchronous=FULL");
         if (@import("builtin").os.tag == .macos) try exec(database.?, "PRAGMA fullfsync=ON");
+        // Validation precedes this, so an incompatible Store keeps its journal mode.
+        const journal_mode = diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
+        if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
+        // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
+        try exec(database.?, "PRAGMA journal_size_limit=4194304");
         if (!existing) try bootstrap(database.?, selector);
-        try exec(database.?, "PRAGMA journal_mode=DELETE");
 
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
@@ -1547,6 +1584,7 @@ pub const Store = struct {
 
     pub fn close(self: *Store) !void {
         self.lockAdmin();
+        for (self.hot_statements.values) |statement| _ = c.sqlite3_finalize(statement);
         const close_result = c.sqlite3_close(self.database);
         self.mutex.unlock(self.io);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
@@ -1554,10 +1592,26 @@ pub const Store = struct {
         self.* = undefined;
     }
 
+    /// Prepares `which` once for the Store's lifetime; the caller resets it
+    /// with `resetHot` before releasing the Store mutex.
+    fn hot(self: *Store, which: HotStatement) !*c.sqlite3_stmt {
+        const slot = self.hot_statements.getPtr(which);
+        if (slot.*) |statement| {
+            std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
+            return statement;
+        }
+        var statement: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v3(self.database, which.sql(), -1, c.SQLITE_PREPARE_PERSISTENT, &statement, null) != c.SQLITE_OK) {
+            return error.StatementPrepareFailed;
+        }
+        slot.* = statement orelse return error.StatementPrepareFailed;
+        return slot.*.?;
+    }
+
     pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
         self.lockAdmin();
         defer self.mutex.unlock(self.io);
-        try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.database));
+        try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.io));
     }
 
     /// The Host supplies its model capability; a configuration that requires
@@ -3152,7 +3206,7 @@ pub const Store = struct {
         }
         if (authenticate) {
             var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
-            defer source.reader.close();
+            defer source.reader.closeHeld();
             @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
@@ -4139,6 +4193,7 @@ pub const Store = struct {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
         var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        defer reader.closeHeld();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
@@ -4351,23 +4406,10 @@ pub const Store = struct {
         bash_timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        try exec(self.database, "BEGIN IMMEDIATE");
-        const select = try prepare(
-            self.database,
-            "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
-                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
-                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-                "ORDER BY action.action_id LIMIT 1",
-        );
-        defer _ = c.sqlite3_finalize(select);
+        const select = try self.hot(.executable_action);
+        defer resetHot(select);
         const step = c.sqlite3_step(select);
-        if (step == c.SQLITE_DONE) {
-            try exec(self.database, "ROLLBACK");
-            return null;
-        }
+        if (step == c.SQLITE_DONE) return null;
         if (step != c.SQLITE_ROW) return error.ActionSelectionFailed;
         const action_id = c.sqlite3_column_int64(select, 0);
         const parent_operation_id = c.sqlite3_column_int64(select, 1);
@@ -4377,6 +4419,10 @@ pub const Store = struct {
             @as(u64, @intCast(override))
         else
             bash_timeout_ms;
+        // The held Store mutex excludes every other writer, so the candidate
+        // read outside the transaction is still current inside it.
+        _ = c.sqlite3_reset(select);
+        try exec(self.database, "BEGIN IMMEDIATE");
         const update = try prepare(
             self.database,
             "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2 " ++
@@ -4960,8 +5006,7 @@ pub const Store = struct {
         active: ActiveOperationFilter,
         faults: Faults,
     ) !?AttemptAdmission {
-        try exec(self.database, "BEGIN IMMEDIATE");
-        const snapshot_ms = try readUnixMilliseconds(self.database);
+        const snapshot_ms = try readUnixMilliseconds(self.io);
         const selection_limit = try std.math.add(
             usize,
             active.maximum_exclusions,
@@ -5004,10 +5049,10 @@ pub const Store = struct {
 
         // Eligibility exists only inside this Store transition. No selected
         // candidate or time snapshot survives rollback, capacity loss or exit.
-        const current = selected orelse {
-            try exec(self.database, "ROLLBACK");
-            return null;
-        };
+        // The held Store mutex excludes every other writer, so the candidate
+        // read outside the transaction is still current inside it.
+        const current = selected orelse return null;
+        try exec(self.database, "BEGIN IMMEDIATE");
         if (current.attempt_ordinal >= retry_policy.maximum_attempts) return error.CorruptStore;
         const replacement_ordinal = current.attempt_ordinal + 1;
         const update = try prepare(
@@ -5037,11 +5082,11 @@ pub const Store = struct {
     }
 
     fn hasRunnableWorkLocked(self: *Store, kind: ModelAdmissionKind) !bool {
-        const statement = try prepare(self.database, switch (kind) {
-            .message => runnable_probe_sql,
-            .tool_continuation => tool_continuation_selection_sql,
+        const statement = try self.hot(switch (kind) {
+            .message => .runnable_probe,
+            .tool_continuation => .tool_continuation_probe,
         });
-        defer _ = c.sqlite3_finalize(statement);
+        defer resetHot(statement);
         return switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => {
@@ -5056,13 +5101,8 @@ pub const Store = struct {
     /// from malformed canonical classification. Only each active Turn's
     /// current Operation can be blocking successor discovery.
     fn validateBlockedToolCalls(self: *Store) !void {
-        const statement = try prepare(
-            self.database,
-            "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
-                "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
-                "AND " ++ resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.blocked_tool_calls);
+        defer resetHot(statement);
         while (true) switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
@@ -5131,12 +5171,8 @@ pub const Store = struct {
     }
 
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
-        const statement = try prepare(
-            self.database,
-            "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
-                "FROM model_operation WHERE operation_id=?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.current_attempt);
+        defer resetHot(statement);
         try bindU64(statement, 1, binding.operation_id);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
@@ -5442,7 +5478,7 @@ pub const Store = struct {
                 return error.HistoricalPending;
             try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
             try scan.validation.authenticate(scan.fields);
-            reader.close();
+            reader.closeHeld();
             scan.reader = null;
             return error.HistoricalPending;
         }
@@ -5602,6 +5638,11 @@ pub const Store = struct {
         return self.fenced.load(.acquire);
     }
 
+    /// Read before the canonical reads it may let a caller skip.
+    pub fn commitGeneration(self: *const Store) u64 {
+        return self.commit_generation.load(.acquire);
+    }
+
     pub fn operationSupersededByControl(self: *Store, binding: AttemptBinding) !?SupersedingControl {
         const access = try self.enter(.none);
         defer access.release();
@@ -5609,11 +5650,8 @@ pub const Store = struct {
     }
 
     fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        const statement = try prepare(
-            self.database,
-            "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.operation_supersession);
+        defer resetHot(statement);
         try bindU64(statement, 1, binding.operation_id);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return null;
@@ -5714,7 +5752,7 @@ pub const Store = struct {
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 try self.recordTurnOutcomePosition(binding.turn_id);
             },
-            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.database))) {
+            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io))) {
                 .schedule_at_ms => |due_at_ms| {
                     const update = try prepare(
                         self.database,
@@ -6159,8 +6197,8 @@ pub const Store = struct {
     const ContentSlot = struct { id: i64, existing: bool };
 
     fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-        const find = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
-        defer _ = c.sqlite3_finalize(find);
+        const find = try self.hot(.content_lookup);
+        defer resetHot(find);
         try bindBlob(find, 1, digest);
         try bindU64(find, 2, length);
         try bindI64(find, 3, @as(i64, if (private) 1 else 0));
@@ -6405,7 +6443,7 @@ pub const Store = struct {
     /// Fills all of `destination` or fails, so no reader sees a short window.
     fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
         switch (reader.representation) {
-            .raw => try self.readBlob(reader.content_id, start, destination),
+            .raw => try self.readBlob(&reader.blob, reader.content_id, start, destination),
             .projection => |*cursor| {
                 std.debug.assert(start == cursor.decoded_position);
                 var filled: usize = 0;
@@ -6436,7 +6474,7 @@ pub const Store = struct {
                         cursor.next_part += 1;
                         if (cursor.encoded_position == cursor.encoded_end) continue;
                     }
-                    var source = ProjectedByteSource{ .store = self, .cursor = cursor };
+                    var source = ProjectedByteSource{ .store = self, .cursor = cursor, .blob = &reader.blob };
                     cursor.pending_end = try decodeOutputScalar(&source, &cursor.pending);
                     if (@import("builtin").is_test) _ = self.testing_content_work.decoded.fetchAdd(cursor.pending_end, .monotonic);
                     cursor.pending_start = 0;
@@ -6465,15 +6503,21 @@ pub const Store = struct {
         }
     }
 
-    // Called only while the Store mutex is held; the blob handle never crosses
-    // a delivery or adapter callback boundary.
-    fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
+    // Called only while the Store mutex is held. The reader's handle stays
+    // open between windows; content rows are immutable once referenced.
+    fn readBlob(self: *Store, blob: *ContentBlob, content_id: i64, start: u64, destination: []u8) !void {
         if (destination.len == 0) return;
         if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
-        var blob: ?*c.sqlite3_blob = null;
-        if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob) != c.SQLITE_OK) return error.ContentReadFailed;
-        defer _ = c.sqlite3_blob_close(blob);
-        if (c.sqlite3_blob_read(blob, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
+        if (blob.handle == null) {
+            // A failed open leaves the handle null.
+            if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
+            blob.content_id = content_id;
+        } else if (blob.content_id != content_id) {
+            // A failed reopen aborts the handle; close remains its release.
+            if (c.sqlite3_blob_reopen(blob.handle, content_id) != c.SQLITE_OK) return error.ContentReadFailed;
+            blob.content_id = content_id;
+        }
+        if (c.sqlite3_blob_read(blob.handle, destination.ptr, @intCast(destination.len), @intCast(start)) != c.SQLITE_OK) return error.ContentReadFailed;
     }
 
     fn rollbackAfterError(self: *Store, faults: Faults) !void {
@@ -6527,8 +6571,8 @@ pub const Store = struct {
     }
 
     fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-        const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.existing_command);
+        defer resetHot(statement);
         try bindText(statement, 1, key);
         const step_result = c.sqlite3_step(statement);
         if (step_result == c.SQLITE_DONE) return null;
@@ -6720,8 +6764,8 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.session);
+        defer resetHot(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
         if (step_result == c.SQLITE_DONE) return null;
@@ -6948,8 +6992,8 @@ pub const Store = struct {
     const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
     fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-        const statement = try prepare(self.database, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.content_metadata);
+        defer resetHot(statement);
         try bindI64(statement, 1, content_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         const length = c.sqlite3_column_int64(statement, 0);
@@ -6966,8 +7010,8 @@ pub const Store = struct {
     }
 
     fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-        const statement = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.content_lookup);
+        defer resetHot(statement);
         try bindBlob(statement, 1, &reference.digest);
         try bindU64(statement, 2, reference.length);
         try bindI64(statement, 3, @as(i64, if (private) 1 else 0));
@@ -7043,6 +7087,7 @@ const ProjectionCursor = struct {
 const ProjectedByteSource = struct {
     store: *Store,
     cursor: *ProjectionCursor,
+    blob: *ContentBlob,
 
     pub fn take(self: *ProjectedByteSource) !u8 {
         const cursor = self.cursor;
@@ -7050,7 +7095,7 @@ const ProjectedByteSource = struct {
         if (cursor.buffer_length == 0 or cursor.encoded_position >= cursor.buffer_start + cursor.buffer_length) {
             cursor.buffer_start = cursor.encoded_position;
             cursor.buffer_length = @intCast(@min(cursor.encoded_end - cursor.encoded_position, cursor.buffer.len));
-            try self.store.readBlob(cursor.source_id, cursor.buffer_start, cursor.buffer[0..cursor.buffer_length]);
+            try self.store.readBlob(self.blob, cursor.source_id, cursor.buffer_start, cursor.buffer[0..cursor.buffer_length]);
         }
         const byte = cursor.buffer[@intCast(cursor.encoded_position - cursor.buffer_start)];
         cursor.encoded_position += 1;
@@ -7408,14 +7453,8 @@ fn pragmaInt(database: *c.sqlite3, sql: [:0]const u8) !u32 {
     return @intCast(value);
 }
 
-fn readUnixMilliseconds(database: *c.sqlite3) !i64 {
-    const statement = try prepare(
-        database,
-        "SELECT CAST(unixepoch('subsec') * 1000 AS INTEGER)",
-    );
-    defer _ = c.sqlite3_finalize(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.ClockReadFailed;
-    const value = c.sqlite3_column_int64(statement, 0);
+fn readUnixMilliseconds(io: std.Io) !i64 {
+    const value = std.Io.Clock.real.now(io).toMilliseconds();
     if (value <= 0) return error.ClockReadFailed;
     return value;
 }
@@ -7462,6 +7501,50 @@ fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
         return error.StatementPrepareFailed;
     }
     return statement orelse error.StatementPrepareFailed;
+}
+
+/// The ten statements measured most frequent under STREAM100 after the
+/// commit-generation skips; every other statement stays short-lived.
+const HotStatement = enum {
+    operation_supersession,
+    current_attempt,
+    content_metadata,
+    content_lookup,
+    blocked_tool_calls,
+    session,
+    executable_action,
+    runnable_probe,
+    tool_continuation_probe,
+    existing_command,
+
+    fn sql(self: HotStatement) [:0]const u8 {
+        return switch (self) {
+            .operation_supersession => "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+            .current_attempt => "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
+                "FROM model_operation WHERE operation_id=?1",
+            .content_metadata => "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+            .content_lookup => "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
+            .blocked_tool_calls => "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
+                "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
+                "AND " ++ resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
+            .session => "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1",
+            .executable_action => "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
+                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
+                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+                "ORDER BY action.action_id LIMIT 1",
+            .runnable_probe => runnable_probe_sql,
+            .tool_continuation_probe => tool_continuation_selection_sql,
+            .existing_command => "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+        };
+    }
+};
+
+fn resetHot(statement: *c.sqlite3_stmt) void {
+    _ = c.sqlite3_reset(statement);
+    _ = c.sqlite3_clear_bindings(statement);
 }
 
 fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
@@ -7758,6 +7841,21 @@ fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []cons
         .length = bytes.len,
         .digest = protocol.contentDigest(bytes),
     };
+}
+
+/// Test aid: statements left mid-step. Cached statements are reset and idle;
+/// each open reader's blob handle is the only expected busy statement.
+fn busyStatements(database: *c.sqlite3) usize {
+    var count: usize = 0;
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |current| : (statement = c.sqlite3_next_stmt(database, current)) {
+        if (c.sqlite3_stmt_busy(current) != 0) count += 1;
+    }
+    return count;
+}
+
+fn readerStatements(reader: *const ContentReader) usize {
+    return @intFromBool(reader.blob.handle != null);
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -9563,6 +9661,9 @@ test "production turn preserves skipped continuation preference through actual S
         pub fn noteLifecycleOpportunity(_: *@This()) void {}
         pub fn consumeControlHint(_: *@This()) bool {
             return false;
+        }
+        pub fn commitGeneration(self: *@This()) u64 {
+            return self.storage.commitGeneration();
         }
         pub fn reconcileControls(_: *@This()) void {}
         pub fn advanceBashPreparation(_: *@This()) bool {
@@ -12118,7 +12219,7 @@ test "failed commit saves neither answer nor partial Session" {
     }
 }
 
-test "real SQLite busy saves no answer and fences the connection" {
+test "an outside SQLite writer cannot take the open Store's lock" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -12143,8 +12244,9 @@ test "real SQLite busy saves no answer and fences the connection" {
     defer if (blocker_open) {
         _ = c.sqlite3_close(blocker);
     };
+    // The Store's exclusive lock refuses the outside writer, never the Host.
     try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_OK),
+        @as(c_int, c.SQLITE_BUSY),
         c.sqlite3_exec(blocker, "BEGIN IMMEDIATE", null, null, null),
     );
 
@@ -12156,18 +12258,9 @@ test "real SQLite busy saves no answer and fences the connection" {
         workspace,
         "model-a",
     );
-    try std.testing.expect(storage.configure(&command, true, .{}) == .infrastructure_failure);
-    try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_BUSY),
-        c.sqlite3_extended_errcode(storage.database),
-    );
-    try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.observeCommand("busy-save"));
+    try std.testing.expect(storage.configure(&command, true, .{}) != .infrastructure_failure);
+    try std.testing.expect(!storage.isFenced());
 
-    try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_OK),
-        c.sqlite3_exec(blocker, "ROLLBACK", null, null, null),
-    );
     try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_close(blocker));
     blocker_open = false;
     try storage.close();
@@ -12175,8 +12268,8 @@ test "real SQLite busy saves no answer and fences the connection" {
 
     var reopened = try Store.open(std.testing.io, database, root);
     defer reopened.close() catch unreachable;
-    try std.testing.expect((try reopened.observeCommand("busy-save")).status == .absent);
-    try std.testing.expect(!(try reopened.inspectSession("direct/busy-save")).found);
+    try std.testing.expect((try reopened.observeCommand("busy-save")).status != .absent);
+    try std.testing.expect((try reopened.inspectSession("direct/busy-save")).found);
 }
 
 test "real SQLite full during import publishes no canonical prefix" {
@@ -12712,7 +12805,9 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(u32, 1), try pragmaInt(storage.database, "PRAGMA foreign_keys"));
     try std.testing.expectEqual(@as(u32, 0), try pragmaInt(storage.database, "PRAGMA mmap_size"));
     try std.testing.expectEqual(@as(u32, 1), try pragmaInt(storage.database, "PRAGMA temp_store"));
-    try std.testing.expectEqual(@as(u32, 3), try pragmaInt(storage.database, "PRAGMA synchronous"));
+    try std.testing.expectEqual(@as(u32, 2), try pragmaInt(storage.database, "PRAGMA synchronous"));
+    try std.testing.expectEqual(@as(u32, 4194304), try pragmaInt(storage.database, "PRAGMA journal_size_limit"));
+    try std.testing.expectEqualStrings("exclusive", (diagnosticTextPragma(storage.database, "PRAGMA locking_mode") orelse return error.TestUnexpectedResult).slice());
     try std.testing.expectEqual(@as(u32, 4096), try pragmaInt(storage.database, "PRAGMA page_size"));
     try std.testing.expectEqual(@as(u32, 0), try pragmaInt(storage.database, "PRAGMA trusted_schema"));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_threadsafe());
@@ -12727,10 +12822,10 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
     try std.testing.expect(diagnostic.cache_spill_threshold.? > 0);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.mmap_size_bytes);
-    try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
+    try std.testing.expectEqual(@as(?i64, 2), diagnostic.synchronous);
     try std.testing.expectEqual(@as(?i64, 1), diagnostic.temp_store);
     try std.testing.expectEqual(@as(?u64, 0), diagnostic.busy_timeout_ms);
-    try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
+    try std.testing.expectEqualStrings("wal", diagnostic.journal_mode.?.slice());
     try std.testing.expect(diagnostic.process_memory_current_bytes != null);
     try std.testing.expect(diagnostic.process_memory_highwater_bytes != null);
     try std.testing.expect(diagnostic.cache_used_bytes != null);
@@ -12743,7 +12838,21 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expect(over_limit == null);
 }
 
-test "maximum canonical Store path completes a journaled transaction" {
+/// Rows in a raw copy's content table, or null when the copy lacks the table.
+fn rawContentCount(path: []const u8) !?u64 {
+    var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    if (c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{path}, 0), &raw) != c.SQLITE_OK) return error.StoreOpenFailed;
+    const statement = prepare(raw.?, "SELECT count(*) FROM content") catch return null;
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.QueryFailed;
+    return @intCast(c.sqlite3_column_int64(statement, 0));
+}
+
+test "Store WAL lifecycle at the maximum path: sidecars, lock ownership, crash copy, checkpoint and restore" {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
     const vfs = c.sqlite3_vfs_find(null) orelse return error.SqliteVfsUnavailable;
     try std.testing.expectEqual(@as(c_int, 512), vfs.*.mxPathname);
 
@@ -12751,19 +12860,71 @@ test "maximum canonical Store path completes a journaled transaction" {
     defer tmp.cleanup();
     var store_buffer: [protocol.max_store_bytes]u8 = undefined;
     const store_path = try createMaximumCanonicalStore(&tmp, &store_buffer);
-    const paths = try platform.resolveClientPaths(std.testing.io, store_path);
-    try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), paths.database.len);
-
-    var storage = try Store.open(std.testing.io, paths.database.slice(), paths.store.slice());
-    defer storage.close() catch unreachable;
-    try exec(storage.database, "BEGIN IMMEDIATE");
-    errdefer rollback(storage.database);
-    try exec(storage.database, "UPDATE store_meta SET value='temporary' WHERE key='wire_version'");
+    const paths = try platform.resolveClientPaths(io, store_path);
+    const database = paths.database.slice();
+    try std.testing.expectEqual(@as(usize, platform.max_database_path_bytes), database.len);
+    var wal_buffer: [platform.max_database_path_bytes + "-wal".len]u8 = undefined;
+    const wal = try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database});
+    var shm_buffer: [platform.max_database_path_bytes + "-shm".len]u8 = undefined;
+    const shm = try std.fmt.bufPrint(&shm_buffer, "{s}-shm", .{database});
     var journal_buffer: [platform.max_database_path_bytes + "-journal".len]u8 = undefined;
-    const journal_path = try std.fmt.bufPrint(&journal_buffer, "{s}-journal", .{paths.database.slice()});
-    const journal = try std.Io.Dir.cwd().statFile(std.testing.io, journal_path, .{});
-    try std.testing.expect(journal.kind == .file);
-    try exec(storage.database, "ROLLBACK");
+    const journal = try std.fmt.bufPrint(&journal_buffer, "{s}-journal", .{database});
+    try tmp.dir.createDir(io, "crash", .default_dir);
+    try tmp.dir.createDir(io, "database-only", .default_dir);
+
+    var storage = try Store.open(io, database, paths.store.slice());
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+    try exec(storage.database, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,NULL)");
+    const crash_rows = try queryU64(storage.database, "SELECT count(*) FROM content");
+    try std.testing.expect((try cwd.statFile(io, wal, .{})).size > 0);
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, shm, .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, journal, .{}));
+
+    // The open Host excludes every other reader and a second owner.
+    {
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        var raw: ?*c.sqlite3 = null;
+        defer _ = c.sqlite3_close(raw);
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open_v2(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw, c.SQLITE_OPEN_READONLY, null));
+        var statement: ?*c.sqlite3_stmt = null;
+        const prepared = c.sqlite3_prepare_v2(raw, "SELECT count(*) FROM content", -1, &statement, null);
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expect(prepared == c.SQLITE_BUSY or (prepared == c.SQLITE_OK and c.sqlite3_step(statement) == c.SQLITE_BUSY));
+    }
+    if (Store.open(io, database, paths.store.slice())) |_| return error.TestUnexpectedResult else |_| {}
+    // The failed open released the process-wide heap limit; restore it.
+    _ = c.sqlite3_hard_heap_limit64(sqlite_heap_bytes);
+
+    // A process crash leaves exactly these files; the WAL holds the commits.
+    try cwd.copyFile(database, tmp.dir, "crash/rui.sqlite3", io, .{});
+    try cwd.copyFile(wal, tmp.dir, "crash/rui.sqlite3-wal", io, .{});
+    try cwd.copyFile(database, tmp.dir, "database-only/rui.sqlite3", io, .{});
+
+    // A payload past the auto-checkpoint size moves into the database file,
+    // and the next commit truncates the reset WAL to the size limit.
+    try exec(storage.database, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),6291456,0,zeroblob(6291456))");
+    try exec(storage.database, "INSERT INTO content(digest,byte_length,private,payload) VALUES(randomblob(32),0,0,NULL)");
+    try std.testing.expect((try cwd.statFile(io, database, .{})).size > 6291456);
+    try std.testing.expect((try cwd.statFile(io, wal, .{})).size <= 4194304);
+    try storage.close();
+    storage_open = false;
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, wal, .{}));
+    try std.testing.expectError(error.FileNotFound, cwd.statFile(io, shm, .{}));
+
+    // Restoring the complete crash copy at the original path recovers its
+    // commits; the database file alone does not.
+    try tmp.dir.copyFile("crash/rui.sqlite3", cwd, database, io, .{});
+    try tmp.dir.copyFile("crash/rui.sqlite3-wal", cwd, wal, io, .{});
+    storage = try Store.open(io, database, paths.store.slice());
+    storage_open = true;
+    try std.testing.expectEqual(crash_rows, try queryU64(storage.database, "SELECT count(*) FROM content"));
+    var database_only_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const database_only = try std.fmt.bufPrint(&database_only_buffer, "{s}/database-only/rui.sqlite3", .{root});
+    const surviving = try rawContentCount(database_only);
+    try std.testing.expect(surviving == null or surviving.? < crash_rows);
 }
 
 test "measurement Store can disable cache spill without changing other limits" {
@@ -12786,8 +12947,8 @@ test "measurement Store can disable cache spill without changing other limits" {
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
-    try std.testing.expectEqual(@as(?i64, 3), diagnostic.synchronous);
-    try std.testing.expectEqualStrings("delete", diagnostic.journal_mode.?.slice());
+    try std.testing.expectEqual(@as(?i64, 2), diagnostic.synchronous);
+    try std.testing.expectEqualStrings("wal", diagnostic.journal_mode.?.slice());
 }
 
 test "measurement Store can force a smaller SQLite cache without changing production defaults" {
@@ -12842,16 +13003,30 @@ test "fresh Store uses current schema and rejects the prior version" {
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(duplicated_action_uncertainty));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(duplicated_action_uncertainty, 0));
     }
-    try exec(
-        storage.database,
-        std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version - 1}),
-    );
     try storage.close();
+    // Model the prior format's rollback-journal header; rejection must
+    // happen before the WAL switch, leaving that Store unmodified.
+    {
+        var raw: ?*c.sqlite3 = null;
+        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
+        try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database}, 0), &raw));
+        defer _ = c.sqlite3_close(raw);
+        try exec(raw.?, "PRAGMA journal_mode=DELETE");
+        try exec(raw.?, std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_version - 1}));
+    }
+    const before = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(before);
+    try std.testing.expectEqual(@as(u8, 1), before[18]);
 
     try std.testing.expectError(
         error.WrongStoreVersion,
         Store.open(std.testing.io, database, root),
     );
+    const after = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, database, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    var wal_buffer: [platform.max_database_path_bytes + "-wal".len]u8 = undefined;
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try std.fmt.bufPrint(&wal_buffer, "{s}-wal", .{database}), .{}));
 }
 
 test "existing Store rejects noncanonical durable authority" {
@@ -13324,7 +13499,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13405,7 +13580,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13489,7 +13664,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -13705,7 +13880,7 @@ test "public projected content sequential work excludes repeated prefixes" {
     }
     try std.testing.expectEqual(@as(u64, 147456), storage.testing_content_work.decoded.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 8), storage.testing_content_work.closes.load(.monotonic));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13735,7 +13910,7 @@ test "public projected content equal-length repoint fences at complete-stream EO
         try std.testing.expectError(error.CorruptStore, if (range) reader.readRange(4990, &bytes) else reader.read(4096, &bytes));
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, reader.read(5000, &bytes));
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -13774,7 +13949,7 @@ test "public projected content EOF rejects nonempty trailing parts" {
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, reader.readRange(8, &bytes));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -13798,7 +13973,7 @@ test "public projected content trailing empty parts retain final byte and repeat
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13824,7 +13999,7 @@ test "public projected content ranges own positioning across windows and scalar 
         const wanted = @min(bytes.len, expected.len - start);
         try std.testing.expectEqual(wanted, count);
         try std.testing.expectEqualStrings(expected[@intCast(start)..][0..count], bytes[0..count]);
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
     try std.testing.expectError(error.RangeOutOfBounds, reader.readRange(expected.len + 1, &bytes));
@@ -13868,7 +14043,7 @@ test "public projected content empty identity and repeated EOF" {
             try std.testing.expectEqual(@as(usize, 0), try reader.readRange(0, &bytes));
             try std.testing.expect(!storage.isFenced());
         }
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -13906,7 +14081,7 @@ test "public projected content range positioning preserves decoding and backing 
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(error.InvalidJsonEscape, reader.readRange(1, &bytes));
         try std.testing.expect(storage.isFenced());
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -14250,7 +14425,7 @@ test "continued accepted output keeps model immutable and public projection read
     try std.testing.expectEqual(@as(usize, 1), before_answer.count);
     try std.testing.expect(before_answer.items[0].kind == .user);
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     {
         const resolution = try prepare(
@@ -15210,7 +15385,7 @@ test "public proposal structural corruption fences independently on every route"
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.proposalPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -15275,7 +15450,7 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -15353,7 +15528,7 @@ test "persisted tool label corruption fences every publication route" {
             try std.testing.expectError(description.failure, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
