@@ -4278,9 +4278,9 @@ def renderer_cases():
         # cuts the Admission, older pages still hold the Message, whether its
         # row arrives alone (held reply) or with the reply.
         # A long Message shows collapsed live, so the reply alone outgrows
-        # the live view. Older pages show the Message by its size alone.
+        # the live view. Older pages show the Message as a bare fold row.
         reply = "\n".join(f"REPLY-{index:05d} " + "y" * 50 for index in range(4400))
-        omitted = "› ┄ 59 KB"
+        omitted = "› ┄"
 
         def after_message(shown, reply="REPLY-00000"):
             # What follows the Message: its reply live, the long reply's own
@@ -4341,7 +4341,7 @@ def renderer_cases():
             tty.capture.resize(80, 40)
             tty.send("\x1b[200~" + pasted + "\x1b[201~\r", "EXPAND-ANSWER")
             shown = tty.capture.completed
-            assert "PASTE-0001" in shown and "PASTE-0002" not in shown and "┄ 299 more lines · 16 KB" in shown, shown
+            assert "PASTE-0001" in shown and "PASTE-0002" not in shown and "┄ 299 more lines" in shown and "more lines ·" not in shown, shown
             for return_key in ("\x1b", "\x07", "\x0f"):
                 before = tty.capture.completed
                 tty.send("\x0f", heading)
@@ -4683,16 +4683,19 @@ def renderer_cases():
 
         long_reply = "\n".join(f"LONG-{index:05d} " + "y" * 50 for index in range(4400))
         big = "BIG-START " + "é ñ ü " * 300 + "BIG-END"
-        # 2,717 bytes: collapsed to its first 200 bytes, cut before a split é.
-        big_size = "┄ 2.7 KB"
+        # 2,717 bytes: collapsed to its first 200 bytes, cut before a split é,
+        # then a bare fold row: one line, and no size.
+        big_size = "┄"
 
         def big_whole(shown):
             # Its preview once, whatever wrapping, indentation and its time
-            # add, then its size and nothing more of it.
+            # add, then its fold row and nothing more of it.
             start = shown.index("BIG-START") + len("BIG-START")
             cut = shown.index("…", start)
             body = "\n".join(untimed(row) for row in shown[start:cut].split("\n"))
-            return "".join(body.split()) == "éñü" * 21 and shown.index(big_size, cut) - cut < 8 and "BIG-END" not in shown
+            fold = shown.index(big_size, cut)
+            return ("".join(body.split()) == "éñü" * 21 and fold - cut < 8 and not shown[fold + len(big_size):].split("\n", 1)[0].strip()
+                    and "BIG-END" not in shown)
         session = "renderer/listed-queued"
         configure(session)
         first_release = threading.Event()
