@@ -1,0 +1,12 @@
+'trace' not valid for hardware events. Ignoring.
+'trace' not valid for software events. Ignoring.
+'trace' not valid for hardware-cache events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+'trace' not valid for unknown events. Ignoring.
+Warning:
+Processed 1389483 events and lost 1 chunks!
+
+Check IO/CPU overload!
+

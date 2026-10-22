@@ -159,3 +159,5 @@
 - 2026-10-22T11:31:54Z strace pair base/cand exit=0 (published, timed_out). Note: first extraction helper raised AttributeError on a resumed line; replaced by extract.py.
 - 2026-10-22T11:36:52Z pre-spawn memory probe base/cand exit=0 (launch-mem)
 - 2026-10-22T11:38:33Z perf sched/fault runs perf-base, perf-cand, strace-base, strace-cand exit=0 (launch-sched/analysis.md)
+- 2026-10-22T13:21:55Z launch-sched-v2 predeclared (launch-sched-v2/PREDECLARED.md), before any data
+- 2026-10-22T13:29:45Z launch-sched-v2: 12 blocks exit=0 13:21:57Z–13:25Z; perf lost chunks in 8 blocks (recorded); results launch-sched-v2/analysis.md
