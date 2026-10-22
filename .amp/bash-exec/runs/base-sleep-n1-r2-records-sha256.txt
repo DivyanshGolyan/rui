@@ -1,0 +1,4 @@
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  records/.configure-000-configure.json.capture.lock  0
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  records/.seed-000.json.capture.lock  0
+eb71f2b30d72a684affcb55fe65ec5fc81a056e8e170358446c51fe295b6857f  records/configure-000-configure.json  579
+3de5c902db470b3dc53477ec49a080ae6773799cd8947d109b382de64603296d  records/seed-000.json  415186

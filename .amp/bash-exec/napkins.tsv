@@ -1,0 +1,36 @@
+2026-10-22T09:37:54.558748036Z	base-sleep-n1-r1	estimated: script mode, 1 parked shell then shell+sleep; Bash peak ~0.8 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:38:24.209102156Z	cand-sleep-n1-r1	estimated: -c, 1 parked shell then sleep alone (same PID); Bash peak ~0.6 MB (parked shell), post-release ~0.2 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:38:54.030548896Z	base-sleep-n10-r1	estimated: script mode; Bash peak ~5.4 MB (10 shells + 10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:39:25.142627162Z	cand-sleep-n10-r1	estimated: -c; Bash peak ~4 MB while parked, post-release ~1.5 MB (10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:39:56.066311471Z	base-sleep-n100-r1	estimated: script mode; Bash peak ~40 MB (100 shells 0.33 + 100 sleeps 0.1-0.17); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:40:41.241934785Z	cand-sleep-n100-r1	estimated: -c; Bash peak ~33 MB while parked, post-release ~12-17 MB (100 sleeps); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:41:26.680111557Z	base-read-n1-r1	estimated: script mode; Bash peak ~0.9 MB; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:41:51.340360631Z	cand-read-n1-r1	estimated: -c; Bash peak ~0.6 MB parked; cat replaces shell for ~ms; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:42:16.023246398Z	base-read-n10-r1	estimated: script mode; Bash peak ~3.5-5 MB; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:42:41.742155235Z	cand-read-n10-r1	estimated: -c; Bash peak ~3-4 MB parked; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:43:07.287528644Z	base-read-n100-r1	estimated: script mode; Bash peak ~30-46 MB (parked shells, then shells+cats); Host CPU ~8.6 s; barrier; sampler 25 ms
+2026-10-22T09:43:47.929277824Z	cand-read-n100-r1	estimated: -c; Bash peak ~33 MB parked, post-release burst below baseline; Host CPU ~8.6 s; barrier; sampler 25 ms
+2026-10-22T09:44:27.774890781Z	cand-sleep-n1-r2	estimated: -c, 1 parked shell then sleep alone (same PID); Bash peak ~0.6 MB (parked shell), post-release ~0.2 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:44:57.433429121Z	base-sleep-n1-r2	estimated: script mode, 1 parked shell then shell+sleep; Bash peak ~0.8 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:45:27.072598139Z	cand-sleep-n10-r2	estimated: -c; Bash peak ~4 MB while parked, post-release ~1.5 MB (10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:45:57.679391538Z	base-sleep-n10-r2	estimated: script mode; Bash peak ~5.4 MB (10 shells + 10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:46:28.338926103Z	cand-sleep-n100-r2	estimated: -c; Bash peak ~33 MB while parked, post-release ~12-17 MB (100 sleeps); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:47:13.661080573Z	base-sleep-n100-r2	estimated: script mode; Bash peak ~40 MB (100 shells 0.33 + 100 sleeps 0.1-0.17); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:47:59.193480999Z	cand-read-n1-r2	estimated: -c; Bash peak ~0.6 MB parked; cat replaces shell for ~ms; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:48:23.832318787Z	base-read-n1-r2	estimated: script mode; Bash peak ~0.9 MB; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:48:48.474117321Z	cand-read-n10-r2	estimated: -c; Bash peak ~3-4 MB parked; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:49:14.089727928Z	base-read-n10-r2	estimated: script mode; Bash peak ~3.5-5 MB; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:49:39.722619074Z	cand-read-n100-r2	estimated: -c; Bash peak ~33 MB parked, post-release burst below baseline; Host CPU ~8.6 s; barrier; sampler 25 ms
+2026-10-22T09:50:20.243289752Z	base-read-n100-r2	estimated: script mode; Bash peak ~30-46 MB (parked shells, then shells+cats); Host CPU ~8.6 s; barrier; sampler 25 ms
+2026-10-22T09:51:00.666294847Z	base-sleep-n1-r3	estimated: script mode, 1 parked shell then shell+sleep; Bash peak ~0.8 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:51:30.327609611Z	cand-sleep-n1-r3	estimated: -c, 1 parked shell then sleep alone (same PID); Bash peak ~0.6 MB (parked shell), post-release ~0.2 MB; Host CPU ~0.4 s; barrier; sampler 25 ms
+2026-10-22T09:51:59.950521750Z	base-sleep-n10-r3	estimated: script mode; Bash peak ~5.4 MB (10 shells + 10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:52:30.656894486Z	cand-sleep-n10-r3	estimated: -c; Bash peak ~4 MB while parked, post-release ~1.5 MB (10 sleeps); Host CPU ~1.7 s; barrier; sampler 25 ms
+2026-10-22T09:53:01.206058118Z	base-sleep-n100-r3	estimated: script mode; Bash peak ~40 MB (100 shells 0.33 + 100 sleeps 0.1-0.17); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:53:46.832867306Z	cand-sleep-n100-r3	estimated: -c; Bash peak ~33 MB while parked, post-release ~12-17 MB (100 sleeps); Host CPU ~9 s; barrier; sampler 25 ms
+2026-10-22T09:54:32.379889111Z	base-read-n1-r3	estimated: script mode; Bash peak ~0.9 MB; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:54:57.042015972Z	cand-read-n1-r3	estimated: -c; Bash peak ~0.6 MB parked; cat replaces shell for ~ms; Host CPU ~0.1 s; barrier; sampler 25 ms
+2026-10-22T09:55:21.684713696Z	base-read-n10-r3	estimated: script mode; Bash peak ~3.5-5 MB; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:55:47.425839286Z	cand-read-n10-r3	estimated: -c; Bash peak ~3-4 MB parked; Host CPU ~0.6 s; barrier; sampler 25 ms
+2026-10-22T09:56:13.076772280Z	base-read-n100-r3	estimated: script mode; Bash peak ~30-46 MB (parked shells, then shells+cats); Host CPU ~8.6 s; barrier; sampler 25 ms
+2026-10-22T09:56:54.057384951Z	cand-read-n100-r3	estimated: -c; Bash peak ~33 MB parked, post-release burst below baseline; Host CPU ~8.6 s; barrier; sampler 25 ms

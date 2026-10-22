@@ -1,0 +1,6 @@
+193ca22934a63fa0fdf3f0190ad36c18db0d1059f06ac12ecc5b42954721a3a7  /home/user/workspace/.perf-bash/campaign/measure-model-output
+d1a4b9666c39081f46a5219eeead5ac557d6450d5dc145eb22ae6d15dd6c0f39  /home/user/workspace/.perf-bash/build-base-671c3c7d/bin/rui
+34b6e0669acf14eca9dc7da6defe31e6e1165c45f028eedb83d5228733c63e15  /home/user/workspace/.perf-bash/build-cand-6f2dd44c/bin/rui
+GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)
+44319070ddfc03b01bfc44529d9662f11fab1851
+c6ab109bdb78a2a456936f4fd2a55f5222bd0a73
