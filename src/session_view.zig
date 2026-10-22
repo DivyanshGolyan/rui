@@ -1209,19 +1209,24 @@ fn Summary(comptime Sink: type) type {
             if (self.length != 0) try self.emit();
             try self.writeHeading("");
             if (failing(self.code) and self.section != .ended) {
-                // Strip the canonical trailer that follows the last stream.
-                const tail = if (self.stderr.total != 0) &self.stderr else &self.stdout;
-                while (tail.count != 0) {
-                    const line = tail.last(0);
-                    if (line.len == 0 or std.mem.eql(u8, line, "Full output was not retained.") or
-                        std.mem.startsWith(u8, line, "Full stdout: ") or std.mem.startsWith(u8, line, "Full stderr: "))
-                    {
-                        tail.dropLast();
-                    } else if (std.mem.eql(u8, line, "[earlier output omitted]")) {
-                        self.earlier_omitted = true;
-                        tail.dropLast();
-                    } else break;
+                // The canonical trailer follows only the stream written last;
+                // trailing blank lines end either. Select after cleaning, so a
+                // blank-only stderr falls back to useful stdout.
+                const last = if (self.stderr.total != 0) &self.stderr else &self.stdout;
+                for ([_]*Tail{ &self.stdout, &self.stderr }) |stream| {
+                    while (stream.count != 0) {
+                        const line = stream.last(0);
+                        const trailer = stream == last and (std.mem.eql(u8, line, "Full output was not retained.") or
+                            std.mem.startsWith(u8, line, "Full stdout: ") or std.mem.startsWith(u8, line, "Full stderr: "));
+                        if (line.len == 0 or trailer) {
+                            stream.dropLast();
+                        } else if (stream == last and std.mem.eql(u8, line, "[earlier output omitted]")) {
+                            self.earlier_omitted = true;
+                            stream.dropLast();
+                        } else break;
+                    }
                 }
+                const tail = if (self.stderr.count != 0) &self.stderr else &self.stdout;
                 const shown = @min(tail.count, excerpt_lines);
                 var shortened = self.earlier_omitted or tail.total > shown;
                 for (0..shown) |index| {
@@ -1279,6 +1284,13 @@ test "tool summary hides only complete routine metadata and retains warnings" {
         .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\nstderr tail:\nalso hidden", "", "" },
         .{ .failed, "Bash failed. Exit code: 4.\nstderr tail:\n\x1b[2Jcontrol", "  \\x1b[2Jcontrol", "4" },
         .{ .failed, "Bash failed. Exit code: 5.\n", "", "5" },
+        // A blank-only stderr does not hide useful stdout, whole or truncated.
+        .{ .failed, "Bash failed. Exit code: 7.\nstdout tail:\nuseful diagnostic B\nstderr tail:\n\n", "  useful diagnostic B", "7" },
+        .{ .failed, "Bash failed. Exit code: 7.\nstdout tail:\nuseful\n\nstderr tail:\n\n\n", "  useful", "7" },
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nu1\nu2\nstderr tail:\n\n[earlier output omitted]\n\nFull stdout: /s/o\n", "  u1\n  u2\n  /details for full output.", "1" },
+        // Meaningful stderr still wins; warnings stay visible beside the fallback.
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nout\n\nstderr tail:\nerr\n", "  err", "1" },
+        .{ .failed, "Bash failed. Exit code: 7.\n" ++ warning ++ "\nstdout tail:\nB\nstderr tail:\n\n", "  " ++ warning ++ "\n  B", "7" },
     };
     inline for (cases) |case| {
         for (0..case[1].len + 1) |split| {

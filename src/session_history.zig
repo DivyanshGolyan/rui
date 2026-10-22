@@ -274,6 +274,32 @@ test "history body limit preserves contextual tool outcomes" {
     }
 }
 
+test "reopened transcript keeps useful stdout when stderr is blank" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    const result = "Bash failed. Exit code: 7.\nstdout tail:\nuseful diagnostic B\nstderr tail:\n\n";
+    try scratch.writePositionalAll(io, result, 0);
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Run check");
+    var prepared: Prepared = .{ .page = .{ .end = 7, .count = 1, .more = false } };
+    prepared.page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = result.len, .digest = @splat(0) }, .presentation = .{ .description = description, .code = .failed, .publication_position = 7 } };
+    prepared.offsets[0] = 0;
+    var sink: Sink = .{};
+    try prepared.render(io, scratch, "store", "session", &sink, .transcript, false);
+    try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n  useful diagnostic B\n", sink.bytes[0..sink.length]);
+}
+
 test "history preparation binds wire and staged bytes before exposure" {
     const Peer = struct {
         var clients: [2]std.posix.fd_t = undefined;
