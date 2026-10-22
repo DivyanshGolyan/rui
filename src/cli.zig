@@ -14,6 +14,7 @@ const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
+const model_capability = @import("model_capability.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -266,7 +267,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    const codex = provider_selection.codex(readiness);
+    const codex = model_capability.capability(readiness);
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
         .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
@@ -333,7 +334,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"local_credential\":\"{s}\",\"next_session\":", .{@tagName(facts.readiness)});
-    const codex = provider_selection.codex(facts.readiness);
+    const codex = model_capability.capability(facts.readiness);
     if (provider_selection.resolve(&.{codex}, null, null, facts.provider, facts.model)) |choice| switch (choice) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {

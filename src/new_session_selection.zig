@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_capability = @import("model_capability.zig");
 const preferences = @import("preference_values.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
@@ -33,7 +34,7 @@ pub const Snapshot = struct {
     /// still checks the actual Host and captures its atomic require_model guard.
     pub fn resolve(self: *const Snapshot, readiness: provider_selection.Readiness) !?Binding {
         const selection = try provider_selection.resolve(
-            &.{provider_selection.codex(readiness)},
+            &.{model_capability.capability(readiness)},
             self.intent.provider,
             self.intent.model,
             if (self.defaults.provider.len == 0) null else self.defaults.provider.slice(),

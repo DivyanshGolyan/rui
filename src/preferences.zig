@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = @import("posix");
+const model_capability = @import("model_capability.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const provider_selection = @import("provider_selection.zig");
@@ -30,9 +31,8 @@ pub fn validate(values: *const Values) !void {
     for (values.provider.slice()) |byte| {
         if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidPreferenceProvider;
     }
-    for (values.model.slice()) |byte| {
-        if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
-    }
+    // Empty means no pin; any pin follows Codex's one identifier rule.
+    if (values.model.len != 0 and !model_capability.validModel(values.model.slice())) return error.InvalidPreferenceModel;
     if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
 }
 
@@ -102,7 +102,7 @@ fn apply(saved: Values, edit: Edit, readiness: provider_selection.Readiness) !Va
         .keep => {},
         .clear => values.model = .{},
         .set => |model| {
-            const supported = provider_selection.codex(readiness);
+            const supported = model_capability.capability(readiness);
             const choice = provider_selection.resolve(&.{supported}, null, model, if (values.provider.len != 0) values.provider.slice() else null, null) catch |err| switch (err) {
                 error.UnsupportedSelectionProvider => return error.UnsupportedPreferenceProvider,
                 error.UnsupportedSelectionModel => return error.UnsupportedPreferenceModel,
@@ -132,12 +132,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: provider_selection.Read
         if (!std.mem.eql(u8, edit.provider.set, "codex")) return error.UnsupportedPreferenceProvider;
     }
     if (edit.model == .set) {
-        const value = edit.model.set;
-        if (value.len == 0 or value.len > protocol.max_model_bytes) return error.InvalidPreferenceModel;
-        for (value) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidPreferenceModel;
-        const supported = provider_selection.codex(.missing);
-        _ = provider_selection.resolve(&.{supported}, "codex", value, null, null) catch
-            return error.UnsupportedPreferenceModel;
+        if (!model_capability.validModel(edit.model.set)) return error.InvalidPreferenceModel;
     }
     if (edit.store == .set) {
         const value = edit.store.set;
