@@ -1363,7 +1363,25 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     return result;
 }
 
-test "launched Bash starts with default signal actions, an empty mask and no inherited /dev/null" {
+/// Lists, as `leaked-N` lines, the /dev/null descriptors this process would
+/// pass to any child because they lack close-on-exec.
+fn inheritableDevNull(buffer: []u8) ![]const u8 {
+    const null_file = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/null", .{});
+    defer null_file.close(std.testing.io);
+    const target = (try null_file.stat(std.testing.io)).inode;
+    var writer: std.Io.Writer = .fixed(buffer);
+    var fd: c_int = 3;
+    while (fd < 1024) : (fd += 1) {
+        const flags = std.c.fcntl(fd, std.c.F.GETFD);
+        if (flags < 0 or flags & std.c.FD_CLOEXEC != 0) continue;
+        const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+        const stat = file.stat(std.testing.io) catch continue;
+        if (stat.kind == .character_device and stat.inode == target) try writer.print("leaked-{d}\n", .{fd});
+    }
+    return writer.buffered();
+}
+
+test "launched Bash starts with default signal actions, an empty mask and no /dev/null added by launch" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -1373,6 +1391,13 @@ test "launched Bash starts with default signal actions, an empty mask and no inh
     var entries: [8]output_retention.Entry = undefined;
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
+    // Descriptors the Host itself inherited without close-on-exec still reach
+    // Bash. Launch must add none: Bash sees exactly the set held before any
+    // launch, so a /dev/null cached by the spawn path appears as an extra.
+    var inherited_buffer: [512]u8 = undefined;
+    const inherited = try inheritableDevNull(&inherited_buffer);
+    var expected_buffer: [600]u8 = undefined;
+    const expected_descriptors = try std.fmt.bufPrint(&expected_buffer, "Exit code: 0.\nstdout tail:\n{s}checked\n", .{inherited});
     // The Host may inherit an ignored SIGHUP (nohup) and its spawning thread
     // may block signals; neither may reach the tool.
     const ignore: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
@@ -1388,7 +1413,7 @@ test "launched Bash starts with default signal actions, an empty mask and no inh
         .{ "kill -HUP $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.HUP)}) },
         .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}) },
         // fds 0-2 are the tool's own; any later /dev/null was inherited.
-        .{ "for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done; echo checked", "Exit code: 0.\nstdout tail:\nchecked\n" },
+        .{ "for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", expected_descriptors },
     }, 1..) |case, ordinal| {
         const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
         if (std.mem.indexOf(u8, result.text(), case[1]) == null) {
