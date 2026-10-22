@@ -185,7 +185,7 @@ For foreground operation, use `host serve --store PATH --codex`. It uses the sam
 
 ### Start fresh after a Store format change
 
-At Host startup, an incompatible build reports the Store path, its format and the format the build supports. Rui does not migrate or reset the Store. You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
+At Host startup, an incompatible build reports the Store path, its format and the format the build supports. Rui does not migrate or reset the Store. Store format 30 (SQLite WAL with an exclusive Host lock) rejects every Store created by an earlier build, so updating to it requires a fresh Store. You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
 
 Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. Each `install.*` directory has a `revision` file identifying its build. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
 
@@ -204,7 +204,7 @@ If a Host is running, let its work finish before stopping it. `host stop` interr
 "$RUI" host status --store "$STORE"
 ```
 
-Wait until status reports `Host: unavailable`. A stop acknowledgment alone is not enough. Then copy the entire stopped Store into a new private backup directory:
+Wait until status reports `Host: unavailable`. A stop acknowledgment alone is not enough. Then copy the entire stopped Store into a new private backup directory. After a crash, committed work may still be only in `rui.sqlite3-wal`, so never copy or restore `rui.sqlite3` by itself:
 
 ```sh
 BACKUP=$(mktemp -d "$HOME/rui-store-backup.XXXXXX")

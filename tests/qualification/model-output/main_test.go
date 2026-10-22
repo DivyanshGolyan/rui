@@ -322,14 +322,14 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(3), JournalMode: text("delete"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
+		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
 	if !spillDiagnosticsValid(valid, true, true) {
 		t.Fatal("valid spill-on diagnostics were rejected")
 	}
 	invalid := append([]sqliteDiagnostic(nil), valid...)
-	invalid[1].Synchronous = i64(2)
+	invalid[1].Synchronous = i64(3)
 	if spillDiagnosticsValid(invalid, true, true) {
 		t.Fatal("mismatched synchronous setting was accepted")
 	}
@@ -361,7 +361,7 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 }
 
 func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
-	const valid = `{"page_size_bytes":4096,"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":3,"journal_mode":"delete","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
+	const valid = `{"page_size_bytes":4096,"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":2,"journal_mode":"wal","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
 	var record sqliteDiagnostic
 	if err := json.Unmarshal([]byte(valid), &record); err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
 	}
 	for field, wrong := range map[string]any{
 		"cache_size_setting": -4096, "hard_heap_limit_bytes": 33554432,
-		"cache_spill_threshold": 0, "synchronous": 2, "journal_mode": "wal",
+		"cache_spill_threshold": 0, "synchronous": 3, "journal_mode": "delete",
 		"mmap_size_bytes": 4096, "temp_store": 2, "busy_timeout_ms": 100,
 	} {
 		for _, value := range []any{wrong, nil} {
@@ -433,7 +433,7 @@ func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
-		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":3,"journal_mode":"delete","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
+		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":2,"journal_mode":"wal","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
 		records, err := sqliteDiagnosticRecords(encoded)
 		if err != nil || len(records) != 1 {
 			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
