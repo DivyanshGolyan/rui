@@ -65,6 +65,71 @@ def assert_complete_failed_response(store, body, *, operation, code, http_status
     return metadata
 
 
+def empty_response_retention_case(state, processes, endpoints, status):
+    """Empty failures leave fresh diagnostics and a full retention FIFO untouched."""
+    label = f"empty-http-{status}"
+    store = state / label
+    body = b'{"error":"nonempty retention control"}'
+    empty = ResponseSpec(b"", {"X-Request-Id": label}, status=status)
+    nonempty = ResponseSpec(body, {"X-Request-Id": "nonempty-control"}, status=400)
+    endpoint = SuccessEndpoint([empty, nonempty, empty, nonempty])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints[endpoint] = thread
+    thread.start()
+    host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+    processes.append(host)
+    session = f"direct/{label}"
+    configure(state, store, label + "-config", session, "model-a")
+
+    def fail(key, code):
+        message(state, store, key, session, "input")
+        result = wait_for(lambda: (value := observe(store, key)).get("result") and value, key)
+        assert result["result"]["code"] == code, result
+
+    code = "provider_http_400" if status == 400 else "malformed_provider_output"
+    root = store / "diagnostics" / "failed-responses"
+    fail(label + "-fresh", code)
+    assert not root.exists(), f"{label} created diagnostics without response bytes"
+    fail(label + "-seed", "provider_http_400")
+    (seed, retained), = failed_response_records(store)
+    assert retained == body and seed["status"] == "complete", seed
+    assert seed["body"].startswith("response-1-"), seed
+
+    # Fill the production 256-record bound with private copies of this real
+    # record. Empty admission must return before prune could evict its oldest.
+    for sequence in range(2, 257):
+        stem = f"response-{sequence}-{seed['operation']}-{seed['attempt']}"
+        metadata = dict(seed, body=stem + ".body")
+        for name, data in ((stem + ".body", body), (stem + ".json", json.dumps(metadata).encode())):
+            path = root / name
+            path.write_bytes(data)
+            path.chmod(0o600)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    assert len(failed_response_records(store)) == 256
+    fail(label + "-full", code)
+    after = {path.name: path.read_bytes() for path in root.iterdir()}
+    assert after == before, f"{label} changed the full retention FIFO"
+    assert len(endpoint.requests) == 3, len(endpoint.requests)
+
+    # A later nonempty failure still evicts exactly the oldest record and
+    # takes sequence 257, with no sequence or FIFO cost for either empty body.
+    fail(label + "-after", "provider_http_400")
+    records = failed_response_records(store)
+    assert [int(record["body"].split("-")[1]) for record, _ in records] == list(range(2, 258))
+    assert records[-1][1] == body and records[-1][0]["status"] == "complete"
+    oldest = {seed["body"], seed["body"].removesuffix(".body") + ".json"}
+    for name, data in before.items():
+        if name in oldest:
+            assert not (root / name).exists(), name
+        else:
+            assert (root / name).read_bytes() == data, name
+    assert len(endpoint.requests) == 4, len(endpoint.requests)
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+    print(f"{label}: no empty record/directory; full FIFO and next sequence unchanged; nonempty eviction preserved")
+
+
 def decode_model_evidence(value):
     """Independent oracle for the adapter's opaque v1 source certificate."""
     assert isinstance(value, bytes) and 7 <= len(value) <= 775, value
@@ -570,6 +635,8 @@ def main(mode="all", correlation_case="all"):
         if mode == "phased-messages":
             completed = True
             return
+        for status in (400, 200):
+            empty_response_retention_case(state, processes, endpoints, status)
         endpoint_thread.start()
         compaction_cases(state, processes, endpoints, releases)
         forbidden_effect = state / "proposal-must-not-launch"

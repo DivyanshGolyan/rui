@@ -2994,6 +2994,7 @@ const AnsweredAttempt = struct {
 /// directory and record file are this serial execution transition's only
 /// descriptors, within `descriptor_capacity`'s serial excess.
 fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: failed_responses.Failure) void {
+    if (source.length == 0) return;
     const store_dir = host.failed_response_store orelse return;
     const status = status: {
         var dir = failed_responses.open(host.io, store_dir) catch |err| break :status err;
