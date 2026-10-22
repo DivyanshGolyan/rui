@@ -1,0 +1,41 @@
+commits 92
+group: touched / only-this-group
+  transport        27   10
+  requests-api     27    3
+  capture-records   22    6
+  inputs           15    0
+  host-status      14    6
+  read-pages       12    5
+  mutation-decode   11    2
+  session-list      9    2
+  report-decode     7    0
+  replies           5    0
+  misc              3    0
+  observation-decode    2    0
+top pairs
+  capture-records+inputs: 10
+  requests-api+transport: 10
+  capture-records+requests-api: 8
+  mutation-decode+requests-api: 6
+  requests-api+session-list: 6
+  host-status+transport: 6
+  capture-records+transport: 6
+  capture-records+mutation-decode: 5
+  inputs+requests-api: 5
+  read-pages+requests-api: 4
+  report-decode+requests-api: 4
+  replies+requests-api: 4
+  inputs+transport: 4
+  misc+requests-api: 3
+  misc+transport: 3
+  host-status+inputs: 3
+  mutation-decode+report-decode: 3
+  mutation-decode+transport: 3
+  report-decode+session-list: 3
+  replies+transport: 3
+  inputs+mutation-decode: 2
+  mutation-decode+read-pages: 2
+  capture-records+session-list: 2
+  inputs+session-list: 2
+  read-pages+transport: 2
+unmapped (renamed/removed) names top: [('sendBytes', 5), ('sendRecord', 4), ('interruptModel', 3), ('configure', 3), ('message', 3), ('readResponse', 3), ('stopSession', 2), ('MessageObservation', 2), ('waitReadable', 2), ('writeAllUntil', 2), ('readCommandBody', 2), ('denyPermission', 2)]

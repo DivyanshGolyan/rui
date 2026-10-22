@@ -1,0 +1,31 @@
+commits 204
+group: touched / only-this-group
+  execution        93   40
+  host-serve       60   16
+  faults           46    4
+  http-route       34   10
+  trace            24    2
+  intake           18    9
+  render           15    5
+top pairs
+  execution+faults: 31
+  execution+host-serve: 28
+  faults+host-serve: 21
+  execution+trace: 19
+  faults+trace: 14
+  execution+http-route: 13
+  host-serve+trace: 13
+  faults+http-route: 11
+  host-serve+http-route: 10
+  host-serve+intake: 7
+  http-route+trace: 7
+  execution+render: 7
+  http-route+render: 7
+  faults+render: 6
+  host-serve+render: 6
+  http-route+intake: 4
+  execution+intake: 2
+  faults+intake: 2
+  render+trace: 2
+  intake+render: 1
+unmapped (renamed/removed) names top: [('handleConnection', 35), ('renderSessionObservation', 9), ('admitAttempt', 7), ('Connection', 6), ('settleAttemptFailure', 5), ('finishSlotCleanup', 5), ('connectionMain', 5), ('deliverContent', 5), ('beginCleanup', 5), ('finishTestClient', 4), ('writeHttp', 4), ('advanceCleanup', 4)]

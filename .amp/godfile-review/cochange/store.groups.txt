@@ -1,0 +1,44 @@
+commits 158
+group: touched / only-this-group
+  execution        57    5
+  admission        45    9
+  types-sql        45    2
+  historical       44    7
+  schema           37    0
+  public-reads     36    8
+  report           31    4
+  content          22    6
+  types-admission   21    0
+  types-reads      16    1
+  open-lifecycle   12    1
+  faults-trace     12    0
+  sqlite-helpers    7    1
+  txn-fence         5    0
+  connection        5    1
+top pairs
+  execution+historical: 31
+  execution+schema: 31
+  execution+types-sql: 30
+  schema+types-sql: 29
+  historical+types-sql: 24
+  admission+schema: 22
+  historical+schema: 22
+  admission+execution: 20
+  admission+types-sql: 20
+  admission+historical: 17
+  admission+types-admission: 16
+  public-reads+report: 15
+  execution+report: 15
+  admission+public-reads: 14
+  execution+public-reads: 14
+  public-reads+types-sql: 14
+  public-reads+schema: 12
+  historical+report: 12
+  report+schema: 12
+  report+types-sql: 12
+  historical+public-reads: 11
+  admission+report: 11
+  admission+faults-trace: 10
+  execution+types-admission: 10
+  schema+types-admission: 10
+unmapped (renamed/removed) names top: [('Store.denyPermission', 4), ('ModelFailureDisposition', 3), ('Store.usagePressure', 3), ('readOutputHex', 3), ('Store.denyPermissionLocked', 3), ('Store.recoverOneExhaustedModelAttemptForHost', 3), ('Store.settleModelFailure', 3), ('Store.settleModelFailureLocked', 3), ('Store.readContentRange', 3), ('Store.rejectMessageLocked', 3), ('Store.publicConversationContentIdLocked', 2), ('EncodedStringReader', 2)]

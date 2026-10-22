@@ -1,9 +1,9 @@
 import json,sys,re,collections,itertools,subprocess
 # args: cochange.json  pinfile  groupspec(json list of [startline,endline,group])
 co=json.load(open(sys.argv[1])); pin=sys.argv[2]; spec=json.load(open(sys.argv[3]))
-sys.path.insert(0,'/tmp/scripts')
+import os
 text=open(pin).read()
-exec(open('/tmp/scripts/regions_fn.py').read())
+exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'regions_fn.py')).read())
 regs=regions(text)
 name2g={}
 for a,b,name,kind in regs:

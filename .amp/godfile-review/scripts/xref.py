@@ -1,5 +1,6 @@
+import os
 import json,sys,re,collections
-exec(open('/tmp/scripts/regions_fn.py').read())
+exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'regions_fn.py')).read())
 path,spec=sys.argv[1],json.load(open(sys.argv[2]))
 text=open(path).read(); L=text.split('\n')
 regs=[r for r in regions(text) if r[3]!='test']
