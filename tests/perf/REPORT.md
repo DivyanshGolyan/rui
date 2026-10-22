@@ -44,7 +44,7 @@ The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups
 
 The STREAM100 CPU here is an interior observation window at 30 events/s/stream. It is **not** a complete-work CPU-per-event figure and is not comparable with the SSE fix's 80.4458 → 77.0917 µs/event, which came from the separate 100 events/s complete-work runs. STREAM event rate and CPU per event are unavailable for this run.
 
-- P2 is preparing one instrumented HOLD100 window (10 s warmup + 60 s). Pre-run estimate (**estimated**): about 1,000 SELECT/s, since the fixes did not touch SQL polling.
+- P2 started one instrumented HOLD100 window (10 s warmup + 60 s) on `d4f87000` at 01:17:37 UTC; result pending. Instrumented ReleaseFast binary SHA-256 `06529a20…701bc`; 87 exact-main source files, the trace-only patch and 31 harness-source hashes are recorded. Pre-run estimate (**estimated**): about 1,000 SELECT/s, since the fixes did not touch SQL polling. Two earlier attempts failed before any held window or count, and both are kept: a build failure (a copied C extension was missing), and a 01:16:25 UTC setup failure (the precreated artifact directory had mode 0755 and was rejected before Configure). P2 diagnosed the second against `client.Capture.open` and started the single corrected attempt in a fresh 0700 directory. No HOLD0 window.
 
 **Open items.**
 - No Mac measurement (footprint, wakeups) and no live 100 × gpt-6-luna wave: the only approved runner, 1993-X2, is offline.
