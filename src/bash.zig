@@ -1396,8 +1396,10 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     // launch, so a /dev/null cached by the spawn path appears as an extra.
     var inherited_buffer: [512]u8 = undefined;
     const inherited = try inheritableDevNull(&inherited_buffer);
+    // The child's listing is bracketed by its own markers, so notices or
+    // headers the result adds around stdout cannot change what is compared.
     var expected_buffer: [600]u8 = undefined;
-    const expected_descriptors = try std.fmt.bufPrint(&expected_buffer, "Exit code: 0.\nstdout tail:\n{s}checked\n", .{inherited});
+    const expected_descriptors = try std.fmt.bufPrint(&expected_buffer, "begin\n{s}checked\n", .{inherited});
     // The Host may inherit an ignored SIGHUP (nohup) and its spawning thread
     // may block signals; neither may reach the tool.
     const ignore: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
@@ -1409,17 +1411,21 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     var previous_mask: std.posix.sigset_t = undefined;
     std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous_mask);
     defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
-    for ([_]struct { []const u8, []const u8 }{
-        .{ "kill -HUP $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.HUP)}) },
-        .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}) },
+    const succeeded = "Bash succeeded. Exit code: 0.\n";
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "kill -HUP $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.HUP)}), "" },
+        .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}), "" },
         // fds 0-2 are the tool's own; any later /dev/null was inherited.
-        .{ "for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", expected_descriptors },
+        .{ "echo begin; for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done | sort -t- -k2,2n; echo checked", succeeded, expected_descriptors },
     }, 1..) |case, ordinal| {
         const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
-        if (std.mem.indexOf(u8, result.text(), case[1]) == null) {
-            std.debug.print("{s}\n", .{result.text()});
+        const text = result.text();
+        if (std.mem.indexOf(u8, text, case[1]) == null or std.mem.indexOf(u8, text, case[2]) == null) {
+            std.debug.print("expected {s} and {s}; got:\n{s}\n", .{ case[1], case[2], text });
             return error.TestUnexpectedResult;
         }
+        // Each platform's log records the parent baseline beside the child's set.
+        if (case[2].len != 0) std.debug.print("inheritable /dev/null before launch, matched exactly by Bash:\n{s}(end)\n", .{inherited});
     }
 }
 
