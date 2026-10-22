@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -563,6 +566,160 @@ func TestDisconnectedStreamCompletesFixtureAccounting(t *testing.T) {
 	}
 	if completion.TerminalFinished != 1 || completion.OfferFailedStreams != 1 || completion.TerminalFailedStreams != 1 || completion.CompletedBatches >= testFixtureRate {
 		t.Fatalf("completion = %+v", completion)
+	}
+}
+
+type holdResponseWriter struct {
+	header http.Header
+	writes chan int
+}
+
+func (w holdResponseWriter) Header() http.Header  { return w.header }
+func (w holdResponseWriter) WriteHeader(code int) { w.writes <- code }
+func (w holdResponseWriter) Write(data []byte) (int, error) {
+	w.writes <- len(data)
+	return len(data), nil
+}
+func (w holdResponseWriter) Flush() { w.writes <- 0 }
+
+func TestHoldAcceptsWithoutHeadersForFullWindowAndCancels(t *testing.T) {
+	for _, cancelAt := range []string{"before-start", "during-hold", "expire"} {
+		t.Run(cancelAt, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				facts, err := os.CreateTemp(t.TempDir(), "facts")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer facts.Close()
+				f, err := newFixture(1, time.Second, 3, false, t.TempDir(), facts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.hold = true
+				server := &Server{fixture: f}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hold"}]}]}`)).WithContext(ctx)
+				response := holdResponseWriter{header: make(http.Header), writes: make(chan int, 8)}
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					// The real HTTP server consumes this sentinel without writing headers.
+					defer func() {
+						if value := recover(); value != nil && value != http.ErrAbortHandler {
+							t.Errorf("unexpected handler panic: %v", value)
+						}
+					}()
+					f.serveResponse(response, request)
+				}()
+				ready, err := server.WaitReady(ctx)
+				if err != nil || ready.ReadyStreams != 1 || ready.HeldStreams != 1 {
+					t.Fatalf("request acceptance = %+v, %v", ready, err)
+				}
+				if cancelAt != "before-start" {
+					if _, err := server.StartOffer(); err != nil {
+						t.Fatal(err)
+					}
+					// StartOffer's existing 500 ms lead plus the full 120 s HOLD.
+					time.Sleep(120*time.Second + 499*time.Millisecond)
+				}
+				synctest.Wait()
+				select {
+				case write := <-response.writes:
+					t.Fatalf("HOLD leaked header/body/flush before expiry: %d", write)
+				default:
+				}
+				if cancelAt == "expire" {
+					time.Sleep(time.Millisecond)
+				} else {
+					cancel()
+				}
+				<-done
+				if cancelAt == "expire" {
+					if code := <-response.writes; code != http.StatusGatewayTimeout {
+						t.Fatalf("HOLD resumed paced streaming: code=%d", code)
+					}
+				} else if len(response.writes) != 0 {
+					t.Fatal("cancelled HOLD wrote a response")
+				}
+				if got := server.Snapshot().HeldStreams; got != 0 {
+					t.Fatalf("ended HOLD still counted active: %d", got)
+				}
+			})
+		})
+	}
+}
+
+func TestHoldPublicH1AndH2SendNoHeadersAndClose(t *testing.T) {
+	for _, test := range []struct {
+		tls  bool
+		stop string
+	}{
+		{false, "client"}, {false, "server-before-start"}, {false, "server-during-hold"},
+		{true, "client"}, {true, "server-before-start"}, {true, "server-during-hold"},
+	} {
+		tls, stop := test.tls, test.stop
+		t.Run(fmt.Sprintf("%t/%s", tls, stop), func(t *testing.T) {
+			server, err := Start(Config{Streams: 1, Duration: time.Second, EventsPerSecond: 3, TLS: tls, Hold: true, ArtifactDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := false
+			defer func() {
+				if !closed {
+					if err := server.Close(); err != nil {
+						t.Error(err)
+					}
+				}
+			}()
+			client := http.DefaultClient
+			if tls {
+				client = server.providerTLS.Client()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.ProviderURL(), strings.NewReader(`{"input":[{"role":"user","content":[{"type":"input_text","text":"hold"}]}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				response, err := client.Do(request)
+				if response != nil {
+					response.Body.Close()
+				}
+				done <- err
+			}()
+			ready, err := server.WaitReady(ctx)
+			if err != nil || ready.HeldStreams != 1 || (tls && ready.H2Streams != 1) {
+				t.Fatalf("public HOLD acceptance = %+v, %v", ready, err)
+			}
+			if stop != "server-before-start" {
+				if _, err := server.StartOffer(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("HOLD returned headers before expiry: %v", err)
+			case <-time.After(25 * time.Millisecond):
+			}
+			if stop == "client" {
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled held request = %v", err)
+				}
+			} else {
+				err := server.Close()
+				closed = true
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := <-done; err == nil || ctx.Err() != nil {
+					t.Fatalf("server close sent headers or left request waiting: err=%v context=%v", err, ctx.Err())
+				}
+			}
+		})
 	}
 }
 

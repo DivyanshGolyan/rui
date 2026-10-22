@@ -626,6 +626,10 @@ const Intake = struct {
         var failure: ?anyerror = null;
         var accept_retry_at: i128 = 0;
         while (true) {
+            // Drain before rechecking: a hint written after this read stays
+            // readable, so the bounded poll below cannot sleep past it.
+            var bytes: [256]u8 = undefined;
+            while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
             if (self.host.effect_shutdown.load(.acquire)) {
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
             }
@@ -644,21 +648,33 @@ const Intake = struct {
             // workers or shutdown, and avoid spinning on that same readiness.
             try self.polls.append(self.host.allocator, .{ .fd = if (listener_open.* and now >= accept_retry_at) listener.socket.handle else -1, .events = std.posix.POLL.IN, .revents = 0 });
             try self.polls.append(self.host.allocator, .{ .fd = self.wake[0], .events = std.posix.POLL.IN, .revents = 0 });
+            // Sleep until the earliest owned deadline. Workers and shutdown
+            // write the wake pipe; one second bounds any unowned change.
+            var wake_at: i128 = now + std.time.ns_per_s;
+            if (listener_open.* and now < accept_retry_at) wake_at = @min(wake_at, accept_retry_at);
             for (self.exchanges.items) |exchange| {
                 var fd: std.posix.fd_t = -1;
                 var events: i16 = std.posix.POLL.IN;
                 switch (exchange.state) {
                     .header, .body => {
-                        if (now >= exchange.deadline) exchange.fail(error.TransferInactive) else fd = exchange.fd;
+                        if (now >= exchange.deadline) {
+                            exchange.fail(error.TransferInactive);
+                            wake_at = now;
+                        } else {
+                            fd = exchange.fd;
+                            wake_at = @min(wake_at, exchange.deadline);
+                        }
                     },
                     .ready => if (exchange.route == .host_info or exchange.route == .host_stop) {
                         exchange.state = .reply;
                         exchange.prepare() catch |err| exchange.fail(err);
+                        wake_at = now;
                     },
                     .reply => {
                         if (exchange.reply) |reply| {
                             if (reply.body == .none or now >= reply.deadline()) {
                                 exchange.state = .retired;
+                                wake_at = now;
                             } else if (reply.deliveryReady() catch false) {
                                 if (reply.needsFill()) {
                                     exchange.job = .fill;
@@ -666,22 +682,34 @@ const Intake = struct {
                                 } else {
                                     fd = exchange.fd;
                                     events = std.posix.POLL.OUT;
+                                    wake_at = @min(wake_at, reply.deadline());
                                 }
+                            } else {
+                                // Test delivery holds: a FIFO gate has no
+                                // readiness here, so keep checking it briefly.
+                                wake_at = @min(wake_at, reply.deadline(), if (reply.gate != null) now + 20 * std.time.ns_per_ms else reply.not_before_ns);
                             }
-                        } else exchange.state = .retired;
+                        } else {
+                            exchange.state = .retired;
+                            wake_at = now;
+                        }
                     },
                     .working, .retired, .closed => {},
                 }
                 try self.polls.append(self.host.allocator, .{ .fd = fd, .events = events, .revents = 0 });
             }
-            // Bounded wait also services deadline-only and test-gate states.
             self.serviceWorkers();
-            const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), 20);
-            if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
-            if (self.polls.items[1].revents != 0) {
-                var bytes: [256]u8 = undefined;
-                while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            // Worker results applied above can leave closures to destroy or
+            // cleanup to retry. A worker owns its exchange's fields meanwhile.
+            for (self.exchanges.items) |exchange| {
+                if (exchange.state == .working) continue;
+                if (exchange.cleanup_retry_at > now) {
+                    wake_at = @min(wake_at, exchange.cleanup_retry_at);
+                } else if (exchange.state == .closed) wake_at = now;
             }
+            const wait_ms: c_int = @intCast(@divFloor(@max(wake_at - now, 0) + std.time.ns_per_ms - 1, std.time.ns_per_ms));
+            const count = std.c.poll(self.polls.items.ptr, @intCast(self.polls.items.len), wait_ms);
+            if (count < 0 and std.posix.errno(count) != .INTR) return error.IntakePollFailed;
             for (self.exchanges.items, self.polls.items[2..]) |exchange, poll| {
                 if (poll.revents == 0) continue;
                 switch (exchange.state) {
