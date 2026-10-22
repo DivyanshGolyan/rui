@@ -1,0 +1,19 @@
+{
+  "phase": "review",
+  "targets": [
+    "measurement-check"
+  ],
+  "native_targets": [
+    "measurement-check"
+  ],
+  "native_required": true,
+  "retry": true,
+  "cache_execution_checks": false,
+  "linux_memory_checks": false,
+  "manual_checks": [],
+  "reasons": [
+    "Measurement code: pinned Go package checks"
+  ],
+  "base": "0392b87a527fc91dff6141736808f76d2d852a47",
+  "head": "14c2f1edbd474c45234a90bb1184b1f1aa87c605"
+}

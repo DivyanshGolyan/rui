@@ -1,0 +1,19 @@
+ok  	rui.local/qualification/call-classification	0.076s
+?   	rui.local/qualification/configuration-admission	[no test files]
+ok  	rui.local/qualification/execution-service	0.008s
+ok  	rui.local/qualification/measurement	0.056s
+?   	rui.local/qualification/message-admission	[no test files]
+ok  	rui.local/qualification/model-control	0.004s
+?   	rui.local/qualification/model-dispatch	[no test files]
+ok  	rui.local/qualification/model-output	1.000s
+ok  	rui.local/qualification/model-output/provider	6.392s
+ok  	rui.local/qualification/model-queue	0.004s
+ok  	rui.local/qualification/model-retry	0.003s
+ok  	rui.local/qualification/model-queue	0.034s
+Build Summary: 4/4 steps succeeded
+measurement-check success
++- run go success 8s
++- run go success 352ms
+   +- compile exe rui-qualification-sqlite3 small native cached 18ms MaxRSS:39M
+
+exit=0
