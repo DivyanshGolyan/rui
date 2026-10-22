@@ -1,0 +1,3 @@
+Gated commit 647e2aad26dd1dbfcb786515687448402d5917b1, tree bae60bd05e7bf0443c9482c18a34ca1b1d6886a4, base 4c95e4d74daa89f51996b36c42b9d040ebb791c0.
+Landing commit bbabd879 has the same tree (message-only rewrite).
+Logs: zig build <target> on that exact tree, Linux orb, PATH with h2 4.3.0/pyte 0.8.2/wcwidth 0.2.13.
