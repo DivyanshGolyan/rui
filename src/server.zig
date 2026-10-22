@@ -3962,10 +3962,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
                 },
             };
-            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
-            var out = std.Io.Writer.fixed(&buffer);
-            try page.writeJson(&out);
-            deliverResponse(host.io, fd, 200, out.buffered());
+            try prepareActivityPage(host.io, fd, &page);
         },
         .activity_content => |command| {
             const reader = host.store.openActivityContent(command) catch |err| switch (err) {
@@ -3978,6 +3975,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try deliverPublicContent(host, fd, reader, 0, true);
         },
     }
+}
+
+// The response buffer is needed only after Store/SQLite reads return. Do not
+// keep it on the intake worker's bounded stack during recursive SQL planning.
+fn prepareActivityPage(io: std.Io, reply: *Reply, page: *const protocol.ActivityFacts) !void {
+    var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try page.writeJson(&out);
+    deliverResponse(io, reply, 200, out.buffered());
 }
 
 fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol.ConversationContent) !void {
