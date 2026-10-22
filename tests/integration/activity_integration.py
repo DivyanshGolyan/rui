@@ -352,17 +352,21 @@ def performance_case(item_bytes):
         configure(state, store, "second-config", "direct/independent")
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
-        # A live, read-only commit observer avoids sending a bounded Client
-        # exchange into the nonpreemptible import. This is not admission proof:
-        # the native page below must independently report the admitted Action.
-        def committed():
-            try:
-                with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True, timeout=0) as db:
-                    return db.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 1
-            except sqlite3.OperationalError as error:
-                if error.sqlite_errorcode == sqlite3.SQLITE_BUSY: return False
-                raise
-        wait_for(committed, "live provider import commit", timeout=300)
+        # Observing the Host's unlinked response capture avoids sending a
+        # bounded Client exchange into the nonpreemptible import; the Host holds
+        # its Store exclusively, so no outside reader exists. This is not
+        # admission proof: the native page below must report the Action.
+        def capturing():
+            descriptors = pathlib.Path(f"/proc/{process.pid}/fd")
+            assert descriptors.exists(), "the live import observer is Linux-only"
+            for descriptor in descriptors.iterdir():
+                try:
+                    if "/scratch/response-" in os.readlink(descriptor): return True
+                except FileNotFoundError:
+                    pass
+            return False
+        wait_for(capturing, "live provider response capture", timeout=60)
+        wait_for(lambda: not capturing(), "live provider import settlement", timeout=300)
         first = page(store)
         calls = [r for r in first["page"]["items"] if kind(r) == "call"]
         assert len(calls) == 1 and calls[0]["value"]["call"]["action"] is not None, first
