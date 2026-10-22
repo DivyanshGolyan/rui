@@ -418,7 +418,33 @@ class LandingTest(unittest.TestCase):
         self.assertIn('workflows: [Selected checks, Previous installed-release upgrade]', on)
         self.assertIn("branches: ['wip/land-*', main]", on)
         self.assertIn('auto_land.py', workflow('auto-land.yml'))
-        self.assertIn('group: auto-land\n  cancel-in-progress: false', workflow('auto-land.yml'))
+        text = workflow('auto-land.yml')
+        self.assertNotRegex(text, r'(?m)^concurrency:')
+        completion = re.search(r'(?ms)^  completion:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
+        land = re.search(r'(?ms)^  land:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
+        self.assertNotIn('concurrency:', completion, 'a pending parent must not lock main')
+        self.assertIn('actions: read', completion)
+        self.assertIn('contents: read', completion)
+        self.assertIn('needs: completion', land)
+        self.assertIn('group: auto-land\n      cancel-in-progress: false', land)
+        condition = re.search(r'(?m)^    if: \$\{\{ (.*) \}\}$', land)[1]
+
+        def eligible(event, result='skipped', ref='refs/heads/main', source='push', repo='o/r'):
+            github = SimpleNamespace(event_name=event, ref=ref, repository='o/r', event=SimpleNamespace(
+                repository=SimpleNamespace(private=False), workflow_run=SimpleNamespace(
+                    event=source, head_repository=SimpleNamespace(full_name=repo))))
+            needs = SimpleNamespace(completion=SimpleNamespace(result=result))
+            return eval(condition.replace('&&', 'and').replace('||', 'or').replace('!', 'not '),
+                        dict(github=github, needs=needs, always=lambda: True,
+                             fromJSON=json.loads, contains=lambda rows, row: row in rows))
+
+        self.assertTrue(eligible('workflow_dispatch', 'success'))
+        for result in ('failure', 'cancelled', 'timed_out', 'skipped'):
+            self.assertFalse(eligible('workflow_dispatch', result))
+            self.assertTrue(eligible('workflow_run', result), 'normal Linux landing remains independent')
+        self.assertFalse(eligible('workflow_dispatch', 'success', ref='refs/heads/other'))
+        self.assertFalse(eligible('workflow_run', source='pull_request'))
+        self.assertFalse(eligible('workflow_run', repo='fork/r'))
         self.assertIn('actions: write', workflow('auto-land.yml'))
         self.assertIn('auto_land.py --promote-stable', workflow('auto-land.yml'))
         self.assertIn("""contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)""",
@@ -429,6 +455,82 @@ class LandingTest(unittest.TestCase):
         self.assertTrue(any(auto_land.STABLE_BASE.fullmatch(name.format('0' * 40)) for name in names))
         self.assertTrue(auto_land.BRANCH.fullmatch('wip/land-12'))
         self.assertFalse(auto_land.BRANCH.fullmatch('wip/land-12x'))
+
+    def test_completion_wait_executes_the_workflow_with_provenance_and_a_hard_deadline(self):
+        job = re.search(r'(?ms)^  completion:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow('auto-land.yml'))[1]
+        script = textwrap.dedent(job.split('        run: |\n', 1)[1])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / 'tests').symlink_to(Path('tests').resolve(), target_is_directory=True)
+            (root / 'gh').write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$CALLS"
+if [ "$1" = api ]; then cat "$PARENT"; exit; fi
+test "$1 $2" = 'run watch' || exit 70
+case "$WATCH" in success) exit 0;; failure) exit 9;; timeout) exec sleep 10;; esac
+exit 71
+''')
+            # Execute a real subprocess deadline at a test scale, while pinning
+            # the actual workflow's production 120s + 5s kill bound.
+            (root / 'timeout').write_text(f'''#!{sys.executable}
+import subprocess, sys
+assert sys.argv[1:3] == ['--kill-after=5s', '120s'], sys.argv
+try:
+    raise SystemExit(subprocess.run(sys.argv[3:], timeout=0.5).returncode)
+except subprocess.TimeoutExpired:
+    raise SystemExit(124)
+''')
+            for name in ('gh', 'timeout'):
+                (root / name).chmod(0o755)
+            selected = dict(path='.github/workflows/check.yml', event='workflow_dispatch',
+                            head_branch='main', head_repository=dict(full_name='o/r'),
+                            display_title='Stable qualification from base ' + 'a' * 40)
+            env = dict(os.environ, PATH=f'{root}{os.pathsep}{os.environ["PATH"]}',
+                       GITHUB_REPOSITORY='o/r', COMPLETED_RUN='42', PARENT=str(root / 'parent'),
+                       CALLS=str(root / 'calls'))
+            for mode, code in (('success', 0), ('failure', 9), ('timeout', 124)):
+                with self.subTest(mode=mode):
+                    (root / 'parent').write_text(json.dumps(selected))
+                    (root / 'calls').write_text('')
+                    result = subprocess.run(['bash', '-c', script], cwd=root, env=dict(env, WATCH=mode),
+                                            capture_output=True, text=True, timeout=15)
+                    self.assertEqual(result.returncode, code, result.stderr)
+                    self.assertEqual((root / 'calls').read_text().splitlines(), [
+                        'api repos/o/r/actions/runs/42', 'run watch 42 --exit-status --repo o/r'])
+            for parent in (dict(selected, head_branch='other'), dict(selected, event='pull_request'),
+                           dict(selected, head_repository=dict(full_name='fork/r')),
+                           dict(selected, path='.github/workflows/other.yml'),
+                           dict(selected, display_title='Selected checks')):
+                (root / 'parent').write_text(json.dumps(parent))
+                (root / 'calls').write_text('')
+                result = subprocess.run(['bash', '-c', script], cwd=root, env=dict(env, WATCH='success'),
+                                        capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('run watch', (root / 'calls').read_text())
+            (root / 'parent').write_text(json.dumps(dict(selected,
+                path='.github/workflows/previous-release-upgrade.yml', display_title='upgrade')))
+            result = subprocess.run(['bash', '-c', script], cwd=root, env=dict(env, WATCH='success'),
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_completion_explicitly_wakes_the_serialized_writer(self):
+        for name, needs in (('check.yml', '[linux, macos, cache_execution]'),
+                            ('previous-release-upgrade.yml', 'upgrade')):
+            with self.subTest(workflow=name):
+                job = re.search(r'(?ms)^  completion:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow(name))
+                self.assertIsNotNone(job, 'bot completion cannot rely on workflow_run')
+                job = job[1]
+                self.assertIn('needs: ' + needs, job)
+                self.assertIn("github.event_name == 'workflow_dispatch'", job)
+                self.assertIn("github.ref == 'refs/heads/main'", job)
+                self.assertIn('always()', job)
+                self.assertIn('actions: write', job)
+                self.assertIn('contents: read', job)
+                self.assertNotIn('contents: write', job)
+                self.assertNotIn('concurrency:', job)
+                self.assertIn('gh workflow run auto-land.yml --repo "$GITHUB_REPOSITORY" --ref main '
+                              '-f completed_run="$GITHUB_RUN_ID"', job)
+                if name == 'check.yml':
+                    self.assertIn('inputs.stable', job)
 
     def test_selected_runs_only_on_pull_requests_and_landing_tips(self):
         text = workflow('check.yml')

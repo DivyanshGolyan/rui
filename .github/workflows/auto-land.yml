@@ -6,21 +6,48 @@ on:
     workflows: [Selected checks, Previous installed-release upgrade]
     types: [completed]
     branches: ['wip/land-*', main]
+  workflow_dispatch:
+    inputs:
+      completed_run:
+        description: Main qualification run whose completion wakes promotion
+        type: string
+        required: true
 
 permissions:
   contents: write
   actions: write
 
-concurrency:
-  # One landing decision at a time; a running push is never cancelled. A newer
-  # queued run replaces a pending one, so each run decides every landing tip.
-  group: auto-land
-  cancel-in-progress: false
-
 jobs:
+  completion:
+    # GITHUB_TOKEN-dispatched qualifications do not emit workflow_run callbacks.
+    # Their final job explicitly dispatches us before its own workflow completes.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Validate parent provenance and await its complete result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPLETED_RUN: ${{ inputs.completed_run }}
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/auto_land.py --check-qualification-run "$COMPLETED_RUN"
+          timeout --kill-after=5s 120s gh run watch "$COMPLETED_RUN" --exit-status --repo "$GITHUB_REPOSITORY"
   land:
+    needs: completion
     # Landing-tip pushes and dispatched qualifications wake the lander; pull_request runs never do.
-    if: ${{ contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository && !github.event.repository.private }}
+    if: ${{ always() && !github.event.repository.private && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.completion.result == 'success') || (github.event_name == 'workflow_run' && contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    concurrency:
+      # Only ref writers serialize. Waiting for a qualification never holds main.
+      group: auto-land
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

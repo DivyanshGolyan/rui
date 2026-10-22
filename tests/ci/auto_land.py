@@ -134,7 +134,11 @@ def main():
                         help="dispatch only absent current-main Mac and upgrade qualification")
     parser.add_argument("--promote-stable", action="store_true",
                         help="promote the newest exact-SHA qualified main commit")
+    parser.add_argument("--check-qualification-run", type=int, metavar="RUN_ID",
+                        help="validate a main qualification parent before the bounded CLI wait")
     args = parser.parse_args()
+    if args.check_qualification_run is not None:
+        return check_qualification_run(args.check_qualification_run)
     if args.preflight:
         return preflight(args.preflight, git("rev-parse", "HEAD"))
     if args.qualify_main:
@@ -153,6 +157,21 @@ def main():
         print(f"{branch} {sha} is already in main")
         return
     land(branch, sha, main_sha)
+
+
+def check_qualification_run(run_id):
+    """A parent ID permits only a wait; it supplies no landing or promotion evidence."""
+    if run_id <= 0:
+        raise SystemExit("qualification run ID must be positive")
+    repository = os.environ["GITHUB_REPOSITORY"]
+    run = json.loads(gh("api", f"repos/{repository}/actions/runs/{run_id}"))
+    path = run["path"]
+    if (run["head_repository"]["full_name"] != repository
+            or run["head_branch"] != "main" or run["event"] != "workflow_dispatch"
+            or path not in (".github/workflows/check.yml", f".github/workflows/{UPGRADE}")
+            or (path == ".github/workflows/check.yml"
+                and not STABLE_BASE.fullmatch(run.get("display_title") or ""))):
+        raise SystemExit("parent must be this repository's dispatched main qualification")
 
 
 def land(branch, sha, main_sha):
