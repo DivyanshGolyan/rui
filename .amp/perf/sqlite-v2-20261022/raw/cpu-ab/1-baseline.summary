@@ -1,0 +1,10 @@
+{
+  "fixture": true,
+  "uninstrumented_cpu": true,
+  "binary_sha256": "83529d64256ee1734e4f30f5b06785cdca17e64f3604a57f39929388d61d4697",
+  "harness_verdict": "incomplete",
+  "messages": 200,
+  "events": 1200000,
+  "host_cpu_seconds": 43.349999999999994,
+  "microseconds_per_event": 36.12499999999999
+}

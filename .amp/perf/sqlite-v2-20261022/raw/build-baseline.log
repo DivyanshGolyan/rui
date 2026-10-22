@@ -1,0 +1,85 @@
+install
++- install rui
+   +- compile exe rui fast native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/.amp/sqlv2/baseline-source/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/.amp/sqlv2/baseline-source/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/.amp/sqlv2/baseline-source/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/.amp/sqlv2/baseline-source/src/curl-post-retry.patch /home/user/workspace/repo/.zig-cache/o/6c5b4bd4397719afa03eac8819e0246d/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+
+Build Summary: 42/42 steps succeeded
+install success
++- install rui success
+|  +- compile exe rui fast native success 2m MaxRSS:1G
+|     +- run sh (pinned-transport-x86_64-linux) success 3m
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- translate-c sqlite success 44ms
+|     |  +- compile exe translate-c fast native success 2m MaxRSS:1G
+|     |  |  +- options success
+|     |  |  +- options success
+|     |  |  +- options success
+|     |  |  +- run exe generate-def (aarch64.zig) success 56ms
+|     |  |  |  +- compile exe generate-def debug native success 1s MaxRSS:137M
+|     |  |  +- run exe generate-def (amdgcn.zig) success 342ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (arm.zig) success 26ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (bpf.zig) success 13ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (common.zig) success 337ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (hexagon.zig) success 223ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (loongarch.zig) success 117ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (mips.zig) success 51ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (neon.zig) success 230ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (nvptx.zig) success 110ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (powerpc.zig) success 116ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (riscv.zig) success 26ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (s390x.zig) success 44ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (ve.zig) success 147ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (wasm.zig) success 34ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86_64.zig) success 37ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86.zig) success 288ms
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (xcore.zig) success 9ms
+|     |  |     +- compile exe generate-def debug native (reused)
+|     |  +- WriteFile sqlite.h success
+|     +- translate-c posix success 99ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile posix.h success
+|     +- run bash (vaxis) success 53ms
+|     +- run bash (vaxis) (reused)
+|     +- run bash (vaxis) (reused)
+|     +- options success
+|     +- translate-c curl success 137ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile curl.h success
+|     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run exe uucode_generate (tables.zig) success 484ms
+|     |  +- compile exe uucode_generate debug native success 3s MaxRSS:303M
+|     |     +- WriteFile build_config.zig success
+|     +- WriteFile build_config.zig (reused)
++- install THIRD_PARTY_NOTICES.md to THIRD_PARTY_NOTICES.md success
++- install rui-evaluator success
+   +- compile exe rui-evaluator fast native success 1m MaxRSS:540M
+      +- run sh (quickjs.c) success 71ms
+
+
+real	8m51.993s
+user	8m19.311s
+sys	0m57.214s
+EXIT=0

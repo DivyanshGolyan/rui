@@ -1,0 +1,3 @@
+{"time_ns":1792646872593748548,"classification":"startup","phase":"begin","detail":"lease_acquired"}
+{"time_ns":1792646872593774266,"classification":"startup","phase":"capacity","detail":"ordinary_intake=100 default_intake=100 minimum_intake=10 descriptor_requirement=922 descriptor_limit=1024"}
+{"time_ns":1792646872607542600,"classification":"startup","phase":"ready","detail":"serving"}

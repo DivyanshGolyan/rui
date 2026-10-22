@@ -1,0 +1,78 @@
+{
+  "configured_sessions": 100,
+  "controller_provider_pid": 430388,
+  "events": 0,
+  "fixture": true,
+  "held_snapshot": {
+    "hold": true,
+    "held_streams": 100,
+    "hold_until_unix_ns": 1792643846885902966,
+    "h2_streams": 100,
+    "h2_connections": 1,
+    "delivery_method": "rational_pacing_v1",
+    "delivery_rule": {
+      "batch_interval_ns": 33333334,
+      "allowed_delivery_variation_ns": 33333334,
+      "maximum_completion_gap_ns": 66666668,
+      "burst_window_ns": 33333334,
+      "maximum_batches_per_burst_window": 2
+    },
+    "expected_streams": 100,
+    "ready_streams": 100,
+    "offer_finished_streams": 0,
+    "terminal_finished_streams": 0,
+    "valid_offer_streams": 0,
+    "timing_invalid_streams": 0,
+    "offer_failed_streams": 0,
+    "terminal_failed_streams": 0,
+    "minimum_completed_batches": 0,
+    "maximum_completed_batches": 0,
+    "completed_batches": 0,
+    "completed_events": 0,
+    "offer_bytes": 0,
+    "expected_batches": 360000,
+    "expected_events": 360000,
+    "expected_offer_bytes": 93600000,
+    "early_completion_violations": 0,
+    "late_completion_violations": 0,
+    "completion_gap_violations": 0,
+    "burst_window_violations": 0,
+    "terminal_bytes": 0,
+    "request_bytes": 103880,
+    "request_set_sha256": "bd772071203c731906b8dd5468e024c15c07a7b9542b4fc91a92dd6c58dd21c4",
+    "history_valid_streams": 100,
+    "start_unix_ns": 1792643726885902966,
+    "offer_horizon_unix_ns": 1792643846919236300,
+    "hard_deadline_unix_ns": 1792643966885902966,
+    "event_bytes": 260,
+    "events_per_batch": 1,
+    "batches_per_stream": 3600,
+    "offer_seconds": 120,
+    "events_per_second": 30
+  },
+  "host_capacity": 100,
+  "host_pid": 430398,
+  "instrumented_counts_only": true,
+  "limits": "One post-fix HOLD100 window only. SQL first executions, not completions; logged wall-clock intervals are count denominators, not CPU or natural wakeups. Admission and explicit cancellation/drain are outside the held window. No matched new HOLD0 or repeat statistics.",
+  "messages": 100,
+  "product_revision": "d4f870002b1eeef370fb8f4c7aa3fd8b14343159",
+  "requested_window_seconds": 60,
+  "warmup_seconds": 10,
+  "windows": [
+    {
+      "name": "configure_and_admit",
+      "start_unix_ns": 1792643724325681133,
+      "end_unix_ns": 1792643726385902016
+    },
+    {
+      "name": "held_100",
+      "start_unix_ns": 1792643736392825926,
+      "end_unix_ns": 1792643796400763999
+    },
+    {
+      "name": "stop_and_drain",
+      "start_unix_ns": 1792643796400869942,
+      "end_unix_ns": 1792643797396359846
+    }
+  ]
+}
