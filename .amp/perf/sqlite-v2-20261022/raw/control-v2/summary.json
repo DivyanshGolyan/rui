@@ -1,0 +1,243 @@
+{
+ "all": {
+  "baseline": {
+   "n": 300,
+   "trace_missing_rows": 0,
+   "unpublished": 48,
+   "m1_host_store_fsyncs_total": 0,
+   "m1_host_store_fsyncs_trials_with_any": 0,
+   "m1_host_scratch_fsyncs_total": 328,
+   "m1_host_scratch_fsyncs_trials_with_any": 248,
+   "m1_host_other_fsyncs_total": 0,
+   "m1_host_other_fsyncs_trials_with_any": 0,
+   "m2_jbd2_commits": {
+    "median": 1.0,
+    "p90": 2,
+    "max": 3,
+    "mean": 1.137
+   },
+   "m3_host_oncpu_ms": {
+    "median": 3.459,
+    "p90": 5.904,
+    "max": 7.66,
+    "mean": 3.708
+   },
+   "m4_shell_D_ms": {
+    "median": 0.0,
+    "p90": 0.0,
+    "max": 31.768,
+    "mean": 0.383
+   },
+   "m4_shell_preempted_ms": {
+    "median": 22.512,
+    "p90": 60.299,
+    "max": 96.855,
+    "mean": 27.028
+   },
+   "m4_shell_oncpu_ms": {
+    "median": 3.915,
+    "p90": 4.778,
+    "max": 15.545,
+    "mean": 3.782
+   },
+   "m1_host_fsync_ms": {
+    "median": 0.82,
+    "p90": 3.593,
+    "max": 35.025,
+    "mean": 1.593
+   },
+   "bash_exec_after_spawn_ms": {
+    "median": 15.846,
+    "p90": 41.921,
+    "max": 80.015,
+    "mean": 20.743
+   },
+   "trials_with_shell_D_gt_1ms": 11,
+   "publish_ms": {
+    "median": 51.62,
+    "p90": 88.64,
+    "max": 119.44
+   }
+  },
+  "cand2": {
+   "n": 300,
+   "trace_missing_rows": 0,
+   "unpublished": 48,
+   "m1_host_store_fsyncs_total": 0,
+   "m1_host_store_fsyncs_trials_with_any": 0,
+   "m1_host_scratch_fsyncs_total": 335,
+   "m1_host_scratch_fsyncs_trials_with_any": 266,
+   "m1_host_other_fsyncs_total": 0,
+   "m1_host_other_fsyncs_trials_with_any": 0,
+   "m2_jbd2_commits": {
+    "median": 1.0,
+    "p90": 2,
+    "max": 3,
+    "mean": 1.143
+   },
+   "m3_host_oncpu_ms": {
+    "median": 2.958,
+    "p90": 4.897,
+    "max": 6.584,
+    "mean": 3.153
+   },
+   "m4_shell_D_ms": {
+    "median": 0.0,
+    "p90": 0.0,
+    "max": 46.35,
+    "mean": 0.209
+   },
+   "m4_shell_preempted_ms": {
+    "median": 26.385,
+    "p90": 54.947,
+    "max": 95.206,
+    "mean": 28.413
+   },
+   "m4_shell_oncpu_ms": {
+    "median": 3.832,
+    "p90": 4.404,
+    "max": 7.513,
+    "mean": 3.648
+   },
+   "m1_host_fsync_ms": {
+    "median": 0.903,
+    "p90": 5.089,
+    "max": 86.025,
+    "mean": 2.403
+   },
+   "bash_exec_after_spawn_ms": {
+    "median": 19.358,
+    "p90": 46.521,
+    "max": 94.606,
+    "mean": 24.437
+   },
+   "trials_with_shell_D_gt_1ms": 5,
+   "publish_ms": {
+    "median": 57.28,
+    "p90": 99.1,
+    "max": 126.09
+   }
+  }
+ },
+ "unpublished_only": {
+  "baseline": {
+   "n": 48,
+   "trace_missing_rows": 0,
+   "unpublished": 48,
+   "m1_host_store_fsyncs_total": 0,
+   "m1_host_store_fsyncs_trials_with_any": 0,
+   "m1_host_scratch_fsyncs_total": 27,
+   "m1_host_scratch_fsyncs_trials_with_any": 24,
+   "m1_host_other_fsyncs_total": 0,
+   "m1_host_other_fsyncs_trials_with_any": 0,
+   "m2_jbd2_commits": {
+    "median": 0.5,
+    "p90": 1,
+    "max": 2,
+    "mean": 0.562
+   },
+   "m3_host_oncpu_ms": {
+    "median": 2.686,
+    "p90": 5.34,
+    "max": 7.087,
+    "mean": 2.39
+   },
+   "m4_shell_D_ms": {
+    "median": 0.0,
+    "p90": 0.0,
+    "max": 20.788,
+    "mean": 0.642
+   },
+   "m4_shell_preempted_ms": {
+    "median": 42.886,
+    "p90": 84.969,
+    "max": 96.855,
+    "mean": 42.206
+   },
+   "m4_shell_oncpu_ms": {
+    "median": 2.072,
+    "p90": 3.28,
+    "max": 5.982,
+    "mean": 1.746
+   },
+   "m1_host_fsync_ms": {
+    "median": 0.606,
+    "p90": 4.761,
+    "max": 9.062,
+    "mean": 1.242
+   },
+   "bash_exec_after_spawn_ms": {
+    "median": 25.761,
+    "p90": 53.538,
+    "max": 80.015,
+    "mean": 31.144
+   },
+   "trials_with_shell_D_gt_1ms": 3,
+   "publish_ms": null
+  },
+  "cand2": {
+   "n": 48,
+   "trace_missing_rows": 0,
+   "unpublished": 48,
+   "m1_host_store_fsyncs_total": 0,
+   "m1_host_store_fsyncs_trials_with_any": 0,
+   "m1_host_scratch_fsyncs_total": 41,
+   "m1_host_scratch_fsyncs_trials_with_any": 40,
+   "m1_host_other_fsyncs_total": 0,
+   "m1_host_other_fsyncs_trials_with_any": 0,
+   "m2_jbd2_commits": {
+    "median": 1.0,
+    "p90": 1,
+    "max": 2,
+    "mean": 0.896
+   },
+   "m3_host_oncpu_ms": {
+    "median": 2.782,
+    "p90": 3.388,
+    "max": 5.927,
+    "mean": 2.617
+   },
+   "m4_shell_D_ms": {
+    "median": 0.0,
+    "p90": 0.0,
+    "max": 0.0,
+    "mean": 0.0
+   },
+   "m4_shell_preempted_ms": {
+    "median": 45.581,
+    "p90": 83.849,
+    "max": 95.206,
+    "mean": 46.862
+   },
+   "m4_shell_oncpu_ms": {
+    "median": 2.26,
+    "p90": 3.441,
+    "max": 5.781,
+    "mean": 2.199
+   },
+   "m1_host_fsync_ms": {
+    "median": 0.829,
+    "p90": 6.454,
+    "max": 86.025,
+    "mean": 4.606
+   },
+   "bash_exec_after_spawn_ms": {
+    "median": 37.439,
+    "p90": 68.429,
+    "max": 94.606,
+    "mean": 37.632
+   },
+   "trials_with_shell_D_gt_1ms": 0,
+   "publish_ms": null
+  }
+ },
+ "primary": {
+  "baseline_rate": 0.16,
+  "candidate_rate": 0.16,
+  "difference_pp": 0.0,
+  "wald95_pp": [
+   -5.87,
+   5.87
+  ]
+ }
+}

@@ -1,0 +1,86 @@
+{
+ "binary": "/home/user/workspace/repo/.amp/sqlv2/bin/rui-cand2",
+ "timeout_ms": 100,
+ "host_pid": 2495565,
+ "host_tids": [
+  2495565,
+  2495570,
+  2495571,
+  2495572,
+  2495575
+ ],
+ "realtime_minus_monotonic_s": 1792641924.276693,
+ "state": "/tmp/rui-same-group-control.b7h3hvkv",
+ "rows": [
+  {
+   "trial": 0,
+   "action": "1",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.017,
+   "spawn_to_pid_published_ms": 3.95,
+   "pid_published": true,
+   "deadline_ns": 14875744467305,
+   "serviced_at_ns": 14875745834528,
+   "start_realtime": "1792656799.923177",
+   "published_realtime": "1792656799.925110",
+   "spawn_to_deadline_serviced_ms": 101.367,
+   "trace_missing": []
+  },
+  {
+   "trial": 1,
+   "action": "2",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 1.975,
+   "spawn_to_pid_published_ms": 3.748,
+   "pid_published": true,
+   "deadline_ns": 14876291021111,
+   "serviced_at_ns": 14876293448889,
+   "start_realtime": "1792656800.469689",
+   "published_realtime": "1792656800.471462",
+   "spawn_to_deadline_serviced_ms": 102.428,
+   "trace_missing": []
+  },
+  {
+   "trial": 2,
+   "action": "3",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.668,
+   "spawn_to_pid_published_ms": 4.614,
+   "pid_published": true,
+   "deadline_ns": 14876835465251,
+   "serviced_at_ns": 14876837130954,
+   "start_realtime": "1792656801.014826",
+   "published_realtime": "1792656801.016772",
+   "spawn_to_deadline_serviced_ms": 101.666,
+   "trace_missing": []
+  },
+  {
+   "trial": 3,
+   "action": "4",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.073,
+   "spawn_to_pid_published_ms": 3.861,
+   "pid_published": true,
+   "deadline_ns": 14877350133474,
+   "serviced_at_ns": 14877351426547,
+   "start_realtime": "1792656801.528900",
+   "published_realtime": "1792656801.530688",
+   "spawn_to_deadline_serviced_ms": 101.293,
+   "trace_missing": []
+  },
+  {
+   "trial": 4,
+   "action": "5",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.698,
+   "spawn_to_pid_published_ms": 4.546,
+   "pid_published": true,
+   "deadline_ns": 14877891617394,
+   "serviced_at_ns": 14877894750536,
+   "start_realtime": "1792656802.071009",
+   "published_realtime": "1792656802.072857",
+   "spawn_to_deadline_serviced_ms": 103.133,
+   "trace_missing": []
+  }
+ ]
+}

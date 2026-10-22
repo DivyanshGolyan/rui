@@ -74,3 +74,27 @@ race exists independently of WAL/FULL. The control does not rule out a small can
 under CPU load the candidate's failure rate and publish median are somewhat higher. That difference
 is within block-to-block variation (no-load baseline block medians were 9.4 and 4.1 ms), and it is
 not resolved.
+
+## Bash timeout causal control v2 (predeclared in attempts.md; 600 trials)
+
+CPU load (4 busy loops on 2 vCPU), exact fixture command at 100 ms. 20 blocks of 30 trials, order
+(B C C B) x5, with system-wide perf tracepoints on every block. Baseline d4f87000 vs candidate
+26857f7c. All 20 blocks exited 0, and no trace rows were missing.
+- Primary: PID unpublished at kill, baseline 48/300 (16.0%) vs candidate 48/300 (16.0%). Difference
+  0.0 pp, Wald 95% CI ±5.87 pp. As predeclared, the rate alone cannot exclude a 5 pp effect.
+- m1 Store fsyncs (db/-wal/-journal) starting inside any window: 0/300 baseline, 0/300 candidate.
+  All in-window Host fsyncs went to the scratch directory (Bash captures): 328 vs 335.
+- m2 journal commits overlapping a window: mean 1.137 vs 1.143. They follow the scratch syncs; no
+  Store sync is in the window.
+- m3 Host on-CPU in the window: median 3.46 vs 2.96 ms. The candidate is lower.
+- m4 shell, all trials: D-state mean 0.38 vs 0.21 ms (trials with >1 ms D: 11 vs 5); preempted
+  (runnable) median 22.5 vs 26.4 ms; on-CPU 3.9 vs 3.8 ms.
+- m4 shell, failed trials only: D-state 0 ms in every candidate failure (3 baseline failures had
+  >1 ms). Preempted median 42.9 vs 45.6 ms, against on-CPU about 2 ms. The shell was runnable and
+  waiting for CPU, not blocked on I/O.
+Predeclared decision: the fixture-attribution conditions hold (failures on both arms, m1 = 0,
+m4 D ≈ 0, m3 comparable). No WAL/FULL attribution condition holds.
+Not predeclared, unresolved: spawn→bash-exec median 15.8 vs 19.4 ms (failed trials 25.8 vs
+37.4 ms). The per-quad candidate−baseline differences are +6.2, +6.3, −0.7, +1.0, +4.9 ms (4 of 5
+positive, sign test p = 0.375). The mechanism is not Store I/O (m1 = 0) and not Host CPU (lower).
+The failure rate is unchanged. Per-block numbers are in raw/control-v2/per-block.txt.

@@ -88,3 +88,67 @@
 - 2026-10-22T07:59:20Z control cpu block 3 cand2 FAILED in reduction: empty marker file (shell killed mid-printf), ValueError; reducer now treats empty marker as unpublished; rerunning one cpu cand2 block as cpu-5-cand2
 - 2026-10-22T07:59:21Z control cpu block 5 cand2 start
 - 2026-10-22T07:59:50Z control cpu block 5 cand2 exit=0
+- 2026-10-22 PREDECLARED (before any data) bounded causal diagnostic v2, CPU load (4 busy loops / 2 vCPU),
+  exact fixture command, timeout_ms=100, binaries rui-baseline (d4f87000) vs rui-cand2 (26857f7c):
+  * Design: 20 blocks x 30 trials, order (B C C B) x5 => 300 trials per arm; one Host per block; system-wide
+    `perf record -k mono` for ext4:ext4_sync_file_enter/exit, jbd2:jbd2_start_commit/jbd2_end_commit,
+    sched:sched_switch, sched:sched_process_exec over every block (equal overhead on both arms).
+  * Window per trial: [spawn, spawn+100 ms], where spawn = Host bash_deadline deadline_ns - 100 ms (CLOCK_MONOTONIC).
+    Check the clock alignment with the bash sched_process_exec time (expected 0..10 ms after spawn).
+  * Primary outcome: P(PID unpublished at kill), candidate - baseline, with a 95% Wald CI. Practical effect of
+    interest: 5 pp. Expected CI half-width is about +-6 pp, so the rate comparison alone CANNOT exclude 5 pp. A
+    null result is not proof of no WAL effect.
+  * Mechanism outcomes per trial (deciding evidence): (m1) Host ext4 fsync calls starting in the window;
+    (m2) jbd2 commits overlapping the window; (m3) Host on-CPU ms in the window (sched_switch);
+    (m4) D-state (uninterruptible) sleep ms of the trial's bash/mv tasks in the window.
+  * Decision rule: attribute a WAL/FULL contribution if candidate trials show Host fsync (m1) or
+    Host-caused journal commits (m2) in the window materially more often than baseline, or show D-state
+    blocking (m4) that baseline lacks, or a median Host on-CPU in the window (m3) higher by >=5 ms; failed
+    trials are examined separately. Attribute to fixture setup if failures occur on both arms while m1/m4
+    are ~0 and m3 is comparable. If neither rule is met, report the boundary as unresolved.
+- 2026-10-22 PREDECLARATION AMENDMENT (after the 5-trial smoke at raw/control-v2-smoke, before any main data):
+  m1 is split by the fsync's parent directory inode: Store dir (db/-wal/-journal), scratch dir (Bash captures),
+  other. Reason: the final inode->path map is unreliable because unlinked scratch inodes are reused. The WAL/FULL
+  question is decided by m1_store, not by total fsyncs. Smoke (cand2, no load, 5 trials): m1_store=0,
+  m1_scratch=3, m2 jbd2=3, m3 host on-CPU ~7 ms, m4 shell D=0 per window. The smoke is not part of the main data.
+- 2026-10-22T08:17:42Z control-v2 block 01-baseline start
+- 2026-10-22T08:18:08Z control-v2 block 01-baseline exit=0
+- 2026-10-22T08:18:11Z control-v2 block 02-cand2 start
+- 2026-10-22T08:18:38Z control-v2 block 02-cand2 exit=0
+- 2026-10-22T08:18:43Z control-v2 block 03-cand2 start
+- 2026-10-22T08:19:13Z control-v2 block 03-cand2 exit=0
+- 2026-10-22T08:19:20Z control-v2 block 04-baseline start
+- 2026-10-22T08:19:52Z control-v2 block 04-baseline exit=0
+- 2026-10-22T08:19:57Z control-v2 block 05-baseline start
+- 2026-10-22T08:20:20Z control-v2 block 05-baseline exit=0
+- 2026-10-22T08:20:23Z control-v2 block 06-cand2 start
+- 2026-10-22T08:20:53Z control-v2 block 06-cand2 exit=0
+- 2026-10-22T08:20:59Z control-v2 block 07-cand2 start
+- 2026-10-22T08:21:29Z control-v2 block 07-cand2 exit=0
+- 2026-10-22T08:21:36Z control-v2 block 08-baseline start
+- 2026-10-22T08:22:06Z control-v2 block 08-baseline exit=0
+- 2026-10-22T08:22:10Z control-v2 block 09-baseline start
+- 2026-10-22T08:22:41Z control-v2 block 09-baseline exit=0
+- 2026-10-22T08:22:46Z control-v2 block 10-cand2 start
+- 2026-10-22T08:23:18Z control-v2 block 10-cand2 exit=0
+- 2026-10-22T08:23:24Z control-v2 block 11-cand2 start
+- 2026-10-22T08:23:54Z control-v2 block 11-cand2 exit=0
+- 2026-10-22T08:23:58Z control-v2 block 12-baseline start
+- 2026-10-22T08:24:29Z control-v2 block 12-baseline exit=0
+- 2026-10-22T08:24:35Z control-v2 block 13-baseline start
+- 2026-10-22T08:25:05Z control-v2 block 13-baseline exit=0
+- 2026-10-22T08:25:12Z control-v2 block 14-cand2 start
+- 2026-10-22T08:25:43Z control-v2 block 14-cand2 exit=0
+- 2026-10-22T08:25:47Z control-v2 block 15-cand2 start
+- 2026-10-22T08:26:16Z control-v2 block 15-cand2 exit=0
+- 2026-10-22T08:26:21Z control-v2 block 16-baseline start
+- 2026-10-22T08:26:51Z control-v2 block 16-baseline exit=0
+- 2026-10-22T08:26:57Z control-v2 block 17-baseline start
+- 2026-10-22T08:27:33Z control-v2 block 17-baseline exit=0
+- 2026-10-22T08:27:38Z control-v2 block 18-cand2 start
+- 2026-10-22T08:28:06Z control-v2 block 18-cand2 exit=0
+- 2026-10-22T08:28:12Z control-v2 block 19-cand2 start
+- 2026-10-22T08:28:44Z control-v2 block 19-cand2 exit=0
+- 2026-10-22T08:28:49Z control-v2 block 20-baseline start
+- 2026-10-22T08:29:22Z control-v2 block 20-baseline exit=0
+- 2026-10-22T08:36:23Z control-v2 complete: 20/20 blocks exit=0; summary raw/control-v2/summary.json, per-block.txt; perf.data kept in the orb (not committed; size above)

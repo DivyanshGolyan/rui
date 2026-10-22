@@ -1,0 +1,6 @@
+83529d64256ee1734e4f30f5b06785cdca17e64f3604a57f39929388d61d4697  /home/user/workspace/repo/.amp/sqlv2/bin/rui-baseline
+04c8bc908c79aadecde2ea7a2aa3bde8cce5cbe799597334800e3c374ba9bf73  /home/user/workspace/repo/.amp/sqlv2/bin/rui-cand2
+a7fdd28438f7a4763ea46624cff67cb88ef3854b03e9f2edf0ca337c294f503c  /home/user/workspace/repo/.amp/sqlv2/control/same_group_control_v2.py
+af412149d62f55ac7c7a16ad0d953730b4c0c61067002e5b79a2825e533eaeac  control/run_control_v2.sh
+b5d5c6a6602e4ecdb0c71f06edd018111023c8e5b1cd526d4010880ddec80a77  /home/user/workspace/repo/tests/integration/bash_integration.py
+5e7b3194531bf963fe5872e0acc2ef805b761f732f21d93ebcd3b602208bbd41  /usr/bin/perf
