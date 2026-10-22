@@ -29,7 +29,9 @@ The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups
 | PSS step from 0 to 10 sessions | +3,983,360 B (≈398,336 B/session) vs ≈25 KB/session from 10 to 100 | — | Cause unknown; investigate first-activation allocations (pools, TLS/H2, SQLite caches) |
 | SSE JSON second pass | 2 rereads/event, 274 B | small; curl/OpenSSL dominate stacks | Parse JSON from the scanned buffer |
 
-**Combined-head confirmation on `d4f87000`:** pending. P1 is running one STREAM100 PSS plus HOLD100 switch-proxy campaign, and P2 one instrumented HOLD100 SELECT/s count, both target 01:35 UTC. These are independent methods; traced switches are not natural wakeups.
+**Combined-head confirmation on `d4f87000`:** pending. These are independent methods; traced switches are not natural wakeups.
+- P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`.
+- P2 is preparing one instrumented HOLD100 window (10 s warmup + 60 s). Pre-run estimate (**estimated**): about 1,000 SELECT/s, since the fixes did not touch SQL polling.
 
 **Open items.**
 - No Mac measurement (footprint, wakeups) and no live 100 × gpt-6-luna wave: the only approved runner, 1993-X2, is offline.
