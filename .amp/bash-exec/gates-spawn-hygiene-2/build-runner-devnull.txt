@@ -1,0 +1,3 @@
+pid 429537 bash fd 0 flags 0100000
+pid 429540 bash fd 0 flags 0100000
+pid 432987 bash fd 0 flags 0100000

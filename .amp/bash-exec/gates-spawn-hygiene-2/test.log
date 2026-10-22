@@ -1,0 +1,62 @@
+test
++- run test w
+rui: diagnostic writer unavailable (IsDir); no Host work was changed
+{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"session_stop","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"11558405603584","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"11558405603580","host_total_ns":"11558405603583","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"model_interruption","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"11558405704841","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"11558405704837","host_total_ns":"11558405704840","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"permission_decision","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"11558405784132","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"11558405784128","host_total_ns":"11558405784131","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"provider_completion_removed","at_ns":"11558407752019","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"11558407844945","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"11558407864529","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"provider_completion_removed","at_ns":"11558408369285","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+rui: provider error capture unreadable for operation 7: ShortSealedRead
+{"rui_test_phase":"cleanup_completed","at_ns":"11558408406011","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"11558408420054","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"provider_completion_removed","at_ns":"11558408779789","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"11558408815636","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"11558408828843","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"11558408958916","turn":"3","operation":"7","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"11558408962009","turn":"3","operation":"7","action":"11","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"11558408963989","turn":"3","operation":"7","action":"11","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"cleanup_release_observed","at_ns":"11558528424642","turn":"3","operation":"7","action":"11","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"4","trace_lost":false}
+rui: dispatch fenced after Bash resource reclamation failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+{"rui_test_phase":"cleanup_completed","at_ns":"11558528502114","turn":"3","operation":"7","action":"11","attempt":"2","process":"450719","run":"0","clock":"awake_ns","sequence":"5","trace_lost":false}
+rui: dispatch fenced after request scratch unlink failure: InjectedScratchRemovalFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+rui: dispatch fenced after Bash Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Bash Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after retry Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after retry Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+keyed facts bytes=944; reply bytes=3248; fixed parser scratch=5721; no retained allocator/DOM
+Current facts=7856B, fixed scanner/token/input=16384B, capture=431213B; 4x257 rows, no population allocation
+transport metadata: Requests=32 Cancellation=1; existing window=4096; no transport heap/worker/queue
+renderer allocation wide5000X: retained=16154624, peak=16187392 bytes (page charged, not RSS)
+renderer allocation resize2048→80: retained=655360, peak=16171008 bytes
+renderer allocation dense 中 192x256: retained=30326784, peak=30408704 bytes
+renderer allocation dense 中 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense NFD 192x256: retained=30326784, peak=30638080 bytes
+renderer allocation dense NFD 24x2048: retained=30326784, peak=30638080 bytes
+renderer allocation dense 🐄 192x256: retained=30326784, peak=30457856 bytes
+renderer allocation dense 🐄 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense SGR 192x256: retained=16154624, peak=17661952 bytes
+renderer allocation dense SGR 24x2048: retained=16154624, peak=17661952 bytes
+failed command: SUDO_COMMAND="/usr/bin/systemd-run --scope --quiet --collect --slice=amp-workload.slice --uid=user --same-dir --setenv=HOME=/home/user --setenv=PATH=/home/user/.amp/bin:/opt/git/bin:/home/user/.local/bin:/home/user/.local/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin --property=OOMPolicy=kill --unit=amp-run-13131-26197.scope /bin/sh -c [ -z \"\$1\" ] || printf \"%s\\n\" \"\$1\" > /proc/self/oom_score_adj; shift; exec \"\$@\" amp-workload 500 /bin/bash -c sed -n 6180,6215p src/server.zig; zig build -l 2>/dev/null | head -60" INVOCATION_ID=55bf3c5ca14a49cc9ce59fd4dc365fb8 PATH=/home/user/.amp/bin:/opt/git/bin:/home/user/.local/bin:/home/user/.local/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin OLDPWD=/ RUI_TEST_EXACT_INACTIVITY=0 ./.zig-cache/o/76ebd2afdf4158082ab72f09422f2ffe/test --cache-dir=./.zig-cache --seed=0x17be6e39 --listen=-
+

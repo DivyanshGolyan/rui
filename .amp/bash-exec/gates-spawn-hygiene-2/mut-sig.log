@@ -1,0 +1,16 @@
+test
++- run test 1 pass, 1 fail (2 total)
+error: 'bash.test.launched Bash starts with default signal actions, an empty mask and no inherited /dev/null' failed:
+       Bash succeeded. Exit code: 0.
+       stdout tail:
+       survived
+       
+       stderr tail:
+       
+       Full output was not retained.
+failed command: SUDO_COMMAND="/usr/bin/systemd-run --scope --quiet --collect --slice=amp-workload.slice --uid=user --same-dir --setenv=HOME=/home/user --setenv=PATH=/home/user/.amp/bin:/opt/git/bin:/home/user/.local/bin:/home/user/.local/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin --property=OOMPolicy=kill --unit=amp-run-353615-4231.scope /bin/sh -c [ -z \"\$1\" ] || printf \"%s\\n\" \"\$1\" > /proc/self/oom_score_adj; shift; exec \"\$@\" amp-workload 500 /bin/bash -c F=\"launched Bash starts\"; cp src/bash_platform.c /tmp/bp.c\nsed -i 's/POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF/POSIX_SPAWN_SETPGROUP/' src/bash_platform.c\nzig build test -Dtest-filter=\"\$F\" > /home/user/workspace/evidence/b/mut-sig.log 2>&1; echo \"mut-sig rc=\$?\"; cp /tmp/bp.c src/bash_platform.c\nsed -i 's|if (result == 0) result = posix_spawn_file_actions_addopen(&actions, 0, \"/dev/null\", O_RDWR, 0);|if (result == 0) { static int leak = -1; if (leak < 0) leak = open(\"/dev/null\", O_RDWR); result = posix_spawn_file_actions_addopen(\\&actions, 0, \"/dev/null\", O_RDWR, 0); }|' src/bash_platform.c; grep -c \"leak\" src/bash_platform.c\nzig build test -Dtest-filter=\"\$F\" > /home/user/workspace/evidence/b/mut-null.log 2>&1; echo \"mut-null rc=\$?\"; cp /tmp/bp.c src/bash_platform.c\nzig build test -Dtest-filter=\"\$F\" > /home/user/workspace/evidence/b/green-filter.log 2>&1; echo \"green rc=\$?\"; git diff --stat src/bash_platform.c\ngrep -h \"Signal\\|leaked\\|exit code\\|Exit code\" /home/user/workspace/evidence/b/mut-*.log | head" INVOCATION_ID=140818da06b641f4ba1afaebd03c5341 PATH=/home/user/.amp/bin:/opt/git/bin:/home/user/.local/bin:/home/user/.local/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin OLDPWD=/ RUI_TEST_EXACT_INACTIVITY=0 ./.zig-cache/o/7a66a49d408d88e9cffe86cd1abbabd9/test --cache-dir=./.zig-cache --seed=0xbf765339 --listen=-
+
+Build Summary: 38/40 steps succeeded (1 failed); 1/2 tests passed (1 failed)
+test transitive failure
++- run test 1 pass, 1 fail (2 total)
+
