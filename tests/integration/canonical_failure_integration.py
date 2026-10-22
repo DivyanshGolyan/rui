@@ -349,11 +349,6 @@ def committed_cases(state):
             assert recovered.returncode == 0, recovered
             assert json.loads(recovered.stdout)["answer"] == {**answer, "replayed": True}, recovered
             assert record.read_bytes() == original, "fatal diagnosis replaced original recovery inputs"
-        database = sqlite3.connect(store / "rui.sqlite3")
-        try:
-            assert database.execute("SELECT count(*) FROM core_command WHERE command_key=?", (key,)).fetchone() == (1,)
-        finally:
-            database.close()
         # Keyed reads retain typed diagnostics and the queried key; the distinct
         # inspection/report route remains outside this owner correction.
         for route, args in (
@@ -382,6 +377,10 @@ def committed_cases(state):
             assert len(proxy.exchanges) == 1, proxy.exchanges
         finally:
             proxy.close()
+        # The Host holds its Store exclusively; count the replays once it exits.
+        fixture.stop_host(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM core_command WHERE command_key=?", (key,)).fetchone() == (1,)
     finally:
         fixture.stop_host(host)
     print("canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed", flush=True)
@@ -748,16 +747,19 @@ def store_read_cases(state):
         fixture.message(home, store, "store-read-message", "s", "queued work")
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         assert content_failure(before)["error"]["code"] == "result_not_ready", before
-        # The statement still compiles; SQLite fails it at the first step,
-        # as for an I/O or corruption fault after preparation.
-        database = sqlite3.connect(store / "rui.sqlite3")
-        try:
-            with database:
-                database.execute("ALTER TABLE core_command RENAME TO core_command_unreadable")
-                database.execute("CREATE VIEW core_command AS SELECT * FROM core_command_unreadable "
-                    "WHERE abs(-9223372036854775808) IS NOT NULL")
-        finally:
-            database.close()
+        # The Host holds its Store exclusively, so corrupt the stopped file:
+        # startup validation never reads core_command, and the keyed read then
+        # fails at its first step with SQLITE_CORRUPT.
+        fixture.stop_host(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            page_size = database.execute("PRAGMA page_size").fetchone()[0]
+            root = database.execute("SELECT rootpage FROM sqlite_schema WHERE name='core_command'").fetchone()[0]
+        assert not (store / "rui.sqlite3-wal").exists()
+        with open(store / "rui.sqlite3", "r+b") as file:
+            file.seek((root - 1) * page_size)
+            file.write(b"\xff")
+        host = fixture.start_host(store, None)
         result = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         expect_fatal(result)
         assert content_failure(result) == {"key": "store-read-message",
