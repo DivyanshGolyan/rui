@@ -1,6 +1,6 @@
 # Rui overnight performance report, 21–22 Oct 2026
 
-**Status: final for tonight, Linux only.** No Mac runner was connected, so there is no macOS footprint, Mac wakeup or live result; nothing Linux is presented as Mac. Every number is labelled **measured** or **estimated**; all measurements are **Linux fixture** runs, none **live**. Baseline: main/stable [`240aef2e`](https://github.com/DivyanshGolyan/rui/commit/240aef2e46d7240ce31a02ce4cefceb695551a56). Two fixes **landed** at 00:05:30 UTC on 22 Oct as main = stable = [`d4f87000`](https://github.com/DivyanshGolyan/rui/commit/d4f870002b1eeef370fb8f4c7aa3fd8b14343159). Their before/after numbers were measured on the original source commits [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) and [`12f84075`](https://github.com/DivyanshGolyan/rui/commit/12f84075a2f5e73dcd5e4c8b38ed0ea890f1beef), each on `240aef2e`; no workload ran on the landed combined head, so this report makes no combined performance claim.
+**Status: final for tonight, Linux only.** No Mac runner was connected, so there is no macOS footprint, Mac wakeup or live result; nothing Linux is presented as Mac. Every number is labelled **measured** or **estimated**; all measurements are **Linux fixture** runs, none **live**. Baseline: main/stable [`240aef2e`](https://github.com/DivyanshGolyan/rui/commit/240aef2e46d7240ce31a02ce4cefceb695551a56). Two fixes **landed** at 00:05:30 UTC on 22 Oct as main = stable = [`d4f87000`](https://github.com/DivyanshGolyan/rui/commit/d4f870002b1eeef370fb8f4c7aa3fd8b14343159). Their before/after numbers were measured on the original source commits [`4950c22e`](https://github.com/DivyanshGolyan/rui/commit/4950c22effd8120a4b8f689c81c652ef13e50d8b) and [`12f84075`](https://github.com/DivyanshGolyan/rui/commit/12f84075a2f5e73dcd5e4c8b38ed0ea890f1beef), each on `240aef2e`. A/B used original source commits; separate single-run combined-head confirmations follow, not a combined-head A/B claim.
 
 **Setup.** 2-vCPU Linux 6.1 orbs (KVM, Xeon 2.6 GHz); ReleaseFast builds with identical options; the existing Go qualification harness and samplers (frozen harness [`a204296c`](https://github.com/DivyanshGolyan/rui/commit/a204296c7289cf0a90f95df155c4f27832c924fe)); fixed Host capacity 100, TLS/H2. A/B runs alternate in one orb. CPU is Linux user+system time at 10 ms granularity.
 
@@ -29,7 +29,23 @@ The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups
 | PSS step from 0 to 10 sessions | +3,983,360 B (≈398,336 B/session) vs ≈25 KB/session from 10 to 100 | — | Cause unknown; investigate first-activation allocations (pools, TLS/H2, SQLite caches) |
 | SSE JSON second pass | 2 rereads/event, 274 B | small; curl/OpenSSL dominate stacks | Parse JSON from the scanned buffer |
 
-**Combined-head confirmation on `d4f87000`:** P1's one-run observation and P2's one instrumented SQL count are both published (below). These are independent methods; traced switches are not natural wakeups.
+**Combined-head confirmation on `d4f87000`** (**measured**, Linux fixture, one run each, independent methods; not a combined-head A/B):
+
+| Quantity | Landed `d4f87000` | Source |
+| --- | ---: | --- |
+| STREAM100 Host PSS at end of window | 13,594,624 B | P1 [`225f42d4`](https://github.com/DivyanshGolyan/rui/commit/225f42d49a3328ba3922ba7d51f32ddbb21b34a2) |
+| HOLD100 voluntary switch proxy (distinct wakeups unavailable) | 39.583/s | same |
+| HOLD100 SELECT/s (instrumented) | 1,006.1999/s | P2 [`c95185dc`](https://github.com/DivyanshGolyan/rui/commit/c95185dc8b935b975d79901565ec8c4485924257) |
+
+**Limits:** no Mac or live data; SQL/`fsync` costs are estimates; artifacts are owner-verified (some queue-reproduced) with no independent artifact review; the SSE CPU A/B has two pairs, not three; P1's post-fix campaign had a restart incident and is not a strict single launch; other syscalls rose 3.27M per run with the SSE fix, cause unknown. Full records, failures and the incident are in Appendix A and the appendix limits; raw data stays on the perf branches linked there.
+
+---
+
+## Appendix A: details and full records
+
+### Combined-head confirmation records (`d4f87000`)
+
+These are independent methods; traced switches are not natural wakeups.
 - P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`. The ReleaseFast build of `d4f87000` finished at 01:03:51 UTC (42/42 steps, exit 0, binary SHA-256 `98bfb3f1…ef719`); STREAM100 started at 01:03:52 UTC. STREAM and HOLD each completed once with exit 0, at 01:05:04 and 01:06:16 UTC, and both final JSONs are kept. A later service restart left record gaps; see "Post-fix restart incident" in the appendix limits. Results below are **measured**, Linux fixture, from P1 [`225f42d4`](https://github.com/DivyanshGolyan/rui/commit/225f42d49a3328ba3922ba7d51f32ddbb21b34a2), merged here: [NOTES.md](../../.amp/p1-postfix/NOTES.md), [summary.json](../../.amp/p1-postfix/summary.json), [attempts.json](../../.amp/p1-postfix/attempts.json), [raw/](../../.amp/p1-postfix/raw/). P1's clean export verifies 49/49 hashes and its reducer reproduces the summary byte for byte. The queue then reproduced it independently: remote identity, 49/49 hashes with full coverage, 33 gzip files, 87 product and 156 harness source hashes, the byte-identical summary, all 4 raw memory endpoints and 13 counters, the CPU pairs and the five-thread 2,375/81 switch deltas; only 50 evidence paths differ from `d4f87000`. That is owner-verified and queue-reproduced, not an independent review, rebuild or native liveness check. The published campaign and service receipts confirm the original windows ended before the restart. Observation method only, not complete-work or Mac qualification. One run each, a single observation and not a statistical A/B; the aborted extra STREAM is not used as a replicate.
 
 | Quantity | Pre-fix `240aef2e` (median) | Source-commit A/B after | Landed `d4f87000` (one run) |
@@ -46,18 +62,15 @@ The STREAM100 CPU here is an interior observation window at 30 events/s/stream. 
 
 - P2, one instrumented HOLD100 window on `d4f87000` (**measured** counts, Linux fixture; P2 [`c95185dc`](https://github.com/DivyanshGolyan/rui/commit/c95185dc8b935b975d79901565ec8c4485924257), merged here: [postfix-hold100-summary.json](../../.amp/p2/raw/postfix-hold100-summary.json), raw [evidence.json](../../.amp/p2/raw/postfix-hold100-attempt2/evidence.json) and [host-stderr.log.gz](../../.amp/p2/raw/postfix-hold100-attempt2/host-stderr.log.gz)). Test 01:17:37–01:18:57 UTC passed, exit 0; 100 configured and admitted held streams, 10 s warmup, then a 60.007954823 s window. **60,380 SELECTs = 1,006.1999/s**: 58,000 control reads (966.5385/s), 2,320 uncertain-Action scans (38.6615/s), 60 retry scans (0.9999/s). Zero bytes, events and completions; no other SQL verbs and no in-window admissions. Pre-run estimate (**estimated**) 1,000/s, about 0.62% low. This matches the pre-fix matched HOLD100 rate (1,004.3855/s), as expected: neither fix touched SQL polling. Instrumented ReleaseFast binary SHA-256 `06529a20…701bc`, Go harness `2e412d81…c952b`; 87 exact-main product files verified. The reaped Store has 100 cancelled Messages and zero Actions or unresolved operations. P2's export verifies 159/159 hashes and 7 byte-identical reductions (owner-verified; no independent review). No HOLD0, CPU-causality or speedup claim. Two earlier attempts failed before any held window or count, and both are kept: a build failure (a copied C extension was missing), and a 01:16:25 UTC setup failure (the precreated artifact directory had mode 0755 and was rejected before Configure). P2 diagnosed the second against `client.Capture.open` and started the single corrected attempt in a fresh 0700 directory. No HOLD0 window.
 
-**Open items.**
+### Open items
+
 - No Mac measurement (footprint, wakeups) and no live 100 × gpt-6-luna wave: the only approved runner, 1993-X2, is offline.
 - SQL polling and the execution-loop polls need an execution Store-commit wake (proposal below, not built); adding a wake alone does not remove the queries.
 - With the SSE fix, other syscalls rose by 3.27M per run, mostly `recvfrom` (+2.48M); cause unknown.
 - Artifact reviews are pending. P2's SSE-count (131 hashes) and matched-SQL (141 hashes) artifacts are owner-verified and queue-reproduced (hashes and reducers), without an independent artifact review. P1's SSE CPU artifact is owner-verified only, with its audit pending. Source correctness review of both fixes is complete.
 - A3 of the SSE CPU A/B was killed by an executor restart and B3 never ran, so that A/B has two pairs, not three.
 
-Details, method, limits and every artifact link follow. Raw data stays on the perf branches listed in each section.
-
----
-
-## Details
+### Earlier headlines, method and fix records
 
 ## Headline 1: Linux PSS (macOS footprint pending), Host and clients, N = 0/10/100
 
