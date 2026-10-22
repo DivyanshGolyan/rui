@@ -51,8 +51,6 @@ def trace_u64(record, field):
 
 
 def released_resources(pid, diagnostics, invocation):
-    if sys.platform != "linux":
-        return None  # Native descriptor evidence remains Linux-only.
     began_ns, ended_ns, deadline = invocation
     with diagnostics.condition:
         while True:
@@ -107,6 +105,8 @@ def released_resources(pid, diagnostics, invocation):
                     last_release = max((releases[key] for key in prefix), key=lambda record: int(record["sequence"]))
                     assert last_release["scratch_used_bytes"] == "0", ("retained scratch charge", last_release)
                     assert time.monotonic() <= deadline, "release exceeded original command budget"
+                    if sys.platform != "linux":
+                        return None  # Only the /proc resource census is Linux-specific.
                     census = linux_resources(pid)
                     assert census is not None, "Host vanished before resource census"
                     return census

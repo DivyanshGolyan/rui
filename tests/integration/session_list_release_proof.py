@@ -28,7 +28,7 @@ def expect_failure(operation, message):
     raise AssertionError(f"negative did not fail: {message}")
 
 
-def oracle_controls():
+def oracle_controls(platform="linux"):
     def record(phase, sequence, subject, charge=None):
         result = dict(rui_test_phase=phase, process="1", run="2", clock="awake_ns",
                       sequence=str(sequence), at_ns=str(100 + sequence), trace_lost=False,
@@ -44,8 +44,16 @@ def oracle_controls():
                record("connection_resources_released", 4, 0, "0")]
     diagnostics = SimpleNamespace(records=records, read_error=None, condition=threading.Condition())
     invocation = (102, 102, time.monotonic() + 10)
-    with patch.object(fixture, "linux_resources", return_value={"census": "observed"}):
-        assert fixture.released_resources(1, diagnostics, invocation) == {"census": "observed"}
+    census = {"census": "observed"} if platform == "linux" else None
+    with patch.object(fixture.sys, "platform", platform), \
+         patch.object(fixture, "linux_resources", return_value={"census": "observed"}):
+        # Neither the selected release nor an earlier owner's release may be
+        # skipped before teardown, even without a platform resource census.
+        for missing in (2, 3):
+            diagnostics.records = records[:missing] + records[missing + 1:]
+            expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
+        diagnostics.records = records
+        assert fixture.released_resources(1, diagnostics, invocation) == census
         for charge in (None, 0, "00", "-1", str(2**64)):
             diagnostics.records = copy.deepcopy(records)
             release = diagnostics.records[2]
@@ -61,7 +69,7 @@ def oracle_controls():
             item["trace_lost"] = True
         # An unrelated lost diagnostic does not remove required endpoints.
         diagnostics.records[-1]["sequence"] = "6"
-        assert fixture.released_resources(1, diagnostics, invocation) == {"census": "observed"}
+        assert fixture.released_resources(1, diagnostics, invocation) == census
         diagnostics.records[-1]["trace_lost"] = False
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "not sticky")
         diagnostics.records = copy.deepcopy(records)
@@ -73,9 +81,6 @@ def oracle_controls():
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "request_number")
         diagnostics.records = [records[0], records[3]]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
-        for missing in (2, 3):
-            diagnostics.records = records[:missing] + records[missing + 1:]
-            expect_failure(lambda: fixture.released_resources(1, diagnostics, (102, 102, time.monotonic())), "missing exchange release")
         diagnostics.records = records + [records[-1]]
         expect_failure(lambda: fixture.released_resources(1, diagnostics, invocation), "duplicate exchange")
         diagnostics.records = copy.deepcopy(records)

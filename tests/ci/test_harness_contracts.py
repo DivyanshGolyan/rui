@@ -63,6 +63,15 @@ class ObservationCodecTest(unittest.TestCase):
         self.assertEqual(observations.records, [dict(values, process=str(os.getpid()), run="37",
                                                    sequence="1", clock="awake_ns", trace_lost=False)])
 
+    def test_session_list_release_prefix_on_both_platforms(self):
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c",
+                     f"from session_list_release_proof import oracle_controls; oracle_controls({platform!r})"],
+                    cwd=ROOT / "tests/integration", capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class ImportSafetyTest(unittest.TestCase):
     def test_session_list_support_imports_ignore_process_arguments_and_workspace(self):
