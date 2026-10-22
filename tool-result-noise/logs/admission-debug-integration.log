@@ -1,0 +1,58 @@
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+Build Summary: 38/38 steps succeeded
+exit 0

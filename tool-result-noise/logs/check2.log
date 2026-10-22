@@ -1,0 +1,1276 @@
+evaluator boundary: compile-only, result, CPU, framing, and cleanup passed on linux
+Integration Python: 3.11.6 (/usr/local/bin/python3)
+Actual native platform: Linux x86_64
+native passed: exit=0 elapsed=74.641s
+1/714 tests.test_0...OK
+2/714 codex_auth.test.device login cancellation rejects before a provider request...OK
+3/714 codex_credentials.test.installed local credential status completes under the exclusive mutation lock...OK
+4/714 codex_credentials.test.a rejected refresh replacement leaves the claim pending until login...OK
+5/714 codex_credentials.test.unsafe paths and credential aliases fail closed...OK
+6/714 codex_credentials.test.private file, lock, directory, and abandoned temp are validated...OK
+7/714 codex_credentials.test.each replacement failure leaves only a complete old or new credential...OK
+8/714 model_adapter.test.provider interpretation preserves accepted bytes and rejects every model disagreement...OK
+9/714 model_adapter.test.provider interpretation closes failure variants without granting settlement or disposal...OK
+10/714 model_adapter.test.Codex continuation requires identical requested binding...OK
+11/714 model_adapter.test.request writer charges exact growth and seals through a readonly descriptor...OK
+12/714 model_adapter.test.request writer failure retains the full reservation until the owner releases...OK
+13/714 model_adapter.test.real preparation consumes the configured allowance across multiple advances...OK
+14/714 model_adapter.test.plain JSON runs batch writes and conserve scan plus output allowance...OK
+15/714 model_adapter.test.a peer Message leads with its recorded sender and the peer rule, apart from its text...OK
+16/714 model_adapter.test.Codex affinity separates Sessions and Stores and survives reopening...OK
+17/714 model_adapter.test.request preparation minimal golden is exact across schedules...OK
+18/714 model_adapter.test.request preparation escapes instructions and user content...OK
+19/714 model_adapter.test.request preparation frozen selection excludes later messages...OK
+20/714 model_adapter.test.request preparation freezes settings at admission...OK
+21/714 model_adapter.test.preparation integrity follows live readers and rejects a foreign binding...OK
+22/714 model_adapter.test.request preparation cancellation and failure release ownership...OK
+23/714 model_adapter.test.request preparation completed request is fenced by later stop before handoff...OK
+24/714 model_adapter.test.a bound trip releases ownership whether or not the sealing advance fired...OK
+25/714 model_adapter.test.request preparation rejects unsupported saved meaning and fences malformed canonical items...OK
+26/714 model_adapter.test.request preparation resumes large private replay validation before emission...OK
+27/714 model_adapter.test.request preparation composes replay tool results and schema...OK
+28/714 model_adapter.test.request preparation authenticates the historical requested model binding...OK
+29/714 model_adapter.test.request preparation cancellation yields inside canonical proposal authentication...OK
+30/714 model_adapter.test.compaction preparation appends request only trigger and replays asymmetric anchor tail...OK
+31/714 model_adapter.test.compaction public preparation rejects incompatible selected base and suffix bindings...OK
+32/714 model_adapter.test.request preparation cancels inside schema and replay emissions...OK
+33/714 model_capability.test.the recommended model has an automatic compaction threshold; other models do not...OK
+34/714 descriptor_capacity.test.requirement uses simultaneous owner populations rather than summing exclusive maxima...OK
+35/714 descriptor_capacity.test.zero execution capacity has no unreachable preparation or spawn population...OK
+36/714 descriptor_capacity.test.execution population compares exclusive steady and shared transition overlaps...OK
+37/714 descriptor_capacity.test.requirement arithmetic rejects overflow...OK
+38/714 descriptor_capacity.test.finite descriptor limits reject below and accept exact or above...OK
+39/714 descriptor_capacity.test.intake fits the available limit without sacrificing its minimum...OK
+40/714 descriptor_limit.test.native limit conversion preserves finite and unlimited results...OK
+41/714 descriptor_limit.test.native limit conversion rejects invalid queries and values...OK
+42/714 descriptor_limit.test.descriptor enumeration agrees with independent finite-limit scan...OK
+43/714 execution_turn.test.one production turn removes at most one provider completion...OK
+44/714 execution_turn.test.a remaining completion burst drains across later turns with lifecycle between removals...OK
+45/714 execution_turn.test.one production turn advances model preparation once with the configured allowance...OK
+46/714 execution_turn.test.large preparation requires a later turn rather than draining inside one turn...OK
+47/714 execution_turn.test.lifecycle service still runs when admission, completion, and preparation all make progress...OK
+48/714 execution_turn.test.progress from an earlier phase cannot skip a later lifecycle service...OK
+49/714 execution_turn.test.immediate runnable work selects continuation rather than an idle wait...OK
+50/714 execution_turn.test.true idle work selects a wait rather than spinning...OK
+51/714 execution_turn.test.absent control hint still reconciles when the fallback deadline is due...OK
+52/714 execution_turn.test.live Bash observes a later clock than Bash preparation in the same lifecycle service...OK
+53/714 execution_turn.test.each lifecycle service observes a later clock than earlier bounded work...OK
+54/714 execution_turn.test.sustained messages cannot starve a tool continuation after preparation reopens...OK
+55/714 execution_turn.test.rolled back retry admission does not suppress other kinds or lose preference...OK
+56/714 execution_turn.test.capacity release after a full turn schedules retry maintenance...OK
+57/714 execution_turn.test.occupied model preparation skips retry and new-model admission...OK
+58/714 execution_turn.test.Bash admission uses a free slot without sharing the model-preparation quota...OK
+59/714 execution_turn.test.a fenced recover does not launch later work in the same turn...OK
+60/714 protocol.test.semantic digest distinguishes omission, null, and value...OK
+61/714 protocol.test.Request Store borrow remains in its active union payload...OK
+62/714 protocol.test.captured content cleanup closes sealed custody...OK
+63/714 protocol.test.configuration content sealing peaks at four descriptors with its socket...OK
+64/714 protocol.test.content sink enforces the decoded consumer boundary before retention...OK
+65/714 protocol.test.fixed JSON buffers preserve control bytes and enforce capacity...OK
+66/714 protocol.test.ingress charges decoded growth and transfers file charge through cleanup...OK
+67/714 protocol.test.failed ingress unlink retains an actionable owner and only the affected charge...OK
+68/714 protocol.test.ingress unknown write failure keeps submitted charge until close...OK
+69/714 protocol.test.observation needs no scratch at a full budget...OK
+70/714 protocol.test.Conversation content stream wire requires start zero and literal true...OK
+71/714 protocol.test.conversation cursor parser rejects unfixed and malformed continuations...OK
+72/714 protocol.test.configuration token heuristics parse sparsely and bind idempotency...OK
+73/714 protocol.test.configuration provider envelope preserves exact spelling and omission...OK
+74/714 protocol.test.Session report profile is closed and omission selects Current...OK
+75/714 protocol.test.Session listing wire distinguishes all, exact workspace, continuation and invalid cursor...OK
+76/714 protocol.test.incremental ingress streams fragmented content and transfers charged custody only at complete framing...OK
+77/714 protocol.test.incremental ingress preserves grammar and releases both captures after late failure...OK
+78/714 platform.test.Store paths canonicalize aliases to one socket...OK
+79/714 platform.test.Store lease observation owns probe mechanics and releases every descriptor...OK
+80/714 platform.test.socket path uses the first 16 SHA-256 bytes in lowercase hex...OK
+81/714 platform.test.absent destination preflight checks components but bounds canonical aliases...OK
+82/714 platform.test.absent destination preflight resumes filesystem checks after missing components cancel...OK
+83/714 platform.test.absent destination preflight checks read-only ancestor reached through dot dot...OK
+84/714 platform.test.Store path capacities follow the SQLite VFS and derived suffixes...OK
+85/714 platform.test.canonical Store boundary rejects before ownership or endpoint effects...OK
+86/714 platform.test.long raw Store aliases remain usable when their canonical path fits...OK
+87/714 platform.test.invalid UTF-8 Store path remains distinct from path overflow...OK
+88/714 platform.test.startup cleanup recognizes only owned ingress names...OK
+89/714 platform.test.startup cleanup removes owned files and preserves lookalikes...OK
+90/714 platform.test.startup cleanup refuses an owned name with the wrong type...OK
+91/714 platform.test.startup cleanup refuses owned symlink and socket names...OK
+92/714 platform.test.startup reclaims only a stale Unix socket...OK
+93/714 socket_fixture.test.socket fixture survives the historical deep checkout and owns cleanup...OK
+94/714 socket_fixture.test.socket fixture validates complete native byte paths without truncation...OK
+95/714 socket_fixture.test.socket fixture lint rejects checkout-rooted Unix socket construction...OK
+96/714 HostDiagnostics.test.startup diagnostics rotate before growth, repair tails and retain failures...rui: diagnostic writer unavailable (IsDir); no Host work was changed
+OK
+97/714 TestObservation.test.private owner observations remain bounded under full and closed credit...OK
+98/714 TestObservation.test.private owner observations preserve selected custody through SIGKILL...OK
+99/714 TestObservation.test.private owner observations seal admission without forgiving held or late publication...OK
+100/714 store.test.Store open failures return typed errors without unwinding panics...OK
+101/714 store.test.Session list pages accepted creation order with exact workspace and fixed high water...OK
+102/714 store.test.Session list capture and cursor storage stay page bounded as dormant Sessions grow...OK
+103/714 store.test.Current excludes history while Full exposes exact closed Session inventory...OK
+104/714 store.test.Current selects active then queued work and bounds recent Message identities...OK
+105/714 store.test.Current preserves empty Message identity across queue, active Turn and history...OK
+106/714 store.test.Full preserves rejected model interruption targets as canonical u64 text...OK
+107/714 store.test.Full revisions own repeated content once and render semantic settings...OK
+108/714 store.test.Full attributes unbound Messages to the earliest covering stop...OK
+109/714 store.test.Bash proposals retain exact order permission provenance denial and stop terminality...OK
+110/714 store.test.allow once survives mode changes and reopen without granting another Attempt...OK
+111/714 store.test.Current reports progress alongside an actionable sibling...OK
+112/714 store.test.Action settlement atomically yields to an earlier Session stop...OK
+113/714 store.test.earlier Action settlement remains authoritative after Session stop...OK
+114/714 store.test.Full reports every closed Action resolution without fencing...OK
+115/714 store.test.report scratch exhaustion is an observation failure without Store fencing...OK
+116/714 store.test.report unlink failure retains a startup-owned zero-request file...OK
+117/714 store.test.canonical report and Action read failures fence later commands...OK
+118/714 store.test.Store entry points lock and fence only through canonical access...OK
+119/714 store.test.response-stage model failures require their provenance...OK
+120/714 store.test.canonical step faults fence rather than reading as ordinary misses...OK
+121/714 store.test.Core classifies trustworthy calls atomically without Action-shaped rejections...OK
+122/714 store.test.complete call outcomes continue once in call order ahead of pending input...OK
+123/714 store.test.kind-specific admission selects a tool continuation despite fresh input and rolls back atomically...OK
+124/714 store.test.production turn preserves skipped continuation preference through actual Store admissions...OK
+125/714 store.test.terminal call-result import and read failures preserve canonical authority...OK
+126/714 store.test.runnable discovery fences structurally incomplete current tool calls...OK
+127/714 store.test.compaction pressure uses provider usage appended input and complete call result groups...OK
+128/714 store.test.missing canonical call outcome rows fence history and inspection...OK
+129/714 store.test.historical tool-result EOF revalidates complete canonical coverage...OK
+130/714 store.test.complete historical tool-result traversal scales with groups and calls...OK
+131/714 store.test.historical preparation yields covered group populations and cancels proposal authentication...OK
+132/714 store.test.historical preparation rejects missing extra and reordered sibling classifications incrementally...OK
+133/714 store.test.historical accepted assistant output completeness and provenance fence reads...OK
+134/714 store.test.historical preparation keeps incompatible authenticated calls distinct from corruption...OK
+135/714 store.test.historical accepted output selection work excludes failed Operation population...OK
+136/714 store.test.Current report work is independent of terminal tool history...OK
+137/714 store.test.Current pending count skips excluded Message history by indexed cutoff...OK
+138/714 store.test.Full Message projection work does not multiply Messages by stops...OK
+139/714 store.test.call classification uses the proposing Operation frozen catalog...OK
+140/714 store.test.duplicate trustworthy call identity rolls back every imported consequence...OK
+141/714 store.test.valid and rejected call populations grow independently...OK
+142/714 store.test.Session stop freezes its selection and excludes only the admitted prefix...OK
+143/714 store.test.later idle stop does not reclassify a completed Message...OK
+144/714 store.test.idle Session stop excludes queued work but not later admissions...OK
+145/714 store.test.exact model interruption continues only with applicable pending input...OK
+146/714 store.test.exact model interruption rejects stale targets and replays before applicability...OK
+147/714 store.test.controls wait behind an active model settlement transaction...OK
+148/714 store.test.controls remove scheduled retries and replay without cancelling newer work after reopen...OK
+149/714 store.test.accepted stop remains discoverable without a control hint...OK
+150/714 store.test.dispatch handoff refuses a stopped Attempt without invoking the launch callback...OK
+151/714 store.test.failed control commit saves no answer after reopening...OK
+152/714 store.test.configuration pre-Workspace decisions preserve completeness and immutable binding...OK
+153/714 store.test.Store configuration requires and freezes provider model and workspace...OK
+154/714 store.test.unsupported provider rejects mixed configuration atomically and replays exact shape...OK
+155/714 store.test.persisted settings survive reopen and corrupt canonical provider fences current and historical reads...OK
+156/714 store.test.created Session tools and permission resolve to product defaults...OK
+157/714 store.test.configuration planning preserves sparse defaults and rejection precedence...OK
+158/714 store.test.configuration rejections bypass content effects and replay committed answer...OK
+159/714 store.test.configuration answers replay without reverting newer settings...OK
+160/714 store.test.content reader owns the bounded result-delivery window...OK
+161/714 store.test.core preserves empty keys and Session references containing NUL...OK
+162/714 store.test.saved incomplete initialization stays rejected after Session creation...OK
+163/714 store.test.capability-required configuration rejects on replacement and replays its saved decision...OK
+164/714 store.test.failed commit saves neither answer nor partial Session...OK
+165/714 store.test.real SQLite busy saves no answer and fences the connection...OK
+166/714 store.test.real SQLite full during import publishes no canonical prefix...OK
+167/714 store.test.message admissions remain queued in order and retain bounded canonical content...OK
+168/714 store.test.message rejections replay before current Session checks without retained input...OK
+169/714 store.test.a peer sender is recorded, ordered in its own sequence and rejected when unknown...OK
+170/714 store.test.message observation validates accepted admission references independently...OK
+171/714 store.test.message observation rejects an answer attached to processing durable facts...OK
+172/714 store.test.message conflicts and failed commits cannot create another admission...OK
+173/714 store.test.failed message import rolls back content command and admission...OK
+174/714 store.test.rollback failure fences mutation until fresh reopen restores committed facts...OK
+175/714 store.test.production Store applies finite durable SQLite settings...OK
+176/714 store.test.maximum canonical Store path completes a journaled transaction...OK
+177/714 store.test.measurement Store can disable cache spill without changing other limits...OK
+178/714 store.test.measurement Store can force a smaller SQLite cache without changing production defaults...OK
+179/714 store.test.fresh Store uses current schema and rejects the prior version...OK
+180/714 store.test.existing Store rejects noncanonical durable authority...OK
+181/714 store.test.existing Store rejects a different canonical identity...OK
+182/714 store.test.canonical observation failure fences later admission...OK
+183/714 store.test.external content import follows sealed descriptor custody...OK
+184/714 store.test.external content identity is verified before canonical commit...OK
+185/714 store.test.content verification failure rolls back new imports and deduplicated inputs...OK
+186/714 store.test.content import reads once and rolls back sources that change during reading...OK
+187/714 store.test.multiwindow content import and deduplication preserve all bytes...OK
+188/714 store.test.large raw content opens without materializing its payload...OK
+189/714 store.test.public conversation owner fixes end, filters settings and bounds content...OK
+190/714 store.test.public content SQL failure fences Store instead of reporting absence...OK
+191/714 store.test.public content SQLite step failure fences after successful preparation...OK
+192/714 store.test.public ordinary private bytes and cursor fence...OK
+193/714 store.test.public ordinary private page fences...OK
+194/714 store.test.public foreign Turn bytes and cursor fence...OK
+195/714 store.test.public foreign Turn page fences...OK
+196/714 store.test.public private tool bytes fence...OK
+197/714 store.test.public private tool page fences...OK
+198/714 store.test.public private tool cursor fences...OK
+199/714 store.test.public completed tool group with missing exposed content fences...OK
+200/714 store.test.public completed tool group with corrupt sibling provenance fences...OK
+201/714 store.test.public completed Action sibling corruption fences first Conversation read...OK
+202/714 store.test.private-only model output never becomes public conversation...OK
+203/714 store.test.public tool-result cursor crosses a completed group boundary...OK
+204/714 store.test.public projected content sequential work excludes repeated prefixes...OK
+205/714 store.test.public projected content equal-length repoint fences at complete-stream EOF...OK
+206/714 store.test.public projected content EOF rejects nonempty trailing parts...OK
+207/714 store.test.public projected content trailing empty parts retain final byte and repeated EOF...OK
+208/714 store.test.public projected content ranges own positioning across windows and scalar splits...OK
+209/714 store.test.public projected content empty identity and repeated EOF...OK
+210/714 store.test.public projected content range positioning preserves decoding and backing faults...OK
+211/714 store.test.definite rejections retain decisions without retaining payloads...OK
+212/714 store.test.one committed selection freezes its settings and input prefix...OK
+213/714 store.test.continued accepted output keeps model immutable and public projection readable...OK
+214/714 store.test.model rejection diagnostic is atomic Attempt-bound provenance not Turn output...OK
+215/714 store.test.model rejection diagnostic cannot masquerade as assistant content...OK
+216/714 store.test.failed model settlement recovers uncertainty with a fresh consumed Attempt...OK
+217/714 store.test.HTTP status failures keep the settling Attempt's provider correlation...OK
+218/714 store.test.temporary model failures conserve allowance and exhaust after four Attempts...OK
+219/714 store.test.canonical historical read failure fences dispatch without a fabricated outcome...OK
+220/714 store.test.idle runnable probe uses the pending-only admission index...OK
+221/714 store.test.runnable selection finds age through pending index then groups one session...OK
+222/714 store.test.runnable discovery measures eligible ineligible and history populations independently...OK
+223/714 store.test.content reader metadata and decode window remain bounded...OK
+224/714 store.test.retry admission and exhausted recovery use their selection indexes...OK
+225/714 store.test.retry due index excludes future population and preserves age ordering...OK
+226/714 store.test.retry transitions preserve age and settle one exhausted outcome per call...OK
+227/714 store.test.public proposal structural corruption fences independently on every route...OK
+228/714 store.test.proposal callable cursor domain preserves healthy Store...OK
+229/714 store.test.public activity admission corruption fences page and content independently...OK
+230/714 store.test.activity fixed admission prefix survives later application and stop...OK
+231/714 store.test.persisted tool label corruption fences every publication route...OK
+232/714 store.test.tool label observation trusts admission but exact inspection authenticates payload...OK
+233/714 store.test.completed tool labels trust admission while model replay authenticates payload...OK
+234/714 store.test.live tool activity survives completed Turns and split result pages...OK
+235/714 store.test.compaction overflow admits a new Operation without losing applied input...OK
+236/714 store.test.compaction success retains host inputs and ordered anchor suffix across reopen...OK
+237/714 store.test.compaction defaults nullable overrides and frozen retry survive reopen...OK
+238/714 store.test.compaction exact threshold zero reservation and integer usage fallback...OK
+239/714 store.test.compaction pressure uses the latest accepted output even without usage...OK
+240/714 store.test.compaction soft trigger freezes settings before selecting arrivals and instructions...OK
+241/714 store.test.compaction failed and unresolved candidates preserve the accepted base...OK
+242/714 store.test.compaction selected newest base corruption fences rather than using an older base...OK
+243/714 store.test.historical accepted output completeness and provenance fence both read paths...OK
+244/714 store.test.compaction repeated overflow consumes fixed pending prefix without a proactive loop...OK
+245/714 store.test.compaction does not repeat a soft trigger after a failed assistant with unchanged source...OK
+246/714 store.test.compaction missing usage estimates covered retained host input...OK
+247/714 store.test.historical context selection work excludes nonmatching Operation population...OK
+248/714 store.test.model admission work excludes failed historical Operation population...OK
+249/714 store.test.model admission work excludes accepted compaction base history...OK
+250/714 store.test.model admission work excludes usage-covered accepted tool and instruction history...OK
+251/714 store.test.compaction new Turn evaluates pressure independently of stopped overflow recovery...OK
+252/714 store.test.compaction purpose admission fences a missing latest Turn Operation...OK
+253/714 server.test.receive advancement serves paused siblings across recurring queue pressure...OK
+254/714 server.test.canonical failure classifier accepts every production mutation failure envelope...OK
+255/714 server.test.mutation decoder validates all five actual producers and preserved domain answers...OK
+256/714 server.test.Conversation stream native delivery decodes once and closes on failed handoff...OK
+257/714 server.test.reply delivery establishes nonblocking only when sending...OK
+258/714 server.test.discovery identity exhaustion cannot start a new error delivery budget...OK
+259/714 server.test.discovery reply delivery shares its absolute budget across header and partial body writes...OK
+260/714 server.test.reply delivery renews on short writes and excludes production between windows...OK
+261/714 server.test.reply delivery retries actual AGAIN without renewing inactivity...OK
+262/714 server.test.reply delivery interrupted poll consumes the existing inactivity budget...OK
+263/714 server.test.model retry and inactivity defaults match the owning resource contract...OK
+264/714 server.test.authentication handoff borrows the sole credential lease and releases it once...OK
+265/714 server.test.inspection counts held custody, not an in-flight admission reservation...OK
+266/714 server.test.delayed control replies retain command identity after request storage reuse...{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"session_stop","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"5191779911403","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"5191779911399","host_total_ns":"5191779911402","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"model_interruption","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"5191779985693","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"5191779985689","host_total_ns":"5191779985692","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"control_timing","command_key":"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwx","kind":"permission_decision","store_queued_at_ns":"2","lock_acquired_at_ns":"3","store_complete_at_ns":"4","reply_complete_at_ns":"5191780030816","queue_wait_ns":"1","store_lock_wait_ns":"1","store_service_ns":"1","post_commit_reply_ns":"5191780030812","host_total_ns":"5191780030815","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+OK
+267/714 server.test.required Bash observations publish while optional stderr custody is held...OK
+268/714 server.test.HTTP error capture retires before execution custody...{"rui_test_phase":"provider_completion_removed","at_ns":"5191781606608","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"5191781657283","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"5191781660225","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"provider_completion_removed","at_ns":"5191782115254","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+rui: provider error capture unreadable for operation 7: ShortSealedRead
+{"rui_test_phase":"cleanup_completed","at_ns":"5191782132423","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"5191782134311","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"provider_completion_removed","at_ns":"5191782470750","queued_after":"0","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"5191782494644","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"provider_completion_serviced","at_ns":"5191782496920","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+OK
+269/714 server.test.cleanup publication follows complete execution retirement...{"rui_test_phase":"cleanup_completed","at_ns":"5191782547372","turn":"3","operation":"7","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"1","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"5191782549402","turn":"3","operation":"7","action":"11","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"2","trace_lost":false}
+{"rui_test_phase":"cleanup_completed","at_ns":"5191782551048","turn":"3","operation":"7","action":"11","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"3","trace_lost":false}
+{"rui_test_phase":"cleanup_release_observed","at_ns":"5191902936024","turn":"3","operation":"7","action":"11","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"4","trace_lost":false}
+rui: dispatch fenced after Bash resource reclamation failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+{"rui_test_phase":"cleanup_completed","at_ns":"5191902990662","turn":"3","operation":"7","action":"11","attempt":"2","process":"120089","run":"0","clock":"awake_ns","sequence":"5","trace_lost":false}
+OK
+270/714 server.test.named scratch retry releases custody through the shutdown owner path...rui: dispatch fenced after request scratch unlink failure: InjectedScratchRemovalFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+OK
+271/714 server.test.execution slots agree with custody across the complete population...OK
+272/714 server.test.no-work admission restores only its temporary custody reservation...OK
+273/714 server.test.failed admission releases its reservation and fences the Store and dispatch...rui: dispatch fenced after Bash Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Bash Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after retry Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after retry Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+rui: dispatch fenced after Attempt admission failure: StoreFenced
+Host cannot safely continue; wait for shutdown before restarting this Store. Use saved request handles; do not resubmit uncertain work.
+OK
+274/714 server.test.closed Bash delivery retains its payload with detached custody...OK
+275/714 server.test.closed Bash payloads keep their typed binding identity...OK
+276/714 server.test.preparing slots belong to their live preparations...OK
+277/714 server.test.retained named scratch blocks its slot until the same owner reclaims...OK
+278/714 server.test.provider metadata uses shared scratch reclamation without widening its limit...OK
+279/714 server.test.message observation renders every closed queue state without fabricated rejection state...OK
+280/714 server.test.Message observation progress fits the resident response bound with escaped identities...OK
+281/714 server.test.control response variants fit exact worst-case JSON bounds...OK
+282/714 server.test.retired reserved exchanges cannot block their successors while workers are occupied...OK
+283/714 server.test.disconnected reserved peers release classification while half-closed peers receive errors...OK
+284/714 server.test.file-free retirement releases intake places before acceptance with occupied workers...OK
+285/714 server.test.retired ordinary capture still consumes its intake classification and resource place...OK
+286/714 server.test.shutdown fences every unhanded route while preserving request and reply custody...OK
+287/714 server.test.intake accepts and physically retires a hundred incomplete exchanges...OK
+288/714 server.test.blocked ingress file work leaves controls discovery and shutdown responsive...OK
+289/714 server.test.readable ingress cannot cross its header or body deadline...OK
+290/714 server.test.ingress resumes its peer wait after local capture completion...OK
+291/714 server.test.exchange retirement retains failed ingress cleanup through retry...OK
+292/714 server.test.Host fences dispose admitted preparation without touching canonical state...OK
+293/714 server.test.Host fences dispose a sealed request before native transfer construction...OK
+294/714 server.test.effect launch gate rechecks every Host suppression combination...OK
+295/714 server.test.effect launch gate releases its mutex after native failure...OK
+296/714 server.test.Host fences discard prepared Bash without settling and retain failed cleanup...rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+New work is blocked; retained cleanup is still owned. Inspect saved requests; do not resubmit uncertain work.
+OK
+297/714 client.test.Host information is bounded and rejects ambiguous identities and capacity...OK
+298/714 client.test.Host unavailable replies require a known complete error...OK
+299/714 client.test.a page peer has an ID prefix only on a generated reference...OK
+300/714 client.test.canonical presentation typed ingress owns escaped labels and closed facts...OK
+301/714 client.test.canonical presentation releases allocations on acceptance and late rejection...OK
+302/714 client.test.mutation decoder checks binding queue ambiguity and fixed reply bounds...OK
+303/714 client.test.mutation decoder preserves invalid-target domain rejection not false fatal certainty...OK
+304/714 client.test.mutation diagnostics own complete validated metadata without raw reply lifetime...OK
+305/714 client.test.canonical failure classifier validates complete string-only error envelope...OK
+306/714 client.test.canonical failure classifier uses only authoritative invocation envelope...OK
+307/714 client.test.canonical failure classifier bounds deep wide and escaped maximum replies...OK
+308/714 client.test.Host processing wait starts inactivity only after the first response byte...OK
+309/714 client.test.Host-info first byte is bounded independently of normal processing waits...OK
+310/714 client.test.response deadlines include partial header and body...OK
+311/714 client.test.mutation response progress renews inactivity through header and body...OK
+312/714 client.test.Host processing wait does not consume response transfer inactivity...SKIP
+313/714 client.test.response transfer inactivity begins after the first byte...OK
+314/714 client.test.response closure and truncation stay explicit...OK
+315/714 client.test.response framing rejects ambiguous or malformed fields before interpreting body...OK
+316/714 client.test.capture configure derives Session from captured key and retains model admission...OK
+317/714 client.test.capture mutation binding streams complete escaped input and rejects late ambiguity...OK
+318/714 client.test.retry and generated recovery select captured mutations by kind...OK
+319/714 client.test.a peer send captures its sender and refuses another Store before capture...OK
+320/714 client.test.capture returns original identity before send and preserves empty explicit keys...OK
+321/714 client.test.capture retransmits complete original bytes after a lost reply...OK
+322/714 client.test.capture publication transfers original inode across pathname replacement...OK
+323/714 client.test.capture closes pinned reader when publication or handoff fails...OK
+324/714 client.test.capture recovery closes rejected records and retains only its reader lifetime...OK
+325/714 client.test.capture batches escaped file output and flushes before publication...OK
+326/714 client.test.capture validates split UTF8 and does not publish after final flush failure...OK
+327/714 client.test.capture bounds decoded bytes and preserves record ownership...OK
+328/714 client.test.stdin capture uses the same decoded bound before publication...OK
+329/714 client.test.command reply borrows the caller buffer...OK
+330/714 client.test.bounded read requests attain their independent worst-case capacities...OK
+331/714 client.test.Session list client renders exact cursor and maximum escaped workspace without truncation...OK
+332/714 client.test.Session list facts own complete rows and render semantic output after scratch reuse...OK
+333/714 client.test.Session list reply owns read failure facts without asserting absence or admission...OK
+334/714 client.test.Session list byte range rejects zero instead of decoding an older page...OK
+335/714 client.test.Session list byte range reads a shorter overwritten prefix without changing borrowed storage...OK
+336/714 client.test.Session list byte range rejects physical EOF before promised completion...OK
+337/714 client.test.Session list byte range rejects a promise excluding the final delimiter...OK
+338/714 client.test.Session list byte range validates junk inside and ignores junk outside the promise...OK
+339/714 client.test.Session list facts reject malformed metadata and consequential ambiguity...OK
+340/714 client.test.Session list terminal cursor accepts only empty rows without rejecting initial or continuing pages...OK
+341/714 client.test.Session list facts attain eight maximum escaped rows and bind the continuation cohort...OK
+342/714 client.test.control captures attain their exact worst-case request bounds...OK
+343/714 client.test.response parsing rejects truncated head and command body...OK
+344/714 client.test.result response streams 100,000 bytes into an explicit file...OK
+345/714 client.test.Session list client streams a page larger than the resident reply buffer...OK
+346/714 client.test.read result returns bounded command errors without touching destination...OK
+347/714 client.test.truncated result body leaves only an unsuccessful destination prefix...OK
+348/714 client.test.result body publishes nothing unless EOF follows the advertised bytes...OK
+349/714 client.test.keyed observation retains request acceptance independently of later work...OK
+350/714 client.test.keyed observation distinguishes named statuses and omitted fields from numeric tags and null...OK
+351/714 client.test.keyed observation validates all five operation shapes and binding...OK
+352/714 client.test.keyed observation rejects malformed consequential fields before outcome interpretation...OK
+353/714 client.test.keyed observation owns supported strings without retaining unknown DOM across polls...OK
+354/714 client.test.keyed observation read diagnostics are owned without claiming admission...keyed facts bytes=944; reply bytes=3248; fixed parser scratch=5721; no retained allocator/DOM
+OK
+355/714 client.test.Current facts preserve explicit unconfigured and promised range...OK
+356/714 client.test.Current settings preserve decimal token heuristics in projections...OK
+357/714 client.test.Current facts retain settings selected empty key and ten recent bindings...OK
+358/714 client.test.Current facts traverse every attention row and preserve metadata with fixed scratch...Current facts=7856B, fixed scanner/token/input=16384B, capture=431213B; 4x257 rows, no population allocation
+OK
+359/714 client.test.transport cancellation preserves caller capture and rejects before path access...transport metadata: Requests=32 Cancellation=1; existing window=4096; no transport heap/worker/queue
+OK
+360/714 client.test.transport cancellation returns before silent peer release and retains pinned capture...OK
+361/714 client.test.transport cancellation stops a backpressured nonblocking write after real progress...OK
+362/714 client.test.transport cancellation retains synchronous sink loans and respects delivered completion and sink failure...OK
+363/714 client.test.transport readiness cannot authorize reads or writes across a deadline...OK
+364/714 client.test.transport cancellation quanta neither expire nor renew inactivity and observed stop wins...OK
+365/714 client.test.transport cancellation saturated Unix backlog is not a connected writable socket...OK
+366/714 execution.test.transfer decisions exhaust transport dispositions and error response precedence...OK
+367/714 execution.test.transfer decisions never correlate capture failure or settle request source corruption...OK
+368/714 execution.test.custody remains occupied through detachment and rejects late delivery after reuse...OK
+369/714 execution.test.custody attach consumes one permit only after validating its reservation...OK
+370/714 execution.test.unused reservation returns without an Attempt binding...OK
+371/714 execution.test.model and Action Attempt bindings cannot cross custody paths...OK
+372/714 execution.test.model launch authority requires every identity field...OK
+373/714 execution.test.action launch authority requires every identity field including turn...OK
+374/714 execution.test.detached custody rejects reuse until cleanup completes...OK
+375/714 execution.test.bounded custody sequences preserve invariants after every operation...OK
+376/714 execution.test.stale tokens after reuse leave the new owner unchanged...OK
+377/714 execution.test.failed reclamation keeps custody occupied until the same owner succeeds...OK
+378/714 execution.test.model decisions preserve cancellation and known authentication failure precedence...OK
+379/714 execution.test.model preparation failure retains resources before considering semantic delivery...OK
+380/714 execution.test.model prepared routes preserve one shot handoff across rejection and reuse...OK
+381/714 bash.test.native Bash observation agrees with reap for wide process exit values...OK
+382/714 bash.test.service acts on its service-time observation rather than an earlier one...OK
+383/714 bash.test.cleanup deadline cuts off unresolved pipe custody exactly once...OK
+384/714 bash.test.cleanup ownership transfers consume their source...OK
+385/714 bash.test.prepared cleanup reclaims partially and retries through the same owner...OK
+386/714 bash.test.launched Bash starts with default signal actions, an empty mask and no /dev/null added by launch...inheritable /dev/null before launch, matched exactly by Bash:
+(end)
+OK
+387/714 bash.test.an owned file closes its descriptor before reporting removal failure...OK
+388/714 bash.test.retired execution is independent of outstanding capture reclamation...OK
+389/714 bash.test.output publication closes producer aliases before making output evictable...OK
+390/714 bash.test.UTF-8 excerpt keeps the newest source and reports replacement expansion...OK
+391/714 bash.test.results show only nonempty stream sections and mark truncation...OK
+392/714 bash.test.Bash descriptor decoding preserves authorized command bytes...OK
+393/714 bash.test.Bash environment carries only this executable's PATH and an absolute HOME...OK
+394/714 named_scratch.test.owner retains every resource after retryable removal failure...OK
+395/714 named_scratch.test.an already absent name reclaims handles and accounting...OK
+396/714 named_scratch.test.injected removal failure retains ownership until the same owner can retry...OK
+397/714 output_retention.test.retention entry capacity derives from fixed orchestration memory...OK
+398/714 output_retention.test.retention evicts the oldest pair without refunding newer files...OK
+399/714 output_retention.test.shared scratch reservations reclaim retained output and fail when none is eligible...OK
+400/714 output_retention.test.already absent retained files release their entries and scratch charge...OK
+401/714 output_retention.test.unconfirmed retained-file deletion preserves its entry and scratch charge...OK
+402/714 output_retention.test.reserved output is not evictable before producer aliases close and publication completes...OK
+403/714 output_retention.test.cancelling a reserved pair releases entry capacity without refunding producer scratch...OK
+404/714 output_retention.test.zero-byte retained files occupy entries without occupying scratch bytes...OK
+405/714 output_retention.test.entry capacity evicts zero-byte output while byte capacity remains spare...OK
+406/714 output_retention.test.failed eviction retains its charge until the same queue retries successfully...OK
+407/714 output_retention.test.partial retained cleanup keeps only the exact residual owner and charge...OK
+408/714 provider.test.scratch reservation is bounded and releases exact charge...OK
+409/714 provider.test.endpoint validation permits TLS and loopback fixture HTTP only...OK
+410/714 provider.test.Retry-After preserves dates and delays without unchecked arithmetic...OK
+411/714 provider.test.duplicate Retry-After headers retain both independent constraints...OK
+412/714 provider.test.response observations use caller-selected names and reject contradictions...OK
+413/714 provider.test.idle reactor reports zero unprocessed completions without consuming messages...OK
+414/714 provider.test.sealed POST source rewinds only within its complete length...OK
+415/714 provider.test.curl results reach transport policy by name...OK
+416/714 provider.test.a full capture queue pauses the inactivity interval and curl progress cannot expire it...OK
+417/714 provider.test.Transfer finalization waits for real writer drainage and seals once...OK
+418/714 provider.test.receive scans without resume capacity still settle capture failure and queue expiry...OK
+419/714 provider.test.full capture queue rejects an offer without changing its charge or pending writes...OK
+420/714 provider.test.Transfer finalization records late capture failure and retains discarded writes and seals...OK
+421/714 provider_selection.test.prospective selection does not fall back from a stale or unavailable preference...OK
+422/714 provider_selection.test.Codex selection accepts identifiers without claiming model qualification...OK
+423/714 provider_selection.test.renewal due selects a sole provider and resolves only absent model pins...OK
+424/714 preferences.test.native directory sync forwards descriptor failures...OK
+425/714 preferences.test.directory sync failures preserve complete preference publication...OK
+426/714 preferences.test.login fills only a missing provider under the preference lock...OK
+427/714 preferences.test.preference edits distinguish model keep set and clear without publishing recommendations...OK
+428/714 preferences.test.preference edits persist explicit choices rather than recommendations...OK
+429/714 preferences.test.preference edits preserve unused deleted Store but validate supplied replacement...OK
+430/714 preferences.test.preference publication creates owner usable private modes despite umask...OK
+431/714 preferences.test.preference publication is independent of an unused oversized HOME Store fallback...OK
+432/714 preferences.test.preference login fill and setup serialize without losing an explicit pin...OK
+433/714 provider_output.test.replay compatibility rejects unsupported meaning and preserves open fields...OK
+434/714 provider_output.test.replay compatibility distinguishes consumed duplicates and syntax from unsupported shapes...OK
+435/714 provider_output.test.replay compatibility streams opaque windows and preserves syntax failures...OK
+436/714 provider_output.test.replay compatibility cursor bounds actual sequential reads including open fields...OK
+437/714 provider_output.test.incremental call authentication binds all four decoded fields with fixed storage...OK
+438/714 provider_output.test.explicit compaction requires one private anchor and rejects Actions...OK
+439/714 provider_output.test.compaction validates opaque windows added identity and complete terminal agreement...OK
+440/714 provider_output.test.compaction rejects missing double malformed unknown and Action candidates...OK
+441/714 provider_output.test.SSE line framing accepts CRLF, field lines and DONE, and rejects malformed lines...OK
+442/714 provider_output.test.completion gate saves which requirement failed at the completed event...OK
+443/714 provider_output.test.context overflow requires exact valid provider code over HTTP and SSE...OK
+444/714 provider_output.test.provider proposal identity uses decoded content domain...OK
+445/714 provider_output.test.provider reasoning strings preserve raw items across evidence and file window boundaries...OK
+446/714 provider_output.test.provider reasoning validation rejects wrong types duplicates and malformed suffixes...OK
+447/714 provider_output.test.provider added identity permits incomplete content but terminal agreement requires exact bytes...OK
+448/714 provider_output.test.provider preserves ordered trustworthy function call envelopes...OK
+449/714 provider_output.test.empty terminal output uses complete streamed items but partial terminal output contradicts them...OK
+450/714 provider_output.test.function call argument stream events are scratch and completed items remain authority...OK
+451/714 provider_output.test.provider rejects unsupported consequential function call controls...OK
+452/714 provider_output.test.metadata notification is not output or completion authority...OK
+453/714 provider_output.test.Bash proposal metadata growth is linear and disk-backed...OK
+454/714 provider_output.test.provider field collection traverses large open values once for all lookups...OK
+455/714 provider_output.test.provider field collection preserves escaped keys duplicates and missing fields...OK
+456/714 provider_output.test.provider field collection validates unknown and late syntax...OK
+457/714 provider_output.test.provider field collection cannot grant authority through escaped metadata keys...OK
+458/714 provider_output.test.provider authority metadata rejects every supported item on acceptance and replay...OK
+459/714 provider_output.test.fuzz provider decoded answers and rejection across file windows...OK
+460/714 request_encoding.test.request encoding fixed bytes respect one-byte allowances...OK
+461/714 request_encoding.test.request encoding json escapes across partitions and allowances...OK
+462/714 request_encoding.test.request encoding json pending escape emits under one-byte allowance...OK
+463/714 request_encoding.test.request encoding json short canonical reads fail...OK
+464/714 request_encoding.test.request encoding json output failure cannot report completion...OK
+465/714 request_encoding.test.request encoding json window boundaries preserve bytes...OK
+466/714 request_encoding.test.request encoding raw copies nested schema exactly...OK
+467/714 request_encoding.test.request encoding plain runs batch writes and conserve allowance...OK
+468/714 request_encoding.test.request encoding replay omits only top-level created_by...OK
+469/714 request_encoding.test.request encoding replay preserves nested values and escapes...OK
+470/714 request_encoding.test.request encoding replay invalidates scan window after retained copy...OK
+471/714 request_encoding.test.request encoding replay short reads fail...OK
+472/714 request_encoding.test.request encoding replay item allowance forces yields...OK
+473/714 tools.test.tool classification uses frozen availability before argument validity...OK
+474/714 tools.test.resumable Bash parser preserves state across every byte boundary...OK
+475/714 tools.test.resumable Bash parser rejects malformed split values...OK
+476/714 tools.test.Bash descriptions are required and bounded by decoded UTF-8 bytes...OK
+477/714 cli.test.detached launcher reports exec failure before claiming Host readiness...OK
+478/714 cli.test.login owner preserves interruption, publication and independent defaults...OK
+479/714 cli.test.SIGINT and credential publication have one winner...OK
+480/714 cli.test.policy arguments reset and preserve spelling...OK
+481/714 cli.test.local recovery enumeration observes cancellation before skipping invalid records...OK
+482/714 cli.test.hex selector bounds are the protocol's identity bounds...OK
+483/714 cli.test.mutation presentation renders owned diagnostics and context with bounded writer...OK
+484/714 cli.test.mutation presentation complete modes preserve escaped original context...OK
+485/714 cli.test.mutation presentation wrong binding keeps caller context even interactively...OK
+486/714 cli.test.post-command hold signals only after work and exits on release...OK
+487/714 cli.test.post-command hold reports release-pipe cleanup...OK
+488/714 cli.test.render scratch has no named payload and refuses failed unlink...OK
+489/714 cli_args.test.grammar rejects ambiguous invocations before any effect...OK
+490/714 cli_args.test.every advertised operation is reachable through its own resource...OK
+491/714 cli_args.test.every grammar's conflict and spelling data names its own options...OK
+492/714 cli_args.test.a hex spelling fills its named option and conflicts with it...OK
+493/714 cli_args.test.hidden test options belong to their operation and stay out of help...OK
+494/714 cli_args.test.live /configure and /setup share the one-shot grammar...OK
+495/714 cli_args.test.complete syntax still names the first missing requirement...OK
+496/714 cli_args.test.Host start help states the product default capacity and existing-Host precedence...OK
+497/714 TerminalText.test.opaque Session shell selectors preserve NUL position and maximum length...OK
+498/714 TerminalText.test.natural Unicode stays readable while controls and ambiguous command bytes remain visible...OK
+499/714 TerminalText.test.TerminalText line bytes are independent of chunk boundaries and incomplete UTF-8 stays visible...OK
+500/714 TerminalText.test.TerminalText propagates output failure during feed and incomplete-byte finish...OK
+501/714 SessionInput.test.SessionInput loan release preserves next Unicode draft and cursor...OK
+502/714 SessionInput.test.SessionInput malformed rejection resets only the active composition...OK
+503/714 SessionInput.test.SessionInput retained loan and stale tickets cannot consume next composition...OK
+504/714 SessionInput.test.one stream survives draft resets and replacement editors...OK
+505/714 SessionSubmission.test.submission bounded gestures consume only the original and do not requeue failed launch...OK
+506/714 SessionSubmission.test.submission bounded joined outcomes precede retry and retire original authority...OK
+507/714 SessionSubmission.test.submission reservation failure retains unsent intent ahead of accepted history...OK
+508/714 SessionSubmission.test.submission cancelled and failed joins preserve independent publication facts...OK
+509/714 SessionSubmission.test.submission recovery validates reopened originals and pins the saved reader through handoff...OK
+510/714 SessionSubmission.test.submission settles wire Admission only after join and releases only accepted or discarded intent...OK
+511/714 SessionFrontend.test.frontend exit guidance preserves accepted identity and never substitutes it for current intent...OK
+512/714 SessionFrontend.test.frontend answers local and unknown commands in place and keeps Host commands for inspection...OK
+513/714 SessionFrontend.test.frontend consumed canonical reader and admission failures survive external interruption...OK
+514/714 SessionFrontend.test.frontend cleanup joins both borrowers before reporting restoration failure...OK
+515/714 SessionFrontend.test.status lines keep the notice and instructions beside an oversized context...OK
+516/714 SessionFrontend.test.a paged Action keeps what runs, where and for how long beside the choice...OK
+517/714 SessionFrontend.test.the composer status shows only live work, not an ending the transcript already shows...OK
+518/714 SessionFrontend.test.frontend joined read diagnostic survives failed notice and worker reset...OK
+519/714 SessionFrontend.test.frontend commits spacing only for completed visible reads...OK
+520/714 SessionFrontend.test.a line begun at the choice ends there when the Action leaves or a page opens without a key...OK
+521/714 SessionFrontend.test.a transcript begun before grown live output is drawn shows the gap, not a lost join...OK
+522/714 SessionFrontend.test.a command queued during a held draft frame blocks the later Message Enter...OK
+523/714 SessionFrontend.test.each source admits a slash command while another is active as it always did...OK
+524/714 SessionFrontend.test.a held ready choice decides nothing after a command queued in the same frame...OK
+525/714 SessionFrontend.test.a transition inside a held frame leaves its remaining input with the frame's editor...OK
+526/714 SessionFrontend.test.a details page read before a Message was sent never covers it...OK
+527/714 SessionFrontend.test.Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported text...OK
+528/714 session_reads.test.a transcript lists each recorded Message once, whole, before the copy that follows it...OK
+529/714 session_reads.test.the opening mark is retained through 64 marks and dropped by the 65th...OK
+530/714 session_reads.test.a silent read marks its end only when complete and every shown Message is rowed...OK
+531/714 session_reads.test.a transcript joins at the first retained boundary or shows the gap after the newest evicted one...OK
+532/714 session_reads.test.a Message page past the display limit keeps what fits and says what it cut...OK
+533/714 session_reads.test.a live page's beginning precedes its first item, without repeating or skipping one...OK
+534/714 session_reads.test.a Host command writes its page and inherits no saved terminal descriptor...OK
+535/714 SessionTerminal.test.detached notice restores flags and requires one complete nonblocking write...OK
+536/714 SessionScreen.test.wide resize preserves a growing combining draft...renderer allocation wide5000X: retained=16154624, peak=16187392 bytes (page charged, not RSS)
+renderer allocation resize2048→80: retained=655360, peak=16171008 bytes
+renderer allocation dense 中 192x256: retained=30326784, peak=30408704 bytes
+renderer allocation dense 中 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense NFD 192x256: retained=30326784, peak=30638080 bytes
+renderer allocation dense NFD 24x2048: retained=30326784, peak=30638080 bytes
+renderer allocation dense 🐄 192x256: retained=30326784, peak=30457856 bytes
+renderer allocation dense 🐄 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense SGR 192x256: retained=16154624, peak=17661952 bytes
+renderer allocation dense SGR 24x2048: retained=16154624, peak=17661952 bytes
+OK
+537/714 SessionScreen.test.a transcript's front is taken after escaping, which can grow live text past the view...OK
+538/714 SessionScreen.test.compact conversation keeps the composer beside content without persistent chrome...OK
+539/714 SessionScreen.test.optional spacing yields before exact-fit transcript rows...OK
+540/714 SessionScreen.test.mandatory status and calls wrap wide clusters before the edge...OK
+541/714 SessionScreen.test.actual overflow yields wording before clipping required status...OK
+542/714 SessionScreen.test.narrow browsing retains the complete return instruction...OK
+543/714 SessionScreen.test.prepared Action preserves selected inspection until explicit return...OK
+544/714 SessionScreen.test.line scrolling marks only drawn Action rows and older pages keep the row in view...OK
+545/714 SessionScreen.test.an unchanged frame writes nothing...OK
+546/714 SessionScreen.test.a Message page returns to the view and position it came from...OK
+547/714 SessionScreen.test.Ctrl-O names the lowest collapsed block drawn, counted from the end...OK
+548/714 SessionScreen.test.browsing up then down by the same rows returns to the latest view...OK
+549/714 SessionScreen.test.only a complete frame write in an unchanged scope credits Action rows...OK
+550/714 SessionScreen.test.a decision prompt opens freshness only after its own delivered frame...OK
+551/714 session_history.test.historical export preserves opaque identities without terminal or shell interpretation...OK
+552/714 session_history.test.history body limit preserves contextual tool outcomes...OK
+553/714 session_history.test.history preparation binds wire and staged bytes before exposure...OK
+554/714 session_view.test.a peer reference shows a generated ID's distinguishing prefix and caps at 16 columns...OK
+555/714 session_view.test.peer Messages render as one dim line each, with time in the margin and `…` when they continue...OK
+556/714 session_view.test.collapsed blocks keep their order from the end as pages join and leave...OK
+557/714 session_view.test.a Message's time is the local hour and minute of its Host second...OK
+558/714 session_view.test.sizes are thousands of bytes with one decimal below 9.95...OK
+559/714 session_view.test.a long user Message shows two non-blank lines and what it hides...OK
+560/714 session_view.test.hanging indentation survives split windows and trusted styles...OK
+561/714 session_view.test.tool summary hides only complete routine metadata and retains warnings...OK
+562/714 session_view.test.an ended Turn says what happened and what to do next where it ended...OK
+563/714 ClientTask.test.ClientTask read diagnostic survives join with isolated borrowers and resets on reuse...OK
+564/714 ResponseTiming.test.response policy separates mutation silence transfer inactivity and discovery...OK
+565/714 ResponseTiming.test.positive progress renews mutation inactivity without a total response deadline...OK
+566/714 AnswerRenderer.test.outer code closer owns its complete run at retained and streaming bounds...OK
+567/714 AnswerRenderer.test.streaming literal outer code owns double closer before independent code...OK
+568/714 AnswerRenderer.test.single opener with double closer recovers before independent code...OK
+569/714 AnswerRenderer.test.multi-tick opener recovers locally before independent code...OK
+570/714 AnswerRenderer.test.overwide star closers stay literal before independent supported spans...OK
+571/714 AnswerRenderer.test.provisional closers finalize at boundaries and leave lookahead to prose...OK
+572/714 AnswerRenderer.test.provisional closer at exact and overflowing bounds owns all run bytes...OK
+573/714 AnswerRenderer.test.long unsupported delimiter runs stream literally and recover locally...OK
+574/714 AnswerRenderer.test.chunked subset, malformed markup and terminal controls...OK
+575/714 AnswerRenderer.test.ordered markers retain complete bounded prefix across one-byte feeds...OK
+576/714 AnswerRenderer.test.bold candidate overflow preserves the first closing star...OK
+577/714 AnswerRenderer.test.inline closing delimiter counts toward the 256-byte candidate bound...OK
+578/714 AnswerRenderer.test.strong overflow boundaries retain their closer and resume after every closer split...OK
+579/714 AnswerRenderer.test.overlong closer stays literal rather than opening markup in the suffix...OK
+580/714 AnswerRenderer.test.payload overflow does not turn its closer into an opener...OK
+581/714 AnswerRenderer.test.outer code preserves literal backslashes across every feed split and finish...OK
+582/714 AnswerRenderer.test.escaped star cannot close a strong candidate...OK
+583/714 AnswerRenderer.test.unsupported consecutive star runs stay literal before later strong markup...OK
+584/714 AnswerRenderer.test.nested code composes with strong and heading without exposing delimiters...OK
+585/714 AnswerRenderer.test.unsupported asterisk runs preserve bytes and later supported markup...OK
+586/714 AnswerRenderer.test.italic code restores parent style and flushes incomplete UTF-8 at transitions...OK
+587/714 AnswerRenderer.test.unclosed nested code and full candidate retain every original byte...OK
+588/714 AnswerRenderer.test.overflow closing backtick stays literal and later code resumes after outer closer...OK
+589/714 AnswerRenderer.test.overflow before nested opener preserves both abandoned delimiter pairs...OK
+590/714 AnswerRenderer.test.empty nested backticks remain literal within styled text...OK
+591/714 AnswerRenderer.test.empty nested backticks beside the outer closer stay literal across chunk splits...OK
+592/714 AnswerRenderer.test.escaped star interrupts a strong closer and backslash in code does not escape its tick...OK
+593/714 AnswerRenderer.test.overflow recovery requires adjacent unescaped strong closer...OK
+594/714 AnswerRenderer.test.adjacent nonempty nested code spans close and reopen...OK
+595/714 AnswerRenderer.test.empty pair after nonempty nested code stays in the outer style...OK
+596/714 AnswerRenderer.test.indented fences render code without marker lines or reverse video...OK
+597/714 AnswerRenderer.test.closing fence at end of answer needs no final newline...OK
+598/714 AnswerRenderer.test.rendered content and unsupported fence syntax stay visible without a gutter...OK
+599/714 AnswerRenderer.test.oversized fence candidate is literal and does not enter code state...OK
+600/714 AnswerRenderer.test.empty assistant content and empty fence add no text...OK
+601/714 AnswerRenderer.test.unclosed and oversized fences remain literal and later headings still render...OK
+602/714 AnswerRenderer.test.fence overflow mid-line cannot reinterpret a suffix as the closing line...OK
+603/714 AnswerRenderer.test.fence overflow immediately after a closing marker resumes markup...OK
+604/714 AnswerRenderer.test.overflow and long lines continue without retaining history...OK
+605/714 AnswerRenderer.test.sixteen MiB answer uses fixed parser and output storage...OK
+606/714 ConversationViewport.test.vaxis wraps reading text at words with hanging indentation...OK
+607/714 ConversationViewport.test.positions move by laid-out rows and never skip the first unseen row...OK
+608/714 ConversationViewport.test.viewport retention is finite and split Unicode is not rendered early...OK
+609/714 ConversationViewport.test.trusted renderer styles survive fragmented output retention...OK
+610/714 ConversationViewport.test.user text is dim italic with colour and keeps its body column without it...OK
+611/714 ConversationViewport.test.a sidenote shows in the right margin of its line's first row from 60 columns...OK
+612/714 ConversationViewport.test.a peer line keeps one row with its time in the right margin, as a user block's...OK
+613/714 ConversationViewport.test.a peer line's wide last cluster yields to the ellipsis instead of crossing the edge...OK
+614/714 ConversationViewport.test.retention never starts inside an extended grapheme across append windows...OK
+615/714 ConversationViewport.test.invisible and oversized output clusters become visible escapes...OK
+616/714 ConversationViewport.test.older text prepends above the rows in view and trims newer text at capacity...OK
+617/714 session_consent.test.consent requires real emptiness after completed prompt...OK
+618/714 session_consent.test.consent bounded lifecycle sequences preserve exact authority...OK
+619/714 session_consent.test.consent reentry and successor proposals require separate fresh scopes...OK
+620/714 session_consent.test.an oversized preview cannot authorize even after completed output and empty input...OK
+621/714 session_consent.test.projection selects the choice editor only beside a whole visible Action...OK
+622/714 session_consent.test.a Message probe blocks on every live owner fact independently...OK
+623/714 TerminalEditor.test.modified kitty text cannot become an ordinary permission choice...OK
+624/714 TerminalEditor.test.marked paste rejects encoded controls without releasing paste custody...OK
+625/714 TerminalEditor.test.renderer declines standalone zero-width edits and rolls back an unrepresentable paste...OK
+626/714 TerminalEditor.test.an unbound Alt or Meta chord never inserts its bare character...OK
+627/714 TerminalEditor.test.xterm modifyOtherKeys bindings mean what the same Kitty keys mean...OK
+628/714 TerminalEditor.test.a dropped chord reports itself as it arrives...OK
+629/714 TerminalEditor.test.an ESC prefix decodes its key as typed alone, and ESC ESC keeps what follows whole...OK
+630/714 TerminalEditor.test.meta-backspace deletes a word without swallowing the next character...OK
+631/714 TerminalEditor.test.grapheme deletion, distinct word bindings and multiline paste...OK
+632/714 TerminalEditor.test.exact UTF-8 bound and sticky rejection after backspace...OK
+633/714 TerminalEditor.test.unknown CSI retains following text; malformed input and marked choice reject...OK
+634/714 TerminalEditor.test.inserting a joiner before an emoji leaves the caret at a cluster boundary...OK
+635/714 TerminalEditor.test.deleting a separator does not leave the caret inside a joined grapheme...OK
+636/714 TerminalEditor.test.arrows beyond the draft's lines scroll instead of moving the caret...OK
+637/714 TerminalEditor.test.Ctrl-D exits only on an empty draft and otherwise deletes forward...OK
+638/714 TerminalEditor.test.flag and variation selector are each deleted as one grapheme...OK
+639/714 TerminalEditor.test.incomplete escape cannot swallow Enter or Ctrl-C...OK
+640/714 TerminalEditor.test.word movement skips separators and stops at word edges...OK
+641/714 TerminalEditor.test.Shift-Enter sent as ESC CR adds a line at the caret, as every Alt-Enter does...OK
+642/714 TerminalEditor.test.Shift held with a binding's key is never that binding, whatever text the key reports...OK
+643/714 ChoiceLine.test.a choice line opens on typed input and closes only at its end...OK
+644/714 ChoiceLine.test.an unseen change keeps only a leading slash command...OK
+645/714 ChoiceLine.test.the choice editor starts over at a line end or for text that cannot stay...OK
+646/714 TerminalFrame.test.geometry is bounded before the shell allocates cells...OK
+647/714 TerminalFrame.test.compact frame keeps exact-fit transcript and multiline caret without bottom pinning...OK
+648/714 TerminalFrame.test.an exactly filled draft row puts the caret on the next row...OK
+649/714 TerminalFrame.test.complete approval and overflow survive short layouts or fail before rendering...OK
+650/714 TerminalFrame.test.inspection navigation names its actual return target at narrow widths...OK
+651/714 TerminalFrame.test.Action approval requires contiguous displayed rows and resets after resize...OK
+652/714 TerminalInput.test.terminal input owns fragmentation and paste provenance without an event queue...OK
+653/714 TerminalInput.test.a held ESC ESC expires as one Esc...OK
+654/714 TerminalInput.test.terminal input consumes kitty text before parser scratch can be reused...OK
+655/714 TerminalInput.test.terminal width reports distinguish enabled mode from mere support...OK
+656/714 TerminalInput.test.alternate scroll is reported only when present and reset...OK
+657/714 TerminalInput.test.fragmented X10 mouse reports are consumed whole, never as typed text...OK
+658/714 TerminalInput.test.an interrupted OSC keeps the following sequence and key...OK
+659/714 TerminalInput.test.fragmented APC and oversized associated text keep the following key...OK
+660/714 TerminalInput.test.malformed keyboard values fail closed on every supported route; unknown keys stay ignored...OK
+661/714 TerminalInput.test.an ESC inside marked paste rejects it, and an end marker right after still ends it...OK
+662/714 TerminalInput.test.pending input expires at its inactivity limit after the last byte, before more is read...OK
+663/714 session_departure.test.departure settlement precedence and reader exit policies retain independent facts...OK
+664/714 session_departure.test.departure interruption alone leaves a clean exit and substantive errors primary...OK
+665/714 session_departure.test.departure joined fact matrix preserves precedence and recovery...OK
+666/714 product_defaults.test.approved product defaults...OK
+667/714 codex_credential_policy.test.format is bounded and strictly consumed...OK
+668/714 codex_credential_policy.test.extracts both pinned account claim spellings and rejects malformed compact tokens...OK
+669/714 codex_credential_policy.test.refresh is due at the expiry margin or eight days after an opaque exchange...OK
+670/714 codex_credential_policy.test.selection refreshes inside the launch margin and rejects unusable records...OK
+671/714 codex_credential_policy.test.launch rejects a leased token that expired after selection...OK
+672/714 codex_credential_policy.test.local status reports renewal only at expiry, without the launch margin...OK
+673/714 codex_credential_policy.test.a refresh claim marks the current generation pending once...OK
+674/714 codex_credential_policy.test.replacement admission advances generations and preserves refresh routing...OK
+675/714 codex_credential_policy.test.a replacement must be complete and ready...OK
+676/714 codex_credential_policy.test.only failures resolved by logging in again are authentication failures...OK
+677/714 codex_token_wire.test.refresh preserves omitted fields and refuses account replacement...OK
+678/714 codex_token_wire.test.refresh keeps the account's routing claim in both directions...OK
+679/714 codex_token_wire.test.a login record takes its account, routing and expiry from its tokens...OK
+680/714 codex_token_wire.test.refresh request escapes the refresh token as JSON...OK
+681/714 codex_token_wire.test.authorization exchange requires and owns all token fields...OK
+682/714 codex_token_wire.test.device start validates codes and builds the poll body...OK
+683/714 codex_token_wire.test.device polling recognizes structured denial and expiration without retrying...OK
+684/714 codex_token_wire.test.authorization exchange percent-encodes code and verifier independently...OK
+685/714 codex_token_wire.test.authentication failure classes name errors their producers raise...OK
+686/714 turn_policy.test.output facts do not encode the Turn continuation decision...OK
+687/714 turn_policy.test.every provider output is accepted context history...OK
+688/714 turn_policy.test.compaction purpose respects recovery prefix and both sides of pressure...OK
+689/714 ScratchBudget.test.concurrent scratch reservations share one ceiling...OK
+690/714 ScratchBudget.test.partial scratch reservation owns only available capacity...OK
+691/714 ScratchBudget.test.narrowing a scratch budget cannot widen its authority...OK
+692/714 ScratchBudget.test.shared usage is baseline-relative and failed growth reserves nothing...OK
+693/714 ScratchBudget.test.only allocation may reclaim and partial allocation preserves charged progress...OK
+694/714 transport_policy.test.curl failures retry only temporary connection loss and explicit inactivity...OK
+695/714 transport_policy.test.HTTP status classes and their Retry-After constraints...OK
+696/714 transport_policy.test.TLS requires negotiated H2 and loopback HTTP requires HTTP/1.1...OK
+697/714 transport_policy.test.contradictory response headers fail the transfer unless its version is refused...OK
+698/714 transport_policy.test.only HTTP responses keep their captured body...OK
+699/714 transport_policy.test.inactivity renews on download progress and expires at its limit...OK
+700/714 transport_policy.test.a local capture pause excludes only its own duration from inactivity...OK
+701/714 BashLifecycle.test.natural exit terminates the original group before reaping...OK
+702/714 BashLifecycle.test.deadline expiry fixes grace from the service-time observation...OK
+703/714 BashLifecycle.test.the first termination fixes reason and deadlines...OK
+704/714 BashLifecycle.test.a later reap disagreeing with the observation keeps the observed status...OK
+705/714 BashLifecycle.test.reaping is unconfirmed only from the cleanup watchdog...OK
+706/714 BashLifecycle.test.capture cutoff waits for group absence or the cleanup watchdog...OK
+707/714 BashLifecycle.test.a finite tail closes complete only on EOF after its owed bytes...OK
+708/714 BashLifecycle.test.capture failure stops a running Attempt and saves storage failure...OK
+709/714 BashLifecycle.test.finite-tail capture failure leaves the stop reason to a later request...OK
+710/714 BashLifecycle.test.resolution follows the first stop reason, then capture, then exit status...OK
+711/714 BashLifecycle.test.signal results are independent facts...OK
+712/714 retry_policy.test.model retry decision applies configured waits Retry-After and exhaustion...OK
+713/714 retry_policy.test.retry dates stay absolute across body transfer and checked settlement arithmetic...OK
+714/714 retry_policy.test.configured waits must name a deadline from now...OK
+713 passed; 1 skipped; 0 failed.
+1 fuzz tests found.
+admission passed: exit=0 elapsed=11.576s
+grep: /tmp/rui-admission.0UeeLX/drain-ready: No such file or directory
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: request recover was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session send was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+
+rui: session configure was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.
+
+error: MutationNotAccepted (exit status 1)
+grep: /tmp/rui-admission.0UeeLX/wire-ready: No such file or directory
+dispatch passed: exit=0 elapsed=75.050s
+queued capacity-release discovery (diagnostic): 51.0 ms
+exhausted recovery ordinary inspections (diagnostic only): samples=23 p95_ms=44.9 max_ms=54.3
+bash-owner passed: exit=0 elapsed=10.595s
+Bash timeout feedback: default 500 ms, override 800 ms, saved/model result identity and success control passed
+Workspace framing: quoted path round-trip, one instruction section and exact native Bash cwd passed
+bash passed: exit=0 elapsed=28.918s
+{"bash_resource_samples": [{"VmHWM": 9977856, "VmRSS": 9977856, "descriptors": 10, "files": 0, "logical_bytes": 0, "phase": "cold"}, {"VmHWM": 12673024, "VmRSS": 12414976, "accounted_scratch_bytes": 12014, "descriptors": 14, "files": 2, "logical_bytes": 12014, "phase": "retained-output-idle"}, {"VmHWM": 12746752, "VmRSS": 12742656, "accounted_scratch_bytes": 0, "descriptors": 15, "files": 2, "logical_bytes": 0, "phase": "active-descendant-pipes"}, {"VmHWM": 12816384, "VmRSS": 12550144, "accounted_scratch_bytes": 0, "descriptors": 11, "files": 4, "logical_bytes": 0, "phase": "two-sibling-retained-idle"}]}
+peer passed: exit=0 elapsed=2.694s
+peer round trip passed: installed Bash rui configured B and sent with a durable receipt, Host-recorded senders both ways, B replied to its recorded sender, original capture recovered its saved sender without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME
+human-cli passed: exit=0 elapsed=327.695s
+renderer: initial zero-width prompt bypasses composer and reaches provider unchanged
+renderer: non-TTY rejection and literal multiline pipe output retain their existing contracts
+renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed
+renderer: initial oversize and excessive resize give typed actionable guidance and restore exactly
+renderer: lost admission exact replay on raw, Kitty and modifyOtherKeys Ctrl-R, retained draft/caret and SIGTERM restoration passed
+renderer: invisible answer and tool output escaped; saved conversation reopens
+renderer: fresh complete non-pasted exact Action consent and SIGINT restoration passed
+renderer: oversized Action cannot approve; exact shell commands survive alternate-screen exit
+renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a line begun there stays there
+renderer: a line begun at one choice never decides the next Action
+renderer: a page opening mid-sequence at the choice keeps that sequence there
+renderer: a slash command begun while reading a tall Action stays a command
+renderer: delivered history and the live footer never show one call twice
+renderer: an open /status page follows the work it describes
+renderer: a submitted Message shows as sending or in full from Enter on
+renderer: Sent stays with each accepted Message until a delivered page holds it
+renderer: Sent stays through catch-up pages that end before the Message
+renderer: an open /status page updates in place and a choice command waits for a running one
+renderer: a page spanning several windows commits with its footer as one capture
+renderer: the composer status and history come from one capture
+renderer: /status opens from the capture the composer status shows
+renderer: a later /details replaces a /status not yet shown
+renderer: a fresh Session scrolls to its start
+renderer: a draft typed while approval is paused stays and cannot decide
+renderer: Sent never outlives a Message delivered before its acceptance joined
+renderer: an unbound Alt chord is dropped as it arrives and the draft stays
+renderer: an ESC inside paste rejects it and its end marker still returns input to the draft
+renderer: an empty Session scrolls to its start, and tmux composing names Alt-J
+renderer: a page asked for before a Message never opens over it
+renderer: an evicted Message stays in the transcript, alone or with its reply
+renderer: Ctrl-O shows a collapsed Message whole and returns to the same rows
+renderer: a Message steered into a running tool stays in the transcript after eviction
+renderer: a Message queued behind an answer stays in the transcript after eviction
+renderer: a Message whose row and reply share a page with a long answer stays reachable after eviction
+renderer: a boundary after text that live output shortens starts where its item's text does
+renderer: a boundary after text escaping shortens by more than later output stays ordered
+renderer: a Message whose row a silent read holds stays reachable after eviction
+renderer: a Message whose turn waits on an Action stays reachable, and its result shows once
+renderer: queued Messages whose echoes left the view are listed once, then are their rows
+renderer: queued echoes beyond the record's capacity are listed once, in order
+renderer: Messages a Stop excluded are listed once, labelled, after later output evicts them
+renderer: a queued Message the opening left out stays reachable once applied unseen
+renderer: an opening lists the queued Messages its page left out once, at its seam
+test_body_failure_stays_primary_when_close_fails (terminal_process_test.TerminalProcessTest.test_body_failure_stays_primary_when_close_fails) ... ok
+test_failed_launch_closes_terminal (terminal_process_test.TerminalProcessTest.test_failed_launch_closes_terminal) ... ok
+test_scope_retires_live_child (terminal_process_test.TerminalProcessTest.test_scope_retires_live_child) ... ok
+test_stop_failure_fails_successful_body_and_closes_terminal (terminal_process_test.TerminalProcessTest.test_stop_failure_fails_successful_body_and_closes_terminal) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.030s
+
+OK
+pipe wait oracles passed: exact records/prefix, unread suffix, EOF, partial deadline and byte bound
+terminal wait oracles passed: committed frames only, replaced frames seen, composer cursor, bounded frames and closure
+{"printed": "rui action deny --store $'/tmp/rui-opaque-session.o34kg9ex/store' --session-hex 68756d616e2f6e756c002720c3a90a2d2d6c617374 --action 1", "decision": "deny", "exact_session": true}
+{"printed": "rui action allow --store $'/tmp/rui-opaque-session.o34kg9ex/store' --session-hex 68756d616e2f6e756c002720c3a90a2d2d6c617374 --action 2", "decision": "allow_once", "exact_session": true}
+opaque Session: actual printed resume preserves NUL and rejects a configured prefix lookalike
+silent observation: /v1/activity-page visible Unicode edit and exact capture passed
+CLI entry/resume/send: literal prompt, canonical scoped paginated last vs older activity, exact resume, colour/NO_COLOR, fresh default Configure, admission-only held send with exact saved answer, stdin, literal dash/option with untouched held stdin, failure, exact lost-reply recovery, permission block and accepted-entry recovery controls passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+persistent opening/history: exact chronological frozen replay, assistant-only Markdown, whole-page failure/retry, no cursor loss/late append/repeated work passed
+scroll return: N rows up then N down (1, 8, 40 at 30 and 16 rows) and history-boundary returns reach live output; draft kept, nothing sent
+persistent pending: exact frozen 24 beyond newest 16, newest page labelled, late admission excluded passed
+persistent public Session: exact original replay, joined acceptance, next Unicode cursor, malformed→valid, prepublication repair, restoration passed
+persistent permission: inline deny-action, lost=False, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline allow-action, lost=False, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline allow-action, lost=False, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline allow-action, lost=False, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline allow-action, lost=False, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline allow-action, lost=True, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline deny-action, lost=True, fragmented=False, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+persistent permission: inline deny-action, lost=False, fragmented=True, quiet outcome, retained cursor, label-only opening and TERM cleanup passed
+native notice: pipe full=False, exact bytes and restored flags passed
+native notice: pipe full=True, exact bytes and restored flags passed
+native notice: pty full=False, exact bytes and restored flags passed
+terminal fixture forwarding: write/writev/tcdrain/tcsetattr/fcntl passed
+terminal fixture command markers: four selectors, coalesced/split writev, line boundaries and one signal passed
+terminal fixture contention: wrong phase/Session/kind/fragment forwarded; exact write held, released and flags restored
+native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch
+Host diagnostics: aliased full stdout, startup warning and failed restore: required readiness blocks until exact filler release; Host usable
+Host diagnostics: record-time failure retained under exclusion; one notice follows required readiness; Host usable
+Host diagnostics: readiness-held: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked
+Host diagnostics: readiness-held-error: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked
+Host diagnostics: readiness-alias: required stdout outcome checked
+Host diagnostics: readiness-error: required stdout outcome checked
+Host diagnostics: normal/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: filled/response-acquire: public outcome checked, flags checked; warnings=[]
+Host diagnostics: closed/response-acquire: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-metadata: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider output rejected for operation 1: InjectedMetadataFailure')]
+Host diagnostics: filled/response-metadata: public outcome checked, flags checked; warnings=[]
+Host diagnostics: filled/response-commit: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-write: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-commit: public outcome checked, flags checked; warnings=[bytearray(b'rui: dispatch fenced after model output import failure: InjectedOutputCommitFailure'), bytearray(b'rui: host serve failed; syntax and recovery: rui host serve --help')]
+Host diagnostics: diagnostic-enable/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 2: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-enable-unmutated/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 2: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-partial/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-nonblock/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-restore/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-restore-startup/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: startup diagnostics unavailable (InsecureDiagnostics); continuing under Store lease')]
+Host diagnostics: diagnostic-contention-host/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: retained response file, charge=0, custody=1; stop reply='{"version":"1","type":"host_stop","status":"acknowledged","store":"/tmp/rui-terminal-restoration.uxk_kg3a/host-normal-response-unlink/store","instance":"abf266852c3a23d66272a5a24807216c","retirement":"unconfirmed"}\n'
+Host diagnostics: normal/response-unlink: public outcome checked, flags checked; warnings=[bytearray(b'rui: dispatch fenced after response scratch unlink failure: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: filled/success: public outcome checked, flags checked; warnings=[]
+Host diagnostics: closed/success: public outcome checked, flags checked; warnings=[]
+Host diagnostics: diagnostic-restore/success: public outcome checked, flags checked; warnings=[]
+persistent consent boundary: cancel passed
+persistent consent boundary: paste passed
+persistent consent boundary: escape-allow passed
+persistent consent boundary: escape-deny passed
+synchronous command interruption: requests passed
+synchronous command interruption: configure-before passed
+synchronous command interruption: configure-stopped-stderr passed
+synchronous command interruption: configure-full-stderr passed
+synchronous command interruption: configure-inflight passed
+synchronous command interruption: configure-commit-int passed
+synchronous command interruption: configure-commit-term passed
+synchronous command interruption: configure-admitted passed
+synchronous command interruption: configure-presentation passed
+synchronous command interruption: configure-rejected passed
+synchronous command interruption: configure-canonical passed
+synchronous command interruption: result-observe passed
+synchronous command interruption: result-content passed
+synchronous command interruption: inspect-current passed
+synchronous command interruption: inspect-arguments passed
+synchronous command interruption: inspect-full-stderr passed
+fatal reporting: SessionNotConfigured stopped stderr=False passed
+fatal reporting: SessionNotConfigured stopped stderr=True passed
+fatal reporting: UnsupportedPreferenceProvider stopped stderr=False passed
+fatal reporting: UnsupportedPreferenceProvider stopped stderr=True passed
+fatal reporting: UnsupportedSelectionProvider stopped stderr=False passed
+fatal reporting: UnsupportedSelectionProvider stopped stderr=True passed
+fatal reporting: SessionNotConfigured disconnected stderr passed
+fatal reporting: UnsupportedPreferenceProvider disconnected stderr passed
+fatal reporting: UnsupportedSelectionProvider disconnected stderr passed
+fatal reporting: current unconfirmed original passed
+fatal reporting: acquired terminal disconnected stderr passed
+decision reporting: allow_once-False passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+decision reporting: allow_once-True passed
+decision reporting: deny-False passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+decision reporting: deny-True passed
+entry enable: entry-0-mutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-0-unmutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-0-mutated-reset exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-mutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-unmutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-mutated-reset exact flags, unchanged termios, no intent and cleanup error passed
+detach reporting: message-detach-enable-mutated-reset exact accepted guide, restored termios and saved replay passed
+detach reporting: message-detach-write-full exact accepted guide, restored termios and saved replay passed
+detach reporting: allow_once-detach-enable-mutated-reset exact accepted guide, restored termios and saved replay passed
+detach reporting: deny-detach-write-full exact accepted guide, restored termios and saved replay passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: message exact custody, publication/mutation conservation and cleanup precedence passed
+startup reporting: allow_once exact custody, publication/mutation conservation and cleanup precedence passed
+startup reporting: deny exact custody, publication/mutation conservation and cleanup precedence passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: message-restore exact custody, publication/mutation conservation and cleanup precedence passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: retry exact custody, publication/mutation conservation and cleanup precedence passed
+visible opening: pending command waits for held output, then runs once without capture or provider work
+visible activity: pending command waits for held output, then runs once without capture or provider work
+visible history: pending command waits for held output, then runs once without capture or provider work
+visible details: pending command waits for held output, then runs once without capture or provider work
+visible interrupt: Ctrl-C while held restores and the pending command never runs
+visible completion: completed output permits one command; suffix stays a draft
+visible permission: pending command waits for held output, then runs once without capture or provider work
+renderer backpressure: actual EAGAIN; deferred command ran once; accepted Configure notice on the alternate screen; refreshed composer; exact termios/fd restoration
+persistent terminal: sync-exit passed
+persistent terminal: sync-handoff passed
+persistent terminal: sync-command-int passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+persistent terminal: admission-interrupt passed
+persistent terminal: disable passed
+persistent terminal: restore passed
+persistent terminal: both passed
+persistent terminal: incomplete-disable passed
+persistent terminal: incomplete-restore passed
+persistent terminal: incomplete-both passed
+persistent terminal: backpressure passed
+persistent terminal: backpressure-command passed
+reply proxy swap: install and restore always leave a listener at the Host path
+canonical producers: all five fenced HTTP mutation owners; typed explicit/generated JSON diagnostics and five retry kinds passed
+canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed
+canonical Store read: step fault fences the Host instead of reporting result_not_found
+canonical PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+automatic permission read: canonical/ordinary/invalid failures retain classification, restore terminal and never consent or mutate
+mutation bindings: five typed explicit/generated/retry/recover callers reject wrong Session, digest, target or decision; original-key replay preserved
+mutation nulls: five typed explicit/generated/retry/recover callers reject present null code; original-key replay preserved
+binding PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+null PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+keyed: five actual operation observations, accepted request vs failed work; typed keyed/handle inspection, handle read-result and diagnostics passed
+Store provenance: saved-initial passed
+Store provenance: saved-after passed
+Store provenance: explicit-override passed
+Store provenance: explicit-create passed
+Store provenance: home-create passed
+saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, sync uncertainty, listing asymmetry
+incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed
+human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed
+preference-policy passed: exit=0 elapsed=0.973s
+PASS preference privacy and native publication/reload
+bash-lifecycle passed: exit=0 elapsed=33.220s
+{"bash_pid_publication": "passed"}
+{"bash_lifecycle_faults": "passed"}
+bash-recovery passed: exit=0 elapsed=3.777s
+{"bash_recovery": "passed"}
+codex passed: exit=0 elapsed=6.014s
+codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch
+control passed: exit=0 elapsed=18.348s
+Partial callers: both write failures and setup cleanup passed; native census owns membership
+Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal
+pre-handoff release: {"superseded": {"process": "121150", "run": "5140220638894", "sequence": "17", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "canonical_handoff_superseded", "at_ns": "5143355841619", "turn": "1", "operation": "1", "attempt": "1"}, "execution_boundary": {"process": "121150", "run": "5140220638894", "sequence": "19", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "lifecycle_boundary", "at_ns": "5143355866729", "start_ns": "5140350230256", "wait_ns": "0"}, "execution": {"status": "partial", "dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0", "unavailable": ["structured_output"]}, "release_budget_seconds": 8, "release_elapsed_seconds": 3.358711498000048}
+control integration: stalled_ingress=10 controls=25 p95_ms=89.4 control_first_p95_ms=16.0 real_settlement_p95_ms=10.2 overlap_controls=1 blocked_result_control_ms=9.6 exact_ack_ms=6.8
+session-list passed: exit=0 elapsed=8.465s
+Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {'rss_kib': 7904, 'fds': 10, 'identities': {0: (5, 3, 8630, '/dev/null'), 1: (12, 268841, 4480, 'pipe:[268841]'), 2: (12, 268842, 4480, 'pipe:[268842]'), 3: (65024, 2090156, 16832, '/tmp/rui-session-list-qoe2yv7x/store'), 4: (12, 268840, 4480, 'pipe:[268840]'), 5: (8, 268892, 49663, 'socket:[268892]'), 6: (65024, 2090236, 33152, '/tmp/rui-session-list-qoe2yv7x/store/host.lock'), 9: (65024, 2090256, 33188, '/tmp/rui-session-list-qoe2yv7x/store/rui.sqlite3'), 10: (8, 268890, 49663, 'socket:[268890]'), 11: (8, 268893, 49663, 'socket:[268893]')}}→{'rss_kib': 8284, 'fds': 10, 'identities': {0: (5, 3, 8630, '/dev/null'), 1: (12, 268841, 4480, 'pipe:[268841]'), 2: (12, 268842, 4480, 'pipe:[268842]'), 3: (65024, 2090156, 16832, '/tmp/rui-session-list-qoe2yv7x/store'), 4: (12, 268840, 4480, 'pipe:[268840]'), 5: (8, 268892, 49663, 'socket:[268892]'), 6: (65024, 2090236, 33152, '/tmp/rui-session-list-qoe2yv7x/store/host.lock'), 9: (65024, 2090256, 33188, '/tmp/rui-session-list-qoe2yv7x/store/rui.sqlite3'), 10: (8, 268890, 49663, 'socket:[268890]'), 11: (8, 268893, 49663, 'socket:[268893]')}}
+Session-list facts: actual producer, all pages, one JSON value, discarded extensions, exact scope/version/canonical cursor/duplicate rejection; synthetic busy diagnostics
+conversation-page passed: exit=0 elapsed=7.554s
+conversation Host resource snapshots baseline=(10772480, 11) queued_2MiB=(12292096, 15) drained=(12754944, 11) (RSS bytes, FDs; Linux only)
+projected nonempty-tail offset 4110: canonical corruption HTTP 500
+projected nonempty-tail offset 4111: canonical corruption HTTP 500
+projected Conversation ranges: exact escaped/multibyte bytes, healthy trailing empties, repeated EOF, tail and digest corruption fences passed
+whole stream 0 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 1 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 4095 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 4096 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 8192 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 8193 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+whole stream 131073 bytes: exact escape-heavy framing, independent digest/tail no-false-success witnesses passed
+proposal passed: exit=0 elapsed=9.590s
+proposal retained idle after repeated small/large reads=(12836864, 11) (Linux RSS bytes/FDs)
+proposal resources baseline=(10928128, 11) large_fields=(12836864, 11) (Linux RSS bytes/FDs, not aggregate qualification)
+proposal page=3480 cursor=24 bytes (fixed owned values)
+native Client small-field max RSS KiB=2284 (fresh process; not aggregate verdict)
+native Client large-field max RSS KiB=2204 (fresh process; not aggregate verdict)
+native Client page max RSS KiB=2324 (fresh process; not aggregate verdict)
+proposal native caller: historical rejection/complete fields/frozen traversal/restart/authority/corruption/malformed/truncation passed
+activity passed: exit=0 elapsed=13.022s
+activity repeated-reader idle Linux RSS/FDs: (13852672, 11) (13856768, 11)
+activity retained-idle Linux RSS/FDs: (10903552, 11) (13856768, 11)
+activity typed native: seven kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed
+descriptor-capacity passed: exit=0 elapsed=12.464s
+descriptor oracle: independent final population, missing start/release, wrong route/number/run, reversed and duplicate controls passed
+accept log oracle: every publication cut, complete corruption and final incomplete refusal passed
+accept inheritance child: {"fd": 16, "expected": [8, 272243], "raw": null, "normalized": null, "stat_error": 9, "inherited": false}
+accept inheritance: real Bash child did not retain the selected exchange socket
+accept pressure: mfile, existing peer, admitted work, same-Host recovery and bounded retry passed
+accept pressure: nfile, existing peer, admitted work, same-Host recovery and bounded retry passed
+accept pressure: nobufs, existing peer, admitted work, same-Host recovery and bounded retry passed
+accept pressure: nomem, existing peer, admitted work, same-Host recovery and bounded retry passed
+accept pressure: real-mfile, existing peer, admitted work, same-Host recovery and bounded retry passed
+accept pressure: guarded shutdown during cooldown passed
+descriptor borrower retirement: [{"process": "123501", "run": "5148503540661", "sequence": "41", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148912741280", "subject_kind": "request_number", "subject": "4", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "42", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148912898180", "subject_kind": "request_number", "subject": "5", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "43", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148913024281", "subject_kind": "request_number", "subject": "6", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "44", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148913115568", "subject_kind": "request_number", "subject": "7", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "45", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148913181802", "subject_kind": "request_number", "subject": "8", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "46", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148913241500", "subject_kind": "request_number", "subject": "9", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "47", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148913317896", "subject_kind": "request_number", "subject": "10", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "48", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148914586989", "subject_kind": "request_number", "subject": "11", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "49", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148914725119", "subject_kind": "request_number", "subject": "12", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "50", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_resources_released", "at_ns": "5148914918879", "subject_kind": "request_number", "subject": "13", "scratch_used_bytes": "0"}, {"process": "123501", "run": "5148503540661", "sequence": "51", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_place_released", "at_ns": "5148914975902", "subject_kind": "place", "subject": "classification"}, {"process": "123501", "run": "5148503540661", "sequence": "52", "clock": "awake_ns", "trace_lost": false, "rui_test_phase": "connection_place_released", "at_ns": "5148915017234", "subject_kind": "place", "subject": "classification"}]
+host-status passed: exit=0 elapsed=15.168s
+protected discovery passed: ten ordinary + incomplete discovery, competing ready, exact stop, unhanded peer retirement, correlated release and lease reuse
+hostile discovery passed: oversized before body, message/configure before scratch, no saved command, healthy reuse
+discovery absolute deadline passed: header + trickling body closed in 10.002s, scratch=0
+host-status passed: capacity=3/7 replacement identity, 40 reads, fd=12->12, scratch=0
+host-stop passed: exit=0 elapsed=4.441s
+host-stop oracle passed: actual condition wait/no actor, correlated release then launch
+host-stop oracle passed: missing required phase expires without actor
+mixed Host stop passed: provider-before-Bash, TERM and exactly-once Bash cleanup before capture release; lease held, scratch=0
+mixed Host stop passed: Bash-before-provider, TERM and exactly-once Bash cleanup before capture release; lease held, scratch=0
+host-stop passed: guarded rejection, incomplete-stop retirement, held cleanup/connection lease, replacement; Linux fd=17->12, scratch=0
+host-launch passed: exit=0 elapsed=3.559s
+Host process discovery: ENOENT/ESRCH retirement, exact/subtree Store selection, lookalike/executable exclusion and real read failures passed
+action-ready counterexample RED: pipe-only wait blocked with actual PTY credit withheld
+action-ready credit: exact final transcript, one notification and original deadline passed
+host-launch exit reader: exact transcript/outcome/reap, remaining budget and overflow passed
+Host-launch failure retention: actual status, diagnostics, private Store, process disposal and primary failure passed
+default capacity refused below 570 descriptors (default intake needs 930)
+detached startup soft-256: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-af6j00x9/soft-256', 'instance': 'feb95f2542025b5f9fe869150ad32ed0', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '930', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-af6j00x9/soft-256/diagnostics'}
+detached startup linux-1024: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-af6j00x9/linux-1024', 'instance': '16c506d9c8261014ede73040d561cabe', 'active_capacity': '100', 'intake_capacity': '100', 'descriptor_limit': '1024', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-af6j00x9/linux-1024/diagnostics'}
+detached startup hard-minimum: {'version': '1', 'type': 'host_status', 'status': 'ready', 'store': '/tmp/rui-host-launch-af6j00x9/hard-minimum', 'instance': '3bb069768f468d148ede03d7d7e38fda', 'active_capacity': '100', 'intake_capacity': '10', 'descriptor_limit': '570', 'capabilities': {'bash': True, 'model': True, 'managed_authentication': True}, 'diagnostics': '/tmp/rui-host-launch-af6j00x9/hard-minimum/diagnostics'}
+startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure
+host-launch passed: held lease, 6 aliases -> 1 capacity-100 Host, detached stdio, bounded failure
+admission-debug passed: exit=0 elapsed=0.437s
+admission artifact smoke passed: capture errors, Store lease, lost reply and restart replay
+host-process passed: exit=0 elapsed=7.330s
+Host cleanup failed: AssertionError at host_process.py:255: missing/foreign disposal state
+Host cleanup failed: AssertionError at host_process.py:283: missing/foreign final observation state
+bounded fixture failure destination: /tmp/rui-fixture-failures-y_u1ra3k
+retained native observation failure state: /tmp/tmpxbpml_vs
+bounded fixture failure destination: /tmp/rui-fixture-failures-y_u1ra3k
+retained native observation failure state: /tmp/tmp9zwbv2he
+Host cleanup failed: AssertionError at host_process.py:264: Host observation failed: native observation loss invalidates evidence
+Host cleanup failed: AssertionError at host_process.py:281: Host observation failed: native observation loss invalidates evidence
+bounded fixture failure destination: /tmp/rui-fixture-failures-y_u1ra3k
+retained native observation failure state: /tmp/tmpadn3yy0x
+Host cleanup failed: AssertionError at host_process.py:265: native loss during observation disposal
+Host cleanup failed: AssertionError at host_process.py:281: Host observation failed: native observation loss invalidates evidence
+bounded fixture failure destination: /tmp/rui-fixture-failures-y_u1ra3k
+retained native observation failure state: /tmp/tmp3a13nq60
+Host cleanup failed: AssertionError at host_process.py:265: native loss during observation disposal
+Host cleanup failed: AssertionError at host_process.py:281: Host observation failed: native observation loss invalidates evidence
+bounded fixture failure destination: /tmp/rui-fixture-failures-y_u1ra3k
+retained native observation failure state: /tmp/tmpu0zll5am
+bounded fixture failure destination: /tmp/tmpi3tjn3lv
+retained native observation failure state: /tmp/tmp2di3lrcw
+Fixture failure metadata unavailable: OSError
+Fixture failure metadata unavailable: OSError
+Native failure copy unavailable: OSError
+retained native observation failure state: /tmp/tmputw8yv_6
+Host cleanup failed: AssertionError at host_process.py:286: final native observation loss invalidates evidence
+bounded fixture failure destination: /tmp/tmp4zbsjpzd
+retained native observation failure state: /tmp/tmpvwplw3v_
+Fixture disposal: primary failure retained, all resources attempted
+Peer disconnects: broken pipe/reset/ENOTCONN observed; setup, timeout and I/O errors preserved
+Peer census: reply waits for exact retirement; missing, wrong, duplicate, late and extra owners refuse
+One-reply peer: exact bytes, EOF/limits/deadlines, primary errors, sockets/path and worker retirement
+Terminal capture caller clock: timely exact read/release accepted; late exact read and release rejected
+Renderer comparison retention: exact redraw/exit operands and timing survive root deletion; evidence faults preserve assertion and disposal
+Execution release oracle: simultaneous accounting, exact cleanup owners/final population, withheld custody/scratch, late replies, caller and inspection bounds
+Bash cleanup census: exact unique owner endpoints, single release, inspection bound and no extra phases
+Required receipts: optional authority/wrong plan/disposable retention refused; missing/duplicate/lost native gate fails; original failure survives release/reap/root teardown
+Caller disposal: dispatch/page/Bash body and cleanup faults, multiple children/endpoints, startup refusal and live-thread rejection passed
+Observation startup: complete cohort credit drained before launch; unavailable/short/corrupt credit refuses and closes; disabled path unchanged
+Host observation channel: withheld prefix, reordered arrival, missing middle/final/handoff, wrong Action, foreign subject/process, loss, duplicate and bounded overflow controls passed
+Host final observation helper: every plan rejects final loss, encoding loss, missing tail, interrupted publication and missing/foreign state with kill status; normal prefix accepted
+Host disposal: every plan drains held final custody, seals admission, refuses late loss/missing tail and missing endpoint; pre-teardown retention survives root removal
+Host retention: sampling/write/copy refusal preserves original failure and actual SIGKILL/reap/closed custody; post-seal loss retains distinct pre/post states
+Intentional crash: receipt custody retires unsealed inside original budget; withheld/lost evidence and future writers fail with teardown/retention
+Host optional receipt: short write visible with writer open and no filler, no native evidence
+Numeric HTTP fixture: usable bound listener and exact port without reverse DNS
+host-allocator passed: exit=0 elapsed=0.185s
+Host allocator startup checks passed
+1 fuzz tests found.
+Build Summary: 98/98 steps succeeded
+exit 0

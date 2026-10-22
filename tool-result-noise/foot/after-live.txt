@@ -1,0 +1,33 @@
+
+› list the workspace                                                                                       13:22
+
+✓ Run listing command
+
+Listed the workspace.
+
+› now check missing-file                                                                                   13:22
+
+! Run missing file command — Failed (exit 2)
+  ls: cannot access 'missing-file': No such file or directory
+
+That file is absent.
+
+›
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

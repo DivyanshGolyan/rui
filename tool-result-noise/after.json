@@ -1,0 +1,6 @@
+{
+ "command": "ls",
+ "result": "Bash succeeded. Exit code: 0.\nstdout tail:\nREADME.md\nbuild.zig\nmain.zig\n",
+ "bytes": 72,
+ "platform": "linux"
+}
