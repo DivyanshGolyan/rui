@@ -1,0 +1,767 @@
+[
+  {
+    "path": "src/AnswerRenderer.zig",
+    "bytes": 47413,
+    "lines": 1063,
+    "sha256": "b0e299dce3473929f186cafe97fc208b463ee04ecb182c2d98a95590e0594c7f",
+    "extension": ".zig",
+    "test_body_lines": 592,
+    "test_declarations": 40
+  },
+  {
+    "path": "src/BashLifecycle.zig",
+    "bytes": 26543,
+    "lines": 583,
+    "sha256": "b86361fb0e188e548cce34d44565a5d8b79f919846a63eb3ef8237ce826ad03b",
+    "extension": ".zig",
+    "test_body_lines": 232,
+    "test_declarations": 11
+  },
+  {
+    "path": "src/ChoiceLine.zig",
+    "bytes": 3145,
+    "lines": 70,
+    "sha256": "3c45fa2a88e88a9911fe6e9de152c03686a783180bcaf03310a8ed63832cfe00",
+    "extension": ".zig",
+    "test_body_lines": 35,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/ClientTask.zig",
+    "bytes": 3813,
+    "lines": 95,
+    "sha256": "a76f4359f676758d440f08f96065a80c639db787f7b83eb2d8dc2b31d85aae64",
+    "extension": ".zig",
+    "test_body_lines": 36,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/ConversationViewport.zig",
+    "bytes": 48435,
+    "lines": 900,
+    "sha256": "293c233f35f5ec83b009e7f9db3befc90824cfe3c61f70cd3b38b477eba69989",
+    "extension": ".zig",
+    "test_body_lines": 318,
+    "test_declarations": 11
+  },
+  {
+    "path": "src/HostDiagnostics.zig",
+    "bytes": 7530,
+    "lines": 180,
+    "sha256": "ddf54a7ac86c908c38312b6b8278b45c787e772cb02ef9682668b6fa6298a19b",
+    "extension": ".zig",
+    "test_body_lines": 30,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/ResponseTiming.zig",
+    "bytes": 2285,
+    "lines": 43,
+    "sha256": "566b29e4ce681a92e82d7922b18fe30f1d69fc212d3dc854d34b965beefa338a",
+    "extension": ".zig",
+    "test_body_lines": 25,
+    "test_declarations": 2
+  },
+  {
+    "path": "src/ScratchBudget.zig",
+    "bytes": 7289,
+    "lines": 163,
+    "sha256": "a2bbbbab64a020787bf8be46b2f4a8b444be3e82d2caa5f22cbc504b1ab49062",
+    "extension": ".zig",
+    "test_body_lines": 101,
+    "test_declarations": 5
+  },
+  {
+    "path": "src/SessionFrontend.zig",
+    "bytes": 92761,
+    "lines": 1791,
+    "sha256": "764e5186b5e829fee0cdc110d9cdeb3c8cc70e4c6ba7e379e1312bad65ee3930",
+    "extension": ".zig",
+    "test_body_lines": 494,
+    "test_declarations": 17
+  },
+  {
+    "path": "src/SessionInput.zig",
+    "bytes": 8627,
+    "lines": 193,
+    "sha256": "5de7c50ca64cb10878b7a1889f4ee9e741cec83a2e8a7e4a38c3b45d05c3ff2c",
+    "extension": ".zig",
+    "test_body_lines": 66,
+    "test_declarations": 4
+  },
+  {
+    "path": "src/SessionScreen.zig",
+    "bytes": 73433,
+    "lines": 1442,
+    "sha256": "eacbf5dc503b076f5f984546db2c108347562e176fbc649cc18c6c760fc264af",
+    "extension": ".zig",
+    "test_body_lines": 667,
+    "test_declarations": 15
+  },
+  {
+    "path": "src/SessionSubmission.zig",
+    "bytes": 32669,
+    "lines": 588,
+    "sha256": "1b0d37cc387d600e4e0d66da9ec89a94cbf129b9b0b67e1bc7808417588ad765",
+    "extension": ".zig",
+    "test_body_lines": 362,
+    "test_declarations": 6
+  },
+  {
+    "path": "src/SessionTerminal.zig",
+    "bytes": 14926,
+    "lines": 297,
+    "sha256": "b789e0ca08d9ca9255eb763e047ac60fecbc3933f1dd6fd213030713614c4000",
+    "extension": ".zig",
+    "test_body_lines": 65,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/TerminalEditor.zig",
+    "bytes": 51873,
+    "lines": 1063,
+    "sha256": "232020cdc00db4126a27a378cbc216a3cac0ef20f30380dd97ce31b368ac3ef2",
+    "extension": ".zig",
+    "test_body_lines": 435,
+    "test_declarations": 20
+  },
+  {
+    "path": "src/TerminalFrame.zig",
+    "bytes": 13482,
+    "lines": 271,
+    "sha256": "1d321fb0e0d9fc24df7c6558a6dcb73a729adde4f37599a371769bafb7183270",
+    "extension": ".zig",
+    "test_body_lines": 92,
+    "test_declarations": 6
+  },
+  {
+    "path": "src/TerminalInput.zig",
+    "bytes": 25484,
+    "lines": 499,
+    "sha256": "4e946623e59f320393875d8a8d7247ce5b6c82684ad3481f2323ecf806207610",
+    "extension": ".zig",
+    "test_body_lines": 252,
+    "test_declarations": 11
+  },
+  {
+    "path": "src/TerminalText.zig",
+    "bytes": 6972,
+    "lines": 168,
+    "sha256": "5519f0a7ad1acb3b7423d155aa7e1e4f2d07aecfc376c7a8fc3153691b5810af",
+    "extension": ".zig",
+    "test_body_lines": 59,
+    "test_declarations": 4
+  },
+  {
+    "path": "src/TestObservation.zig",
+    "bytes": 26268,
+    "lines": 515,
+    "sha256": "9a1efb6e1e30c4a0b1fe297667713b55b666adbe0af20a9a7144a4b28e6b1e59",
+    "extension": ".zig",
+    "test_body_lines": 226,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/attempt.zig",
+    "bytes": 881,
+    "lines": 36,
+    "sha256": "79a28bffbe9ddaf010a89a756c2e386baca0ffc98338696a1e5bbf0b6df62281",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/bash.zig",
+    "bytes": 80010,
+    "lines": 1768,
+    "sha256": "be55647d2db0ba38ab669297c2c7d6cd68c8cb641a2cd7d9008b9df25414149d",
+    "extension": ".zig",
+    "test_body_lines": 624,
+    "test_declarations": 13
+  },
+  {
+    "path": "src/bash_platform.c",
+    "bytes": 5351,
+    "lines": 173,
+    "sha256": "dcbd944c581ef64fd430673ee1005cfbebedb6c52fd8122778e604961fdb2069",
+    "extension": ".c",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/bounded.zig",
+    "bytes": 801,
+    "lines": 24,
+    "sha256": "7eb0c03ffedd7b1f41bb70e1e658a67923ca26d50520e5c7d31c49655b7d73df",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/build_evaluator.sh",
+    "bytes": 383,
+    "lines": 8,
+    "sha256": "040c1bda5ff00f2b754e21f9e064d41f20553ce7262034d287e559a4442afbe0",
+    "extension": ".sh",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/build_transport.sh",
+    "bytes": 5077,
+    "lines": 147,
+    "sha256": "a5c05ef688807c6f9d0a8b13ce988ab4fbeb2a755ce083b8428f6f762643198b",
+    "extension": ".sh",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/cli.zig",
+    "bytes": 148930,
+    "lines": 2528,
+    "sha256": "4d1b509ef967a9647ac4b42d7f099e7b730ebc571966b9296fc6a6da895ead71",
+    "extension": ".zig",
+    "test_body_lines": 389,
+    "test_declarations": 12
+  },
+  {
+    "path": "src/cli_args.zig",
+    "bytes": 38631,
+    "lines": 565,
+    "sha256": "c68a91efb4cf91b27e8671edf86865f9bac02a1590271e90f1d7ea3dc5d1a13e",
+    "extension": ".zig",
+    "test_body_lines": 119,
+    "test_declarations": 8
+  },
+  {
+    "path": "src/client.zig",
+    "bytes": 329415,
+    "lines": 5839,
+    "sha256": "09d980d153beba7aa7274327132d00d029e01de959597b81b98d033a276ae5b6",
+    "extension": ".zig",
+    "test_body_lines": 2306,
+    "test_declarations": 69
+  },
+  {
+    "path": "src/codex_auth.zig",
+    "bytes": 9042,
+    "lines": 186,
+    "sha256": "d30a43399a1a630779946499af2928e229d31a1b53da0c3e939da74565a23565",
+    "extension": ".zig",
+    "test_body_lines": 12,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/codex_credential_policy.zig",
+    "bytes": 30279,
+    "lines": 601,
+    "sha256": "a1a79621994a8cef0a24f60ca285c75ac85c5598fe5ff8d2bb621e23e81eab8c",
+    "extension": ".zig",
+    "test_body_lines": 204,
+    "test_declarations": 10
+  },
+  {
+    "path": "src/codex_credentials.zig",
+    "bytes": 21346,
+    "lines": 490,
+    "sha256": "776ede8f037f4c98ce83ddb4da8bda6f70479fc9e24b801e8640981b5cb7caea",
+    "extension": ".zig",
+    "test_body_lines": 153,
+    "test_declarations": 5
+  },
+  {
+    "path": "src/codex_token_wire.zig",
+    "bytes": 25074,
+    "lines": 450,
+    "sha256": "6fe152ad25553ea037041c1f29ff0b8710fa0c080779e259df3505ad99e3c19f",
+    "extension": ".zig",
+    "test_body_lines": 182,
+    "test_declarations": 9
+  },
+  {
+    "path": "src/core_boundary.zig",
+    "bytes": 17433,
+    "lines": 341,
+    "sha256": "82f93dda0c3f31484381fbc38d9630e0e70859a383787dbdfad46bdc9480acf0",
+    "extension": ".zig",
+    "test_body_lines": 92,
+    "test_declarations": 2
+  },
+  {
+    "path": "src/curl-post-retry.patch",
+    "bytes": 1832,
+    "lines": 43,
+    "sha256": "851ff59f8c082ce7ce956a3e1ce90a5073cc3d0d875b179260671505f4dd22bb",
+    "extension": ".patch",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/deadline.zig",
+    "bytes": 478,
+    "lines": 16,
+    "sha256": "a59693c66cbe83f82b640a58efd5e6364e6c9e3e9fa9ac2c11e779cea7b01c04",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/descriptor_capacity.zig",
+    "bytes": 9861,
+    "lines": 228,
+    "sha256": "fb4ceb78ed38a3276f3acb62430f344ae6df2a565ce52dad2a239d1bbc498317",
+    "extension": ".zig",
+    "test_body_lines": 58,
+    "test_declarations": 6
+  },
+  {
+    "path": "src/descriptor_limit.zig",
+    "bytes": 4251,
+    "lines": 110,
+    "sha256": "be42cc9cf731b1987295544270195849a619e31e22bdd850b70007d6d0fda70d",
+    "extension": ".zig",
+    "test_body_lines": 26,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/evaluator.zig",
+    "bytes": 9652,
+    "lines": 238,
+    "sha256": "b2529219b8d78ed2157353a8f83f11d9b51e72c626d101811b317939f9b7ebed",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_child.c",
+    "bytes": 15976,
+    "lines": 413,
+    "sha256": "96895b7d6373fab3f0f67d010c93b16980179bf7df7f65399fd9543a4cd31fc6",
+    "extension": ".c",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_parent.c",
+    "bytes": 14783,
+    "lines": 358,
+    "sha256": "ff0e328863ecbeca8ca537c7452457021213445f47142e52be3c81ec5d4abe17",
+    "extension": ".c",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_parent.h",
+    "bytes": 1610,
+    "lines": 27,
+    "sha256": "c8512e8cd56e8645cd67a20f17a868afeee5df85335cc9a9e2925c5696035c38",
+    "extension": ".h",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_policy.h",
+    "bytes": 487,
+    "lines": 11,
+    "sha256": "a00bc5597e99667e60d305031c511b7a8803bdac05fb2f3885b5e2b64902d2ed",
+    "extension": ".h",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_policy.inc",
+    "bytes": 891,
+    "lines": 25,
+    "sha256": "c270a27f6b3abedc0537cb5a41c8fe58fa2a9a1be0e1fda5d2b7d9a1b763c904",
+    "extension": ".inc",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_policy.patch",
+    "bytes": 4276,
+    "lines": 91,
+    "sha256": "7759f9b7361dd2963e50801af392f7025296ad14750535f6792539423169918c",
+    "extension": ".patch",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_string_reader.h",
+    "bytes": 1979,
+    "lines": 41,
+    "sha256": "d4ce3e038aa3d804948003b30e5e9d9d1c0bf0e6a46fe943462f6767778795a0",
+    "extension": ".h",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/evaluator_string_reader.inc",
+    "bytes": 5643,
+    "lines": 151,
+    "sha256": "ce7a5e0be9d4ea7c404f032e3d0a48ba40287dd5849b69b21ee2ba8eca1d5fb6",
+    "extension": ".inc",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/execution.zig",
+    "bytes": 47003,
+    "lines": 1035,
+    "sha256": "a257b3438ce2fb467ce425cf3ef86ec8cc21861c4a58e33a474d13a45e684bbb",
+    "extension": ".zig",
+    "test_body_lines": 609,
+    "test_declarations": 15
+  },
+  {
+    "path": "src/execution_turn.zig",
+    "bytes": 21627,
+    "lines": 590,
+    "sha256": "ff7ce55749db942e6eb9b7a883624c2fc88d4f8a9b2d9184511f8a1b52f3cab7",
+    "extension": ".zig",
+    "test_body_lines": 229,
+    "test_declarations": 17
+  },
+  {
+    "path": "src/fetch_dependencies.sh",
+    "bytes": 3102,
+    "lines": 70,
+    "sha256": "bb6729fe7e41851802de34165965381561fb6206c44e0f5de954de541293fbd2",
+    "extension": ".sh",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/host_launch.c",
+    "bytes": 9469,
+    "lines": 249,
+    "sha256": "37780c335cdcc6442105a350e18353d8f43f045164f4faa48e1da2fd04bef3b6",
+    "extension": ".c",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/json_ascii.zig",
+    "bytes": 5812,
+    "lines": 139,
+    "sha256": "441f04d32b5c55d11331da47592bf8d3f608430c040c0834dca2645ad04b2697",
+    "extension": ".zig",
+    "test_body_lines": 27,
+    "test_declarations": 2
+  },
+  {
+    "path": "src/logic_tests.zig",
+    "bytes": 2649,
+    "lines": 60,
+    "sha256": "92fd8363a5569811ce9eea0d487c9e189c9ee3a28593822505786f104aa9786c",
+    "extension": ".zig",
+    "test_body_lines": 34,
+    "test_declarations": 2
+  },
+  {
+    "path": "src/model_adapter.zig",
+    "bytes": 142693,
+    "lines": 2604,
+    "sha256": "3b4ce4b33d76b45007a24af42a7a11e23ccaa8fdfdff99d4e48a85f93633f672",
+    "extension": ".zig",
+    "test_body_lines": 1327,
+    "test_declarations": 25
+  },
+  {
+    "path": "src/model_capability.zig",
+    "bytes": 2938,
+    "lines": 62,
+    "sha256": "5b960c3ca5d4850ba2a52884e7dac4ed3defc40e17a31422bd90a6e01a9cb660",
+    "extension": ".zig",
+    "test_body_lines": 12,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/named_scratch.zig",
+    "bytes": 8440,
+    "lines": 234,
+    "sha256": "0e89e188b6b74d52b5bf988d29ef38f8bba996c5754b8473aeb9915811e6f050",
+    "extension": ".zig",
+    "test_body_lines": 122,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/new_session_selection.zig",
+    "bytes": 10247,
+    "lines": 189,
+    "sha256": "7901e105aea81eb11cf27934faa5a570382d7fcde68e186f958994443c750961",
+    "extension": ".zig",
+    "test_body_lines": 118,
+    "test_declarations": 4
+  },
+  {
+    "path": "src/output_format.zig",
+    "bytes": 9776,
+    "lines": 255,
+    "sha256": "7951fa5fe8dfc96046429410afb872ce02d717b3abf4681c5e4ab3c7339b54bb",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/output_retention.zig",
+    "bytes": 25157,
+    "lines": 579,
+    "sha256": "bba17ccebbd813eeb65251a9e7e157c9edf311e9fd0e7d877f3a7ee3218812ca",
+    "extension": ".zig",
+    "test_body_lines": 329,
+    "test_declarations": 11
+  },
+  {
+    "path": "src/platform.zig",
+    "bytes": 37302,
+    "lines": 757,
+    "sha256": "c782e73c037cfb1dd6280e9e9a7290e592f10673c747611778bfd8de6b31b57b",
+    "extension": ".zig",
+    "test_body_lines": 398,
+    "test_declarations": 15
+  },
+  {
+    "path": "src/preference_values.zig",
+    "bytes": 983,
+    "lines": 24,
+    "sha256": "903c974cf6454cbeabde9cb185fbbf62ec8f126ab938f38915c1c0ad328563b6",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/preferences.zig",
+    "bytes": 26539,
+    "lines": 524,
+    "sha256": "7c74a3577dd7a3e94db85ae5f9d0847a7c88f36d6a7e1f7892143848b2c58597",
+    "extension": ".zig",
+    "test_body_lines": 250,
+    "test_declarations": 9
+  },
+  {
+    "path": "src/prepare_vaxis.sh",
+    "bytes": 359,
+    "lines": 11,
+    "sha256": "effe90521486ecdffe3f47fdd24ea45d1cd34e365eaae4df91562c716ba329c0",
+    "extension": ".sh",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/product_defaults.zig",
+    "bytes": 2031,
+    "lines": 43,
+    "sha256": "6d66b59f23c0745be2c0772af682fe79c288c19c23ce64eccb01281cb69e6f80",
+    "extension": ".zig",
+    "test_body_lines": 11,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/protocol.zig",
+    "bytes": 118415,
+    "lines": 2575,
+    "sha256": "16908d3f998cfa86ac6830d8882ae582ec567425d361cd9177ce3e0e02fdaf72",
+    "extension": ".zig",
+    "test_body_lines": 611,
+    "test_declarations": 18
+  },
+  {
+    "path": "src/provider.zig",
+    "bytes": 54580,
+    "lines": 1207,
+    "sha256": "b0911f7d03322a89ce2e59a476a0ec05b95731a4785ed128008ea01e388e88ab",
+    "extension": ".zig",
+    "test_body_lines": 273,
+    "test_declarations": 13
+  },
+  {
+    "path": "src/provider_output.zig",
+    "bytes": 131767,
+    "lines": 2452,
+    "sha256": "0d7cd6acfdeb2d3cdbcda828b764e2bcf71a58a186040295b0ff1d58ec37f520",
+    "extension": ".zig",
+    "test_body_lines": 740,
+    "test_declarations": 27
+  },
+  {
+    "path": "src/provider_selection.zig",
+    "bytes": 5885,
+    "lines": 111,
+    "sha256": "0e13cfab2bb47ab8aac2a6b85c7ed6a2669c45918f239afaf70ffd0ce7535f31",
+    "extension": ".zig",
+    "test_body_lines": 50,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/request_encoding.zig",
+    "bytes": 55029,
+    "lines": 1259,
+    "sha256": "3c53b1a03adff112fc90d80a6f51719c0536237119afe18faae2c882c3a0f3da",
+    "extension": ".zig",
+    "test_body_lines": 393,
+    "test_declarations": 13
+  },
+  {
+    "path": "src/retry_policy.zig",
+    "bytes": 5647,
+    "lines": 122,
+    "sha256": "187377c448b292c8bf7e64002f9c75f319571b628981f1005945a6dbdb3b3576",
+    "extension": ".zig",
+    "test_body_lines": 71,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/server.zig",
+    "bytes": 364084,
+    "lines": 7659,
+    "sha256": "1f6aaa1bc65a78be26b68284e0f75fe29664bf6f68bb241d3731c78b6a1c5937",
+    "extension": ".zig",
+    "test_body_lines": 3011,
+    "test_declarations": 44
+  },
+  {
+    "path": "src/session_consent.zig",
+    "bytes": 13565,
+    "lines": 268,
+    "sha256": "8136059ef58f18c5f859178361f10978040aadd099730c6ee8dba4687ca0933e",
+    "extension": ".zig",
+    "test_body_lines": 159,
+    "test_declarations": 6
+  },
+  {
+    "path": "src/session_departure.zig",
+    "bytes": 7341,
+    "lines": 126,
+    "sha256": "b5ff93fba07ecd114955a3192731e5715b70a764793e6e5ee722201e7f2d8c0d",
+    "extension": ".zig",
+    "test_body_lines": 63,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/session_history.zig",
+    "bytes": 26204,
+    "lines": 454,
+    "sha256": "c3e6eaeb61a226524963c9a7deed62a446d483d6b9e8a952124c7ad7f80ef159",
+    "extension": ".zig",
+    "test_body_lines": 261,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/session_reads.zig",
+    "bytes": 51279,
+    "lines": 993,
+    "sha256": "90996319ee93817f433340a59bcddf1c0e7bee27f310b6497c99aa0340d728a3",
+    "extension": ".zig",
+    "test_body_lines": 194,
+    "test_declarations": 7
+  },
+  {
+    "path": "src/session_sequence_model_test.zig",
+    "bytes": 31061,
+    "lines": 645,
+    "sha256": "279b292247a599f2d2884b7bb4807f37a2c83ffd6928f334ebcb900e4ac68c5b",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/session_view.zig",
+    "bytes": 67251,
+    "lines": 1389,
+    "sha256": "90c1f6b216873e3ad98faf8bf534205a44c1eeb08d3701b2b52ca51eb7dc263f",
+    "extension": ".zig",
+    "test_body_lines": 321,
+    "test_declarations": 9
+  },
+  {
+    "path": "src/socket_fixture.zig",
+    "bytes": 10391,
+    "lines": 213,
+    "sha256": "02be8f3f2defeefdca57d5aeabc992c2f8d1654f048bfc1276fd737628ab5837",
+    "extension": ".zig",
+    "test_body_lines": 104,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/stderr.zig",
+    "bytes": 2329,
+    "lines": 54,
+    "sha256": "2c5fa4ce6b7eaa8a29839df204f4e2867c6cfc1c2da518f991a6c6ae5e20becd",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/store.zig",
+    "bytes": 910397,
+    "lines": 16428,
+    "sha256": "628b17644b80b430452f46a56389933c93d485001c88f45aeaae34dd27ec9c61",
+    "extension": ".zig",
+    "test_body_lines": 7905,
+    "test_declarations": 153
+  },
+  {
+    "path": "src/terminal_input_equivalence_test.zig",
+    "bytes": 34342,
+    "lines": 537,
+    "sha256": "c755d87455c8660522f22b05eff38241209cb62bbf2a02ff7b549c98604cf62b",
+    "extension": ".zig",
+    "test_body_lines": 299,
+    "test_declarations": 11
+  },
+  {
+    "path": "src/terminal_notice_test.zig",
+    "bytes": 3001,
+    "lines": 64,
+    "sha256": "4663314922d4f1ce14e73a8947a9891bf5e5e9073499a4d2ce3c9a24af47f441",
+    "extension": ".zig",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  },
+  {
+    "path": "src/tests.zig",
+    "bytes": 1439,
+    "lines": 41,
+    "sha256": "05893a91ffc07eec1dcfdad653e98903c8e71517b87900942527e726f755bfb0",
+    "extension": ".zig",
+    "test_body_lines": 41,
+    "test_declarations": 1
+  },
+  {
+    "path": "src/tools.zig",
+    "bytes": 19938,
+    "lines": 443,
+    "sha256": "4d1d906f838f5d535f0c666cafa776d18b1ec739dd5205fcc24e113901a9b1a6",
+    "extension": ".zig",
+    "test_body_lines": 69,
+    "test_declarations": 4
+  },
+  {
+    "path": "src/transport_policy.zig",
+    "bytes": 16764,
+    "lines": 386,
+    "sha256": "8e3d2accf9c06732d95404914ca27739b2a395770fc3deb7fa50e94173956a25",
+    "extension": ".zig",
+    "test_body_lines": 176,
+    "test_declarations": 7
+  },
+  {
+    "path": "src/turn_policy.zig",
+    "bytes": 6172,
+    "lines": 145,
+    "sha256": "f8392b2c663ad8301dfe35ff8348438ce9c04a910d7bdd5f18a1bb1a33dabc0e",
+    "extension": ".zig",
+    "test_body_lines": 50,
+    "test_declarations": 3
+  },
+  {
+    "path": "src/vaxis-parser.patch",
+    "bytes": 32788,
+    "lines": 689,
+    "sha256": "ae8ff193506fe64dbabfcf2740524f7493711ccb36057ce4f6ff56e44876e9ed",
+    "extension": ".patch",
+    "test_body_lines": 0,
+    "test_declarations": 0
+  }
+]

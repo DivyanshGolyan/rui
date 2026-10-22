@@ -1,0 +1,4252 @@
+[
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/AnswerRenderer.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/AnswerRenderer.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/BashLifecycle.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 11,
+    "import_name": "deadline.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/BashLifecycle.zig",
+    "kind": "local",
+    "target": "src/deadline.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ChoiceLine.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ClientTask.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ClientTask.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ConversationViewport.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 5,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ConversationViewport.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 6,
+    "import_name": "terminal_width",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ConversationViewport.zig",
+    "kind": "package_or_generated",
+    "target": "terminal_width"
+  },
+  {
+    "line": 7,
+    "import_name": "terminal_unicode",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ConversationViewport.zig",
+    "kind": "package_or_generated",
+    "target": "terminal_unicode"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/HostDiagnostics.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/HostDiagnostics.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/HostDiagnostics.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 19,
+    "import_name": "std",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ResponseTiming.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 36,
+    "import_name": "std",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ResponseTiming.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/ScratchBudget.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 5,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "SessionInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "SessionSubmission.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/SessionSubmission.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "ClientTask.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/ClientTask.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "SessionTerminal.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/SessionTerminal.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "SessionScreen.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/SessionScreen.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "TerminalFrame.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/TerminalFrame.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "session_view.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 16,
+    "import_name": "session_departure.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/session_departure.zig"
+  },
+  {
+    "line": 17,
+    "import_name": "session_consent.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/session_consent.zig"
+  },
+  {
+    "line": 18,
+    "import_name": "ChoiceLine.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/ChoiceLine.zig"
+  },
+  {
+    "line": 19,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 20,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 23,
+    "import_name": "session_reads.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionFrontend.zig",
+    "kind": "local",
+    "target": "src/session_reads.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionInput.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionInput.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionInput.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 5,
+    "import_name": "ConversationViewport.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/ConversationViewport.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "TerminalFrame.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/TerminalFrame.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "session_view.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "session_consent.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/session_consent.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "ChoiceLine.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/ChoiceLine.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 661,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 672,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionScreen.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "SessionInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "ClientTask.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "local",
+    "target": "src/ClientTask.zig"
+  },
+  {
+    "line": 514,
+    "import_name": "platform.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionSubmission.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "session_view.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "SessionScreen.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/SessionScreen.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/SessionTerminal.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalEditor.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalEditor.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 4,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalEditor.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 5,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalEditor.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalFrame.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 5,
+    "import_name": "ConversationViewport.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalFrame.zig",
+    "kind": "local",
+    "target": "src/ConversationViewport.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalInput.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 7,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalInput.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalText.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TerminalText.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TestObservation.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TestObservation.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 143,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TestObservation.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 157,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/TestObservation.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/attempt.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "output_retention.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/output_retention.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "BashLifecycle.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/BashLifecycle.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "deadline.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/deadline.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "ScratchBudget.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/ScratchBudget.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "store.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/store.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 576,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bash.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/bounded.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "AnswerRenderer.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/AnswerRenderer.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "SessionFrontend.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/SessionFrontend.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "TestObservation.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/TestObservation.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "cli_args.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/cli_args.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "json_ascii.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/json_ascii.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "codex_auth.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/codex_auth.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "codex_credentials.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/codex_credentials.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "model_adapter.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/model_adapter.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "new_session_selection.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/new_session_selection.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "preferences.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/preferences.zig"
+  },
+  {
+    "line": 16,
+    "import_name": "provider.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/provider.zig"
+  },
+  {
+    "line": 17,
+    "import_name": "provider_selection.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/provider_selection.zig"
+  },
+  {
+    "line": 18,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 19,
+    "import_name": "retry_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/retry_policy.zig"
+  },
+  {
+    "line": 20,
+    "import_name": "server.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/server.zig"
+  },
+  {
+    "line": 21,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 150,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 509,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 532,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 533,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 554,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 942,
+    "import_name": "SessionInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 971,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 1471,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli_args.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/cli_args.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "ResponseTiming.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/ResponseTiming.zig"
+  },
+  {
+    "line": 956,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 2169,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 3022,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 5813,
+    "import_name": "builtin",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 5815,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 5817,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/client.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "codex_credentials.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "local",
+    "target": "src/codex_credentials.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "codex_credential_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "local",
+    "target": "src/codex_credential_policy.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "codex_token_wire.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "local",
+    "target": "src/codex_token_wire.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "curl",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_auth.zig",
+    "kind": "package_or_generated",
+    "target": "curl"
+  },
+  {
+    "line": 10,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credential_policy.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credentials.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credentials.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credentials.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 4,
+    "import_name": "codex_credential_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credentials.zig",
+    "kind": "local",
+    "target": "src/codex_credential_policy.zig"
+  },
+  {
+    "line": 335,
+    "import_name": "codex_auth.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_credentials.zig",
+    "kind": "local",
+    "target": "src/codex_auth.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_token_wire.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 8,
+    "import_name": "codex_credential_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/codex_token_wire.zig",
+    "kind": "local",
+    "target": "src/codex_credential_policy.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/core_boundary.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/deadline.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/descriptor_capacity.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/descriptor_capacity.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/descriptor_limit.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/descriptor_limit.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/descriptor_limit.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/evaluator.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "ScratchBudget.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/evaluator.zig",
+    "kind": "local",
+    "target": "src/ScratchBudget.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/evaluator.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "evaluator_native",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/evaluator.zig",
+    "kind": "package_or_generated",
+    "target": "evaluator_native"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "attempt.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution.zig",
+    "kind": "local",
+    "target": "src/attempt.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "transport_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution.zig",
+    "kind": "local",
+    "target": "src/transport_policy.zig"
+  },
+  {
+    "line": 914,
+    "import_name": "named_scratch.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution_turn.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "deadline.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/execution_turn.zig",
+    "kind": "local",
+    "target": "src/deadline.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/json_ascii.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "core_boundary.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/core_boundary.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "attempt.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/attempt.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "BashLifecycle.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/BashLifecycle.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "ChoiceLine.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/ChoiceLine.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "cli_args.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/cli_args.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "codex_credential_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/codex_credential_policy.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "codex_token_wire.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/codex_token_wire.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "deadline.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/deadline.zig"
+  },
+  {
+    "line": 16,
+    "import_name": "descriptor_capacity.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/descriptor_capacity.zig"
+  },
+  {
+    "line": 17,
+    "import_name": "json_ascii.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/json_ascii.zig"
+  },
+  {
+    "line": 18,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 19,
+    "import_name": "retry_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/retry_policy.zig"
+  },
+  {
+    "line": 20,
+    "import_name": "session_consent.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/session_consent.zig"
+  },
+  {
+    "line": 21,
+    "import_name": "session_departure.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/session_departure.zig"
+  },
+  {
+    "line": 22,
+    "import_name": "transport_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/transport_policy.zig"
+  },
+  {
+    "line": 23,
+    "import_name": "turn_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/turn_policy.zig"
+  },
+  {
+    "line": 27,
+    "import_name": "AnswerRenderer.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/AnswerRenderer.zig"
+  },
+  {
+    "line": 28,
+    "import_name": "core_boundary.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/core_boundary.zig"
+  },
+  {
+    "line": 29,
+    "import_name": "execution.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/execution.zig"
+  },
+  {
+    "line": 30,
+    "import_name": "execution_turn.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/execution_turn.zig"
+  },
+  {
+    "line": 31,
+    "import_name": "named_scratch.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 32,
+    "import_name": "new_session_selection.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/new_session_selection.zig"
+  },
+  {
+    "line": 33,
+    "import_name": "request_encoding.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/request_encoding.zig"
+  },
+  {
+    "line": 34,
+    "import_name": "ResponseTiming.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/ResponseTiming.zig"
+  },
+  {
+    "line": 35,
+    "import_name": "ConversationViewport.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/ConversationViewport.zig"
+  },
+  {
+    "line": 36,
+    "import_name": "SessionInput.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 37,
+    "import_name": "TerminalFrame.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/TerminalFrame.zig"
+  },
+  {
+    "line": 38,
+    "import_name": "TerminalInput.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 39,
+    "import_name": "TerminalEditor.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 40,
+    "import_name": "TerminalText.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 41,
+    "import_name": "terminal_input_equivalence_test.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/terminal_input_equivalence_test.zig"
+  },
+  {
+    "line": 42,
+    "import_name": "tools.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/logic_tests.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "codex_auth.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/codex_auth.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "codex_credentials.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/codex_credentials.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "execution.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/execution.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "output_format.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/output_format.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "provider.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/provider.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "provider_output.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "request_encoding.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/request_encoding.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "store.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/store.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 21,
+    "import_name": "model_capability.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 22,
+    "import_name": "model_capability.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 23,
+    "import_name": "model_capability.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_adapter.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_capability.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_capability.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "provider_selection.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_capability.zig",
+    "kind": "local",
+    "target": "src/provider_selection.zig"
+  },
+  {
+    "line": 23,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_capability.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 52,
+    "import_name": "std",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/model_capability.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "bounded.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "local",
+    "target": "src/bounded.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "ScratchBudget.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "local",
+    "target": "src/ScratchBudget.zig"
+  },
+  {
+    "line": 112,
+    "import_name": "protocol.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 157,
+    "import_name": "protocol.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 194,
+    "import_name": "protocol.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/named_scratch.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/new_session_selection.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "preference_values.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/new_session_selection.zig",
+    "kind": "local",
+    "target": "src/preference_values.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/new_session_selection.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "provider_selection.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/new_session_selection.zig",
+    "kind": "local",
+    "target": "src/provider_selection.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_format.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_format.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_format.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "turn_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_format.zig",
+    "kind": "local",
+    "target": "src/turn_policy.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_retention.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_retention.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_retention.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "ScratchBudget.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/output_retention.zig",
+    "kind": "local",
+    "target": "src/ScratchBudget.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 366,
+    "import_name": "descriptor_limit.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/descriptor_limit.zig"
+  },
+  {
+    "line": 458,
+    "import_name": "descriptor_limit.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/descriptor_limit.zig"
+  },
+  {
+    "line": 485,
+    "import_name": "builtin",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 705,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 722,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 737,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 739,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/platform.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preference_values.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preference_values.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 3,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "provider_selection.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/provider_selection.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "preference_values.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/preference_values.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "preference_values.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/preference_values.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "preference_values.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/preferences.zig",
+    "kind": "local",
+    "target": "src/preference_values.zig"
+  },
+  {
+    "line": 35,
+    "import_name": "std",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/product_defaults.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/protocol.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/protocol.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "ScratchBudget.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/protocol.zig",
+    "kind": "local",
+    "target": "src/ScratchBudget.zig"
+  },
+  {
+    "line": 26,
+    "import_name": "bounded.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/protocol.zig",
+    "kind": "local",
+    "target": "src/bounded.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "TestObservation.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "local",
+    "target": "src/TestObservation.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "store.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "local",
+    "target": "src/store.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "transport_options",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "package_or_generated",
+    "target": "transport_options"
+  },
+  {
+    "line": 8,
+    "import_name": "transport_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "local",
+    "target": "src/transport_policy.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "curl",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider.zig",
+    "kind": "package_or_generated",
+    "target": "curl"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_output.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_output.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_output.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "output_format.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_output.zig",
+    "kind": "local",
+    "target": "src/output_format.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_output.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_selection.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 23,
+    "import_name": "model_capability.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/provider_selection.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/request_encoding.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/request_encoding.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/retry_policy.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3,
+    "import_name": "HostDiagnostics.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/HostDiagnostics.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "TestObservation.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/TestObservation.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "posix",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 7,
+    "import_name": "bash.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/bash.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "descriptor_capacity.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/descriptor_capacity.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "descriptor_limit.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/descriptor_limit.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "execution.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/execution.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "execution_turn.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/execution_turn.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "model_adapter.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/model_adapter.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "output_format.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/output_format.zig"
+  },
+  {
+    "line": 16,
+    "import_name": "output_retention.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/output_retention.zig"
+  },
+  {
+    "line": 17,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 18,
+    "import_name": "provider.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/provider.zig"
+  },
+  {
+    "line": 19,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 20,
+    "import_name": "retry_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/retry_policy.zig"
+  },
+  {
+    "line": 21,
+    "import_name": "store.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/store.zig"
+  },
+  {
+    "line": 22,
+    "import_name": "stderr.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/stderr.zig"
+  },
+  {
+    "line": 4115,
+    "import_name": "client.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 4126,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 4127,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 4178,
+    "import_name": "client.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 5073,
+    "import_name": "codex_credentials.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "local",
+    "target": "src/codex_credentials.zig"
+  },
+  {
+    "line": 5213,
+    "import_name": "posix",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 5263,
+    "import_name": "posix",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 7400,
+    "import_name": "posix",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/server.zig",
+    "kind": "package_or_generated",
+    "target": "posix"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_consent.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_departure.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_history.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_history.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_history.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "session_view.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_history.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 6,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "SessionInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "SessionSubmission.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/SessionSubmission.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "ClientTask.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/ClientTask.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "session_view.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "session_history.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/session_history.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "session_departure.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/session_departure.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "ConversationViewport.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_reads.zig",
+    "kind": "local",
+    "target": "src/ConversationViewport.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 5,
+    "import_name": "SessionScreen.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "local",
+    "target": "src/SessionScreen.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "ClientTask.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "local",
+    "target": "src/ClientTask.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "session_consent.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "local",
+    "target": "src/session_consent.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "ConversationViewport.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_sequence_model_test.zig",
+    "kind": "local",
+    "target": "src/ConversationViewport.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 4,
+    "import_name": "client.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "TerminalText.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "AnswerRenderer.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "local",
+    "target": "src/AnswerRenderer.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "terminal_unicode",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "package_or_generated",
+    "target": "terminal_unicode"
+  },
+  {
+    "line": 10,
+    "import_name": "terminal_width",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/session_view.zig",
+    "kind": "package_or_generated",
+    "target": "terminal_width"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/socket_fixture.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/socket_fixture.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/stderr.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "attempt.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/attempt.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "named_scratch.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "platform.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "model_capability.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "product_defaults.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/product_defaults.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "tools.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "output_format.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/output_format.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "provider_output.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "retry_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/retry_policy.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "turn_policy.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/turn_policy.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "sqlite",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "package_or_generated",
+    "target": "sqlite"
+  },
+  {
+    "line": 571,
+    "import_name": "provider_output.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 1054,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1262,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1262,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1409,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 1489,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 3151,
+    "import_name": "provider_output.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 4322,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 6404,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 9514,
+    "import_name": "execution_turn.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/execution_turn.zig"
+  },
+  {
+    "line": 10249,
+    "import_name": "provider_output.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 10250,
+    "import_name": "provider_output.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 10297,
+    "import_name": "model_adapter.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/model_adapter.zig"
+  },
+  {
+    "line": 10354,
+    "import_name": "model_adapter.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "local",
+    "target": "src/model_adapter.zig"
+  },
+  {
+    "line": 15472,
+    "import_name": "builtin",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/store.zig",
+    "kind": "builtin",
+    "target": "builtin"
+  },
+  {
+    "line": 7,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 8,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "vaxis",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "package_or_generated",
+    "target": "vaxis"
+  },
+  {
+    "line": 434,
+    "import_name": "SessionTerminal.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "local",
+    "target": "src/SessionTerminal.zig"
+  },
+  {
+    "line": 530,
+    "import_name": "SessionTerminal.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_input_equivalence_test.zig",
+    "kind": "local",
+    "target": "src/SessionTerminal.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_notice_test.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 3,
+    "import_name": "SessionTerminal.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_notice_test.zig",
+    "kind": "local",
+    "target": "src/SessionTerminal.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "TerminalInput.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_notice_test.zig",
+    "kind": "local",
+    "target": "src/TerminalInput.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "TerminalEditor.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/terminal_notice_test.zig",
+    "kind": "local",
+    "target": "src/TerminalEditor.zig"
+  },
+  {
+    "line": 2,
+    "import_name": "attempt.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/attempt.zig"
+  },
+  {
+    "line": 3,
+    "import_name": "codex_auth.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/codex_auth.zig"
+  },
+  {
+    "line": 4,
+    "import_name": "codex_credentials.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/codex_credentials.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "model_adapter.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/model_adapter.zig"
+  },
+  {
+    "line": 6,
+    "import_name": "model_capability.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/model_capability.zig"
+  },
+  {
+    "line": 7,
+    "import_name": "descriptor_capacity.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/descriptor_capacity.zig"
+  },
+  {
+    "line": 8,
+    "import_name": "descriptor_limit.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/descriptor_limit.zig"
+  },
+  {
+    "line": 9,
+    "import_name": "execution_turn.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/execution_turn.zig"
+  },
+  {
+    "line": 10,
+    "import_name": "protocol.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 11,
+    "import_name": "platform.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/platform.zig"
+  },
+  {
+    "line": 12,
+    "import_name": "socket_fixture.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/socket_fixture.zig"
+  },
+  {
+    "line": 13,
+    "import_name": "HostDiagnostics.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/HostDiagnostics.zig"
+  },
+  {
+    "line": 14,
+    "import_name": "TestObservation.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/TestObservation.zig"
+  },
+  {
+    "line": 15,
+    "import_name": "store.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/store.zig"
+  },
+  {
+    "line": 16,
+    "import_name": "server.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/server.zig"
+  },
+  {
+    "line": 17,
+    "import_name": "client.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 18,
+    "import_name": "execution.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/execution.zig"
+  },
+  {
+    "line": 19,
+    "import_name": "bash.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/bash.zig"
+  },
+  {
+    "line": 20,
+    "import_name": "named_scratch.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/named_scratch.zig"
+  },
+  {
+    "line": 21,
+    "import_name": "output_retention.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/output_retention.zig"
+  },
+  {
+    "line": 22,
+    "import_name": "provider.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/provider.zig"
+  },
+  {
+    "line": 23,
+    "import_name": "provider_selection.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/provider_selection.zig"
+  },
+  {
+    "line": 24,
+    "import_name": "preferences.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/preferences.zig"
+  },
+  {
+    "line": 25,
+    "import_name": "provider_output.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/provider_output.zig"
+  },
+  {
+    "line": 26,
+    "import_name": "request_encoding.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/request_encoding.zig"
+  },
+  {
+    "line": 27,
+    "import_name": "tools.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/tools.zig"
+  },
+  {
+    "line": 28,
+    "import_name": "client.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/client.zig"
+  },
+  {
+    "line": 29,
+    "import_name": "cli.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/cli.zig"
+  },
+  {
+    "line": 30,
+    "import_name": "cli_args.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/cli_args.zig"
+  },
+  {
+    "line": 31,
+    "import_name": "TerminalText.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/TerminalText.zig"
+  },
+  {
+    "line": 32,
+    "import_name": "SessionInput.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/SessionInput.zig"
+  },
+  {
+    "line": 33,
+    "import_name": "SessionSubmission.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/SessionSubmission.zig"
+  },
+  {
+    "line": 34,
+    "import_name": "SessionFrontend.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/SessionFrontend.zig"
+  },
+  {
+    "line": 35,
+    "import_name": "session_reads.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/session_reads.zig"
+  },
+  {
+    "line": 36,
+    "import_name": "SessionTerminal.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/SessionTerminal.zig"
+  },
+  {
+    "line": 37,
+    "import_name": "SessionScreen.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/SessionScreen.zig"
+  },
+  {
+    "line": 38,
+    "import_name": "session_history.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/session_history.zig"
+  },
+  {
+    "line": 39,
+    "import_name": "session_view.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/session_view.zig"
+  },
+  {
+    "line": 40,
+    "import_name": "ClientTask.zig",
+    "context": "test_body",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tests.zig",
+    "kind": "local",
+    "target": "src/ClientTask.zig"
+  },
+  {
+    "line": 1,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tools.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "protocol.zig",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/tools.zig",
+    "kind": "local",
+    "target": "src/protocol.zig"
+  },
+  {
+    "line": 5,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/transport_policy.zig",
+    "kind": "std",
+    "target": "std"
+  },
+  {
+    "line": 2,
+    "import_name": "std",
+    "context": "non_test_lexical",
+    "comptime_block": false,
+    "dynamic": false,
+    "source": "src/turn_policy.zig",
+    "kind": "std",
+    "target": "std"
+  }
+]

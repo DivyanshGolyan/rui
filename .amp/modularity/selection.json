@@ -1,0 +1,171 @@
+{
+  "R1": {
+    "paths": [
+      "src/model_capability.zig",
+      "src/provider_selection.zig",
+      "src/preferences.zig",
+      "src/new_session_selection.zig",
+      "src/cli.zig"
+    ],
+    "strict_paths": [],
+    "phase": "review",
+    "targets": [
+      "admission-debug-integration",
+      "check",
+      "codex-h2-integration",
+      "test-logic",
+      "transport-h2-integration"
+    ],
+    "native_targets": [
+      "admission-debug-integration",
+      "check",
+      "codex-h2-integration",
+      "test-logic",
+      "transport-h2-integration"
+    ],
+    "native_required": true,
+    "retry": true,
+    "cache_execution_checks": false,
+    "linux_memory_checks": false,
+    "manual_checks": [],
+    "reasons": [
+      "CLI selection and otherwise unnamed native caller checks",
+      "Model admission and transport",
+      "Prospective selection policy and owned values",
+      "Startup capacity: every refusal boundary, managed transport and its companion oracle"
+    ]
+  },
+  "R2": {
+    "paths": [
+      "src/provider.zig"
+    ],
+    "strict_paths": [],
+    "phase": "review",
+    "targets": [
+      "dispatch-integration",
+      "test",
+      "transport-h2-integration"
+    ],
+    "native_targets": [
+      "dispatch-integration",
+      "test",
+      "transport-h2-integration"
+    ],
+    "native_required": true,
+    "retry": true,
+    "cache_execution_checks": false,
+    "linux_memory_checks": false,
+    "manual_checks": [],
+    "reasons": [
+      "Model admission and transport"
+    ]
+  },
+  "R3": {
+    "paths": [
+      "src/named_scratch.zig",
+      "src/platform.zig",
+      "src/protocol.zig",
+      "src/model_adapter.zig",
+      "src/provider.zig",
+      "src/server.zig",
+      "src/bash.zig",
+      "src/store.zig"
+    ],
+    "strict_paths": [
+      "src/server.zig",
+      "src/store.zig"
+    ],
+    "phase": "review",
+    "targets": [
+      "admission-debug-integration",
+      "check",
+      "codex-h2-integration",
+      "dispatch-debug-integration",
+      "transport-h2-integration"
+    ],
+    "native_targets": [
+      "admission-debug-integration",
+      "check",
+      "codex-h2-integration",
+      "dispatch-debug-integration",
+      "transport-h2-integration"
+    ],
+    "native_required": true,
+    "retry": false,
+    "cache_execution_checks": false,
+    "linux_memory_checks": false,
+    "manual_checks": [],
+    "reasons": [
+      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke",
+      "Bash execution, direct custody and process-crash recovery",
+      "Model admission and transport",
+      "Shared protocol, native execution or resource ownership",
+      "Startup capacity: every refusal boundary, managed transport and its companion oracle",
+      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance"
+    ]
+  },
+  "R4": {
+    "paths": [
+      "src/provider_output.zig",
+      "src/output_format.zig",
+      "src/tools.zig",
+      "src/store.zig"
+    ],
+    "strict_paths": [
+      "src/store.zig"
+    ],
+    "phase": "review",
+    "targets": [
+      "check",
+      "dispatch-debug-integration",
+      "test-logic",
+      "transport-h2-integration"
+    ],
+    "native_targets": [
+      "check",
+      "dispatch-debug-integration",
+      "test-logic",
+      "transport-h2-integration"
+    ],
+    "native_required": true,
+    "retry": false,
+    "cache_execution_checks": false,
+    "linux_memory_checks": false,
+    "manual_checks": [],
+    "reasons": [
+      "Model admission and transport",
+      "Portable input and tool-parser tests; shared native owners stay in check",
+      "Shared protocol, native execution or resource ownership",
+      "Store SQL owners: composed Linux caller checks, native SQLite tests and Debug failure provenance",
+      "Unmapped source: full fallback"
+    ]
+  },
+  "R5_exploratory": {
+    "paths": [
+      "src/request_encoding.zig",
+      "src/model_adapter.zig"
+    ],
+    "strict_paths": [],
+    "phase": "review",
+    "targets": [
+      "dispatch-integration",
+      "test",
+      "test-logic",
+      "transport-h2-integration"
+    ],
+    "native_targets": [
+      "dispatch-integration",
+      "test",
+      "transport-h2-integration"
+    ],
+    "native_required": true,
+    "retry": true,
+    "cache_execution_checks": false,
+    "linux_memory_checks": false,
+    "manual_checks": [],
+    "reasons": [
+      "Model admission and transport",
+      "Portable owner transitions and encoding"
+    ]
+  }
+}
