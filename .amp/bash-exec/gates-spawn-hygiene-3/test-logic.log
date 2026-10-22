@@ -1,0 +1,14 @@
+test-logic
++- run test w
+renderer allocation wide5000X: retained=16154624, peak=16187392 bytes (page charged, not RSS)
+renderer allocation resize2048→80: retained=655360, peak=16171008 bytes
+renderer allocation dense 中 192x256: retained=30326784, peak=30408704 bytes
+renderer allocation dense 中 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense NFD 192x256: retained=30326784, peak=30638080 bytes
+renderer allocation dense NFD 24x2048: retained=30326784, peak=30638080 bytes
+renderer allocation dense 🐄 192x256: retained=30326784, peak=30457856 bytes
+renderer allocation dense 🐄 24x2048: retained=16154624, peak=30343168 bytes
+renderer allocation dense SGR 192x256: retained=16154624, peak=17661952 bytes
+renderer allocation dense SGR 24x2048: retained=16154624, peak=17661952 bytes
+failed command: ./.zig-cache/o/fca118597d2d1157d778cdaf0bcf3d3c/test --cache-dir=./.zig-cache --seed=0x5b425feb --listen=-
+

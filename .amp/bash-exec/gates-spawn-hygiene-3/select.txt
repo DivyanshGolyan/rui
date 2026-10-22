@@ -1,0 +1,1 @@
+['bash-integration', 'bash-lifecycle-integration', 'bash-owner-integration', 'bash-recovery-integration', 'test'] True

@@ -1,0 +1,2 @@
+Bash timeout feedback: default 500 ms, override 800 ms, saved/model result identity and success control passed
+Workspace framing: quoted path round-trip, one instruction section and exact native Bash cwd passed

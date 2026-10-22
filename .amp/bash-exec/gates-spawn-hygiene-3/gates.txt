@@ -1,0 +1,10 @@
+test rc=0
+check rc=0
+test-logic rc=0
+admission-debug-integration rc=0
+codex-h2-integration rc=0
+transport-h2-integration rc=0
+bash-integration rc=0
+bash-lifecycle-integration rc=0
+bash-owner-integration rc=0
+bash-recovery-integration rc=0
