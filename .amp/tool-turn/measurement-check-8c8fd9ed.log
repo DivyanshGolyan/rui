@@ -1,0 +1,13 @@
+ok  	rui.local/qualification/call-classification	0.076s
+?   	rui.local/qualification/configuration-admission	[no test files]
+ok  	rui.local/qualification/execution-service	0.007s
+ok  	rui.local/qualification/measurement	0.047s
+?   	rui.local/qualification/message-admission	[no test files]
+ok  	rui.local/qualification/model-control	0.003s
+?   	rui.local/qualification/model-dispatch	[no test files]
+ok  	rui.local/qualification/model-output	1.127s
+ok  	rui.local/qualification/model-output/provider	6.166s
+ok  	rui.local/qualification/model-queue	0.004s
+ok  	rui.local/qualification/model-retry	0.003s
+ok  	rui.local/qualification/model-queue	0.035s
+exit 0
