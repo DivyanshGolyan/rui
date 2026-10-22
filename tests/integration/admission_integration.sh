@@ -841,7 +841,7 @@ import sqlite3, sys
 from host_process import STORE_SCHEMA as schema
 db = sqlite3.connect(sys.argv[1])
 expected = {
-    "journal_mode": "delete",
+    "journal_mode": "wal",
     "mmap_size": 0,
     "application_id": 0x4C544631,
     "user_version": schema,
