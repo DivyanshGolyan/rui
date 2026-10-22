@@ -152,3 +152,6 @@
 - 2026-10-22T08:28:49Z control-v2 block 20-baseline start
 - 2026-10-22T08:29:22Z control-v2 block 20-baseline exit=0
 - 2026-10-22T08:36:23Z control-v2 complete: 20/20 blocks exit=0; summary raw/control-v2/summary.json, per-block.txt; perf.data kept in the orb (not committed; size above)
+- 2026-10-22T09:33:24Z strace pair (user request): ReleaseFast builds of current main 4f478c32 and candidate 2586290c exports; main exit=0 09:44:18Z, cand exit=0 09:51:45Z
+- 2026-10-22T09:52:14Z strace pair main start; exit=0 09:52:15Z (published 1/1, timed_out)
+- 2026-10-22T09:52:16Z strace pair cand start; exit=0 09:52:18Z (published 1/1, timed_out). Analysis: strace-pair/analysis.md
