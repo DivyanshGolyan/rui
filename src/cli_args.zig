@@ -145,6 +145,7 @@ const serve_test = &[_]Option{
     hiddenValue("test-before-launch-delay-ms"),
     hiddenValue("test-before-result-delay-ms"),
     hiddenValue("test-model-result-gate-path"),
+    hiddenValue("test-retry-recovery-gate-path"),
     hiddenValue("test-inspection-reply-gate-path"),
     hiddenValue("test-inspection-reply-delay-ms"),
     hiddenValue("test-client-send-buffer-bytes"),

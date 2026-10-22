@@ -67,7 +67,8 @@ OBSERVATION_STARTUP_CREDIT = 10 * 3 * 512
 # The smaller two-wave H1 case has a shared 40s result/drain budget.
 # HostRequests enforces issuance before traffic; retain both native endpoints.
 # dispatch: seven routed controls with queued/acquired/released endpoints; the first
-# rollback or preparation advance per separately observed Host, not retry history.
+# rollback or preparation advance and one exhausted-recovery hold per separately
+# observed Host, not retry history.
 # capture: one gate, one exact cancellation and one injected resume failure.
 # No cleanup or polling history; public drainage remains its separate oracle.
 # recovery: two Bash Attempts with handoff + three cuts, two model proposal handoffs.
@@ -80,7 +81,7 @@ PEER_EXCHANGE_LIMIT = 4 * 321 + 50 + 6
 TRANSPORT_EXCHANGE_LIMIT = 100 + 20 * (3 * 100 + 1801 + 801)
 OBSERVATION_LIMITS = {"list": 2 * (101 + 37), "status": 3 * (12 + 40 + 20) + 2 + 2,
                       "stop": 321 + 23 + 5 + 12 + 3 * 2 + 1 + 1 + 3 * 2 + 1,
-                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1,
+                      "control": 50 * 2 + 4 * 10 + 3 * 2 + 2, "dispatch": 7 * 4 + 1 + 1,
                       "control_peers": 4 * PEER_EXCHANGE_LIMIT + 4 * 10 + 2 + 8,
                       "transport": 2 * TRANSPORT_EXCHANGE_LIMIT,
                       "capture": 3, "recovery": 2 * 4 + 2, "managed": 9,
@@ -655,6 +656,8 @@ class HostDiagnostics:
             plans = ("control", "control_peers", "bash_cleanup")
         elif phase in ("bash_leader_observed_with_open_pipes", "control_store_complete"):
             plans = ("bash_pipes",)
+        elif phase == "exhausted_retry_recovery_held":
+            plans = ("dispatch",)
         elif phase in ("connection_request_session_stop", "connection_request_permission_decision"):
             plans = ("dispatch", "status", "list", "control_peers")
         if plans is not None:
@@ -938,6 +941,9 @@ def start_ready_process(args, *, timeout=10, required_fields=None, env=None, std
     """Start a Host and transfer ownership only after one valid ready line."""
     # The caller retains the write descriptor; startup and reap own the reader.
     args = list(map(str, args))
+    if "--test-retry-recovery-gate-path" in args:
+        observations = observations or "dispatch"
+        assert observations == "dispatch", "retry recovery gate requires a selecting native plan"
     if "--test-response-capture-gate-path" in args:
         observations = observations or "capture"
         assert observations in ("capture", "stop"), "capture gate requires a selecting native plan"

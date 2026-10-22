@@ -430,7 +430,8 @@ def prove_required_capture_receipts():
                   "preparation_completed", "prepared_before_handoff", "codex_transfer",
                   "cleanup_started", "cleanup_completed", "cleanup_release_observed",
                   "inspection_captured",
-                  "bash_leader_observed_with_open_pipes", "control_store_complete"):
+                  "bash_leader_observed_with_open_pipes", "control_store_complete",
+                  "exhausted_retry_recovery_held"):
         for invoke in (lambda: diagnostics.wait(phase, timeout=.01), lambda: diagnostics.matching(phase)):
             try:
                 invoke()
@@ -448,6 +449,7 @@ def prove_required_capture_receipts():
         "inspection_captured": ("control", "control_peers", "bash_cleanup"),
         "bash_leader_observed_with_open_pipes": ("bash_pipes",),
         "control_store_complete": ("bash_pipes",),
+        "exhausted_retry_recovery_held": ("dispatch",),
     }
     for phase, plans in required.items():
         record = {"rui_test_phase": phase}
@@ -489,7 +491,8 @@ state = mmap.mmap(int(arg('--test-observation-state-fd')), 40)
 case = arg('--case')
 count = 2 if case == 'duplicate' else 1
 state[:] = struct.pack('<QQQQQ', 1, os.getpid(), 37, count * 2 + int(case == 'lost'), 0)
-phase = 'cleanup_started' if case == 'missing' else 'capture_write_gate_entered'
+phase = ('cleanup_started' if case == 'missing' else 'exhausted_retry_recovery_held'
+         if '--test-retry-recovery-gate-path' in sys.argv else 'capture_write_gate_entered')
 fields = ((0, phase), (1, '1234567'), (24, '12345'))
 body = b''.join(struct.pack('<BH', index, len(value)) + value.encode() for index, value in fields)
 for sequence in range(1, count + 1):
@@ -497,30 +500,41 @@ for sequence in range(1, count + 1):
 print('ready execution=enabled curl=8.22.0', flush=True)
 time.sleep(30)
 '''
-    for case in ('received', 'missing', 'duplicate', 'lost'):
+    for option, phase, plan, case in (
+            (option, phase, plan, case)
+            for option, phase, plan in (
+                ('--test-response-capture-gate-path', 'capture_write_gate_entered', 'capture'),
+                ('--test-retry-recovery-gate-path', 'exhausted_retry_recovery_held', 'dispatch'))
+            for case in ('received', 'missing', 'duplicate', 'lost')):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             gate = ReleaseGate(root / 'gate')
             arguments = child(source) + ['--store', str(root / 'store'),
-                '--test-response-capture-gate-path', str(gate.path), '--case', case]
+                option, str(gate.path), '--case', case]
             process, _ = start_ready_process(arguments, timeout=1)
-            assert process.rui_observations.plan == 'capture', "gate forgot its native collector"
+            assert process.rui_observations.plan == plan, "gate forgot its native collector"
             destination = process.rui_failure_destination
             assert destination.is_dir() and not destination.is_relative_to(root), destination
             diagnostics = HostDiagnostics(process)
             primary = None
             try:
                 try:
-                    records = diagnostics.wait('capture_write_gate_entered', timeout=.02)
+                    records = diagnostics.wait(phase, timeout=.02)
                     assert records[0]['written_bytes'] == '12345', records
                     if case == 'duplicate':
-                        diagnostics.wait('capture_write_gate_entered', count=2, timeout=.02)
+                        diagnostics.wait(phase, count=2, timeout=.02)
+                    if plan != 'capture':
+                        assert len(diagnostics.matching(phase)) == 1, diagnostics.records
                 finally:
-                    diagnostics.dispose_capture(gate, lambda: {'case': case, 'capture_released': gate.fd is None})
+                    if plan == 'capture':
+                        diagnostics.dispose_capture(gate, lambda: {'case': case, 'capture_released': gate.fd is None})
+                    else:
+                        diagnostics.snapshot_failure(lambda: {'case': case, 'capture_released': gate.fd is None})
+                        dispose_all(gate.release, lambda: stop_process(process))
             except AssertionError as error:
                 assert case != 'received', error
                 if case == 'missing':
-                    assert 'timed out waiting for 1 capture_write_gate_entered' in str(error), error
+                    assert f'timed out waiting for 1 {phase}' in str(error), error
                 if case == 'lost':
                     assert 'native observation loss' in str(error), error
                 primary = error
@@ -534,9 +548,10 @@ time.sleep(30)
             retained = list(destination.rglob(f'observation-failure-{pid}.json'))
             assert len(retained) == 1, retained
             facts = json.loads(retained[0].read_bytes())
-            assert facts['fixture'] == {'case': case, 'capture_released': case == 'duplicate'}, facts
+            duplicate_after_reap = case == 'duplicate' and plan == 'capture'
+            assert facts['fixture'] == {'case': case, 'capture_released': duplicate_after_reap}, facts
             assert facts['final_error'] == 'AssertionError', facts
-            assert (facts['returncode'] is None) == (case != 'duplicate'), facts
+            assert (facts['returncode'] is None) == (not duplicate_after_reap), facts
             assert facts['post_reap_state'][0:3] == [1, pid, 37], facts
             assert not list(destination.rglob('rui.sqlite3'))
     class NoteFailure(AssertionError):

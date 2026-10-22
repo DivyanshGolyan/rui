@@ -1118,6 +1118,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         faults.before_result_delay_ms = delay;
     }
     faults.model_result_gate_path = parsed.get("test-model-result-gate-path");
+    faults.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
     faults.inspection_reply_gate_path = parsed.get("test-inspection-reply-gate-path");
     if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
         if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;

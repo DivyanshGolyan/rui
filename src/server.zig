@@ -92,6 +92,7 @@ pub const Faults = struct {
     before_launch_delay_ms: i64 = 0,
     before_result_delay_ms: i64 = 0,
     model_result_gate_path: ?[]const u8 = null,
+    retry_recovery_gate_path: ?[]const u8 = null,
     inspection_reply_delay_ms: i64 = 0,
     inspection_reply_gate_path: ?[]const u8 = null,
     report_unlink: bool = false,
@@ -153,6 +154,7 @@ const Host = struct {
     trace_lost: std.atomic.Value(bool) = .init(false),
     test_observation: ?*TestObservation = null,
     last_unprocessed_completions: ?u64 = null,
+    test_retry_recovery: enum { initial, held, released } = .initial,
 
     // Canonical permission belongs to Store; process-local permission belongs
     // to Host. The Store handoff must enter this gate, in that lock order, for
@@ -1580,17 +1582,32 @@ const NativeTurn = struct {
     }
 
     pub fn recoverExhaustedRetry(self: *NativeTurn) error{Fence}!bool {
+        if (self.host.test_retry_recovery == .held) {
+            if (testGateActive(self.host, self.host.faults.retry_recovery_gate_path.?)) return false;
+            self.host.test_retry_recovery = .released;
+        }
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_filter = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeOperationContains,
             .maximum_exclusions = self.slots.len,
         };
-        return self.host.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
+        const recovered = self.host.store.recoverOneExhaustedModelAttempt(active_filter) catch |err| {
             fenceDispatch(self.host, "exhausted retry recovery", err);
             self.fenced = true;
             return error.Fence;
         };
+        // Hold only later recovery calls, never admission or the execution
+        // turn. One real call first preserves the full-drain counterexample.
+        if (recovered and self.host.test_retry_recovery == .initial) {
+            if (self.host.faults.retry_recovery_gate_path) |path| {
+                if (testGateActive(self.host, path)) {
+                    self.host.test_retry_recovery = .held;
+                    traceSubject(self.host, "exhausted_retry_recovery_held", "path", path);
+                }
+            }
+        }
+        return recovered;
     }
 
     fn firstFreeSlot(self: *NativeTurn) ?*ExecutionSlot {
@@ -3397,8 +3414,11 @@ fn waitAtTestGate(host: *Host, path: []const u8) void {
 }
 
 fn testGateActive(host: *Host, path: []const u8) bool {
-    const gate = std.Io.Dir.cwd().openFile(host.io, path, .{}) catch return false;
-    gate.close(host.io);
+    _ = host;
+    // Presence gates may be FIFOs; opening must not wait for a writer during
+    // the release/unlink race. No descriptor survives this synchronous probe.
+    const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) catch return false;
+    _ = std.c.close(fd);
     return true;
 }
 

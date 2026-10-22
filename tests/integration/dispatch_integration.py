@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, ReleaseGate, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -3794,17 +3794,25 @@ def main(mode="all", correlation_case="all"):
             database.commit()
         finally:
             database.close()
+        recovery_gate = ReleaseGate(state / "exhausted-recovery-gate")
+        releases.append(recovery_gate.release)
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",
             "--active-capacity",
             "101",
+            "--test-retry-recovery-gate-path",
+            str(recovery_gate.path),
             "--test-before-launch-delay-ms",
             "100",
             "--test-retry-waits-ms",
             "60000,60000,60000",
         )
         processes.append(recovery_host)
+        recovery_diagnostics = HostDiagnostics(recovery_host)
+        recovery_diagnostics.wait("exhausted_retry_recovery_held", timeout=10,
+                                  subject_kind="path", subject=str(recovery_gate.path))
+        recovery_gate.assert_held()
         due_admitted = wait_for(
             lambda: (
                 value
@@ -3853,7 +3861,9 @@ def main(mode="all", correlation_case="all"):
             assert "result" not in observe(
                 recovery_store, "recovery-sentinel-message"
             ), unresolved_sentinel
+            recovery_gate.assert_held()
         finally:
+            recovery_gate.release()
             recovery_retry_release.set()
             recovery_new_release.set()
         recovery_latencies = []

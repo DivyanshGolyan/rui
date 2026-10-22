@@ -1015,7 +1015,7 @@ const SessionReportCapture = struct {
 };
 
 /// Raw values allow ranged reads; derived values are read sequentially from
-/// zero. No reader or SQLite handle is retained across owner cleanup.
+/// zero. Readers retain copied bytes and identities, never SQLite handles.
 pub const ContentReader = struct {
     pub const content_window_bytes = 64 * 1024;
 
@@ -1023,9 +1023,6 @@ pub const ContentReader = struct {
     representation: union(enum) { raw, projection: ProjectionCursor },
     store: *Store,
     reference: ContentReference,
-    /// Kept open until close so each window seeks through SQLite's cached
-    /// overflow-page list instead of rewalking the chain from the start.
-    blob: ContentBlob = .{},
     active: bool = true,
 
     pub fn read(self: *ContentReader, start: u64, destination: []u8) !usize {
@@ -1053,27 +1050,23 @@ pub const ContentReader = struct {
     }
 
     pub fn close(self: *ContentReader) void {
-        if (self.blob.handle == null) return self.closeHeld();
-        self.store.lockAdmin();
-        defer self.store.mutex.unlock(self.store.io);
-        self.closeHeld();
-    }
-
-    /// Close from Store code that already holds the Store mutex.
-    fn closeHeld(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
-        // Close reports only an earlier read failure, already returned.
-        if (self.blob.handle) |handle| _ = c.sqlite3_blob_close(handle);
         if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
 };
 
-/// One open read handle and its current row, owned by one ContentReader.
+/// One read handle reused only within a locked Store entry point.
 /// Its overflow-page index costs SQLite heap of about length/1024 bytes.
 const ContentBlob = struct {
     handle: ?*c.sqlite3_blob = null,
     content_id: i64 = 0,
+
+    fn close(self: *ContentBlob) void {
+        // Close reports only an earlier read failure, already returned.
+        if (self.handle) |handle| _ = c.sqlite3_blob_close(handle);
+        self.* = .{};
+    }
 };
 
 const Tool = tool_catalog.Tool;
@@ -1284,6 +1277,9 @@ pub const Store = struct {
     /// fact changed since it was read; a rolled-back change also advances it.
     commit_generation: std.atomic.Value(u64) = .init(0),
     hot_statements: std.EnumArray(HotStatement, ?*c.sqlite3_stmt) = .initFill(null),
+    // Access.release closes the read transaction before unlocking, including
+    // errors and yielded historical scans. Logical readers cannot pin the WAL.
+    read_blob: ContentBlob = .{},
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) struct { decoded: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
@@ -1391,6 +1387,7 @@ pub const Store = struct {
         }
 
         fn release(self: Access) void {
+            self.store.read_blob.close();
             // Counts autocommit and explicit-transaction writes alike.
             if (c.sqlite3_total_changes64(self.store.database) != self.changes) {
                 _ = self.store.commit_generation.fetchAdd(1, .release);
@@ -3238,7 +3235,7 @@ pub const Store = struct {
         }
         if (authenticate) {
             var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
-            defer source.reader.closeHeld();
+            defer source.reader.close();
             @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
@@ -4227,7 +4224,7 @@ pub const Store = struct {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
         var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
-        defer reader.closeHeld();
+        defer reader.close();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
@@ -5512,7 +5509,7 @@ pub const Store = struct {
                 return error.HistoricalPending;
             try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
             try scan.validation.authenticate(scan.fields);
-            reader.closeHeld();
+            reader.close();
             scan.reader = null;
             return error.HistoricalPending;
         }
@@ -6481,7 +6478,7 @@ pub const Store = struct {
     /// Fills all of `destination` or fails, so no reader sees a short window.
     fn readOwnedContentLocked(self: *Store, reader: *ContentReader, start: u64, destination: []u8) !void {
         switch (reader.representation) {
-            .raw => try self.readBlob(&reader.blob, reader.content_id, start, destination),
+            .raw => try self.readBlob(reader.content_id, start, destination),
             .projection => |*cursor| {
                 std.debug.assert(start == cursor.decoded_position);
                 var filled: usize = 0;
@@ -6512,7 +6509,7 @@ pub const Store = struct {
                         cursor.next_part += 1;
                         if (cursor.encoded_position == cursor.encoded_end) continue;
                     }
-                    var source = ProjectedByteSource{ .store = self, .cursor = cursor, .blob = &reader.blob };
+                    var source = ProjectedByteSource{ .store = self, .cursor = cursor };
                     cursor.pending_end = try decodeOutputScalar(&source, &cursor.pending);
                     if (@import("builtin").is_test) _ = self.testing_content_work.decoded.fetchAdd(cursor.pending_end, .monotonic);
                     cursor.pending_start = 0;
@@ -6541,11 +6538,12 @@ pub const Store = struct {
         }
     }
 
-    // Called only while the Store mutex is held. The reader's handle stays
-    // open between windows; content rows are immutable once referenced.
-    fn readBlob(self: *Store, blob: *ContentBlob, content_id: i64, start: u64, destination: []u8) !void {
+    // Called only inside one Access. Reuse avoids repeated overflow-page walks
+    // within synchronous work, never across callbacks or preparation yields.
+    fn readBlob(self: *Store, content_id: i64, start: u64, destination: []u8) !void {
         if (destination.len == 0) return;
         if (start > std.math.maxInt(c_int)) return error.RangeOutOfBounds;
+        const blob = &self.read_blob;
         if (blob.handle == null) {
             // A failed open leaves the handle null.
             if (c.sqlite3_blob_open(self.database, "main", "content", "payload", content_id, 0, &blob.handle) != c.SQLITE_OK) return error.ContentReadFailed;
@@ -7125,7 +7123,6 @@ const ProjectionCursor = struct {
 const ProjectedByteSource = struct {
     store: *Store,
     cursor: *ProjectionCursor,
-    blob: *ContentBlob,
 
     pub fn take(self: *ProjectedByteSource) !u8 {
         const cursor = self.cursor;
@@ -7133,7 +7130,7 @@ const ProjectedByteSource = struct {
         if (cursor.buffer_length == 0 or cursor.encoded_position >= cursor.buffer_start + cursor.buffer_length) {
             cursor.buffer_start = cursor.encoded_position;
             cursor.buffer_length = @intCast(@min(cursor.encoded_end - cursor.encoded_position, cursor.buffer.len));
-            try self.store.readBlob(self.blob, cursor.source_id, cursor.buffer_start, cursor.buffer[0..cursor.buffer_length]);
+            try self.store.readBlob(cursor.source_id, cursor.buffer_start, cursor.buffer[0..cursor.buffer_length]);
         }
         const byte = cursor.buffer[@intCast(cursor.encoded_position - cursor.buffer_start)];
         cursor.encoded_position += 1;
@@ -7882,7 +7879,7 @@ fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []cons
 }
 
 /// Test aid: statements left mid-step. Cached statements are reset and idle;
-/// each open reader's blob handle is the only expected busy statement.
+/// read blobs must close before the Store entry point returns.
 fn busyStatements(database: *c.sqlite3) usize {
     var count: usize = 0;
     var statement = c.sqlite3_next_stmt(database, null);
@@ -7890,10 +7887,6 @@ fn busyStatements(database: *c.sqlite3) usize {
         if (c.sqlite3_stmt_busy(current) != 0) count += 1;
     }
     return count;
-}
-
-fn readerStatements(reader: *const ContentReader) usize {
-    return @intFromBool(reader.blob.handle != null);
 }
 
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
@@ -9642,10 +9635,12 @@ test "complete call outcomes continue once in call order ahead of pending input"
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);
+        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
         const output_count = try output.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_output, buffer[0..output_count]);
         output.close();
         call_id.close();
+        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
     try std.testing.expect((try view.nextToolResult()) == null);
     const pending = (try view.nextEntry(position)).?;
@@ -10280,9 +10275,12 @@ test "historical preparation yields covered group populations and cancels propos
         var bytes: usize = 7;
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
+        try configureTestSession(&storage, "yielded-checkpoint", "direct/checkpoint");
+        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
         const closes = storage.testing_content_work.closes.load(.monotonic);
         view.close();
         try std.testing.expectEqual(closes + 1, storage.testing_content_work.closes.load(.monotonic));
+        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
     var view = try storage.openHistoricalView(binding);
     defer view.close();
@@ -12156,6 +12154,93 @@ test "content reader owns the bounded result-delivery window" {
     try std.testing.expectError(error.WindowTooLarge, reader.read(0, &text));
 }
 
+test "retained raw and projected readers allow checkpoints between committed windows" {
+    var checkpoints: [2]c_int = undefined;
+    for ([_]bool{ false, true }, 0..) |projected, index| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const text = @as([32768]u8, @splat('x')) ++ "asymmetric-é-tail";
+        var reader = if (projected) blk: {
+            const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = text, .decoded = text }});
+            break :blk try storage.openPublicConversationContent(request);
+        } else blk: {
+            _ = try storage.importBytesContent(text, false, false);
+            break :blk try storage.openContent(.{ .length = text.len, .digest = protocol.contentDigest(text) });
+        };
+        defer reader.close();
+        var window: [4096]u8 = undefined;
+        try std.testing.expectEqual(window.len, try reader.read(0, &window));
+        try std.testing.expectEqualSlices(u8, text[0..window.len], &window);
+        // Keep the reader alive across an unrelated ordinary commit, just as
+        // slow Reply delivery or an allowance-limited preparation does.
+        try configureTestSession(&storage, "checkpoint-write", "direct/checkpoint");
+        checkpoints[index] = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        var offset: usize = window.len;
+        while (offset < text.len) {
+            const count = try reader.read(offset, &window);
+            try std.testing.expectEqualSlices(u8, text[offset..][0..count], window[0..count]);
+            offset += count;
+        }
+        try std.testing.expectEqual(@as(usize, 0), try reader.read(text.len, &window));
+    }
+    try std.testing.expectEqualSlices(c_int, &.{ c.SQLITE_OK, c.SQLITE_OK }, &checkpoints);
+}
+
+test "yielded Bash preparation leaves checkpoints free while retaining its descriptor" {
+    const bash = @import("bash.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const command = "printf " ++ @as([16384]u8, @splat('x'));
+    const descriptor = "{\"cmd\":\"" ++ command ++ "\",\"timeout_ms\":null,\"description\":\"Print marker\"}";
+    const request = try testingPublicProjection(&storage, &tmp, &.{.{
+        .encoded = "{\\\"cmd\\\":\\\"" ++ command ++ "\\\",\\\"timeout_ms\\\":null,\\\"description\\\":\\\"Print marker\\\"}",
+        .decoded = descriptor,
+    }});
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(storage.selector.slice());
+    var used: std.atomic.Value(u64) = .init(0);
+    var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, try storage.openPublicConversationContent(request), descriptor.len, request.session, storage.selector.slice(), workspace, storage.selector.slice(), "/bin/bash", 1000, .{ .used = &used, .limit = 4096 }, 11, 2, .{})) {
+        .preparing => |value| value,
+        .failed => |initial| {
+            var failure = initial;
+            try failure.cleanup.cleanup();
+            return failure.cause;
+        },
+    };
+    var owned = true;
+    defer if (owned) {
+        var cleanup = preparation.cancel();
+        cleanup.cleanup() catch unreachable;
+    };
+    try std.testing.expect(preparation.advance() == .pending);
+    try configureTestSession(&storage, "bash-checkpoint", "direct/checkpoint");
+    try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
+    while (true) {
+        switch (preparation.advance()) {
+            .pending => {},
+            .prepared => |value| {
+                owned = false;
+                var prepared = value;
+                defer prepared.cleanup() catch unreachable;
+                try std.testing.expectEqualStrings(command, prepared.command.?);
+                break;
+            },
+            .failed => |initial| {
+                owned = false;
+                var failure = initial;
+                try failure.cleanup.cleanup();
+                return failure.cause;
+            },
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 0), used.load(.monotonic));
+}
+
 test "core preserves empty keys and Session references containing NUL" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -14021,7 +14106,7 @@ test "public projected content equal-length repoint fences at complete-stream EO
         try std.testing.expectError(error.CorruptStore, if (range) reader.readRange(4990, &bytes) else reader.read(4096, &bytes));
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, reader.read(5000, &bytes));
-        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -14060,7 +14145,7 @@ test "public projected content EOF rejects nonempty trailing parts" {
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, reader.readRange(8, &bytes));
-            try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -14084,7 +14169,7 @@ test "public projected content trailing empty parts retain final byte and repeat
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -14110,7 +14195,7 @@ test "public projected content ranges own positioning across windows and scalar 
         const wanted = @min(bytes.len, expected.len - start);
         try std.testing.expectEqual(wanted, count);
         try std.testing.expectEqualStrings(expected[@intCast(start)..][0..count], bytes[0..count]);
-        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
     try std.testing.expectError(error.RangeOutOfBounds, reader.readRange(expected.len + 1, &bytes));
@@ -14154,7 +14239,7 @@ test "public projected content empty identity and repeated EOF" {
             try std.testing.expectEqual(@as(usize, 0), try reader.readRange(0, &bytes));
             try std.testing.expect(!storage.isFenced());
         }
-        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -14192,7 +14277,7 @@ test "public projected content range positioning preserves decoding and backing 
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(error.InvalidJsonEscape, reader.readRange(1, &bytes));
         try std.testing.expect(storage.isFenced());
-        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }

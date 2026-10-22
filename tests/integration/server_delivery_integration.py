@@ -59,6 +59,87 @@ def resources(pid):
     return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
 
 
+def checkpoint_readers():
+    """Slow canonical replies cannot prevent WAL reuse by unrelated commits."""
+    with tempfile.TemporaryDirectory(prefix="rui-reader-checkpoint-") as root:
+        state = canonical_fixture_root(root)
+        store = state / "store"
+        store.mkdir(mode=0o700)
+        text = "asymmetric-é中-0123456789\n" * 12_000
+        user_text = "raw-user-prefix:" + text
+        arguments = "proposal-arguments-é\n" * 12_000
+        endpoint = model.SuccessEndpoint([
+            model.sse_tool_calls("checkpoint", [("unknown", "checkpoint-call", arguments)]),
+            model.sse_answer("checkpoint-final", "private", "answer", text)[0],
+        ])
+        worker = threading.Thread(target=endpoint.serve_forever)
+        worker.start()
+        host = peer = None
+        try:
+            host, ready = control.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                                             "--test-client-send-buffer-bytes", "1024", observations="control_peers")
+            peers = PeerCensus(HostDiagnostics(host))
+            sock = ready["socket"]
+            peers.call("configure", lambda: model.configure(state, store, "config", "direct/checkpoint", "model-a"))
+            peers.call("message", lambda: model.message(state, store, "message", "direct/checkpoint", user_text))
+            model.wait_for(lambda: peers.call("observe", lambda: model.observe(store, "message"))
+                           .get("result", {}).get("status") == "completed", "checkpoint saved answer")
+
+            def read(route, kind, **fields):
+                return peers.call(kind, lambda: exchange(sock, store, route, kind, **fields))
+
+            head, body = read("/v1/conversation-page", "conversation_page", session="direct/checkpoint",
+                              end="0", before_position="0", before_ordinal="0")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            items = json.loads(body)["items"]
+            user = next(item["position"] for item in items if item["kind"] == "user")
+            assistant = next(item["position"] for item in items if item["kind"] == "assistant")
+            head, body = read("/v1/proposal-page", "proposal_page", session="direct/checkpoint", end=None, after="0")
+            assert head.startswith(b"HTTP/1.1 200 "), head
+            proposal = json.loads(body)["items"][0]["position"]
+            routes = [
+                ("/v1/read-result", "read_result", {"key": "message"}, text),
+                *[("/v1/conversation-content", "conversation_content",
+                   {"session": "direct/checkpoint", "position": position, "ordinal": "0", "start": "0", "stream": True}, expected)
+                  for position, expected in ((user, user_text), (assistant, text))],
+                ("/v1/proposal-field", "proposal_field",
+                 {"session": "direct/checkpoint", "position": proposal, "field": "arguments"}, arguments),
+                *[("/v1/activity-content", "activity_content",
+                   {"session": "direct/checkpoint", "position": position, "ordinal": "0"}, expected)
+                  for position, expected in ((user, user_text), (assistant, text))],
+            ]
+            reused = []
+            for case, (route, kind, fields, expected) in enumerate(routes):
+                request = peers.expect(kind)
+                peer, length = hold_reply(sock, store, route, kind, **fields)
+                peers.started(request, time.monotonic() + 5)
+                peers.held([request])
+                sizes = [(store / "rui.sqlite3-wal").stat().st_size]
+                for index in range(8):
+                    peers.call("configure", lambda: model.configure(state, store, f"write-{case}-{index}",
+                               "direct/writer", "model-a", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
+                    sizes.append((store / "rui.sqlite3-wal").stat().st_size)
+                # This is reuse/reset, not a 4-MiB quota: a large transaction
+                # can exceed journal_size_limit before a later WAL reset.
+                reused.append(any(after <= before for before, after in zip(sizes[-4:], sizes[-3:])))
+                print(json.dumps({"reader": kind, "fields": fields, "bytes": length,
+                                  "wal_sizes": sizes, "wal_reused_while_held": reused[-1]}), flush=True)
+                peer.close()
+                peer = None
+                peers.release(request, time.monotonic() + 5)
+                head, body = read(route, kind, **fields)
+                assert head.startswith(b"HTTP/1.1 200 ") and body == expected.encode(), (route, head, len(body))
+            peers.finish(time.monotonic() + 5)
+            assert all(reused), reused
+        finally:
+            def join():
+                worker.join(timeout=5)
+                assert not worker.is_alive()
+            dispose_all(lambda: peer.close() if peer is not None else None,
+                        lambda: stop_process(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, join)
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="rui-reply-") as root:
         state = canonical_fixture_root(root)
@@ -201,4 +282,5 @@ def main():
 
 
 if __name__ == "__main__":
+    checkpoint_readers()
     main()
