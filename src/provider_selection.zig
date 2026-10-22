@@ -19,10 +19,6 @@ pub const Capability = struct {
     readiness: Readiness,
 };
 
-pub fn codex(readiness: Readiness) Capability {
-    return @import("model_capability.zig").capability(readiness);
-}
-
 pub const Selection = union(enum) {
     chooser,
     selected: struct {
@@ -87,7 +83,7 @@ test "prospective selection does not fall back from a stale or unavailable prefe
 }
 
 test "Codex selection accepts identifiers without claiming model qualification" {
-    const capability = codex(.configured);
+    const capability = @import("model_capability.zig").capability(.configured);
     try std.testing.expectEqualStrings("family=variant", (try resolve(&.{capability}, null, "family=variant", null, null)).selected.model);
     const maximum = @as([256]u8, @splat('x'));
     try std.testing.expectEqualStrings(&maximum, (try resolve(&.{capability}, null, &maximum, null, null)).selected.model);
@@ -96,7 +92,7 @@ test "Codex selection accepts identifiers without claiming model qualification" 
 }
 
 test "renewal due selects a sole provider and resolves only absent model pins" {
-    var capability = codex(.renewal_due);
+    var capability = @import("model_capability.zig").capability(.renewal_due);
     capability.recommended_model = "future-recommendation";
     const inherited = try resolve(&.{capability}, null, null, null, null);
     try std.testing.expect(inherited == .selected);

@@ -14,6 +14,7 @@ const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
 const provider = @import("provider.zig");
+const model_capability = @import("model_capability.zig");
 const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
@@ -266,7 +267,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    const codex = provider_selection.codex(readiness);
+    const codex = model_capability.capability(readiness);
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
         .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
@@ -333,7 +334,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"local_credential\":\"{s}\",\"next_session\":", .{@tagName(facts.readiness)});
-    const codex = provider_selection.codex(facts.readiness);
+    const codex = model_capability.capability(facts.readiness);
     if (provider_selection.resolve(&.{codex}, null, null, facts.provider, facts.model)) |choice| switch (choice) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
@@ -1238,28 +1239,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     // the same prospective selection as a new interactive Session. Addressed
     // input remains sparse for the canonical create-or-update owner, without a
     // probe; an unknown address needs its complete first configuration.
-    var caller: new_session_selection.Binding = .{};
     if (input.session == .from_capture_key) {
-        var intent: new_session_selection.Intent = .{
+        const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
-        };
-        // Inside a Session, inherit its actual binding; an unreadable caller
-        // fails here rather than falling back to saved defaults.
-        if (intent.model == null) if (init.environ_map.get("RUI_ADDRESS")) |text| {
-            var address_buffer: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
-            const address = client.Address.parse(text, &address_buffer) catch |err| {
-                TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was configured.\n", .{});
-                return err;
-            };
-            var buffer: [256]u8 = undefined;
-            var diagnostics = std.Io.File.stderr().writerStreaming(io, &buffer);
-            defer diagnostics.flush() catch {};
-            const report = try inspectWorkTo(init, requester, address.store, address.session, &diagnostics.interface);
-            defer report.file.close(io);
-            try caller.provider.set(@tagName(report.current.settings.provider.value));
-            try caller.model.set(report.current.settings.model.slice());
-            intent = intent.inheriting(&caller);
         };
         const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
