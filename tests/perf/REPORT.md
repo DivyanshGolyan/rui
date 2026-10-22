@@ -30,7 +30,7 @@ The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups
 | SSE JSON second pass | 2 rereads/event, 274 B | small; curl/OpenSSL dominate stacks | Parse JSON from the scanned buffer |
 
 **Combined-head confirmation on `d4f87000`:** pending. These are independent methods; traced switches are not natural wakeups.
-- P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`.
+- P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`. The ReleaseFast build of `d4f87000` finished at 01:03:51 UTC (42/42 steps, exit 0, binary SHA-256 `98bfb3f1…ef719`); STREAM100 started at 01:03:52 UTC.
 - P2 is preparing one instrumented HOLD100 window (10 s warmup + 60 s). Pre-run estimate (**estimated**): about 1,000 SELECT/s, since the fixes did not touch SQL polling.
 
 **Open items.**
