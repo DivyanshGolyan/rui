@@ -22,7 +22,7 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}-${{ github.sha }}
+  group: previous-release-upgrade-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.sha || '' }}
   cancel-in-progress: true
 
 jobs:

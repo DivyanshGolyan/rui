@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -31,6 +32,26 @@ class LandingTest(unittest.TestCase):
             self.assertEqual(tuple(re.findall(r"'([^']+)'", block)), STRICT)
         self.assertNotIn('  push:', on)
         self.assertIn('  workflow_dispatch:', on)
+
+    def test_upgrade_concurrency_cancels_superseded_prs_but_keeps_main_shas(self):
+        text = workflow('previous-release-upgrade.yml')
+        template = re.search(r'(?m)^  group: (.+)$', text)[1]
+
+        def group(event, ref, sha):
+            github = SimpleNamespace(event_name=event, ref=ref, sha=sha)
+            return re.sub(r'\$\{\{(.*?)\}\}', lambda match: str(eval(
+                match[1].strip().replace('&&', 'and').replace('||', 'or'),
+                {'github': github})), template)
+
+        self.assertIn('  cancel-in-progress: true', text)
+        self.assertEqual(group('pull_request', 'refs/pull/3/merge', 'a' * 40),
+                         group('pull_request', 'refs/pull/3/merge', 'b' * 40))
+        self.assertNotEqual(group('pull_request', 'refs/pull/3/merge', 'a' * 40),
+                            group('pull_request', 'refs/pull/4/merge', 'a' * 40))
+        self.assertNotEqual(group('workflow_dispatch', 'refs/heads/main', 'a' * 40),
+                            group('workflow_dispatch', 'refs/heads/main', 'b' * 40))
+        self.assertEqual(group('workflow_dispatch', 'refs/heads/main', 'a' * 40),
+                         group('workflow_dispatch', 'refs/heads/main', 'a' * 40))
 
     def test_strict_patterns_match_like_github_path_filters(self):
         self.assertEqual(strict([
