@@ -10,15 +10,26 @@
 
 **Hotspots** (**measured** counts, not CPU attribution). At N=100 streaming, `preadv` was 67.3% of all syscalls (7.08/event, SSE rereads). SELECT is ~98% of SQL statements; uncertain-Action recovery and control reconciliation callers account for ~94% of all statements. Sampled stacks are dominated by curl/OpenSSL.
 
-| Waste item | Before | After | Status |
-| --- | ---: | ---: | --- |
-| Intake loop's fixed 20 ms `poll` while idle | 87.90 voluntary switches/s; 1.64 CPU-s/min | 39.70/s (−54.8%); 1.54 CPU-s/min (near noise) | **Fixed, landed** (`4950c22e`) |
-| SSE framing rereads (5 of 7 per event) | 7.07634 `preadv`/event; 96.535 CPU-s | 2.07284/event; 92.510 CPU-s (−4.17%, 2 pairs, descriptive) | **Fixed, landed** (`12f84075`) |
-| SQL polling with 100 idle held streams | 1,004.39 SELECT/s vs 62.44 with none held (16.1×) | — | **Found**; CPU estimated 0.1–1.0% of one core |
-| SSE JSON second pass (2 of 7 rereads per event) | 2 rereads/event, 274 B | — | **Found** |
-| Execution loop 25 ms / 100 ms polls | ≈38.7 switches/s remain on the other busy thread (attribution is a hypothesis) | — | **Found**; needs Store-commit wake |
+**Fixed** (all values **measured**, Linux fixture, on the original source commits):
 
-All before/after values are **measured**, except the SQL CPU range, which is **estimated** from 1 µs and 10 µs per-query assumptions. The switch counts are a Linux voluntary-context-switch proxy, not distinct wakeups.
+| Waste item | Before (`240aef2e`) | After | Status |
+| --- | ---: | ---: | --- |
+| Intake loop's fixed 20 ms `poll` while idle (HOLD100) | 87.90 voluntary switches/s; 1.64 CPU-s/min | 39.70/s (−54.8%); 1.54 CPU-s/min (near noise) | **Fixed: landed `d4f87000`** (source `4950c22e`) |
+| SSE framing rereads (5 of 7 per event), STREAM100 | all syscalls 10.52147/event; `preadv` 7.07634/event; Host CPU 80.4458 µs/event (96.535 CPU-s / 1.2M) | all syscalls 8.24657/event; `preadv` 2.07284/event; Host CPU 77.0917 µs/event (92.510 CPU-s / 1.2M) | **Fixed: landed `d4f87000`** (source `12f84075`) |
+
+The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups are unavailable** (no honest counter on these orbs). The SSE CPU per event is a descriptive median of two completed pairs (−4.17%), a partial result and not a general claim. Syscall counts are traced; CPU is untraced.
+
+**Found, not fixed** (proposals not built tonight):
+
+| Item | Measured | Napkin cost (**estimated**) | Proposal |
+| --- | --- | --- | --- |
+| Idle SQL polling (HOLD100) | 1,004.39 SELECT/s vs 62.44 with 0 held (16.1×); control reads 964.84/s | 0.1–1.0% of one core, assuming 1–10 µs per query | Execution Store-commit wake with a post-`COMMIT` generation; keep the existing control hints and the 100 ms lost-hint fallback, and skip SQL only after a generation and lost-hint proof |
+| Execution loop 25 ms / 100 ms polls | ≈38.7 switches/s remain on the other busy thread (attribution is a hypothesis) | not separately estimated | Same Store-commit wake |
+| `fsync` per Message | 29.5 (N=1), 24.06 (N=100) | I/O wait, not CPU: assuming 1–10 ms per `fsync`, ≈24–300 ms of sync wait per Message | **User decides** durability; no change proposed without that decision |
+| PSS step from 0 to 10 sessions | +3,983,360 B (≈398,336 B/session) vs ≈25 KB/session from 10 to 100 | — | Cause unknown; investigate first-activation allocations (pools, TLS/H2, SQLite caches) |
+| SSE JSON second pass | 2 rereads/event, 274 B | small; curl/OpenSSL dominate stacks | Parse JSON from the scanned buffer |
+
+**Combined-head confirmation on `d4f87000`:** pending. P1 is running one STREAM100 PSS plus HOLD100 switch-proxy campaign, and P2 one instrumented HOLD100 SELECT/s count, both target 01:35 UTC. These are independent methods; traced switches are not natural wakeups.
 
 **Open items.**
 - No Mac measurement (footprint, wakeups) and no live 100 × gpt-6-luna wave: the only approved runner, 1993-X2, is offline.
