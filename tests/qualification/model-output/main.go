@@ -71,7 +71,7 @@ type fixtureStartup struct {
 	PID         int    `json:"pid"`
 }
 
-func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace, store string, hold ...bool) (*childFixture, error) {
+func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond int, duration time.Duration, rounds int, historyAware bool, artifactDir, workspace, store string, extra ...string) (*childFixture, error) {
 	if err := os.MkdirAll(artifactDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -96,9 +96,7 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 	if historyAware {
 		cmd.Args = append(cmd.Args, "--provider-history-aware")
 	}
-	if len(hold) != 0 && hold[0] {
-		cmd.Args = append(cmd.Args, "--provider-hold")
-	}
+	cmd.Args = append(cmd.Args, extra...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		stderr.Close()
@@ -1914,7 +1912,11 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	}
 	deadline := measurement.NewDeadline(5 * time.Minute)
 	// Keep the same TLS-capable provider and Host capacity even for idle N=0.
-	fixture, err := startChildFixture(deadline, max(2, sessions), 30, 120*time.Second, 1, false, filepath.Join(directory, "provider"), workspace, store, hold)
+	var holdOption []string
+	if hold {
+		holdOption = []string{"--provider-hold"}
+	}
+	fixture, err := startChildFixture(deadline, max(2, sessions), 30, 120*time.Second, 1, false, filepath.Join(directory, "provider"), workspace, store, holdOption...)
 	if err != nil {
 		return result, err
 	}
@@ -2118,7 +2120,34 @@ func main() {
 	providerArtifacts := flag.String("provider-artifacts", "", "provider child artifact directory")
 	providerWorkspace := flag.String("provider-workspace", "", "configured Session Workspace expected by the provider child")
 	providerStore := flag.String("provider-store", "", "canonical configured Store selector expected by the provider child")
+	toolSessions := flag.Int("tool-sessions", 0, "measure one coordinated Bash tool turn over 1, 10 or 100 Sessions with ~400 KiB seeded history and one attached coordinator TUI")
+	toolWorkload := flag.String("tool-workload", "", "with --tool-sessions: sleep (sleep 5) or read (cat of a 100 KiB fixture)")
+	toolTrace := flag.String("tool-trace-forks", "", "with --tool-sessions: strace executable attached to the Host for fork/exec timing; instrumented run")
+	providerToolSessions := flag.Int("provider-tool-sessions", 0, "provider child tool Session count")
+	providerToolWorkload := flag.String("provider-tool-workload", "", "provider child tool workload")
+	providerToolReadFile := flag.String("provider-tool-read-file", "", "provider child read workload file")
+	providerToolDispatch := flag.String("provider-tool-dispatch-dir", "", "provider child dispatch record directory")
 	flag.Parse()
+	if *providerChild && *providerToolSessions != 0 {
+		if err := runToolProviderChild(provider.ToolConfig{Sessions: *providerToolSessions, Workload: *providerToolWorkload, ReadFile: *providerToolReadFile, DispatchDir: *providerToolDispatch, Workspace: *providerWorkspace, Store: *providerStore, ArtifactDir: *providerArtifacts}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *toolSessions != 0 {
+		if flag.NArg() != 1 || *capacityOnly != 0 || *repeatWork || *growthOnly || *projection || *hold {
+			fmt.Fprintln(os.Stderr, "--tool-sessions needs exactly one binary and cannot combine measurement modes")
+			os.Exit(2)
+		}
+		if err := toolMeasurementOptions(*toolSessions, *toolWorkload, *expectation); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		result, err := measureTools(flag.Arg(0), *output, *toolSessions, *toolWorkload, *toolTrace, *expectation)
+		result, _ = finalizeQualification(result, err)
+		os.Exit(publishQualification(*output, result))
+	}
 	if *providerChild {
 		if err := measurement.RequireProcessRuntime(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
