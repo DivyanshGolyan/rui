@@ -35,7 +35,10 @@ const (
 	toolClockTicks     = 100 // Linux USER_HZ on every supported kernel
 )
 
-func toolMeasurementOptions(sessions int, workload, expectation string) error {
+func toolMeasurementOptions(sessions int, workload, expectation string, sampleMS int) error {
+	if sampleMS < 10 || sampleMS > 1000 {
+		return errors.New("--tool-sample-ms must be 10 to 1000")
+	}
 	if sessions != 1 && sessions != 10 && sessions != 100 {
 		return errors.New("--tool-sessions must be 1, 10 or 100")
 	}
@@ -194,6 +197,7 @@ type toolSample struct {
 // one category; `rui` processes under a Bash shell are clients, not Bash.
 type toolSampler struct {
 	host, tui int
+	active    time.Duration
 	mu        sync.Mutex
 	phase     string
 	records   map[string]*toolProcessRecord
@@ -305,12 +309,12 @@ func (s *toolSampler) sample() {
 	s.raw.Write(append(encoded, '\n'))
 }
 
-func startToolSampler(host int, path string) (*toolSampler, error) {
+func startToolSampler(host int, path string, active time.Duration) (*toolSampler, error) {
 	raw, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	s := &toolSampler{host: host, phase: "setup", records: map[string]*toolProcessRecord{}, stop: make(chan struct{}), stopped: make(chan struct{}), raw: raw}
+	s := &toolSampler{host: host, active: active, phase: "setup", records: map[string]*toolProcessRecord{}, stop: make(chan struct{}), stopped: make(chan struct{}), raw: raw}
 	go func() {
 		defer close(s.stopped)
 		for {
@@ -318,11 +322,21 @@ func startToolSampler(host int, path string) (*toolSampler, error) {
 			select {
 			case <-s.stop:
 				return
-			case <-time.After(toolSampleInterval):
+			case <-time.After(s.interval()):
 			}
 		}
 	}()
 	return s, nil
+}
+
+// The active phase may sample faster; every other phase keeps the default.
+func (s *toolSampler) interval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.phase == "active" {
+		return s.active
+	}
+	return toolSampleInterval
 }
 
 func (s *toolSampler) setPhase(phase string) { s.mu.Lock(); s.phase = phase; s.mu.Unlock() }
@@ -390,7 +404,11 @@ func (s *toolSampler) summary() map[string]any {
 		}
 		delete(entry, "max_pss_values")
 	}
-	return map[string]any{"interval_ns": toolSampleInterval.Nanoseconds(), "samples": len(s.samples), "phases": phases, "observed_categories": categories, "processes": records}
+	var sampleWall int64
+	for _, sample := range s.samples {
+		sampleWall += sample.EndNS - sample.BeginNS
+	}
+	return map[string]any{"interval_ns": toolSampleInterval.Nanoseconds(), "active_interval_ns": s.active.Nanoseconds(), "sampling_wall_seconds": float64(sampleWall) / 1e9, "samples": len(s.samples), "phases": phases, "observed_categories": categories, "processes": records}
 }
 
 func ioctl(fd uintptr, request uintptr, argument unsafe.Pointer) error {
@@ -615,9 +633,9 @@ func tickDelta(points []map[string]any, from, to int, field string) (float64, bo
 // the coordinator and submits its request; the coordinator's Bash calls run
 // the actual `rui session send` for each worker, and every Session, the
 // coordinator included, runs exactly one workload call.
-func measureTools(binary, output string, sessions int, workload, trace, expectation string) (result map[string]any, resultError error) {
+func measureTools(binary, output string, sessions int, workload, trace, expectation string, barrier bool, activeInterval time.Duration) (result map[string]any, resultError error) {
 	result = map[string]any{"format": "rui-tool-turn-v1", "status": "incomplete", "fixture": true, "sessions": sessions, "workload": workload, "active_capacity": 100,
-		"topology": map[string]any{"coordinator_tui": 1, "dispatch_calls_expected": sessions - 1, "workload_calls_expected": sessions}, "instrumented": trace != ""}
+		"topology": map[string]any{"coordinator_tui": 1, "dispatch_calls_expected": sessions - 1, "workload_calls_expected": sessions}, "instrumented": trace != "", "barrier": barrier, "active_sample_interval_ns": activeInterval.Nanoseconds()}
 	if err := measurement.RequireProcessRuntime(); err != nil {
 		return result, err
 	}
@@ -678,6 +696,16 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 			return result, err
 		}
 	}
+	barrierDir := ""
+	if barrier {
+		barrierDir = filepath.Join(directory, "barrier")
+		if err := os.Mkdir(barrierDir, 0o700); err != nil {
+			return result, err
+		}
+		if err := syscall.Mkfifo(filepath.Join(barrierDir, "release"), 0o600); err != nil {
+			return result, err
+		}
+	}
 	readFile := filepath.Join(directory, "read-fixture.txt")
 	readText := toolText("read fixture\n", toolReadBytes, 7)
 	if err := os.WriteFile(readFile, readText, 0o600); err != nil {
@@ -687,7 +715,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	result["read_fixture"] = map[string]any{"path": readFile, "bytes": len(readText), "sha256": hex.EncodeToString(readDigest[:])}
 	deadline := measurement.NewDeadline(15 * time.Minute)
 	fixture, err := startChildFixture(deadline, 2, 30, 120*time.Second, 1, false, filepath.Join(directory, "provider"), workspace, store,
-		"--provider-tool-sessions", strconv.Itoa(sessions), "--provider-tool-workload", workload, "--provider-tool-read-file", readFile, "--provider-tool-dispatch-dir", dispatch)
+		"--provider-tool-sessions", strconv.Itoa(sessions), "--provider-tool-workload", workload, "--provider-tool-read-file", readFile, "--provider-tool-dispatch-dir", dispatch, "--provider-tool-barrier", barrierDir)
 	if err != nil {
 		return result, err
 	}
@@ -703,7 +731,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	}()
 	hostPID := host.Cmd.Process.Pid
 	result["host_pid"], result["provider_pid"], result["host_ready"] = hostPID, fixture.cmd.Process.Pid, host.Ready
-	sampler, err := startToolSampler(hostPID, filepath.Join(directory, "tree-samples.jsonl"))
+	sampler, err := startToolSampler(hostPID, filepath.Join(directory, "tree-samples.jsonl"), activeInterval)
 	if err != nil {
 		return result, err
 	}
@@ -808,6 +836,14 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	if _, err := terminal.master.Write([]byte("coordinate the tool run\n")); err != nil {
 		return result, err
 	}
+	if barrier {
+		facts, release, err := releaseBarrier(deadline, barrierDir, sessions)
+		result["barrier_release"] = facts
+		if err != nil {
+			return result, err
+		}
+		defer release.Close()
+	}
 	done, err := fixture.tool(deadline, "/control/tool-wait-done")
 	result["provider"] = done
 	if err != nil {
@@ -857,6 +893,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	if err != nil {
 		return result, err
 	}
+	result["sample_coverage"] = toolCoverage(sampler, sessions)
 	hostCPU, hostOK := tickDelta(points, 3, 4, "host_cpu_self_ticks")
 	childCPU, childOK := tickDelta(points, 3, 4, "host_cpu_reaped_children_ticks")
 	tuiCPU, tuiOK := tickDelta(points, 3, 4, "tui_cpu_self_ticks")
@@ -900,7 +937,7 @@ func toolConcurrency(summary provider.ToolSummary) map[string]any {
 	}
 	for _, kind := range []string{"workload", "dispatch"} {
 		var events []event
-		var latencies, durations []float64
+		var latencies, durations, parks []float64
 		missing := 0
 		for _, fact := range summary.SessionFacts {
 			for _, output := range fact.Outputs {
@@ -914,6 +951,9 @@ func toolConcurrency(summary provider.ToolSummary) map[string]any {
 				events = append(events, event{output.ShellStartNS, 1}, event{output.ShellEndNS, -1})
 				latencies = append(latencies, float64(output.ShellStartNS-fact.CallsSentNS)/1e9)
 				durations = append(durations, output.ShellSeconds)
+				if output.ShellParkNS != 0 {
+					parks = append(parks, float64(output.ShellStartNS-output.ShellParkNS)/1e9)
+				}
 			}
 		}
 		sort.Slice(events, func(i, j int) bool {
@@ -932,7 +972,69 @@ func toolConcurrency(summary provider.ToolSummary) map[string]any {
 			row["shell_seconds"] = map[string]float64{"min": durations[0], "median": durations[len(durations)/2], "max": durations[len(durations)-1]}
 			row["first_start_unix_ns"], row["last_end_unix_ns"] = events[0].at, events[len(events)-1].at
 		}
+		if len(parks) != 0 {
+			sort.Float64s(parks)
+			row["park_to_start_seconds"] = map[string]float64{"min": parks[0], "median": parks[len(parks)/2], "max": parks[len(parks)-1]}
+		}
 		result[kind] = row
 	}
 	return result
+}
+
+// releaseBarrier waits until every workload shell has parked, at most 60 s,
+// then releases one line per Session. The writer stays open until the turn
+// ends so a late shell still finds its line. Achieved overlap is measured
+// separately from in-shell markers; this records only what the controller saw.
+func releaseBarrier(deadline measurement.Deadline, directory string, sessions int) (map[string]any, *os.File, error) {
+	begin := time.Now()
+	parked := 0
+	for {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			return nil, nil, err
+		}
+		parked = len(entries) - 1
+		if parked >= sessions || time.Since(begin) > 60*time.Second {
+			break
+		}
+		if _, err := deadline.Remaining(); err != nil {
+			return nil, nil, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	facts := map[string]any{"wait_begin_unix_ns": begin.UnixNano(), "parked_at_release": parked, "expected": sessions, "timed_out": parked < sessions}
+	writer, err := os.OpenFile(filepath.Join(directory, "release"), os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return facts, nil, err
+	}
+	facts["release_unix_ns"] = time.Now().UnixNano()
+	if _, err := writer.Write(bytes.Repeat([]byte{'\n'}, sessions)); err != nil {
+		writer.Close()
+		return facts, nil, err
+	}
+	return facts, writer, nil
+}
+
+// toolCoverage compares processes the sampler saw with the processes the
+// turn must have created. Unseen processes have no PSS observation at all.
+func toolCoverage(s *toolSampler, sessions int) map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]int{}
+	for _, record := range s.records {
+		seen[record.Category]++
+	}
+	row := func(category string, expected int) map[string]any {
+		value := map[string]any{"observed": seen[category], "expected": expected}
+		if expected > 0 {
+			value["fraction"] = float64(seen[category]) / float64(expected)
+		}
+		return value
+	}
+	return map[string]any{
+		"basis":          "processes seen in at least one sample during the whole run versus the minimum the turn creates; observed can exceed expected when shells fork subshells",
+		"bash_shell":     row("bash_shell", 2*sessions-1),
+		"workload_child": row("bash_child", sessions),
+		"send":           row("send", sessions-1),
+	}
 }
