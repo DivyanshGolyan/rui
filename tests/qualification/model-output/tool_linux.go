@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -113,6 +114,7 @@ func toolText(header string, size int, seed uint64) []byte {
 type toolProc struct {
 	pid, ppid int
 	comm      string
+	state     string
 	start     uint64
 	ticks     uint64
 }
@@ -134,7 +136,7 @@ func readToolProc(pid int) (toolProc, error) {
 	utime, _ := strconv.ParseUint(fields[11], 10, 64)
 	stime, _ := strconv.ParseUint(fields[12], 10, 64)
 	start, _ := strconv.ParseUint(fields[19], 10, 64)
-	return toolProc{pid: pid, ppid: ppid, comm: string(data[open+1 : close]), start: start, ticks: utime + stime}, nil
+	return toolProc{pid: pid, ppid: ppid, comm: string(data[open+1 : close]), state: fields[0], start: start, ticks: utime + stime}, nil
 }
 
 // cpuTicks returns own user+system and reaped-children user+system ticks.
@@ -182,6 +184,10 @@ type toolProcessRecord struct {
 	CPUTicks    uint64 `json:"last_cpu_ticks"`
 	// DispatchShell marks a Bash shell seen with a `rui` send child.
 	DispatchShell bool `json:"dispatch_shell"`
+	// Transitions lists each distinct comm/category this identity showed, in
+	// order: a Host child that execs its final command keeps its PID and
+	// start time but changes from bash/bash_shell to, say, sleep/bash_exec.
+	Transitions []string `json:"transitions"`
 }
 
 type toolSample struct {
@@ -216,9 +222,20 @@ func columns(category string) string {
 		return "host"
 	case "tui", "tui_child", "send", "send_child":
 		return "clients"
+	case "unreaped":
+		return "unreaped"
 	default:
 		return "bash"
 	}
+}
+
+// isSend recognizes `rui session send` by argv, whether it runs under a
+// shell or replaced the Host's Bash child; a Host fork before exec has the
+// Host's argv.
+func isSend(pid int) bool {
+	data, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	argv := strings.Split(string(data), "\x00")
+	return len(argv) >= 3 && argv[1] == "session" && argv[2] == "send"
 }
 
 func (s *toolSampler) sample() {
@@ -247,10 +264,17 @@ func (s *toolSampler) sample() {
 			row := procs[child]
 			next := "bash_child"
 			switch {
+			// An exited, unreaped process has no memory or argv left.
+			case row.state == "Z":
+				next = "unreaped"
 			case category == "host" && row.comm == "bash":
 				next = "bash_shell"
-			case category == "host":
+			case category == "host" && row.comm == "rui" && isSend(child):
+				next = "send"
+			case category == "host" && row.comm == "rui":
 				next = "host_fork_pre_exec"
+			case category == "host":
+				next = "bash_exec"
 			case category == "tui" || category == "tui_child":
 				next = "tui_child"
 			case category == "send" || category == "send_child":
@@ -274,7 +298,6 @@ func (s *toolSampler) sample() {
 	result := toolSample{Phase: phase, Counts: map[string]int{}, PSS: map[string]uint64{}}
 	for pid, category := range categories {
 		row := procs[pid]
-		pss, err := readPSS(pid)
 		key := fmt.Sprintf("%d:%d", pid, row.start)
 		s.mu.Lock()
 		record := s.records[key]
@@ -282,9 +305,19 @@ func (s *toolSampler) sample() {
 			record = &toolProcessRecord{PID: pid, PPID: row.ppid, StartTicks: row.start, FirstSeenNS: begin.UnixNano()}
 			s.records[key] = record
 		}
+		if transition := row.comm + "/" + category; len(record.Transitions) == 0 || record.Transitions[len(record.Transitions)-1] != transition {
+			record.Transitions = append(record.Transitions, transition)
+		}
 		record.Comm, record.Category, record.LastSeenNS, record.CPUTicks = row.comm, category, begin.UnixNano(), row.ticks
 		record.DispatchShell = record.DispatchShell || dispatchShells[pid]
 		record.Samples++
+		if category == "unreaped" {
+			// Counted, never read: it has no PSS and is not a live process.
+			s.mu.Unlock()
+			result.Counts[category]++
+			continue
+		}
+		pss, err := readPSS(pid)
 		if err != nil {
 			record.PSSFailures++
 			result.PSSFailures++
@@ -934,7 +967,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		cpu["status"] = "unavailable"
 	}
 	result["cpu"] = cpu
-	result["concurrency"] = toolConcurrency(done)
+	result["concurrency"] = toolConcurrency(done, workload)
 	release, _ := result["barrier_release"].(map[string]any)
 	overlap, _ := result["concurrency"].(map[string]any)["workload"].(map[string]any)["max_overlapping"].(int)
 	if failures := append(originalFailures, toolAcceptance(sessions, done, requests, barrier, release, overlap)...); len(failures) != 0 {
@@ -943,43 +976,51 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	}
 	result["limits"] = []string{
 		"PSS columns are sequential-scan sums of smaps_rollup over the processes read during each sample's [begin, end] span, not simultaneous snapshots; failed reads are counted per sample and omitted from sums; processes shorter than one interval plus scan are missed; the true peak is unobserved",
-		"send processes run under Bash and are counted once, as clients; Bash = shells, their non-rui children and Host forks seen before exec",
+		"send processes are counted once, as clients, whether they run under a shell or replaced it; Bash = shells, their non-rui children, Host children that replaced their shell with the final command, and Host forks seen before exec; exited, unreaped processes are counted as unreaped, with no PSS read",
 		"page cache is system-wide meminfo plus per-file fincore residency; it is not process PSS and is never added to PSS columns",
-		"in-shell timestamps use bash $EPOCHREALTIME builtins around each command; they exclude fork/exec of the shell itself",
+		"in-shell timestamps use bash $EPOCHREALTIME builtins before each command; no marker follows the command, so end times are not observed and overlap is a lower bound; they exclude fork/exec of the shell itself",
 		"fixture/controller excluded from Rui counters; observer CPU is reported separately and not subtracted",
 	}
 	result["status"] = "passed"
 	return result, nil
 }
 
-// toolConcurrency derives in-flight counts from in-shell timestamps: the
-// maximum number of overlapping [start, end] shell intervals per kind, and
+// toolConcurrency derives in-flight counts from in-shell timestamps. A call
+// is known alive over [park or start, start + minimum]: its shell exists from
+// the park marker, and `sleep 5` cannot finish sooner than 5 s after its start
+// marker; other commands get no minimum. The maximum overlap of these
+// intervals is a lower bound on calls simultaneously alive. It also reports
 // the delay from the provider's tool-call response to each shell's start.
-func toolConcurrency(summary provider.ToolSummary) map[string]any {
-	result := map[string]any{"basis": "bash $EPOCHREALTIME at command start/end inside each shell; excludes shell fork/exec"}
+func toolConcurrency(summary provider.ToolSummary, workload string) map[string]any {
+	result := map[string]any{"basis": "bash $EPOCHREALTIME park/start markers inside each shell plus the workload's minimum duration (sleep 5: 5 s; otherwise 0); excludes shell fork/exec; a lower bound, not observed end times"}
 	type event struct {
 		at    int64
 		delta int
 	}
 	for _, kind := range []string{"workload", "dispatch"} {
+		minimum := int64(0)
+		if kind == "workload" && workload == "sleep" {
+			minimum = 5 * int64(time.Second)
+		}
 		var events []event
-		var latencies, durations, parks []float64
+		var latencies, parks []float64
 		missing := 0
 		for _, fact := range summary.SessionFacts {
 			for _, output := range fact.Outputs {
 				if output.Kind != kind {
 					continue
 				}
-				if output.ShellStartNS == 0 || output.ShellEndNS == 0 {
+				if output.ShellStartNS == 0 {
 					missing++
 					continue
 				}
-				events = append(events, event{output.ShellStartNS, 1}, event{output.ShellEndNS, -1})
-				latencies = append(latencies, float64(output.ShellStartNS-fact.CallsSentNS)/1e9)
-				durations = append(durations, output.ShellSeconds)
+				begin := output.ShellStartNS
 				if output.ShellParkNS != 0 {
+					begin = output.ShellParkNS
 					parks = append(parks, float64(output.ShellStartNS-output.ShellParkNS)/1e9)
 				}
+				events = append(events, event{begin, 1}, event{output.ShellStartNS + minimum, -1})
+				latencies = append(latencies, float64(output.ShellStartNS-fact.CallsSentNS)/1e9)
 			}
 		}
 		sort.Slice(events, func(i, j int) bool {
@@ -991,12 +1032,9 @@ func toolConcurrency(summary provider.ToolSummary) map[string]any {
 			peak = max(peak, current)
 		}
 		sort.Float64s(latencies)
-		sort.Float64s(durations)
-		row := map[string]any{"intervals": len(events) / 2, "missing_markers": missing, "max_overlapping": peak}
+		row := map[string]any{"intervals": len(events) / 2, "missing_markers": missing, "max_overlapping": peak, "minimum_workload_ns": minimum}
 		if len(latencies) != 0 {
 			row["call_response_to_shell_start_seconds"] = map[string]float64{"min": latencies[0], "median": latencies[len(latencies)/2], "max": latencies[len(latencies)-1]}
-			row["shell_seconds"] = map[string]float64{"min": durations[0], "median": durations[len(durations)/2], "max": durations[len(durations)-1]}
-			row["first_start_unix_ns"], row["last_end_unix_ns"] = events[0].at, events[len(events)-1].at
 		}
 		if len(parks) != 0 {
 			sort.Float64s(parks)
@@ -1049,9 +1087,25 @@ func toolCoverage(s *toolSampler, sessions int) map[string]any {
 	defer s.mu.Unlock()
 	seen, read := map[string]int{}, map[string]int{}
 	for _, record := range s.records {
-		seen[record.Category]++
-		if record.PSSReads != 0 {
-			read[record.Category]++
+		var classes []string
+		for _, transition := range record.Transitions {
+			comm, category, _ := strings.Cut(transition, "/")
+			if category == "bash_shell" || category == "send" {
+				classes = append(classes, category)
+			}
+			if record.PPID == s.host && (category == "bash_shell" || category == "bash_exec" || category == "send") {
+				classes = append(classes, "host_tool_child")
+			}
+			if (category == "bash_child" || category == "bash_exec") && (comm == "sleep" || comm == "cat") {
+				classes = append(classes, "workload_process")
+			}
+		}
+		slices.Sort(classes)
+		for _, class := range slices.Compact(classes) {
+			seen[class]++
+			if record.PSSReads != 0 {
+				read[class]++
+			}
 		}
 	}
 	row := func(category string, expected int) map[string]any {
@@ -1062,10 +1116,11 @@ func toolCoverage(s *toolSampler, sessions int) map[string]any {
 		return value
 	}
 	return map[string]any{
-		"basis":          "identities seen in at least one sample, and those with at least one successful PSS read, versus the minimum the turn creates; seen can exceed expected when shells fork subshells",
-		"bash_shell":     row("bash_shell", 2*sessions-1),
-		"workload_child": row("bash_child", sessions),
-		"send":           row("send", sessions-1),
+		"basis":            "identities (PID+start time) seen in at least one sample, and those with at least one successful PSS read, versus the minimum the turn creates; seen can exceed expected when shells fork subshells. An identity that execs is one identity in every class it showed",
+		"bash_shell":       row("bash_shell", 2*sessions-1),
+		"host_tool_child":  row("host_tool_child", 2*sessions-1),
+		"workload_process": row("workload_process", sessions),
+		"send":             row("send", sessions-1),
 	}
 }
 

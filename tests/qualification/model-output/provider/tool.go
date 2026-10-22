@@ -51,14 +51,12 @@ func ToolSession(sessions, index int) string {
 }
 
 type ToolOutput struct {
-	CallID       string  `json:"call_id"`
-	Kind         string  `json:"kind"`
-	Succeeded    bool    `json:"succeeded"`
-	OutputBytes  int     `json:"output_bytes"`
-	ShellParkNS  int64   `json:"shell_park_unix_ns,omitempty"`
-	ShellStartNS int64   `json:"shell_start_unix_ns,omitempty"`
-	ShellEndNS   int64   `json:"shell_end_unix_ns,omitempty"`
-	ShellSeconds float64 `json:"shell_seconds,omitempty"`
+	CallID       string `json:"call_id"`
+	Kind         string `json:"kind"`
+	Succeeded    bool   `json:"succeeded"`
+	OutputBytes  int    `json:"output_bytes"`
+	ShellParkNS  int64  `json:"shell_park_unix_ns,omitempty"`
+	ShellStartNS int64  `json:"shell_start_unix_ns,omitempty"`
 }
 
 type ToolSessionFact struct {
@@ -119,11 +117,11 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
-// timed keeps the command's own status: the end marker is a builtin and
-// cannot turn a failed command into Bash success.
+// timed marks the start and leaves command as the shell's final simple
+// command, so `bash -c` may exec it in place. Nothing runs after it: an end
+// marker, trap or redirection there would keep Bash resident.
 func timed(command string) string {
-	return `printf 'rui-measure-start %s\n' "$EPOCHREALTIME" >&2; ` + command +
-		`; status=$?; printf 'rui-measure-end %s\n' "$EPOCHREALTIME" >&2; exit $status`
+	return `printf 'rui-measure-start %s\n' "$EPOCHREALTIME" >&2; ` + command
 }
 
 func (c ToolConfig) workloadCommand(index int) string {
@@ -222,7 +220,8 @@ func parseMarker(seconds, micros string) int64 {
 // validateOutputs requires exactly one output per issued call, in any order,
 // and no other output. A call counts as succeeded only when Bash reported
 // exit 0 and its markers are complete and ordered: park (barrier workload
-// only) <= start <= end. Unissued, duplicate and missing outputs are failures.
+// only) <= start, and no end marker. Unissued, duplicate and missing outputs
+// are failures.
 func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) ([]ToolOutput, []string) {
 	var failures []string
 	kinds := map[string]string{}
@@ -261,16 +260,11 @@ func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) (
 				row.ShellParkNS = parseMarker(match[2], match[3])
 			case "start":
 				row.ShellStartNS = parseMarker(match[2], match[3])
-			default:
-				row.ShellEndNS = parseMarker(match[2], match[3])
 			}
 		}
 		park := barrier && kind == "workload"
-		ordered := markers["start"] == 1 && markers["end"] == 1 && row.ShellStartNS <= row.ShellEndNS &&
+		ordered := markers["start"] == 1 && markers["end"] == 0 &&
 			(!park && markers["park"] == 0 || park && markers["park"] == 1 && row.ShellParkNS <= row.ShellStartNS)
-		if ordered {
-			row.ShellSeconds = float64(row.ShellEndNS-row.ShellStartNS) / 1e9
-		}
 		row.Succeeded = ordered && seen[item.CallID] == 1 && strings.HasPrefix(item.Output, "Bash succeeded. Exit code: 0.")
 		if seen[item.CallID] > 1 {
 			failures = append(failures, fmt.Sprintf("%d outputs for %s", seen[item.CallID], item.CallID))
