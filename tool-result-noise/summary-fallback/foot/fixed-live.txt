@@ -1,0 +1,33 @@
+
+› run the check                                                                                            14:24
+
+! Run repro command — Failed (exit 7)
+  useful diagnostic B
+
+The check failed.
+
+›
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
