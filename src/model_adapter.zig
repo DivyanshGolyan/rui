@@ -322,18 +322,6 @@ pub const PreparationFaults = struct {
     unlink_removal: ?*const std.atomic.Value(bool) = null,
 };
 
-fn retainedNamedScratch(
-    io: std.Io,
-    file: std.Io.File,
-    secondary_file: ?std.Io.File,
-    name: []const u8,
-    budget: ScratchBudget,
-    charged: u64,
-    removal: named_scratch.Removal,
-) named_scratch.Owner {
-    return .init(io, file, secondary_file, name, budget, charged, removal);
-}
-
 const RequestWriter = struct {
     io: std.Io,
     file: std.Io.File,
@@ -543,16 +531,16 @@ pub const Preparation = struct {
         });
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
-            retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
+            retained.* = .init(io, file, null, name, budget, 0, .native);
             return err;
         };
         if (faults.unlink) {
             const removal: named_scratch.Removal = if (faults.unlink_removal) |gate| .{ .gated = gate } else .injected_failure;
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, removal);
+            retained.* = .init(io, file, readonly, name, budget, 0, removal);
             return error.InjectedRequestUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
+            retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
         self.* = .{
