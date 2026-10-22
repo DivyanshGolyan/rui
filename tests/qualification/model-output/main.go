@@ -573,8 +573,8 @@ func sqliteDiagnosticsStatus(records []sqliteDiagnostic, cacheSize int64, spillE
 			record.PageSizeBytes == nil || *record.PageSizeBytes != 4096 ||
 			record.HardHeapLimitBytes == nil || *record.HardHeapLimitBytes != 16*1024*1024 ||
 			record.CacheSpillThreshold == nil ||
-			record.Synchronous == nil || *record.Synchronous != 3 ||
-			record.JournalMode == nil || *record.JournalMode != "delete" ||
+			record.Synchronous == nil || *record.Synchronous != 2 ||
+			record.JournalMode == nil || *record.JournalMode != "wal" ||
 			record.MmapSizeBytes == nil || *record.MmapSizeBytes != 0 ||
 			record.TempStore == nil || *record.TempStore != 1 ||
 			record.BusyTimeoutMS == nil || *record.BusyTimeoutMS != 0 {
