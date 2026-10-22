@@ -4703,7 +4703,7 @@ pub const Store = struct {
         try bindText(usage, 4, current.model.slice());
         switch (c.sqlite3_step(usage)) {
             c.SQLITE_ROW => {
-                usage_tokens = try readNullableU64Blob(usage, 0);
+                usage_tokens = try readNullableTokens(usage, 0, true);
                 if (usage_tokens != null) {
                     usage_position = @intCast(try readNullablePositiveI64(usage, 1) orelse return error.CorruptStore);
                     // Include this producer: its results follow usage.
@@ -6103,11 +6103,9 @@ pub const Store = struct {
             try bindNullableI64(update, 9, usage_id);
             try bindU64(update, 10, binding.attempt_ordinal);
             try bindU64(update, 11, output.item_count);
-            var usage_bytes: [8]u8 = undefined;
-            if (usage_tokens) |tokens| {
-                std.mem.writeInt(u64, &usage_bytes, tokens, .little);
-                try bindBlob(update, 12, &usage_bytes);
-            } else if (c.sqlite3_bind_null(update, 12) != c.SQLITE_OK) return error.BindFailed;
+            // Pressure saturates; every trigger it meets is an SQLite integer,
+            // so clamping to the largest one preserves each decision.
+            try bindNullableU64(update, 12, if (usage_tokens) |tokens| @min(tokens, std.math.maxInt(i64)) else null);
             try expectDone(update);
             if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
         }
@@ -7051,8 +7049,8 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ content_id INTEGER PRIMARY KEY,
         \\ digest BLOB NOT NULL CHECK(length(digest)=32),
         \\ byte_length INTEGER NOT NULL CHECK(byte_length>=0 AND byte_length<=1073737728),
-        \\ payload BLOB CHECK(payload IS NULL OR length(payload)=byte_length),
         \\ private INTEGER NOT NULL CHECK(private IN (0,1) AND (private=0 OR payload IS NOT NULL)),
+        \\ payload BLOB CHECK(payload IS NULL OR length(payload)=byte_length),
         \\ UNIQUE(digest,byte_length,private)
         \\) STRICT;
         \\CREATE TABLE session(
@@ -7163,7 +7161,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ model_evidence BLOB CHECK(model_evidence IS NULL OR length(model_evidence) BETWEEN 7 AND 775),
         \\ request_id TEXT CHECK(request_id IS NULL OR length(CAST(request_id AS BLOB))<=256),
         \\ usage_content_id INTEGER REFERENCES content(content_id),
-        \\ usage_tokens BLOB CHECK(usage_tokens IS NULL OR (length(usage_tokens)=8 AND usage_content_id IS NOT NULL)),
+        \\ usage_tokens INTEGER CHECK(usage_tokens IS NULL OR (usage_tokens>=0 AND usage_content_id IS NOT NULL)),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
         \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms=0) OR (uncertain=0 AND retry_due_at_ms>0))) OR
@@ -7267,6 +7265,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX message_admission_pending ON message_admission(admission_id,session_ref) WHERE turn_id IS NULL;
         \\CREATE INDEX message_admission_session_pending ON message_admission(session_ref,admission_id) WHERE turn_id IS NULL;
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
+        \\CREATE INDEX session_stop_turn ON session_stop(selected_turn_id);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
         \\CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
@@ -7306,7 +7305,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','session_stop_turn','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -7594,13 +7593,6 @@ fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool
     const value = c.sqlite3_column_int64(statement, index);
     if (value < 0 or (!allow_zero and value == 0)) return error.CorruptStore;
     return @intCast(value);
-}
-
-fn readNullableU64Blob(statement: *c.sqlite3_stmt, index: c_int) !?u64 {
-    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
-    if (c.sqlite3_column_type(statement, index) != c.SQLITE_BLOB or c.sqlite3_column_bytes(statement, index) != 8) return error.CorruptStore;
-    const bytes: [*]const u8 = @ptrCast(c.sqlite3_column_blob(statement, index) orelse return error.CorruptStore);
-    return std.mem.readInt(u64, bytes[0..8], .little);
 }
 
 fn testingStore(tmp: *std.testing.TmpDir, io: std.Io) !Store {
