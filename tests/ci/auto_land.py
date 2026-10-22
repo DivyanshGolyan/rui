@@ -36,6 +36,7 @@ def latest(workflow, sha, branch):
     """The newest push or dispatched run of workflow on this exact commit and branch.
 
     A dispatch can replace a cancelled push run; reruns keep the run.
+    Main's Selected acceptance is stable qualification, not diagnostic dispatches.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
     rows = [row for event in ("push", "workflow_dispatch") for row in json.loads(gh(
@@ -43,6 +44,8 @@ def latest(workflow, sha, branch):
                f"?head_sha={sha}&branch={branch}&event={event}&per_page=100"))["workflow_runs"]]
     rows = [row for row in rows if row["head_sha"] == sha and row["head_branch"] == branch
             and row["head_repository"]["full_name"] == repository]
+    if workflow == "check.yml" and branch == "main":
+        rows = [row for row in rows if STABLE_BASE.fullmatch(row.get("display_title") or "")]
     return max(rows, key=lambda row: row["id"], default=None)
 
 
@@ -128,7 +131,7 @@ def main():
     parser.add_argument("--preflight", metavar="BRANCH",
                         help="fail unless BRANCH at HEAD is the only open landing stack")
     parser.add_argument("--qualify-main", action="store_true",
-                        help="dispatch exact current-main Mac and upgrade qualification")
+                        help="dispatch only absent current-main Mac and upgrade qualification")
     parser.add_argument("--promote-stable", action="store_true",
                         help="promote the newest exact-SHA qualified main commit")
     args = parser.parse_args()
@@ -153,7 +156,7 @@ def main():
 
 
 def land(branch, sha, main_sha):
-    """Decide one tip and fast-forward main only, then start its qualification."""
+    """Decide one tip and fast-forward main; the always-run phase qualifies it."""
     fast_forward = contains(sha, main_sha)
     # NUL-delimited, so Git never quotes a strict path out of recognition.
     paths = changed_paths(main_sha, sha)[0] if fast_forward else []
@@ -179,26 +182,32 @@ def land(branch, sha, main_sha):
             return False
         raise SystemExit(f"Push of {sha} to main failed:\n{pushed.stderr}")
     print(f"Fast-forwarded main from {main_sha} to {sha}; stable unchanged")
-    qualify_main()
     return True
 
 
 def qualify_main():
-    """Dispatch while the writer is serialized, pinning both run heads to main."""
+    """Fill absent runs only; existing pending, offline or red runs are not retried.
+
+    The workflow's always-run promotion phase calls this under the shared writer
+    lock, including after a main push whose earlier dispatch was interrupted.
+    """
     git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
         "+refs/heads/stable:refs/remotes/origin/stable")
     sha = git("rev-parse", "origin/main")
     base = git("rev-parse", "origin/stable")
-    gh("workflow", "run", "check.yml", "--ref", "main", "-f", f"base={base}", "-f", "stable=true")
-    gh("workflow", "run", UPGRADE, "--ref", "main")
-    print(f"Dispatched Mac and upgrade qualification on main {sha} from stable {base}")
+    if sha != base and contains(sha, base):
+        if latest("check.yml", sha, "main") is None:
+            gh("workflow", "run", "check.yml", "--ref", "main", "-f", f"base={base}", "-f", "stable=true")
+            print(f"Dispatched missing Mac qualification on main {sha} from stable {base}")
+        if latest(UPGRADE, sha, "main") is None:
+            gh("workflow", "run", UPGRADE, "--ref", "main")
+            print(f"Dispatched missing upgrade qualification on main {sha}")
+    return sha, base
 
 
 def promote_stable():
-    """Newest qualified main ancestor wins; old completions cannot rewind stable."""
-    git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
-        "+refs/heads/stable:refs/remotes/origin/stable")
-    main_sha, stable_sha = (git("rev-parse", f"origin/{ref}") for ref in ("main", "stable"))
+    """Repair missing main runs, then promote the newest qualified main ancestor."""
+    main_sha, stable_sha = qualify_main()
     if not contains(main_sha, stable_sha):
         print("stable is not on main's history; stable promotion held")
         return

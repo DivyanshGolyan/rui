@@ -111,16 +111,28 @@ class LandingTest(unittest.TestCase):
                 'workflow_dispatch': [row(2, 'workflow_dispatch'), row(5, 'workflow_dispatch', head=other),
                                       row(6, 'workflow_dispatch', branch='wip/land-2'),
                                       row(7, 'workflow_dispatch', repo='fork/r')]}
+        requested_branch = 'wip/land-1'
 
         def gh(*args):
             event = args[1].rsplit('event=', 1)[1].split('&', 1)[0]
-            self.assertIn(f'head_sha={sha}&branch=wip/land-1', args[1])
+            self.assertIn(f'head_sha={sha}&branch={requested_branch}', args[1])
             return json.dumps(dict(workflow_runs=rows[event]))
         with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh):
             # A dispatch replaces the cancelled push run; other commits, branches and forks never count.
             self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 2)
             rows['workflow_dispatch'] = rows['workflow_dispatch'][1:]
             self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 1)
+            # Main's ordinary diagnostic Selected dispatch is not a stable run,
+            # and must not hide an existing queued or failed stable qualification.
+            requested_branch = 'main'
+            rows = {'push': [], 'workflow_dispatch': [
+                dict(row(10, 'workflow_dispatch', branch='main'), status='queued',
+                     display_title='Stable qualification from base ' + other),
+                dict(row(11, 'workflow_dispatch', branch='main'), display_title='Selected checks')]}
+            self.assertEqual(auto_land.latest('check.yml', sha, 'main')['id'], 10)
+            self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'main')['id'], 11)
+            rows['workflow_dispatch'].pop(0)
+            self.assertIsNone(auto_land.latest('check.yml', sha, 'main'))
 
     def test_main_and_stable_advance_independently_on_exact_sha_evidence(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
@@ -157,9 +169,20 @@ class LandingTest(unittest.TestCase):
             # Runs are keyed by exact workflow, commit and branch, as latest() filters them.
             runs = {('check.yml', tip, 'wip/land-1'): green}
             dispatches = []
+            fail_dispatch = set()
 
             def dispatch(*args):
-                dispatches.append((git('rev-parse', 'origin/main'), args))
+                workflow = args[2]
+                if workflow in fail_dispatch:
+                    raise subprocess.CalledProcessError(1, ['gh', *args], stderr='injected before submit')
+                sha = git('rev-parse', 'origin/main')
+                dispatches.append((sha, args))
+                title = 'Previous installed-release upgrade'
+                if workflow == 'check.yml':
+                    base_arg = next(arg[5:] for arg in args if arg.startswith('base='))
+                    title = 'Stable qualification from base ' + base_arg
+                runs[(workflow, sha, 'main')] = dict(green, event='workflow_dispatch', status='queued',
+                    conclusion=None, macos=None, display_title=title)
                 return ''
 
             with mock.patch.object(auto_land, 'latest',
@@ -175,6 +198,7 @@ class LandingTest(unittest.TestCase):
                 runs[('check.yml', tip, 'wip/land-1')] = dispatched(base)
                 auto_land.main()
                 self.assertEqual(refs(), (tip, base))
+                auto_land.promote_stable()
                 self.assertEqual({(sha, args[2]) for sha, args in dispatches},
                                  {(tip, 'check.yml'), (tip, auto_land.UPGRADE)})
                 self.assertTrue(all('--ref' in args and 'main' in args for _, args in dispatches))
@@ -183,6 +207,37 @@ class LandingTest(unittest.TestCase):
                 self.assertEqual(refs(), (tip, base))
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, base))
+                # A job stopped after submitting Mac must recover only the absent
+                # upgrade. A failed submit propagates; it never retries Mac.
+                del runs[(auto_land.UPGRADE, tip, 'main')]
+                fail_dispatch.add(auto_land.UPGRADE)
+                before = len(dispatches)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    auto_land.qualify_main()
+                self.assertEqual(len(dispatches), before)
+                fail_dispatch.clear()
+                auto_land.promote_stable()
+                self.assertEqual(len(dispatches), before + 1)
+                self.assertEqual(dispatches[-1][1][2], auto_land.UPGRADE)
+                # Complete loss between main push and dispatch recovers both runs.
+                del runs[('check.yml', tip, 'main')]
+                del runs[(auto_land.UPGRADE, tip, 'main')]
+                before = len(dispatches)
+                with mock.patch.object(sys, 'argv', ['auto_land.py', '--promote-stable']):
+                    auto_land.main()
+                self.assertEqual(len(dispatches), before + 2)
+                # Existing queued/offline/running/red/cancelled/skipped runs are
+                # not absence, so repeated recovery never retries native tests.
+                before = len(dispatches)
+                for status, conclusion in (('queued', None), ('in_progress', None),
+                                           ('completed', 'failure'), ('completed', 'cancelled'),
+                                           ('completed', 'skipped')):
+                    for name in ('check.yml', auto_land.UPGRADE):
+                        runs[(name, tip, 'main')].update(status=status, conclusion=conclusion)
+                    auto_land.promote_stable()
+                    auto_land.qualify_main()
+                    self.assertEqual(refs(), (tip, base))
+                    self.assertEqual(len(dispatches), before)
                 # Qualification on the landing branch cannot qualify stable.
                 runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = green
                 auto_land.promote_stable()
@@ -264,6 +319,10 @@ class LandingTest(unittest.TestCase):
                     display_title='Stable qualification from base ' + ahead)
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (newest, newest))
+                before = len(dispatches)
+                auto_land.qualify_main()
+                auto_land.promote_stable()
+                self.assertEqual(len(dispatches), before, 'already qualified main is a no-op')
 
     def test_preflight_allows_one_open_landing_stack(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
