@@ -1,0 +1,5 @@
+2026-10-22T04:32Z fd-inheritance probe (not a measurement): --tool-sessions 10 --tool-workload sleep, Host 71840, one workload bash 72329 and its sleep child.
+/proc/72329/fd: 0 -> /dev/null; 1 -> pipe:[199713]; 2 -> pipe:[199714]; 19 -> /dev/null; 255 -> store/scratch/bash-input-13-1.tmp (bash's own script fd)
+/proc/<sleep>/fd: 0 -> /dev/null; 1 -> pipe:[199713]; 2 -> pipe:[199714]; 19 -> /dev/null
+bash SigBlk 0x10000 (SIGCHLD, set by bash itself while waiting); SigIgn 0x4 (SIGQUIT); Host threads SigBlk 0 and Host SigIgn 0 observed earlier.
+bash environment names: PATH, HOME, RUI_ADDRESS

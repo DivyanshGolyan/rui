@@ -1,0 +1,22 @@
+2026-10-22T04:15:39.038737260Z	sleep-n1-r1	estimated: Host PSS ~10.8 MB, tree peak ~18.3 MB (Host 10.8 + TUI 6.7 + bash/sleep 0.8); Host CPU ~0.4 s for 2 requests + 1 call (N=1 smoke)
+2026-10-22T04:16:08.666906647Z	sleep-n10-r1	estimated: tree peak ~23 MB (Host 11 + TUI 6.7 + 10 x ~0.5 MB shell+sleep); Host CPU ~0.6 s; 10 sleeps overlap
+2026-10-22T04:16:39.009761268Z	sleep-n100-r1	estimated: tree peak ~56 MB (Host 11.3 + ~97 shells x 0.3 MB + ~97 sleeps x 0.1 MB + TUI 6.7); Host CPU ~9.6 s = ~48 ms x 200 requests (N=100 smoke)
+2026-10-22T04:17:18.542426195Z	read-n1-r1	estimated: tree peak ~18 MB (cat lives ms, likely unobserved); Host CPU ~0.35 s
+2026-10-22T04:17:43.163124397Z	read-n10-r1	estimated: tree peak ~18-19 MB, few shells observed; Host CPU ~0.45 s
+2026-10-22T04:18:08.384226782Z	read-n100-r1	estimated: Host CPU ~9 s (~45 ms/request x 200, 400 KB history each); observed peak ~20-30 MB since reads are short
+2026-10-22T04:18:42.726153846Z	sleep-n1-r2	estimated: Host PSS ~10.8 MB, tree peak ~18.3 MB (Host 10.8 + TUI 6.7 + bash/sleep 0.8); Host CPU ~0.4 s for 2 requests + 1 call (N=1 smoke)
+2026-10-22T04:19:12.332892503Z	sleep-n10-r2	estimated: tree peak ~23 MB (Host 11 + TUI 6.7 + 10 x ~0.5 MB shell+sleep); Host CPU ~0.6 s; 10 sleeps overlap
+2026-10-22T04:19:42.661433899Z	sleep-n100-r2	estimated: tree peak ~56 MB (Host 11.3 + ~97 shells x 0.3 MB + ~97 sleeps x 0.1 MB + TUI 6.7); Host CPU ~9.6 s = ~48 ms x 200 requests (N=100 smoke)
+2026-10-22T04:20:22.412803831Z	read-n1-r2	estimated: tree peak ~18 MB (cat lives ms, likely unobserved); Host CPU ~0.35 s
+2026-10-22T04:20:47.024401677Z	read-n10-r2	estimated: tree peak ~18-19 MB, few shells observed; Host CPU ~0.45 s
+2026-10-22T04:21:12.227012266Z	read-n100-r2	estimated: Host CPU ~9 s (~45 ms/request x 200, 400 KB history each); observed peak ~20-30 MB since reads are short
+2026-10-22T04:21:47.352445339Z	sleep-n1-r3	estimated: Host PSS ~10.8 MB, tree peak ~18.3 MB (Host 10.8 + TUI 6.7 + bash/sleep 0.8); Host CPU ~0.4 s for 2 requests + 1 call (N=1 smoke)
+2026-10-22T04:22:16.973670122Z	sleep-n10-r3	estimated: tree peak ~23 MB (Host 11 + TUI 6.7 + 10 x ~0.5 MB shell+sleep); Host CPU ~0.6 s; 10 sleeps overlap
+2026-10-22T04:22:47.330121907Z	sleep-n100-r3	estimated: tree peak ~56 MB (Host 11.3 + ~97 shells x 0.3 MB + ~97 sleeps x 0.1 MB + TUI 6.7); Host CPU ~9.6 s = ~48 ms x 200 requests (N=100 smoke)
+2026-10-22T04:23:27.203425681Z	read-n1-r3	estimated: tree peak ~18 MB (cat lives ms, likely unobserved); Host CPU ~0.35 s
+2026-10-22T04:23:51.864444071Z	read-n10-r3	estimated: tree peak ~18-19 MB, few shells observed; Host CPU ~0.45 s
+2026-10-22T04:24:17.138258380Z	read-n100-r3	estimated: Host CPU ~9 s (~45 ms/request x 200, 400 KB history each); observed peak ~20-30 MB since reads are short
+2026-10-22T04:24:52.207286453Z	strace-sleep-n1	estimated: instrumented strace run, timings not comparable; fork-to-exec ~1 ms (smoke) / Host PSS ~10.8 MB, tree peak ~18.3 MB (Host 10.8 + TUI 6.7 + bash/sleep 0.8); Host CPU ~0.4 s for 2 requests + 1 call (N=1 smoke)
+2026-10-22T04:25:24.258585921Z	strace-sleep-n10	estimated: instrumented strace run, timings not comparable; fork-to-exec ~1 ms (smoke) / tree peak ~23 MB (Host 11 + TUI 6.7 + 10 x ~0.5 MB shell+sleep); Host CPU ~0.6 s; 10 sleeps overlap
+2026-10-22T04:26:00.917408149Z	strace-sleep-n100	estimated: instrumented strace run, timings not comparable; fork-to-exec ~1 ms (smoke) / tree peak ~56 MB (Host 11.3 + ~97 shells x 0.3 MB + ~97 sleeps x 0.1 MB + TUI 6.7); Host CPU ~9.6 s = ~48 ms x 200 requests (N=100 smoke)
+2026-10-22T04:28:11.406781833Z	strace-read-n100	estimated: instrumented strace run, timings not comparable; fork-to-exec ~1 ms (smoke) / Host CPU ~9 s (~45 ms/request x 200, 400 KB history each); observed peak ~20-30 MB since reads are short
