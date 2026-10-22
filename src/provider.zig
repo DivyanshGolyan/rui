@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const TestObservation = @import("TestObservation.zig");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
-const store = @import("store.zig");
+const attempt = @import("attempt.zig");
 const transport_options = @import("transport_options");
 const transport_policy = @import("transport_policy.zig");
 
@@ -435,7 +435,7 @@ pub const ResponseCapture = struct {
         io: std.Io,
         scratch_path: []const u8,
         budget: ScratchBudget,
-        binding: store.AttemptBinding,
+        binding: attempt.AttemptBinding,
         fail_acquire: bool,
         fail_unlink: bool,
         fail_write: bool,
@@ -535,14 +535,14 @@ pub const Transfer = struct {
     inactivity: transport_policy.Inactivity,
     in_reactor: bool = false,
     completion_identity_fault: CompletionIdentityFault,
-    binding: store.AttemptBinding,
+    binding: attempt.AttemptBinding,
     requires_h2: bool,
 
     pub fn start(
         self: *Transfer,
         endpoint: []const u8,
         request: PreparedRequest,
-        binding: store.AttemptBinding,
+        binding: attempt.AttemptBinding,
         options: TransportOptions,
         writer: *CaptureWriter,
         scratch_path: []const u8,
