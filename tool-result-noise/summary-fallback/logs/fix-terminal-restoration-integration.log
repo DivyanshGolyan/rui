@@ -1,0 +1,183 @@
+native notice: pipe full=False, exact bytes and restored flags passed
+native notice: pipe full=True, exact bytes and restored flags passed
+native notice: pty full=False, exact bytes and restored flags passed
+terminal fixture forwarding: write/writev/tcdrain/tcsetattr/fcntl passed
+terminal fixture command markers: four selectors, coalesced/split writev, line boundaries and one signal passed
+terminal fixture contention: wrong phase/Session/kind/fragment forwarded; exact write held, released and flags restored
+native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch
+Host diagnostics: aliased full stdout, startup warning and failed restore: required readiness blocks until exact filler release; Host usable
+Host diagnostics: record-time failure retained under exclusion; one notice follows required readiness; Host usable
+Host diagnostics: readiness-held: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked
+Host diagnostics: readiness-held-error: execution traces attempted under exclusion; no fd2 borrow/write; required outcome checked
+Host diagnostics: readiness-alias: required stdout outcome checked
+Host diagnostics: readiness-error: required stdout outcome checked
+Host diagnostics: normal/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: filled/response-acquire: public outcome checked, flags checked; warnings=[]
+Host diagnostics: closed/response-acquire: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-metadata: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider output rejected for operation 1: InjectedMetadataFailure')]
+Host diagnostics: filled/response-metadata: public outcome checked, flags checked; warnings=[]
+Host diagnostics: filled/response-commit: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-write: public outcome checked, flags checked; warnings=[]
+Host diagnostics: normal/response-commit: public outcome checked, flags checked; warnings=[bytearray(b'rui: dispatch fenced after model output import failure: InjectedOutputCommitFailure'), bytearray(b'rui: host serve failed; syntax and recovery: rui host serve --help')]
+Host diagnostics: diagnostic-enable/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 2: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-enable-unmutated/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 2: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-partial/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-nonblock/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-restore/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: diagnostic-restore-startup/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: startup diagnostics unavailable (InsecureDiagnostics); continuing under Store lease')]
+Host diagnostics: diagnostic-contention-host/response-acquire: public outcome checked, flags checked; warnings=[bytearray(b'rui: provider preparation failed for operation 1: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: retained response file, charge=0, custody=1; stop reply='{"version":"1","type":"host_stop","status":"acknowledged","store":"/tmp/rui-terminal-restoration.yvdrz2ue/host-normal-response-unlink/store","instance":"f346d51754b364ae849c0ec3ccb9dcd9","retirement":"unconfirmed"}\n'
+Host diagnostics: normal/response-unlink: public outcome checked, flags checked; warnings=[bytearray(b'rui: dispatch fenced after response scratch unlink failure: ResponseCaptureAcquisitionFailed')]
+Host diagnostics: filled/success: public outcome checked, flags checked; warnings=[]
+Host diagnostics: closed/success: public outcome checked, flags checked; warnings=[]
+Host diagnostics: diagnostic-restore/success: public outcome checked, flags checked; warnings=[]
+persistent consent boundary: cancel passed
+persistent consent boundary: paste passed
+persistent consent boundary: escape-allow passed
+persistent consent boundary: escape-deny passed
+synchronous command interruption: requests passed
+synchronous command interruption: configure-before passed
+synchronous command interruption: configure-stopped-stderr passed
+synchronous command interruption: configure-full-stderr passed
+synchronous command interruption: configure-inflight passed
+synchronous command interruption: configure-commit-int passed
+synchronous command interruption: configure-commit-term passed
+synchronous command interruption: configure-admitted passed
+synchronous command interruption: configure-presentation passed
+synchronous command interruption: configure-rejected passed
+synchronous command interruption: configure-canonical passed
+synchronous command interruption: result-observe passed
+synchronous command interruption: result-content passed
+synchronous command interruption: inspect-current passed
+synchronous command interruption: inspect-arguments passed
+synchronous command interruption: inspect-full-stderr passed
+fatal reporting: SessionNotConfigured stopped stderr=False passed
+fatal reporting: SessionNotConfigured stopped stderr=True passed
+fatal reporting: UnsupportedPreferenceProvider stopped stderr=False passed
+fatal reporting: UnsupportedPreferenceProvider stopped stderr=True passed
+fatal reporting: UnsupportedSelectionProvider stopped stderr=False passed
+fatal reporting: UnsupportedSelectionProvider stopped stderr=True passed
+fatal reporting: SessionNotConfigured disconnected stderr passed
+fatal reporting: UnsupportedPreferenceProvider disconnected stderr passed
+fatal reporting: UnsupportedSelectionProvider disconnected stderr passed
+fatal reporting: current unconfirmed original passed
+fatal reporting: acquired terminal disconnected stderr passed
+decision reporting: allow_once-False passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+decision reporting: allow_once-True passed
+decision reporting: deny-False passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+decision reporting: deny-True passed
+entry enable: entry-0-mutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-0-unmutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-0-mutated-reset exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-mutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-unmutated exact flags, unchanged termios, no intent and cleanup error passed
+entry enable: entry-1-mutated-reset exact flags, unchanged termios, no intent and cleanup error passed
+detach reporting: message-detach-enable-mutated-reset exact accepted guide, restored termios and saved replay passed
+detach reporting: message-detach-write-full exact accepted guide, restored termios and saved replay passed
+detach reporting: allow_once-detach-enable-mutated-reset exact accepted guide, restored termios and saved replay passed
+detach reporting: deny-detach-write-full exact accepted guide, restored termios and saved replay passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: message exact custody, publication/mutation conservation and cleanup precedence passed
+startup reporting: allow_once exact custody, publication/mutation conservation and cleanup precedence passed
+startup reporting: deny exact custody, publication/mutation conservation and cleanup precedence passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: message-restore exact custody, publication/mutation conservation and cleanup precedence passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+startup reporting: retry exact custody, publication/mutation conservation and cleanup precedence passed
+visible opening: pending command waits for held output, then runs once without capture or provider work
+visible activity: pending command waits for held output, then runs once without capture or provider work
+visible history: pending command waits for held output, then runs once without capture or provider work
+visible details: pending command waits for held output, then runs once without capture or provider work
+visible interrupt: Ctrl-C while held restores and the pending command never runs
+visible completion: completed output permits one command; suffix stays a draft
+visible permission: pending command waits for held output, then runs once without capture or provider work
+renderer backpressure: actual EAGAIN; deferred command ran once; accepted Configure notice on the alternate screen; refreshed composer; exact termios/fd restoration
+persistent terminal: sync-exit passed
+persistent terminal: sync-handoff passed
+persistent terminal: sync-command-int passed
+----------------------------------------
+Exception occurred during processing of request from 
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.11/socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/usr/local/lib/python3.11/socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/usr/local/lib/python3.11/socketserver.py", line 755, in __init__
+    self.handle()
+  File "/home/user/workspace/repo/tests/integration/canonical_failure_integration.py", line 232, in handle
+    self.request.sendall(response)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+persistent terminal: admission-interrupt passed
+persistent terminal: disable passed
+persistent terminal: restore passed
+persistent terminal: both passed
+persistent terminal: incomplete-disable passed
+persistent terminal: incomplete-restore passed
+persistent terminal: incomplete-both passed
+persistent terminal: backpressure passed
+persistent terminal: backpressure-command passed
+Build Summary: 42/42 steps succeeded
+exit 0

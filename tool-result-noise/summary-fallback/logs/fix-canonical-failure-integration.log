@@ -1,0 +1,13 @@
+reply proxy swap: install and restore always leave a listener at the Host path
+canonical producers: all five fenced HTTP mutation owners; typed explicit/generated JSON diagnostics and five retry kinds passed
+canonical callers: committed-then-fatal retains original key/bytes, replay not resubmit; observation/read errors passed
+canonical Store read: step fault fences the Host instead of reporting result_not_found
+canonical PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+automatic permission read: canonical/ordinary/invalid failures retain classification, restore terminal and never consent or mutate
+mutation bindings: five typed explicit/generated/retry/recover callers reject wrong Session, digest, target or decision; original-key replay preserved
+mutation nulls: five typed explicit/generated/retry/recover callers reject present null code; original-key replay preserved
+binding PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+null PTY: Configure/Message/Permission/bare creation fail before outcome interpretation, restore terminal and retain original capture
+keyed: five actual operation observations, accepted request vs failed work; typed keyed/handle inspection, handle read-result and diagnostics passed
+Build Summary: 38/38 steps succeeded
+exit 0
