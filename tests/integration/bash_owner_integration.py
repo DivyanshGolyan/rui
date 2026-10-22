@@ -166,8 +166,9 @@ def main():
     try:
         prove_timeout_feedback(state)
         actions = {
+            # One byte over the command limit fails after incremental decoding.
             "preparation-failure": stage_action(
-                state, store, "preparation-failure", "printf %05d 0"
+                state, store, "preparation-failure", ":" + " " * (120 * 1024)
             ),
             "slot-reuse": stage_action(state, store, "slot-reuse", "true"),
         }
@@ -208,7 +209,7 @@ def main():
         host = None
         dispose_owner_case(None, endpoint, endpoint_thread)
         endpoint = endpoint_thread = None
-        assert resolution_after_stop(store, "direct/preparation-failure") == "storage_failed"
+        assert resolution_after_stop(store, "direct/preparation-failure") == "spawn_failed"
         assert resolution_after_stop(store, "direct/slot-reuse") == "succeeded"
 
         for name, command, expected in (
@@ -222,7 +223,7 @@ def main():
                 isolated_store,
                 f"http://127.0.0.1:{endpoint.server_port}/responses",
                 "--test-bash-scratch-limit-bytes",
-                "18",
+                "5",
             )
             bash_fixture.allow(
                 state,
@@ -241,38 +242,6 @@ def main():
             dispose_owner_case(None, endpoint, endpoint_thread)
             endpoint = endpoint_thread = None
             assert resolution_after_stop(isolated_store, f"direct/{name}") == expected
-
-        name = "self-unlink"
-        isolated_store = root / f"{name}-store"
-        action = stage_action(state, isolated_store, name, 'rm -- "$0"; printf unlinked')
-        endpoint, endpoint_thread, continuations = continuation_endpoint((name,))
-        host = fixture.start_host(
-            isolated_store,
-            f"http://127.0.0.1:{endpoint.server_port}/responses",
-        )
-        bash_fixture.allow(
-            state,
-            isolated_store,
-            f"{name}-allow",
-            f"direct/{name}",
-            action["action"],
-        )
-        fixture.wait_for(
-            lambda: continuations[0].body_finished_at,
-            "self-unlink continuation",
-        )
-        resources = fixture.wait_for(
-            lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"),
-            "self-unlink cleanup",
-        )["execution"]
-        assert resources["dispatch_fenced"] is False, resources
-        assert resources["custody_occupied"] == "0", resources
-        fixture.stop_host(host)
-        host = None
-        dispose_owner_case(None, endpoint, endpoint_thread)
-        endpoint = endpoint_thread = None
-        assert resolution_after_stop(isolated_store, f"direct/{name}") == "succeeded"
-        assert not list((isolated_store / "scratch").glob("bash-script-*.tmp"))
 
         retention_store = root / "retention-store"
         retention_actions = {

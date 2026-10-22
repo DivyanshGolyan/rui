@@ -254,7 +254,6 @@ fn isOwnedIngressName(name: []const u8) bool {
     return isOwnedNumericScratch(name, "request-") or
         isOwnedNumericScratch(name, "response-") or
         isOwnedNumericScratch(name, "response-metadata-") or
-        isOwnedNumericScratch(name, "bash-input-") or
         isOwnedNumericScratch(name, "bash-stdout-") or
         isOwnedNumericScratch(name, "bash-stderr-") or
         isOwnedNumericScratch(name, "report-") or
@@ -599,7 +598,6 @@ test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(isOwnedIngressName("request-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("response-metadata-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("bash-input-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("bash-stdout-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("bash-stderr-12-2.tmp"));
     try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
@@ -609,7 +607,7 @@ test "startup cleanup recognizes only owned ingress names" {
         var buffer: [64]u8 = undefined;
         try std.testing.expect(isOwnedIngressName(try named_scratch.EvaluatorName.format(&buffer, id)));
     }
-    inline for (.{ "request-", "response-", "response-metadata-", "bash-input-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
+    inline for (.{ "request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
         try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
@@ -650,7 +648,6 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "request-0-1.tmp",
         "response-1-1.tmp",
         "response-metadata-2-1.tmp",
-        "bash-input-3-1.tmp",
         "bash-stdout-3-1.tmp",
         "bash-stderr-3-1.tmp",
         "report-0-1.tmp",

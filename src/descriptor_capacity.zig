@@ -72,8 +72,8 @@ pub fn calculate(
     const clients = try add(ordinary_clients, control_exchanges);
 
     // A model slot owns one request file, two response aliases, and at most
-    // two Happy Eyeballs transport sockets. A running Bash slot owns its
-    // script/two capture files and two parent pipe ends: both are five. Only
+    // two Happy Eyeballs transport sockets: five. A running Bash slot owns its
+    // two capture files and two parent pipe ends: four. Only
     // one serial preparation/spawn/cleanup transition exists. Its largest
     // excess is Bash spawn: two child pipe ends, the two-end exec-error pipe,
     // and Threaded.Io's lazily opened /dev/null. Model preparation (two files
@@ -125,7 +125,7 @@ fn executionPopulation(active_capacity: usize) !ExecutionPopulation {
         .maximum = 0,
     };
     const model_slot = try add(1, try add(2, 2));
-    const bash_slot = try add(3, 2);
+    const bash_slot = try add(2, 2);
     const occupied_slot = @max(model_slot, bash_slot);
     const other_slots = try multiply(active_capacity - 1, occupied_slot);
     const model_full = try multiply(active_capacity, model_slot);
@@ -196,7 +196,7 @@ test "zero execution capacity has no unreachable preparation or spawn population
 test "execution population compares exclusive steady and shared transition overlaps" {
     const population = try executionPopulation(2);
     try std.testing.expectEqual(@as(usize, 10), population.model_full);
-    try std.testing.expectEqual(@as(usize, 10), population.bash_full);
+    try std.testing.expectEqual(@as(usize, 8), population.bash_full);
     try std.testing.expectEqual(@as(usize, 8), population.model_preparation);
     try std.testing.expectEqual(@as(usize, 8), population.bash_preparation);
     try std.testing.expectEqual(@as(usize, 9), population.cleanup);

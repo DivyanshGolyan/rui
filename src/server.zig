@@ -78,7 +78,7 @@ pub const Faults = struct {
     response_import: bool = false,
     response_commit: bool = false,
     bash_preparation: bool = false,
-    bash_preparation_after_script: bool = false,
+    bash_preparation_after_captures: bool = false,
     bash_spawn: bool = false,
     bash_service: bool = false,
     bash_capture_read: bool = false,
@@ -1960,7 +1960,7 @@ fn admitBashAttempt(
         action_binding.attempt_ordinal,
         .{
             .preparation = host.faults.bash_preparation,
-            .preparation_after_script = host.faults.bash_preparation_after_script,
+            .preparation_after_captures = host.faults.bash_preparation_after_captures,
             .spawn = host.faults.bash_spawn,
             .service = host.faults.bash_service,
             .capture_read = host.faults.bash_capture_read,
@@ -2035,7 +2035,12 @@ fn finishBashPreparationFailure(
 ) void {
     const canonical_failure = failure.cause == error.InvalidCanonicalBashDescriptor or
         failure.cause == error.ShortCanonicalRead;
-    if (!canonical_failure) {
+    if (failure.cause == error.BashCommandTooLong) {
+        settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
+            "Bash was not started: the decoded command exceeds {d} bytes. Split long content across several smaller commands.",
+            .{bash.max_command_bytes},
+        ));
+    } else if (!canonical_failure) {
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
     }
     failure.cleanup.cleanup() catch |cleanup_err| {
@@ -5493,7 +5498,7 @@ test "cleanup publication follows complete execution retirement" {
     }
 
     // Exercise the distinct delayed Bash owner with real process/pipe
-    // retirement and charged capture/script resources, not a model stand-in.
+    // retirement and charged capture resources, not a model stand-in.
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
@@ -5583,26 +5588,26 @@ test "cleanup publication follows complete execution retirement" {
     }
     try slot.bash.execution.checkRetired();
     try std.testing.expectEqual(store_module.ActionResolutionCode.succeeded, (try slot.bash.execution.outcome(false)).code);
-    // Eight command bytes and one captured stdout byte remain owned.
-    try std.testing.expectEqual(@as(u64, 9), used.load(.acquire));
+    // One captured stdout byte remains owned.
+    try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     boundary.token = token;
     boundary.observed = false;
     var gate_path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     host.faults.bash_cleanup_gate_path = try std.fmt.bufPrint(&gate_path_buffer, "{s}/released-gate", .{root});
     // A released gate grants one reclamation transition, even if removal
-    // fails repeatedly. The same charged script and custody survive retry.
-    slot.bash.execution.script.cleanup_fault = .persistent;
+    // fails repeatedly. The same charged capture and custody survive retry.
+    slot.bash.execution.stdout_capture.cleanup_fault = .persistent;
     boundary.release_expected = true;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
     try std.testing.expect(!boundary.observed);
-    try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     try checkSlotCustodyAgreement(@as([*]const ExecutionSlot, @ptrCast(&slot))[0..1], &host.custody);
     try std.testing.expect(!reclaimBash(&host, &slot, deadline));
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
-    try std.testing.expectEqual(@as(u64, 8), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), used.load(.acquire));
     try host.custody.checkDetachedAction(token, binding);
-    slot.bash.execution.script.cleanup_fault = .none;
+    slot.bash.execution.stdout_capture.cleanup_fault = .none;
     try std.testing.expect(reclaimBash(&host, &slot, deadline));
     try std.testing.expect(boundary.observed);
     try std.testing.expectEqual(@as(usize, 1), boundary.releases);
@@ -7596,7 +7601,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             } };
             const binding = try host.custody.attachAction(token, &permit);
             const file = try tmp.dir.createFile(std.testing.io, "suppressed-bash", .{});
-            try file.writeStreamingAll(std.testing.io, "exit 0\n");
+            try file.writeStreamingAll(std.testing.io, "output\n");
             var name: protocol.Bounded(96) = .{};
             try name.set("suppressed-bash");
             host.scratch_used.store(7, .release);
@@ -7614,7 +7619,8 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .bash_path = undefined, // Native construction must not run.
                 .timeout_ms = 1,
                 .faults = .{},
-                .script = .{
+                .command = try std.testing.allocator.dupe(u8, "exit 0"),
+                .stdout_capture = .{
                     .io = std.testing.io,
                     .file = file,
                     .name = name,
@@ -7622,7 +7628,6 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                     .budget = .{ .used = &host.scratch_used, .limit = 7 },
                     .cleanup_fault = if (fail_cleanup) .gated else .none,
                 },
-                .stdout_capture = null,
                 .stderr_capture = null,
             };
             var slots = [_]ExecutionSlot{.{ .bash_preparing = .{
@@ -7631,12 +7636,13 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             } }};
             @field(host, flag).store(true, .release);
             launchPreparedBash(&host, &slots[0], token, binding, &prepared);
-            try std.testing.expect(prepared.script == null);
+            try std.testing.expect(prepared.stdout_capture == null);
+            try std.testing.expectEqual(@as(usize, 0), prepared.command.len);
             // A retained cleanup fence must not become an effect shutdown.
             try std.testing.expectEqual(std.mem.eql(u8, flag, "effect_shutdown"), host.effect_shutdown.load(.acquire));
             if (fail_cleanup) {
                 try std.testing.expect(slots[0] == .bash_prepared_cleanup);
-                try std.testing.expect(slots[0].bash_prepared_cleanup.cleanup.script.?.file == null);
+                try std.testing.expect(slots[0].bash_prepared_cleanup.cleanup.stdout_capture.?.file == null);
                 try std.testing.expectEqual(@as(usize, 1), host.custody.occupied());
                 try std.testing.expectEqual(@as(u64, 7), host.scratch_used.load(.acquire));
                 try tmp.dir.deleteFile(std.testing.io, bash.fault_gate_name);

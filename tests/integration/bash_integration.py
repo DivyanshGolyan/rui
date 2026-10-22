@@ -441,7 +441,9 @@ def prove_reused_session(state):
             "session", "inspect", "--store", store, "--session", "direct/reuse"
         )["execution"]
         assert int(delayed["custody_occupied"]) >= len(actions_by_ordinal), delayed
-        assert int(delayed["scratch_used_bytes"]) > 0, delayed
+        # Both commands write only files: delayed cleanup holds custody over
+        # empty captures, and the command itself never reaches scratch.
+        assert delayed["scratch_used_bytes"] == "0", delayed
 
         fixture.message(
             state,
@@ -882,6 +884,16 @@ def main():
     )
     rollback_marker = state / "rollback-marker"
     add_exchange(responses, "rollback", f"printf x >> {rollback_marker}")
+    # The limit counts decoded UTF-8 bytes: each "é" is two command bytes,
+    # six JSON bytes and one character.
+    command_limit = 120 * 1024
+    over_limit_marker = state / "over-limit-marker"
+    limit_prefix = f"printf at-limit; printf x >> {over_limit_marker} #"
+    limit_padding = command_limit - len(limit_prefix.encode())
+    at_limit_command = limit_prefix + "é" * (limit_padding // 2) + "x" * (limit_padding % 2)
+    assert len(at_limit_command.encode()) == command_limit
+    add_exchange(responses, "at-limit", at_limit_command)
+    add_exchange(responses, "over-limit", at_limit_command + "x")
     unattempted_marker = state / "unattempted-marker"
     responses.append(
         fixture.sse_tool_calls(
@@ -1272,6 +1284,22 @@ def main():
         )
         assert rollback_marker.read_text() == "x"
 
+        for name, expected, text in (
+            ("at-limit", "succeeded", "at-limit"),
+            ("over-limit", "spawn_failed", "Bash was not started: the decoded command exceeds 122880 bytes."),
+        ):
+            configure(state, store, f"{name}-config", f"direct/{name}")
+            fixture.message(state, store, f"{name}-message", f"direct/{name}", "execute")
+            action = fixture.wait_for(lambda: action_for(store, f"direct/{name}"), f"{name} Bash Action")
+            allow(state, store, f"{name}-allow", f"direct/{name}", action["action"])
+            fixture.wait_for(lambda: resolution(store, f"direct/{name}") == expected, f"{name} result")
+            assert text in result_text(store, f"direct/{name}")
+            fixture.wait_for(
+                lambda: fixture.completed_observation(store, f"{name}-message"),
+                f"{name} continuation",
+            )
+        assert over_limit_marker.read_text() == "x"
+
         configure(state, store, "unattempted-config", "direct/unattempted")
         fixture.message(state, store, "unattempted-message", "direct/unattempted", "execute")
         fixture.wait_for(
@@ -1368,7 +1396,10 @@ def main():
         assert host.poll() is None
         before_launch_gate.assert_held()
         named_first_acquisition = sorted((store / "scratch").glob("bash-*-*.tmp"))
-        assert len(named_first_acquisition) >= 3, named_first_acquisition
+        assert {
+            store / "scratch" / f"bash-{stream}-{pending['action']}-1.tmp"
+            for stream in ("stdout", "stderr")
+        } <= set(named_first_acquisition), named_first_acquisition
         assert not before_launch_marker.exists()
         crash = fixture.crash_host(host, state, "before-launch-crash", milestones)
         host = None
@@ -1774,7 +1805,6 @@ def main():
             "cleanup-failure original owner reclamation",
         )
         cleanup_attempt = f"{cleanup_action['action']}-1.tmp"
-        assert not (store / "scratch" / f"bash-input-{cleanup_attempt}").exists()
         assert (store / "scratch" / f"bash-stdout-{cleanup_attempt}").exists()
         assert (store / "scratch" / f"bash-stderr-{cleanup_attempt}").exists()
         fixture.stop_host(host)
@@ -1810,7 +1840,7 @@ def main():
             store,
             endpoint_url,
             "--fault",
-            "bash-preparation-after-script",
+            "bash-preparation-after-captures",
             "--fault",
             "bash-cleanup",
             "--fault",
@@ -1846,10 +1876,14 @@ def main():
                 "session", "inspect", "--store", store, "--session", "direct/preparation-cleanup"
             )["execution"]["custody_occupied"]
         ) > 0
-        assert list((store / "scratch").glob("bash-input-*-1.tmp"))
+        preparation_captures = [
+            store / "scratch" / f"bash-{stream}-{action['action']}-1.tmp"
+            for stream in ("stdout", "stderr")
+        ]
+        assert all(capture.exists() for capture in preparation_captures)
         preparation_cleanup_gate.unlink()
         fixture.wait_for(
-            lambda: not list((store / "scratch").glob("bash-input-*-1.tmp")),
+            lambda: not any(capture.exists() for capture in preparation_captures),
             "preparation cleanup by original owner",
         )
         fixture.wait_for(
@@ -2048,7 +2082,7 @@ def main():
             "SELECT count(*),count(acceptance_position),min(acceptance_position) FROM action_operation "
             "WHERE resolution_code IS NOT NULL AND resolution_content_id IS NOT NULL",
         )[0]
-        assert settled[0] == settled[1] == 27 and settled[2] > 0, settled
+        assert settled[0] == settled[1] == 29 and settled[2] > 0, settled
         print(json.dumps({"bash_resource_samples": resource_samples}, sort_keys=True))
         completed = True
     finally:
