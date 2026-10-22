@@ -1012,6 +1012,19 @@ def command_entry_cases():
         for flags, model in (((), "family=variant"), (("--model", "explicit-model"), "explicit-model")):
             chosen = admit(home, "session", "configure", *flags, cwd=workspace)["admission"]["answer"]["session"]
             assert fixture.command("session", "inspect", "--store", store, "--session", chosen)["session"]["model"] == model, flags
+        # Inside a Session (RUI_ADDRESS), fresh Configure takes the caller's
+        # actual model over the saved pin; an explicit model still wins.
+        caller = {"RUI_ADDRESS": json.dumps({"store": str(pathlib.Path(store).resolve()), "session": chosen})}
+        for flags, model in (((), "explicit-model"), (("--provider", "codex"), "explicit-model"),
+                             (("--model", "family=other"), "family=other")):
+            peer = admit(home, "session", "configure", *flags, cwd=workspace, environment=caller)["admission"]["answer"]["session"]
+            assert fixture.command("session", "inspect", "--store", store, "--session", peer)["session"]["model"] == model, flags
+        before_refusal = set((home / ".config/rui/requests").glob("*.json"))
+        for address in ("not json", json.dumps({"store": str(pathlib.Path(store).resolve()), "session": "missing/caller"})):
+            refused = subprocess.run([str(fixture.RUI), "session", "configure"], cwd=workspace,
+                env={**env, "RUI_ADDRESS": address}, capture_output=True, text=True, timeout=20)
+            assert refused.returncode != 0, refused
+        assert set((home / ".config/rui/requests").glob("*.json")) == before_refusal, "unreadable caller captured a request"
         preferences_file.write_bytes(original_preferences.replace(b"provider=codex", b"provider=retired"))
         records = home / ".config/rui/requests"
         before_refusal = set(records.glob("*.json"))

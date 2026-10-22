@@ -1238,10 +1238,28 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     // the same prospective selection as a new interactive Session. Addressed
     // input remains sparse for the canonical create-or-update owner, without a
     // probe; an unknown address needs its complete first configuration.
+    var caller: new_session_selection.Binding = .{};
     if (input.session == .from_capture_key) {
-        const intent: new_session_selection.Intent = .{
+        var intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
+        };
+        // Inside a Session, inherit its actual binding; an unreadable caller
+        // fails here rather than falling back to saved defaults.
+        if (intent.model == null) if (init.environ_map.get("RUI_ADDRESS")) |text| {
+            var address_buffer: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
+            const address = client.Address.parse(text, &address_buffer) catch |err| {
+                TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was configured.\n", .{});
+                return err;
+            };
+            var buffer: [256]u8 = undefined;
+            var diagnostics = std.Io.File.stderr().writerStreaming(io, &buffer);
+            defer diagnostics.flush() catch {};
+            const report = try inspectWorkTo(init, requester, address.store, address.session, &diagnostics.interface);
+            defer report.file.close(io);
+            try caller.provider.set(@tagName(report.current.settings.provider.value));
+            try caller.model.set(report.current.settings.model.slice());
+            intent = intent.inheriting(&caller);
         };
         const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
