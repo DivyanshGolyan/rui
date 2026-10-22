@@ -132,7 +132,7 @@ test "a peer reference shows a generated ID's distinguishing prefix and caps at 
     try std.testing.expectEqualStrings(family ++ family, peerRef(exact, &buffer));
 }
 
-test "peer Messages render as one dim line each, with size and time in the margin" {
+test "peer Messages render as one dim line each, with time in the margin and `…` when they continue" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -160,24 +160,35 @@ test "peer Messages render as one dim line each, with size and time in the margi
     const S = Mark.summary;
     const N = Mark.sidenote;
     const R = Mark.reset;
-    const just_under_kb: [999]u8 = @splat('x');
-    // Leading blank lines and trailing blanks never show; later lines never do.
+    const preview: [200]u8 = @splat('x');
+    // Leading blank lines and trailing blanks never show; later lines never
+    // do, but a later non-blank one ends the line in `…`. A line ending in
+    // `…` is a collapsed block (`true`), whose Message Ctrl-O opens.
     inline for (.{
-        .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← 9f8e7d · Please review" ++ N ++ "31 B · 08:00" ++ R ++ "\n" },
-        .{ .outbound, "done", "\n" ++ S ++ "→ 9f8e7d · done" ++ N ++ "4 B · 08:00" ++ R ++ "\n" },
-        .{ .inbound, " \n", "\n" ++ S ++ "← 9f8e7d" ++ N ++ "2 B · 08:00" ++ R ++ "\n" },
+        .{ .inbound, "\n  \nPlease review\t \nsecond line", "\n" ++ S ++ "← 9f8e7d · Please review…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "first\n\n \t\n  \nsecond", "\n" ++ S ++ "→ 9f8e7d · first…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "done", "\n" ++ S ++ "→ 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, "done\n \n\t\r\n\n", "\n" ++ S ++ "← 9f8e7d · done" ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, " \n", "\n" ++ S ++ "← 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", false },
         // Peer text cannot draw controls or styles.
-        .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ 9f8e7d · \\x1b[2mx" ++ N ++ "5 B · 08:00" ++ R ++ "\n" },
-        // Under 1000 bytes the size is exact; from there it is in KB.
-        .{ .inbound, &just_under_kb, "\n" ++ S ++ "← 9f8e7d · " ++ just_under_kb[0..200] ++ "…" ++ N ++ "999 B · 08:00" ++ R ++ "\n" },
+        .{ .outbound, "\x1b[2mx", "\n" ++ S ++ "→ 9f8e7d · \\x1b[2mx" ++ N ++ "08:00" ++ R ++ "\n", false },
+        // A whole preview needs no `…`; one byte more does.
+        .{ .inbound, &preview, "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ N ++ "08:00" ++ R ++ "\n", false },
+        .{ .inbound, preview ++ "y", "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .inbound, preview ++ "\ny", "\n" ++ S ++ "← 9f8e7d · " ++ preview ++ "…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        // A line already ending in `…` looks continued, so it opens too.
+        .{ .outbound, "wait…", "\n" ++ S ++ "→ 9f8e7d · wait…" ++ N ++ "08:00" ++ R ++ "\n", true },
+        .{ .outbound, "wait…\nmore", "\n" ++ S ++ "→ 9f8e7d · wait……" ++ N ++ "08:00" ++ R ++ "\n", true },
     }) |case| {
-        var sink: Sink = .{};
-        var line: PeerLine(*Sink) = undefined;
-        try line.init(&sink, case[0], peer, case[1].len);
-        try line.feed(case[1][0..1]);
-        try line.feed(case[1][1..]);
-        try line.finish(1_800_000_000);
-        try std.testing.expectEqualStrings(case[2], sink.bytes[0..sink.length]);
+        for (0..case[1].len + 1) |split| {
+            var sink: Sink = .{};
+            var line: PeerLine(*Sink) = undefined;
+            try line.init(&sink, case[0], peer, case[1].len);
+            try line.feed(case[1][0..split]);
+            try line.feed(case[1][split..]);
+            try std.testing.expectEqual(case[3], try line.finish(1_800_000_000));
+            try std.testing.expectEqualStrings(case[2], sink.bytes[0..sink.length]);
+        }
     }
     // A first line past the preview keeps whole graphemes and says it continues.
     var sink: Sink = .{};
@@ -185,8 +196,16 @@ test "peer Messages render as one dim line each, with size and time in the margi
     const long = comptime repeat("é", 500);
     try line.init(&sink, .inbound, peer, long.len);
     try line.feed(long);
-    try line.finish(1_800_000_000);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← 9f8e7d · " ++ comptime repeat("é", 100) ++ "…" ++ N ++ "1.0 KB · 08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expect(try line.finish(1_800_000_000));
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← 9f8e7d · " ++ comptime repeat("é", 100) ++ "…" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    // Unread bytes are more than the line shows; without a time the margin
+    // stays empty.
+    sink = .{};
+    try line.init(&sink, .inbound, peer, 9000);
+    line.received = 9000;
+    line.phase = .more;
+    try std.testing.expect(try line.finish(std.math.maxInt(u64)));
+    try std.testing.expectEqualStrings("\n" ++ S ++ "← 9f8e7d · …" ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer);
     try std.testing.expectEqualStrings("\n" ++ S ++ "! → 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
@@ -200,8 +219,8 @@ fn trimmed(bytes: []const u8) []const u8 {
 }
 
 /// One peer Message as one upright dim line, never `›`: `← ref · first line`
-/// from a peer, `→ ref · first line` sent to one. Its size and admission
-/// time go in the right margin, size first so a narrow view drops it.
+/// from a peer, `→ ref · first line` sent to one. Its admission time goes in
+/// the right margin. A Message with more than its preview shows ends in `…`.
 /// Initialize in final storage, feed the Message's exact bytes, then finish.
 pub fn PeerLine(comptime Sink: type) type {
     return struct {
@@ -211,8 +230,9 @@ pub fn PeerLine(comptime Sink: type) type {
         received: u64 = 0,
         line: [preview_bytes + 4]u8 = undefined,
         line_bytes: usize = 0,
-        // Before the first non-blank byte, in it, or past its line.
-        phase: enum { leading, first, after } = .leading,
+        // Before the first non-blank byte, in it, past its line, or past a
+        // later non-blank byte. A caller that reads no bytes sets `more`.
+        phase: enum { leading, first, after, more } = .leading,
         longer: bool = false,
 
         pub fn init(self: *Self, sink: Sink, direction: enum { inbound, outbound }, peer: protocol.Peer, length: u64) !void {
@@ -234,7 +254,10 @@ pub fn PeerLine(comptime Sink: type) type {
                 .first => if (byte == '\n') {
                     self.phase = .after;
                 } else self.push(byte),
-                .after => return,
+                .after => if (byte != '\n' and !blank(byte)) {
+                    self.phase = .more;
+                },
+                .more => return,
             };
         }
 
@@ -247,27 +270,26 @@ pub fn PeerLine(comptime Sink: type) type {
             self.line_bytes += 1;
         }
 
-        pub fn finish(self: *Self, admitted_at: u64) anyerror!void {
+        /// Returns whether the line ends in `…`, its own or the preview's:
+        /// the caller notes it as a collapsed block, which Ctrl-O opens.
+        /// `ConversationViewport.collapsed` counts such lines alike.
+        pub fn finish(self: *Self, admitted_at: u64) anyerror!bool {
             if (self.received != self.length) return error.ContentLengthMismatch;
             const kept = trimmed(self.line[0..self.line_bytes]);
-            if (kept.len != 0) {
-                try self.sink.feed(" · ");
-                const cut = if (!self.longer and kept.len <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
-                var escaped: Escaped(Sink) = .{ .sink = self.sink, .text = .{ .mode = .multiline } };
-                try escaped.feed(kept[0..cut]);
-                try escaped.finish();
-                if (cut != kept.len or self.longer) try self.sink.feed("…");
-            }
-            try self.sink.feed(Mark.sidenote);
-            // Short peer Messages are common; "0.0 KB" would say nothing.
-            var size: [24]u8 = undefined;
-            try self.sink.feed(if (self.length < 1000) std.fmt.bufPrint(&size, "{d} B", .{self.length}) catch unreachable else kilobytes(self.length, &size));
+            const cut = if (!self.longer and kept.len <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
+            const continues = self.phase == .more or self.longer or cut != kept.len;
+            if (kept.len != 0 or continues) try self.sink.feed(" · ");
+            var escaped: Escaped(Sink) = .{ .sink = self.sink, .text = .{ .mode = .multiline } };
+            try escaped.feed(kept[0..cut]);
+            try escaped.finish();
+            if (continues) try self.sink.feed("…");
             var buffer: [5]u8 = undefined;
             if (clock(admitted_at, &buffer)) |time| {
-                try self.sink.feed(" · ");
+                try self.sink.feed(Mark.sidenote);
                 try self.sink.feed(time);
             }
             try self.sink.feed(Mark.reset ++ "\n");
+            return continues or std.mem.endsWith(u8, kept, "…");
         }
     };
 }
@@ -428,7 +450,7 @@ fn blank(byte: u8) bool {
 
 /// A user Message's body, fed its exact bytes after `userPrefix`. The view
 /// draws it dim; a long one keeps its first two non-blank lines and a
-/// `┄ N more lines · X KB` row, and trailing blank lines never show. `whole`
+/// `┄ N more lines` row, and trailing blank lines never show. `whole`
 /// (/details) shows every byte. Initialize in final storage.
 pub fn UserBody(comptime Sink: type) type {
     return struct {
@@ -478,14 +500,12 @@ pub fn UserBody(comptime Sink: type) type {
                 if (self.shown != 0) try self.out.feed("\n");
                 try self.out.feed(Mark.summary);
                 var count: [32]u8 = undefined;
-                var size: [24]u8 = undefined;
                 const hidden = self.nonblank - self.shown;
                 try self.out.feed(switch (hidden) {
-                    0 => "┄ ",
-                    1 => "┄ 1 more line · ",
-                    else => std.fmt.bufPrint(&count, "┄ {d} more lines · ", .{hidden}) catch unreachable,
+                    0 => "┄",
+                    1 => "┄ 1 more line",
+                    else => std.fmt.bufPrint(&count, "┄ {d} more lines", .{hidden}) catch unreachable,
                 });
-                try self.out.feed(kilobytes(self.length, &size));
                 collapsed = true;
             }
             try self.out.feed(Mark.reset);
@@ -643,21 +663,21 @@ test "a long user Message shows two non-blank lines and what it hides" {
     for ([_]Case{
         // At every limit: 4 non-blank lines in exactly 1,024 bytes.
         .{ .input = a ++ "\n" ++ a ++ "\n" ++ a ++ "\n" ++ a ++ "a", .output = B ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "a" ++ R },
-        .{ .input = "1\n2\n3\n4\n5", .output = B ++ "1\n  2\n  " ++ S ++ "┄ 3 more lines · 0.0 KB" ++ R },
+        .{ .input = "1\n2\n3\n4\n5", .output = B ++ "1\n  2\n  " ++ S ++ "┄ 3 more lines" ++ R },
         // Twelve lines from the first non-blank to the last fit; thirteen do not.
         .{ .input = "a" ++ six ++ "b" ++ five ++ "c", .output = B ++ "a" ++ six ++ "  b" ++ five ++ "  c" ++ R },
-        .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line · 0.0 KB" ++ R },
+        .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line" ++ R },
         // Leading and trailing blank lines do not count; trailing ones never show.
         .{ .input = twenty ++ "a\n \t\r\n", .output = B ++ twenty ++ "  a" ++ R },
         .{ .input = "a\r\n", .output = B ++ "a\\x0d" ++ R },
         // Long only by its bytes: a cut line counts as shown.
-        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄ 1.0 KB" ++ R },
+        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
         // Cuts count source bytes and never split a grapheme.
-        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
-        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
-        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄ 1.1 KB" ++ R },
+        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
+        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
+        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
         // Preview lines skip blank ones; a large Message streams.
-        .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines · 1.1 KB" ++ R },
+        .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines" ++ R },
         .{ .input = lines, .whole = true, .output = B ++ "line" ++ more ++ R },
     }) |case| {
         for ([_]usize{ 0, 1, case.input.len / 2, case.input.len }) |split| {
@@ -1033,17 +1053,19 @@ pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state")) ?
 /// a transcript's listing alike.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, label: bool, sink: anytype, colour: bool) !void {
     if (label) if (messageLabel(value.state)) |text| try print(sink, "\n! {s}", .{text});
+    const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     if (value.sender) |sender| {
         var line: PeerLine(@TypeOf(sink)) = undefined;
         try line.init(sink, .inbound, sender, value.content.length);
         try content(requests, store, session, item, value.content, &line);
-        return line.finish(value.admitted_at);
+        if (try line.finish(value.admitted_at)) try noteCollapsed(sink, block);
+        return;
     }
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    if (try body.finish()) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user });
+    if (try body.finish()) try noteCollapsed(sink, block);
     try sink.feed("\n");
 }
 
@@ -1356,7 +1378,8 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 var line: PeerLine(@TypeOf(sink)) = undefined;
                 try line.init(sink, .outbound, sent.target, sent.content.length);
                 try content(requests, store, session, item, sent.content, &line);
-                try line.finish(sent.admitted_at);
+                // Conversation pages hold no sent Message, so no row exports it.
+                if (try line.finish(sent.admitted_at)) try noteCollapsed(sink, .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = sent.content, .row = false });
             },
             .send_failed => |failed| {
                 compact_tools.* = false;
