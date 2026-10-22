@@ -410,8 +410,87 @@ def whole_stream_shape(length):
             dispose_page(process, endpoint, worker, 5)
 
 
+def missing_assistant_entries():
+    """Stopped synthetic Store damage must not look like absent public text."""
+    import model_fixture as f
+    from host_process import HostDiagnostics
+
+    session = "direct/message-certificates"
+    items = [{"type": "message", "id": f"message-{index}", "role": "assistant", "phase": phase,
+              "content": [{"type": "output_text", "text": text}]}
+             for index, (phase, text) in enumerate((("commentary", "Shared commentary"),
+                 ("commentary", "Second commentary"), ("final_answer", "Selected answer")))]
+    stream = f.encode_sse([
+        *({"type": "response.output_item.done", "output_index": index, "item": item}
+          for index, item in enumerate(items)),
+        {"type": "response.completed", "response": {"id": "synthetic-certificates", "model": "gpt-6-luna",
+         "status": "completed", "output": items}}])
+    failures = []
+    for fault in ("commentary", "final", "cross-operation"):
+        for route in ("page", "exact", "activity", "full"):
+            with tempfile.TemporaryDirectory(prefix="rui-message-certificates-") as root:
+                state = canonical_fixture_root(root)
+                store = state / "store"
+                endpoint = f.SuccessEndpoint([f.ResponseSpec(stream, {})] * 2)
+                worker = threading.Thread(target=endpoint.serve_forever, daemon=True)
+                process = None
+                try:
+                    worker.start()
+                    process = f.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+                    f.configure(state, store, "configure", session, "gpt-6-luna")
+                    for key in ("first", "second"):
+                        f.message(state, store, key, session, "Synthetic certificate input")
+                        f.wait_for(lambda: (value := f.observe(store, key)).get("result") and value, key + " completion")
+                        assert f.read_result(store, key) == b"Selected answer"
+                    f.wait_for_execution_release(lambda remaining: f.command("session", "inspect", "--store", store,
+                        "--session", session, timeout=remaining)["execution"], time.monotonic() + 10)
+                    f.stop_host(process)
+                    process = None
+                    # No concurrent SQLite owner, FK bypass or live Store writes.
+                    with sqlite3.connect(store / "rui.sqlite3") as database:
+                        rows = database.execute("SELECT session_position,source_operation_id,source_item_ordinal,turn_id,content_id "
+                            "FROM conversation_entry WHERE entry_kind=3 ORDER BY session_position").fetchall()
+                        assert len(rows) == 6 and rows[0][4] == rows[3][4], rows
+                        target = rows[2] if fault == "final" else rows[0]
+                        if fault == "cross-operation":
+                            database.execute("UPDATE conversation_entry SET source_operation_id=?,turn_id=? WHERE session_position=?",
+                                (rows[3][1], rows[3][3], target[0]))
+                        else:
+                            database.execute("DELETE FROM conversation_entry WHERE session_position=?", (target[0],))
+                        assert database.execute("PRAGMA foreign_key_check").fetchall() == []
+                        assert database.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+                    process = f.start_host(store, None)
+                    HostDiagnostics(process)
+                    # A damaged Conversation projection does not replace the
+                    # original admitted Request result, even after reopen.
+                    assert f.read_result(store, "first") == b"Selected answer"
+                    paths = {
+                        "page": ("conversation-page", "conversation_page", dict(end="0", before_position="0", before_ordinal="0")),
+                        "exact": ("conversation-content", "conversation_content", dict(position=str(target[0]), ordinal="0", start="0")),
+                        "activity": ("activity-page", "activity_page", dict(end=None, position="0", ordinal=None, direction="forward")),
+                        "full": ("inspect-session", "inspect_session", dict(profile="full")),
+                    }
+                    path, kind, fields = paths[route]
+                    head, body = request(process.rui_ready_fields["socket"], store, "/v1/" + path, kind, session, **fields)
+                    fenced = head.startswith(b"HTTP/1.1 500 ") and json.loads(body).get("code") == "canonical_store_failure"
+                    print(f"message certificate {fault}/{route}: {head.splitlines()[0].decode()}", flush=True)
+                    if not fenced:
+                        failures.append((fault, route, head, body))
+                    else:
+                        assert process.wait(timeout=5) == 1, "canonical corruption did not shut down Host"
+                except BaseException:
+                    if process is not None:
+                        print(f"message certificate {fault}/{route}: Host exit={process.poll()} "
+                              f"diagnostics={process.rui_diagnostics.tail()!r}", flush=True)
+                    raise
+                finally:
+                    dispose_page(process, endpoint, worker, 5)
+    assert not failures, failures
+
+
 if __name__ == "__main__":
     main()
     projected_ranges()
+    missing_assistant_entries()
     for size in (0, 1, 4095, 4096, 8192, 8193, 131073):
         whole_stream_shape(size)

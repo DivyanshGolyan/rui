@@ -2578,6 +2578,8 @@ pub const Store = struct {
             }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| try self.peerLocked(sender) else null, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
+        const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
+        try self.validateAssistantEntries(request.session.slice(), if (page.more) page.items[page.count - 1].position else 0, upper);
         return page;
     }
 
@@ -2597,15 +2599,40 @@ pub const Store = struct {
         return .{ .store = self, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest }, .representation = if (try self.contentIsRaw(content.id, content.metadata.length)) .raw else .{ .projection = .{} } };
     }
 
+    // Accepted assistant messages require entries even when a damaged entry
+    // would disappear from an inventory rooted in conversation_entry. Inspect
+    // only the requested position interval through the existing history index.
+    // Compaction messages deliberately have no Conversation certificate.
+    fn validateAssistantEntries(self: *Store, session: []const u8, lower: u64, upper: u64) !void {
+        if (lower > upper) return;
+        const statement = try prepare(self.database, "SELECT 1 FROM model_output_item item JOIN model_operation op ON op.operation_id=item.operation_id " ++
+            "LEFT JOIN conversation_entry e ON e.session_ref=item.session_ref AND e.session_position=item.session_position " ++
+            "WHERE item.session_ref=?1 AND item.session_position BETWEEN ?2 AND ?3 AND item.item_kind=2 " ++
+            "AND op.purpose=0 AND " ++ resolutionIn("op.resolution_code", &turn_policy.accepted) ++
+            " AND CASE WHEN e.entry_kind=3 AND e.source_operation_id=item.operation_id AND e.source_item_ordinal=item.item_ordinal " ++
+            "AND e.content_id=item.message_content_id AND e.turn_id=op.turn_id AND op.session_ref=item.session_ref " ++
+            "AND item.attempt_ordinal=op.attempt_ordinal THEN 0 ELSE 1 END=1 LIMIT 1");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, session);
+        try bindU64(statement, 2, lower);
+        try bindU64(statement, 3, upper);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => {},
+            c.SQLITE_ROW => return error.CorruptStore,
+            else => return error.ConversationReadFailed,
+        }
+    }
+
     // A cursor and a byte reader resolve the same public identity and exposed
     // metadata. Neither may accept a private or absent canonical result.
     fn publicConversationContentLocked(self: *Store, session: []const u8, position: u64, ordinal: u64) !struct { id: i64, metadata: ContentMetadata, tool_operation: ?u64, admitted_at: ?u64, sender: ?protocol.Bounded(protocol.max_session_bytes) = null } {
+        if (ordinal == 0) try self.validateAssistantEntries(session, position, position);
         // One indexed ordinary identity owns provenance for pages, cursors and
         // bytes. LEFT JOIN retains damage instead of hiding dependencies.
         const statement = try prepare(self.database, if (ordinal == 0)
             "SELECT e.content_id,CASE WHEN c.content_id IS NOT NULL AND c.private=0 AND t.session_ref=e.session_ref AND " ++
                 "((e.entry_kind=1 AND m.session_ref=e.session_ref AND m.turn_id=e.turn_id AND m.content_id=e.content_id) OR " ++
-                "(e.entry_kind=3 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
+                "(e.entry_kind=3 AND o.purpose=0 AND o.session_ref=e.session_ref AND o.turn_id=e.turn_id " ++
                 "AND item.item_kind=2 AND item.message_content_id=e.content_id AND item.session_ref=e.session_ref " ++
                 "AND item.session_position=e.session_position AND item.attempt_ordinal=o.attempt_ordinal AND source.private=1 " ++
                 "AND " ++ resolutionIn("o.resolution_code", &turn_policy.accepted) ++ ")) THEN 1 ELSE 0 END," ++
@@ -2807,7 +2834,11 @@ pub const Store = struct {
             page.items[page.count] = (try self.activityItemLocked(request.session.slice(), end, @intCast(position), @intCast(ordinal))).item;
             page.count += 1;
         }
-        const last = if (request.direction == .forward and page.more) page.items[page.count - 1] else null;
+        const boundary = if (page.more) &page.items[page.count - 1] else null;
+        const lower = if (request.direction == .forward) request.position + 1 else if (boundary) |item| item.position else 0;
+        const upper = if (request.direction == .forward) (if (boundary) |item| item.position else end) else if (request.position == 0) end else @min(end, request.position - @intFromBool((request.ordinal orelse 0) == 0));
+        try self.validateAssistantEntries(request.session.slice(), lower, upper);
+        const last = if (request.direction == .forward) boundary else null;
         page.call_activity = try self.readCallActivityLocked(request.session.slice(), if (last) |item| item.position else end, if (last) |item| item.ordinal else null);
         // Work as of this same read, so the footer, consent and first Action
         // always describe the page they arrive with.
@@ -2923,6 +2954,7 @@ pub const Store = struct {
     const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
 
     fn activityItemLocked(self: *Store, session: []const u8, end: u64, position: u64, ordinal: u64) !ActivityIdentity {
+        if (ordinal == 0 and position <= end) try self.validateAssistantEntries(session, position, position);
         const statement = try prepare(self.database, activity_sql ++ "SELECT kind,id FROM activity WHERE position=?3 AND ordinal=?4 AND position<=?2");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session);
@@ -3886,6 +3918,7 @@ pub const Store = struct {
     }
 
     fn appendConversation(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
+        try self.validateAssistantEntries(session_ref, 0, std.math.maxInt(i64));
         const statement = try prepare(
             self.database,
             "SELECT entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,content_id " ++
@@ -3901,6 +3934,7 @@ pub const Store = struct {
             const turn_id = c.sqlite3_column_int64(statement, 3);
             const content_id = c.sqlite3_column_int64(statement, 7);
             if (ordinal <= 0 or position <= 0 or kind < 1 or kind > 3 or turn_id <= 0 or content_id <= 0) return error.CorruptStore;
+            if (kind != 2 and (try self.publicConversationContentLocked(session_ref, @intCast(position), 0)).id != content_id) return error.CorruptStore;
             try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{ ordinal, position, switch (kind) {
                 1 => "message",
                 2 => "settings",
@@ -13649,6 +13683,7 @@ pub fn testingPublicProjection(
 
 test "public assistant message provenance binds the exact accepted item" {
     const faults = [_][:0]const u8{
+        "DELETE FROM conversation_entry WHERE entry_kind=3",
         "UPDATE conversation_entry SET source_item_ordinal=source_item_ordinal+1 WHERE entry_kind=3",
         "UPDATE conversation_entry SET content_id=(SELECT content_id FROM conversation_entry WHERE entry_kind=1) WHERE entry_kind=3",
         "UPDATE model_output_item SET message_content_id=NULL WHERE item_kind=2",
@@ -13656,7 +13691,7 @@ test "public assistant message provenance binds the exact accepted item" {
         "UPDATE content SET private=0 WHERE content_id=(SELECT content_id FROM model_output_item WHERE item_kind=2)",
     };
     for (faults) |fault| {
-        for ([_]bool{ false, true }) |bytes| {
+        for ([_]enum { page, bytes, activity, activity_bytes, full }{ .page, .bytes, .activity, .activity_bytes, .full }) |route| {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage = try testingStore(&tmp, std.testing.io);
@@ -13666,13 +13701,85 @@ test "public assistant message provenance binds the exact accepted item" {
             try exec(storage.database, fault);
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
             try exec(storage.database, "PRAGMA foreign_keys=ON");
-            if (bytes) {
-                try std.testing.expectError(error.CorruptStore, storage.openPublicConversationContent(request));
-            } else {
-                try std.testing.expectError(error.CorruptStore, storage.publicConversationPage(.{ .session = request.session }));
-            }
+            try storage.close();
+            storage = try testingStore(&tmp, std.testing.io);
+            const result: anyerror!void = switch (route) {
+                .page => if (storage.publicConversationPage(.{ .session = request.session })) |_| {} else |err| err,
+                .bytes => if (storage.openPublicConversationContent(request)) |reader| blk: {
+                    var owned = reader;
+                    owned.close();
+                    break :blk {};
+                } else |err| err,
+                .activity => if (storage.activityPage(.{ .session = request.session })) |_| {} else |err| err,
+                .activity_bytes => if (storage.openActivityContent(.{ .session = request.session, .position = request.position })) |reader| blk: {
+                    var owned = reader;
+                    owned.close();
+                    break :blk {};
+                } else |err| err,
+                .full => if (testingSessionReportWithProfile(&storage, &tmp, request.session.slice(), 1024 * 1024, .full)) |report| blk: {
+                    std.testing.allocator.free(report);
+                    break :blk {};
+                } else |err| err,
+            };
+            try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
+            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
+    }
+}
+
+test "missing assistant certificates respect page windows and fixed ends" {
+    for ([_]bool{ false, true }) |activity| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const missing = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "answer", .decoded = "answer" }});
+        for (0..20) |index| {
+            var key_buffer: [32]u8 = undefined;
+            const key = try std.fmt.bufPrint(&key_buffer, "later-{d}", .{index});
+            try submitTestMessage(&storage, &tmp, key, key, missing.session.slice(), "later user input");
+        }
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        try exec(storage.database, "DELETE FROM conversation_entry WHERE entry_kind=3");
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try storage.close();
+        storage = try testingStore(&tmp, std.testing.io);
+        // A historical window ending before the damage remains readable.
+        _ = try storage.publicConversationPage(.{ .session = missing.session, .end = missing.position - 1 });
+        _ = try storage.activityPage(.{ .session = missing.session, .end = missing.position - 1 });
+        if (activity) {
+            const latest = try storage.activityPage(.{ .session = missing.session, .direction = .backward });
+            try std.testing.expect(latest.more);
+            var cursor = latest.items[latest.count - 1];
+            while (true) {
+                const older = storage.activityPage(.{
+                    .session = missing.session,
+                    .end = latest.end,
+                    .direction = .backward,
+                    .position = cursor.position,
+                    .ordinal = cursor.ordinal,
+                }) catch |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                };
+                try std.testing.expect(older.more);
+                try std.testing.expect(older.items[older.count - 1].position < cursor.position);
+                cursor = older.items[older.count - 1];
+            }
+        } else {
+            const latest = try storage.publicConversationPage(.{ .session = missing.session });
+            try std.testing.expectEqual(@as(usize, 16), latest.count);
+            try std.testing.expect(latest.more);
+            try std.testing.expectError(error.CorruptStore, storage.publicConversationPage(.{
+                .session = missing.session,
+                .end = latest.end,
+                .before_position = latest.items[latest.count - 1].position,
+                .before_ordinal = latest.items[latest.count - 1].ordinal,
+            }));
+        }
+        try std.testing.expect(storage.isFenced());
     }
 }
 
@@ -15615,6 +15722,20 @@ test "compaction success retains host inputs and ordered anchor suffix across re
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession("direct/compact")).pending_messages);
     try storage.close();
     storage = try testingStore(&tmp, std.testing.io);
+    // Accepted compaction message items remain private, without a required
+    // assistant Conversation entry, across every public inventory on reopen.
+    try std.testing.expectEqual(@as(usize, 1), (try storage.publicConversationPage(request)).count);
+    const activity = try storage.activityPage(.{ .session = request.session });
+    for (activity.items[0..activity.count]) |item| try std.testing.expect(item.value != .assistant);
+    const report = try testingSessionReportWithProfile(&storage, &tmp, "direct/compact", 1024 * 1024, .full);
+    defer std.testing.allocator.free(report);
+    var parsed_report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+    defer parsed_report.deinit();
+    for (parsed_report.value.object.get("full").?.object.get("conversation").?.array.items) |entry|
+        try std.testing.expect(!std.mem.eql(u8, "assistant", entry.object.get("kind").?.string));
+    const compaction_message = try queryU64(storage.database, "SELECT session_position FROM model_output_item WHERE item_kind=2");
+    try std.testing.expectError(error.ContentNotFound, storage.openPublicConversationContent(.{ .session = request.session, .position = compaction_message }));
+    try std.testing.expect(!storage.isFenced());
     const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(compact.turn_id, successor.turn_id);
     try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(successor));
