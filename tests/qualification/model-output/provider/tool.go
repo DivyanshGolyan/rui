@@ -39,6 +39,8 @@ type ToolConfig struct {
 	// workload shell marks itself parked and waits for one released line,
 	// using only bash builtins, so parking adds no process.
 	Barrier string
+	// BarrierWait is the shell's `read -t` bound in seconds; empty means 120.
+	BarrierWait string
 }
 
 func ToolSession(sessions, index int) string {
@@ -73,6 +75,7 @@ type ToolSessionFact struct {
 	DispatchCalls            int          `json:"dispatch_calls"`
 	WorkloadCalls            int          `json:"workload_calls"`
 	Outputs                  []ToolOutput `json:"outputs"`
+	issued                   []toolCall
 }
 
 type ToolSummary struct {
@@ -123,9 +126,6 @@ func timed(command string) string {
 		`; status=$?; printf 'rui-measure-end %s\n' "$EPOCHREALTIME" >&2; exit $status`
 }
 
-// BarrierWait bounds how long a parked shell waits for release.
-const BarrierWait = 120
-
 func (c ToolConfig) workloadCommand(index int) string {
 	command := timed("cat " + shellQuote(c.ReadFile))
 	if c.Workload == "sleep" {
@@ -134,8 +134,12 @@ func (c ToolConfig) workloadCommand(index int) string {
 	if c.Barrier == "" {
 		return command
 	}
-	return fmt.Sprintf(`printf 'rui-measure-park %%s\n' "$EPOCHREALTIME" >&2; : > %s; IFS= read -r -t %d _ <> %s; `,
-		shellQuote(filepath.Join(c.Barrier, fmt.Sprintf("parked-%03d", index))), BarrierWait, shellQuote(filepath.Join(c.Barrier, "release"))) + command
+	wait := c.BarrierWait
+	if wait == "" {
+		wait = "120"
+	}
+	return fmt.Sprintf(`printf 'rui-measure-park %%s\n' "$EPOCHREALTIME" >&2; : > %s; IFS= read -r -t %s _ <> %s || exit 124; `,
+		shellQuote(filepath.Join(c.Barrier, fmt.Sprintf("parked-%03d", index))), wait, shellQuote(filepath.Join(c.Barrier, "release"))) + command
 }
 
 func (c ToolConfig) dispatchCommand(index int) string {
@@ -215,6 +219,77 @@ func parseMarker(seconds, micros string) int64 {
 	return whole*1e9 + fraction*1e3
 }
 
+// validateOutputs requires exactly one output per issued call, in any order,
+// and no other output. A call counts as succeeded only when Bash reported
+// exit 0 and its markers are complete and ordered: park (barrier workload
+// only) <= start <= end. Unissued, duplicate and missing outputs are failures.
+func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) ([]ToolOutput, []string) {
+	var failures []string
+	kinds := map[string]string{}
+	for _, call := range issued {
+		kinds[call.ID] = call.Kind
+	}
+	type outputItem struct {
+		Type   string `json:"type"`
+		CallID string `json:"call_id"`
+		Output string `json:"output"`
+	}
+	items := make([]outputItem, len(input))
+	seen := map[string]int{}
+	for index, raw := range input {
+		_ = json.Unmarshal(raw, &items[index])
+		if items[index].Type == "function_call_output" {
+			seen[items[index].CallID]++
+		}
+	}
+	var rows []ToolOutput
+	for _, item := range items {
+		if item.Type != "function_call_output" {
+			continue
+		}
+		kind, ok := kinds[item.CallID]
+		if !ok {
+			failures = append(failures, "output for unissued call "+item.CallID)
+			continue
+		}
+		row := ToolOutput{CallID: item.CallID, Kind: kind, OutputBytes: len(item.Output)}
+		markers := map[string]int{}
+		for _, match := range shellMarker.FindAllStringSubmatch(item.Output, -1) {
+			markers[match[1]]++
+			switch match[1] {
+			case "park":
+				row.ShellParkNS = parseMarker(match[2], match[3])
+			case "start":
+				row.ShellStartNS = parseMarker(match[2], match[3])
+			default:
+				row.ShellEndNS = parseMarker(match[2], match[3])
+			}
+		}
+		park := barrier && kind == "workload"
+		ordered := markers["start"] == 1 && markers["end"] == 1 && row.ShellStartNS <= row.ShellEndNS &&
+			(!park && markers["park"] == 0 || park && markers["park"] == 1 && row.ShellParkNS <= row.ShellStartNS)
+		if ordered {
+			row.ShellSeconds = float64(row.ShellEndNS-row.ShellStartNS) / 1e9
+		}
+		row.Succeeded = ordered && seen[item.CallID] == 1 && strings.HasPrefix(item.Output, "Bash succeeded. Exit code: 0.")
+		if seen[item.CallID] > 1 {
+			failures = append(failures, fmt.Sprintf("%d outputs for %s", seen[item.CallID], item.CallID))
+		} else if !row.Succeeded {
+			failures = append(failures, fmt.Sprintf("call %s failed or has incomplete markers %v", item.CallID, markers))
+		}
+		rows = append(rows, row)
+	}
+	for _, call := range issued {
+		if seen[call.ID] == 0 {
+			failures = append(failures, "missing output for "+call.ID)
+		}
+	}
+	if len(items) == 0 || items[len(items)-1].Type != "function_call_output" {
+		failures = append(failures, "continuation does not end with a call output")
+	}
+	return rows, failures
+}
+
 func (s *ToolServer) fail(message string) {
 	s.summary.Errors = append(s.summary.Errors, message)
 }
@@ -278,6 +353,7 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		calls = append(calls, toolCall{fmt.Sprintf("tool-%03d-workload", fact.Index), "workload", "Run the measured workload", s.config.workloadCommand(fact.Index)})
+		fact.issued = calls
 		fact.DispatchCalls, fact.WorkloadCalls = len(calls)-1, 1
 		s.summary.DispatchCalls += fact.DispatchCalls
 		s.summary.WorkloadCalls++
@@ -287,46 +363,19 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 		s.summary.Measured++
 		payload = toolCallsSSE(responseID, calls)
 	case 2:
-		outputs := map[string]string{}
-		for _, raw := range request.Input {
-			var item struct {
-				Type   string `json:"type"`
-				CallID string `json:"call_id"`
-				Output string `json:"output"`
-			}
-			if json.Unmarshal(raw, &item) == nil && item.Type == "function_call_output" && strings.HasPrefix(item.CallID, fmt.Sprintf("tool-%03d-", fact.Index)) {
-				outputs[item.CallID] = item.Output
-			}
-		}
-		if last.Type != "function_call_output" || len(outputs) != fact.DispatchCalls+fact.WorkloadCalls {
-			s.fail(fmt.Sprintf("%s: continuation has %d outputs, want %d", session, len(outputs), fact.DispatchCalls+fact.WorkloadCalls))
+		rows, failures := validateOutputs(fact.issued, request.Input, s.config.Barrier != "")
+		for _, failure := range failures {
+			s.fail(session + ": " + failure)
 		}
 		fact.ContinuationRequestBytes, fact.ContinuationReceivedNS = len(body), received
-		for id, output := range outputs {
-			row := ToolOutput{CallID: id, Kind: "workload", OutputBytes: len(output), Succeeded: strings.HasPrefix(output, "Bash succeeded. Exit code: 0.")}
-			if strings.Contains(id, "-dispatch-") {
-				row.Kind = "dispatch"
-			}
-			for _, match := range shellMarker.FindAllStringSubmatch(output, -1) {
-				switch match[1] {
-				case "park":
-					row.ShellParkNS = parseMarker(match[2], match[3])
-				case "start":
-					row.ShellStartNS = parseMarker(match[2], match[3])
-				default:
-					row.ShellEndNS = parseMarker(match[2], match[3])
-				}
-			}
-			if row.ShellStartNS != 0 && row.ShellEndNS != 0 {
-				row.ShellSeconds = float64(row.ShellEndNS-row.ShellStartNS) / 1e9
-			}
+		for _, row := range rows {
 			if row.Succeeded {
 				s.summary.SucceededCalls++
 			} else {
 				s.summary.FailedCalls++
 			}
-			fact.Outputs = append(fact.Outputs, row)
 		}
+		fact.Outputs = append(fact.Outputs, rows...)
 		payload = toolAnswerSSE(responseID, "tool turn complete "+session)
 		s.summary.Done++
 		s.summary.LastDoneNS = received
@@ -339,6 +388,7 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected phase", http.StatusConflict)
 		return
 	}
+	stampCalls := fact.Phase == 1
 	fact.Phase++
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -347,9 +397,10 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, payload)
 	_ = http.NewResponseController(w).Flush()
-	if fact.WorkloadCalls != 0 && fact.CallsSentNS == 0 {
+	if stampCalls {
+		sent := time.Now().UnixNano()
 		s.mu.Lock()
-		fact.CallsSentNS = time.Now().UnixNano()
+		fact.CallsSentNS = sent
 		s.mu.Unlock()
 	}
 }
