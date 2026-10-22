@@ -9,9 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"rui.local/qualification/measurement"
 )
@@ -111,6 +114,48 @@ func TestTimedCommandKeepsFailureStatus(t *testing.T) {
 		t.Fatalf("exit = %v", err)
 	}
 	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 2 || markers[0][1] != "start" || markers[1][1] != "end" {
+		t.Fatalf("markers in %q", stderr.String())
+	}
+}
+
+// A parked workload neither runs nor exits before release, then runs once.
+func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
+	directory := t.TempDir()
+	if err := syscall.Mkfifo(directory+"/release", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := ToolConfig{Sessions: 1, Workload: "read", ReadFile: directory + "/data", Barrier: directory}
+	if err := os.WriteFile(config.ReadFile, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("bash", "-c", config.workloadCommand(4))
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for start := time.Now(); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(directory + "/parked-004"); err == nil {
+			break
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("shell never parked")
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if command.ProcessState != nil || stdout.Len() != 0 {
+		t.Fatalf("workload ran before release: %q", stdout.String())
+	}
+	writer, err := os.OpenFile(directory+"/release", os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.Write([]byte("\n"))
+	if err := command.Wait(); err != nil || stdout.String() != "payload" {
+		t.Fatalf("after release: %v %q", err, stdout.String())
+	}
+	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 3 || markers[0][1] != "park" {
 		t.Fatalf("markers in %q", stderr.String())
 	}
 }

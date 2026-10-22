@@ -35,6 +35,10 @@ type ToolConfig struct {
 	Workspace   string
 	Store       string
 	ArtifactDir string
+	// Barrier, when set, is a directory holding the FIFO `release`. Each
+	// workload shell marks itself parked and waits for one released line,
+	// using only bash builtins, so parking adds no process.
+	Barrier string
 }
 
 func ToolSession(sessions, index int) string {
@@ -49,6 +53,7 @@ type ToolOutput struct {
 	Kind         string  `json:"kind"`
 	Succeeded    bool    `json:"succeeded"`
 	OutputBytes  int     `json:"output_bytes"`
+	ShellParkNS  int64   `json:"shell_park_unix_ns,omitempty"`
 	ShellStartNS int64   `json:"shell_start_unix_ns,omitempty"`
 	ShellEndNS   int64   `json:"shell_end_unix_ns,omitempty"`
 	ShellSeconds float64 `json:"shell_seconds,omitempty"`
@@ -105,7 +110,7 @@ type ToolServer struct {
 	shutdownOnce  sync.Once
 }
 
-var shellMarker = regexp.MustCompile(`rui-measure-(start|end) ([0-9]+)\.([0-9]{6})`)
+var shellMarker = regexp.MustCompile(`rui-measure-(park|start|end) ([0-9]+)\.([0-9]{6})`)
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
@@ -118,11 +123,19 @@ func timed(command string) string {
 		`; status=$?; printf 'rui-measure-end %s\n' "$EPOCHREALTIME" >&2; exit $status`
 }
 
-func (c ToolConfig) workloadCommand() string {
+// BarrierWait bounds how long a parked shell waits for release.
+const BarrierWait = 120
+
+func (c ToolConfig) workloadCommand(index int) string {
+	command := timed("cat " + shellQuote(c.ReadFile))
 	if c.Workload == "sleep" {
-		return timed("sleep 5")
+		command = timed("sleep 5")
 	}
-	return timed("cat " + shellQuote(c.ReadFile))
+	if c.Barrier == "" {
+		return command
+	}
+	return fmt.Sprintf(`printf 'rui-measure-park %%s\n' "$EPOCHREALTIME" >&2; : > %s; IFS= read -r -t %d _ <> %s; `,
+		shellQuote(filepath.Join(c.Barrier, fmt.Sprintf("parked-%03d", index))), BarrierWait, shellQuote(filepath.Join(c.Barrier, "release"))) + command
 }
 
 func (c ToolConfig) dispatchCommand(index int) string {
@@ -264,7 +277,7 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 				calls = append(calls, toolCall{fmt.Sprintf("tool-%03d-dispatch-%03d", fact.Index, worker), "dispatch", "Send work to a worker Session", s.config.dispatchCommand(worker)})
 			}
 		}
-		calls = append(calls, toolCall{fmt.Sprintf("tool-%03d-workload", fact.Index), "workload", "Run the measured workload", s.config.workloadCommand()})
+		calls = append(calls, toolCall{fmt.Sprintf("tool-%03d-workload", fact.Index), "workload", "Run the measured workload", s.config.workloadCommand(fact.Index)})
 		fact.DispatchCalls, fact.WorkloadCalls = len(calls)-1, 1
 		s.summary.DispatchCalls += fact.DispatchCalls
 		s.summary.WorkloadCalls++
@@ -295,9 +308,12 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 				row.Kind = "dispatch"
 			}
 			for _, match := range shellMarker.FindAllStringSubmatch(output, -1) {
-				if match[1] == "start" {
+				switch match[1] {
+				case "park":
+					row.ShellParkNS = parseMarker(match[2], match[3])
+				case "start":
 					row.ShellStartNS = parseMarker(match[2], match[3])
-				} else {
+				default:
 					row.ShellEndNS = parseMarker(match[2], match[3])
 				}
 			}
