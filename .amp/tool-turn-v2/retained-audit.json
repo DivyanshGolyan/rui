@@ -1,0 +1,896 @@
+{
+ "summary": {
+  "runs": 60,
+  "pass": 58,
+  "fail_or_unavailable": [
+   "strace-read-n100",
+   "strace-sleep-n100"
+  ]
+ },
+ "runs": [
+  {
+   "campaign": "campaign",
+   "label": "read-n1-r1",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n1-r2",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n1-r3",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n10-r1",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n10-r2",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n10-r3",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n100-r1",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n100-r2",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "read-n100-r3",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n1-r1",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n1-r2",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n1-r3",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n10-r1",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n10-r2",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n10-r3",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n100-r1",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n100-r2",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "sleep-n100-r3",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "strace-read-n100",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "strace-sleep-n1",
+   "sessions": 1,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "strace-sleep-n10",
+   "sessions": 10,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign",
+   "label": "strace-sleep-n100",
+   "sessions": 100,
+   "barrier": false,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms200-r1",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms200-r2",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms200-r3",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms25-r1",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms25-r2",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n1-ms25-r3",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms200-r1",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms200-r2",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms200-r3",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms25-r1",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms25-r2",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n10-ms25-r3",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms200-r1",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms200-r2",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms200-r3",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms25-r1",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms25-r2",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "read-n100-ms25-r3",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms200-r1",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms200-r2",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms200-r3",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms25-r1",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms25-r2",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n1-ms25-r3",
+   "sessions": 1,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms200-r1",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms200-r2",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms200-r3",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms25-r1",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms25-r2",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n10-ms25-r3",
+   "sessions": 10,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms200-r1",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms200-r2",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms200-r3",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms25-r1",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms25-r2",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "sleep-n100-ms25-r3",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [],
+   "passes_corrected_rules": true
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "strace-read-n100",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [
+    "release {'expected': 100, 'parked_at_release': 53, 'release_unix_ns': 1792647050382850814, 'timed_out': True, 'wait_begin_unix_ns': 1792646990379083351} overlap 53"
+   ],
+   "r3_note": "strace run: overlap 53 of 100, not used for concurrency",
+   "passes_corrected_rules": false
+  },
+  {
+   "campaign": "campaign-v2-v2",
+   "label": "strace-sleep-n100",
+   "sessions": 100,
+   "barrier": true,
+   "recorded_status": "passed",
+   "r1_store_problems": [],
+   "tui_transcript": "not used: cursor-addressed frames split the answer text; the Store reader is authoritative",
+   "r2_problems": [],
+   "r2_unavailable": [
+    "duplicate outputs for one call ID: provider stored outputs in a map, so duplicates were collapsed and cannot be detected retrospectively"
+   ],
+   "r3_problems": [
+    "release {'expected': 100, 'parked_at_release': 52, 'release_unix_ns': 1792647183490761565, 'timed_out': True, 'wait_begin_unix_ns': 1792647123486529194} overlap 54"
+   ],
+   "r3_note": "strace run: overlap 54 of 100, not used for concurrency",
+   "passes_corrected_rules": false
+  }
+ ]
+}
