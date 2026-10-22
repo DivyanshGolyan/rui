@@ -1,0 +1,8 @@
+run_start_utc=2026-10-22T01:16:25Z
+estimate_before_run=1000_SELECT_first_executions_per_second;60000_per_60s_window;no_CPU_claim
+=== RUN   TestP2PostfixHold
+    p2_postfix_hold_test.go:65: /home/user/workspace/repo/.amp/p2/bin/rui-postfix-sql failed: exit status 1; stderr="\nrui: session configure failed; syntax and recovery: rui session configure --help\n\nerror: InsecureRecordDirectory (exit status 1)\n"
+--- FAIL: TestP2PostfixHold (0.04s)
+FAIL
+run_end_utc=2026-10-22T01:16:25Z
+run_exit=1

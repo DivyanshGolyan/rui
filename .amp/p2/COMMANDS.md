@@ -129,3 +129,22 @@ python3 .amp/p2/sql_phase_attribution.py raw/hold-population > .amp/p2/raw/hold-
 ```
 
 The controller log preserves start/end UTC and PASS/exit 0. The reducer reports SELECT and all-statement rates separately, verifies the configured population, zero events, full/free slots, admission exclusion and caller-delta sum. Its default invocation still reproduces the original phase summary unchanged. The first schema-related reduction failure remains explicit; no workload was retried.
+
+## One post-fix main HOLD100 confirmation
+
+Export exact `d4f870002b1eeef370fb8f4c7aa3fd8b14343159` into `.amp/p2/postfix-source`. Apply the retained trace-only patch; do not reuse a product binary from the old baseline. Copy `p2_postfix_hold_test.go.txt` into that export's `tests/qualification/model-output/p2_postfix_hold_test.go`. The exact-main provider and measurement owners remain unchanged. Record base, patched and harness-source hashes before the only held observation; verify them after it.
+
+```sh
+gzip -cd .amp/p2/postfix-sql-instrumentation.patch.gz | git apply --directory=.amp/p2/postfix-source
+# From .amp/p2/postfix-source; build output and exit are retained separately:
+zig build -Doptimize=ReleaseFast -j2 --cache-dir /home/user/workspace/repo/.zig-cache --summary all
+# From repository root:
+cp .amp/p2/postfix-source/zig-out/bin/rui .amp/p2/bin/rui-postfix-sql
+GOTOOLCHAIN=local go -C .amp/p2/postfix-source/tests/qualification test -c -mod=readonly -o /home/user/workspace/repo/.amp/p2/bin/p1-postfix-hold-test ./model-output
+mkdir -m 700 .amp/p2/raw/postfix-hold100-attempt2
+env -u LD_PRELOAD P2_SQL_BINARY="$PWD/.amp/p2/bin/rui-postfix-sql" P2_SQL_DIRECTORY="$PWD/.amp/p2/raw/postfix-hold100-attempt2" .amp/p2/bin/p1-postfix-hold-test -test.run '^TestP2PostfixHold$' -test.v -test.timeout 4m
+gzip -cn .amp/p2/raw/postfix-hold100-attempt2/host-stderr.log > .amp/p2/raw/postfix-hold100-attempt2/host-stderr.log.gz
+python3 .amp/p2/sql_phase_attribution.py raw/postfix-hold100-attempt2 > .amp/p2/raw/postfix-hold100-summary.json
+```
+
+The failed initial copy/build and mode-0755 setup attempt remain separate evidence; the corrected test is the only attempt reaching a held window. Never rerun these commands over the retained directories. SQL callbacks count first executions, not completions or CPU. No HOLD0, natural-wakeup counter, product optimization or REPORT/landing write was added.
