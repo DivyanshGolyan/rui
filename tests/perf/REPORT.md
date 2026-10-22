@@ -24,7 +24,7 @@ All before/after values are **measured**, except the SQL CPU range, which is **e
 - No Mac measurement (footprint, wakeups) and no live 100 × gpt-6-luna wave: the only approved runner, 1993-X2, is offline.
 - SQL polling and the execution-loop polls need an execution Store-commit wake (proposal below, not built); adding a wake alone does not remove the queries.
 - With the SSE fix, other syscalls rose by 3.27M per run, mostly `recvfrom` (+2.48M); cause unknown.
-- Independent audits of P1's SSE CPU artifact and P2's SSE-count and matched-SQL artifacts are pending; they are owner-verified only.
+- Artifact reviews are pending. P2's SSE-count (131 hashes) and matched-SQL (141 hashes) artifacts are owner-verified and queue-reproduced (hashes and reducers), without an independent artifact review. P1's SSE CPU artifact is owner-verified only, with its audit pending. Source correctness review of both fixes is complete.
 - A3 of the SSE CPU A/B was killed by an executor restart and B3 never ran, so that A/B has two pairs, not three.
 
 Details, method, limits and every artifact link follow. Raw data stays on the perf branches listed in each section.
@@ -117,11 +117,11 @@ What the A/B shows (measured, Linux fixture, P1 [`4463e505`](https://github.com/
 | Median of 2 completed pairs (P1) | 96.535 CPU-s | 92.510 CPU-s (−4.17%, descriptive) | same |
 
 Each run, in both studies, is 1,200,000 actual 260-byte events and 200 audited Messages. Notes:
-- The `preadv` drop (−6,004,197) matches the estimate (−6,000,000). Total calls fell less than estimated (−2,729,878, not −6,625,760), because other calls **rose** by 3,274,319, mainly `recvfrom` (+2,482,223). The cause is unknown and is retained as a finding.
+- The measured `preadv` reduction (−6,004,197) matches the estimated reduction (−6,000,000). From the baseline total of 12,625,760 calls, that estimate implied a post-fix total of about 6,625,760 (**estimated**). The measured post-fix total was 9,895,882, a measured total reduction of only 2,729,878, because other calls **rose** by 3,274,319, mainly `recvfrom` (+2,482,223). The cause is unknown and is retained as a finding.
 - P1's paired CPU savings are 5.86 and 2.19 CPU-s. Two pairs give no confidence interval; this is a bounded partial result, not a general CPU speedup.
 - **A3 was interrupted**: P1's journal shows `systemctl` sending SIGTERM to the run's executor scope at 20:36:53 UTC, the same second the Amp process restarted. OOM counters are 0. The restart cause is unknown. A3 has no result, B3 never started and nothing was retried.
 - P1 did not serialize the complete-work initial CPU endpoint, so independent delta subtraction is unavailable. All canonical results are exit 1 (`incomplete`, missing Mac footprint only), and pacing diagnostics mark every stream timing-invalid in both studies.
-- P2's counts come from a traced binary (`8c3add2e…c123c6`) and P1's CPU from an untraced one (`c7f0becc…db32`), so the two are kept separate. P2's 131-hash export and P1's 149-entry manifest are owner-verified; independent audits of both await the same reviewer.
+- P2's counts come from a traced binary (`8c3add2e…c123c6`) and P1's CPU from an untraced one (`c7f0becc…db32`), so the two are kept separate. P2's 131-hash count export is owner-verified and queue-reproduced (hashes and reducers); an independent artifact review is still pending. P1's 149-entry CPU manifest is owner-verified, with its artifact audit pending. These are artifact checks; the source correctness review of `12f84075` is complete (above).
 
 Run history:
 - P1 uses the existing `--capacity 100` complete-work path, with two 60 s rounds and an expected 1.2M events and 200 Messages per run. Only the audited final counts are used. This offers 100 events/s/stream, not the 30/s of the `--sessions` headline runs, so it is not comparable with Headline 1. Order is A/B/A/B/A/B. A is the baseline binary `e2835cb2…3a50`. B is a ReleaseFast build of `12f84075`, built with the same options and caches (42/42 build steps, exit 0), SHA-256 `c7f0becc…db32`. A1 started at 20:23:30 UTC. P1's pre-run estimate (**estimated**, rough extrapolation): A ≈180, B ≈171 CPU-s per run. P2's earlier 42.40 CPU-s from another orb is a separate measurement.
