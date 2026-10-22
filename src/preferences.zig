@@ -370,8 +370,17 @@ test "preference edits distinguish model keep set and clear without publishing r
     try std.testing.expect((try load(home)).model.len == 0);
     const reset = try update(home, .{ .model = .{ .set = "gpt-6-luna" } }, .refresh_required);
     try std.testing.expect(reset.model.eql("gpt-6-luna"));
-    try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = "" } }, .configured));
-    try std.testing.expect((try load(home)).model.eql("gpt-6-luna"));
+    // Syntax accepts unlisted exact IDs; catalog membership is a separate
+    // concern. Invalid edits must leave the complete previous pin unchanged.
+    for ([_][]const u8{ "family=variant", &@as([256]u8, @splat('x')) }) |valid| {
+        const result = try update(home, .{ .model = .{ .set = valid } }, .missing);
+        try std.testing.expectEqualStrings(valid, result.model.slice());
+        try std.testing.expectEqualStrings(valid, (try load(home)).model.slice());
+        for ([_][]const u8{ "", "bad model", "bad\nmodel", "\x7f", "\xc3\xa9", &@as([257]u8, @splat('x')) }) |invalid| {
+            try std.testing.expectError(error.InvalidPreferenceModel, update(home, .{ .model = .{ .set = invalid } }, .configured));
+            try std.testing.expectEqualStrings(valid, (try load(home)).model.slice());
+        }
+    }
 }
 
 test "preference edits persist explicit choices rather than recommendations" {

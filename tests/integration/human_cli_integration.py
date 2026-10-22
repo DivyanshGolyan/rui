@@ -1012,6 +1012,16 @@ def command_entry_cases():
         for flags, model in (((), "family=variant"), (("--model", "explicit-model"), "explicit-model")):
             chosen = admit(home, "session", "configure", *flags, cwd=workspace)["admission"]["answer"]["session"]
             assert fixture.command("session", "inspect", "--store", store, "--session", chosen)["session"]["model"] == model, flags
+        # Peer identity belongs to Message sending, not new-Session defaults.
+        # Even a real caller on another model must not override the saved pin;
+        # Configure neither inspects nor requires a readable caller address.
+        for address in (json.dumps({"store": str(pathlib.Path(store).resolve()), "session": chosen}),
+                        json.dumps({"store": str(pathlib.Path(store).resolve()), "session": "missing/caller"}),
+                        "not json"):
+            for flags, model in (((), "family=variant"), (("--model", "family=other"), "family=other")):
+                peer = admit(home, "session", "configure", *flags, cwd=workspace,
+                    environment={"RUI_ADDRESS": address})["admission"]["answer"]["session"]
+                assert fixture.command("session", "inspect", "--store", store, "--session", peer)["session"]["model"] == model, (address, flags)
         preferences_file.write_bytes(original_preferences.replace(b"provider=codex", b"provider=retired"))
         records = home / ".config/rui/requests"
         before_refusal = set(records.glob("*.json"))
