@@ -2489,6 +2489,7 @@ test "compaction preparation appends request only trigger and replays asymmetric
         .metadata = metadata.file,
         .item_count = result.item_count,
         .call_count = result.call_count,
+        .answer_item_ordinal = result.answer_item_ordinal,
         .answer_length = result.answer_length,
         .answer_digest = result.answer_digest,
         .response_id = result.evidence.response_id,

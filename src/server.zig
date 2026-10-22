@@ -2782,6 +2782,7 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         .metadata = metadata.file,
         .item_count = validated.item_count,
         .call_count = validated.call_count,
+        .answer_item_ordinal = validated.answer_item_ordinal,
         .answer_length = validated.answer_length,
         .answer_digest = validated.answer_digest,
         .response_id = validated.evidence.response_id,

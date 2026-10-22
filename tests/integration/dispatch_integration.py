@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 
-from host_process import HostDiagnostics, PeerCensus, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
+from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, stop_process, wait_for_execution_release
 from model_fixture import (
     ROOT, RUI, FailureEndpoint, ResponseSpec, SuccessEndpoint,
     assert_model_cleanup_census, classification_population, command,
@@ -360,8 +360,150 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
     print(f"Failure correlation ({selected}): exact provider bytes and absence preserved through reopen")
 
 
+def phased_message_cases(state, processes, endpoints):
+    """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
+    def text_item(identity, text, phase):
+        item = {"type": "message", "id": identity, "role": "assistant",
+                "content": [{"type": "output_text", "text": text, "annotations": []}]}
+        if phase is not None:
+            item["phase"] = phase
+        return item
+
+    def response(identity, items):
+        return ResponseSpec(encode_sse([
+            *({"type": "response.output_item.done", "output_index": index, "item": item}
+              for index, item in enumerate(items)),
+            {"type": "response.completed", "response": {"id": identity,
+             "model": "gpt-6-luna", "status": "completed", "output": items}},
+        ]), headers={"OpenAI-Model": "gpt-6-luna"})
+
+    for phased in (True, False):
+        label = "phased" if phased else "unphased"
+        session = f"direct/{label}"
+        store = state / f"{label}-store"
+        commentary = "commentary" if phased else None
+        final = "final_answer" if phased else None
+        forbidden = state / f"{label}-must-not-launch"
+        calls = [
+            {"type": "function_call", "id": f"{label}-bash", "call_id": "first-call", "name": "bash",
+             "arguments": json.dumps({"cmd": f"touch {forbidden}", "timeout_ms": None,
+                                      "description": "Create forbidden marker"}, separators=(",", ":"))},
+            {"type": "function_call", "id": f"{label}-unknown", "call_id": "second-call",
+             "name": "missing-tool", "arguments": "{}"},
+        ]
+        first_items = [text_item("before", "Inspecting files", commentary), calls[0],
+                       text_item("between", "Checking sibling calls", commentary), calls[1],
+                       text_item("after", "Waiting for tool results", commentary)]
+        # Identical visible text in distinct messages deliberately exercises
+        # content dedup without losing exact item provenance.
+        final_items = [text_item("repeated", "Inspecting files", commentary),
+                       text_item("summary", "Tools settled", commentary),
+                       text_item("final", "Canonical answer é", final)]
+        later_items = [text_item("later", "Newer answer", final)]
+        if phased:
+            # An explicit final wins even when later text remains visible.
+            later_items.append(text_item("tail", "After final commentary", commentary))
+        endpoint = SuccessEndpoint([response("tools", first_items), response("answer", final_items),
+                                    response("later", later_items)])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host = start_host(store, url)
+        processes.append(host)
+        configure(state, store, f"{label}-config", session, "gpt-6-luna")
+        key = f"{label}-request"
+        message(state, store, key, session, "Inspect the workspace")
+        report = wait_for(lambda: (value := command("session", "inspect", "--store", store,
+                          "--session", session, "--profile", "full"))["actions"]["unresolved"] and value,
+                          "interleaved Bash permission")
+        action = report["full"]["actions"][0]["action"]
+        command("action", "deny", "--store", store, "--session", session, "--action", action,
+                "--record", state / f"{label}-deny.json", "--key", f"{label}-deny")
+        deadline = time.monotonic() + 10
+        wait_for(lambda: completed_observation(store, key, deadline=deadline),
+                 "phase-selected answer", deadline=deadline)
+        assert read_result(store, key, deadline=deadline) == "Canonical answer é".encode()
+        wait_for_execution_release(lambda remaining: command("session", "inspect", "--store", store,
+                                   "--session", session, timeout=remaining)["execution"], deadline)
+        assert not forbidden.exists(), "denied Bash was launched"
+        replay = json.loads(endpoint.requests[1])["input"]
+        assert replay[1:6] == first_items, replay
+        assert replay[6:] == [
+            {"type": "function_call_output", "call_id": "first-call", "output": "Permission denied."},
+            {"type": "function_call_output", "call_id": "second-call", "output": "Unknown tool: missing-tool."},
+        ], replay
+
+        def public_messages():
+            with sqlite3.connect(store / "rui.sqlite3") as database:
+                rows = database.execute("SELECT e.session_position,e.source_item_ordinal,i.item_ordinal "
+                    "FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id "
+                    "AND i.item_ordinal=e.source_item_ordinal WHERE e.entry_kind=3 ORDER BY e.session_position").fetchall()
+                call_positions = [row[0] for row in database.execute(
+                    "SELECT session_position FROM model_output_item WHERE item_kind=3 ORDER BY session_position")]
+                assert rows[0][0] < call_positions[0] < rows[1][0] < call_positions[1] < rows[2][0], rows
+                assert [row[1:] for row in rows] == [(0, 0), (2, 2), (4, 4), (0, 0), (1, 1), (2, 2)], rows
+            actual = []
+            for position, _, _ in rows:
+                result = subprocess.run([str(RUI), "session", "read-conversation", "--store", str(store),
+                    "--session", session, "--position", str(position), "--ordinal", "0"],
+                    capture_output=True, timeout=10)
+                assert result.returncode == 0, result.stderr
+                actual.append(result.stdout.decode())
+            assert actual == ["Inspecting files", "Checking sibling calls", "Waiting for tool results",
+                              "Inspecting files", "Tools settled", "Canonical answer é"], actual
+
+        public_messages()
+        crash_host(host, state, f"{label}-saved")
+        processes.remove(host)
+        host = start_host(store, url)
+        processes.append(host)
+        assert read_result(store, key) == "Canonical answer é".encode()
+        public_messages()
+        message(state, store, f"{label}-newer", session, "Continue after restart")
+        wait_for(lambda: completed_observation(store, f"{label}-newer"), "newer answer")
+        assert read_result(store, f"{label}-newer") == b"Newer answer"
+        assert read_result(store, key) == "Canonical answer é".encode()
+        restarted = json.loads(endpoint.requests[2])["input"]
+        assert restarted[1:6] == first_items, restarted
+        assert restarted[6:8] == replay[6:], restarted
+        assert restarted[8:11] == final_items, restarted
+        assert restarted[11] == {"role": "user", "content": [
+            {"type": "input_text", "text": "Continue after restart"}]}, restarted
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    bad_items = [text_item("bad-prefix", "Never publish this prefix", "commentary"), calls[0],
+                 text_item("bad-final-one", "First final", "final_answer"),
+                 text_item("bad-final-two", "Second final", "final_answer")]
+    endpoint = SuccessEndpoint([response("duplicate-finals", bad_items)])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints[endpoint] = thread
+    thread.start()
+    store = state / "duplicate-finals-store"
+    host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+    processes.append(host)
+    configure(state, store, "duplicate-finals-config", "direct/bad-finals", "gpt-6-luna")
+    message(state, store, "duplicate-finals", "direct/bad-finals", "Reject the complete candidate")
+    failure = wait_for(lambda: (value := observe(store, "duplicate-finals")).get("result") and value,
+                       "duplicate final rejection")
+    assert failure["result"]["code"] == "malformed_provider_output", failure
+    report = command("session", "inspect", "--store", store, "--session", "direct/bad-finals", "--profile", "full")
+    detail = json.loads(report["full"]["model_operations"][0]["resolution"]["content"]["text"])
+    assert detail["reason"] == "MultipleFinalAnswers" and detail["stage"] == "response", detail
+    with sqlite3.connect(store / "rui.sqlite3") as database:
+        for table in ("model_output_item", "model_tool_call", "action_operation"):
+            assert database.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,), table
+        assert database.execute("SELECT count(*) FROM conversation_entry WHERE entry_kind=3").fetchone() == (0,)
+    assert not forbidden.exists(), "malformed candidate launched Bash"
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+    print("Synthetic gpt-6-luna phase and unphased streams: exact replay, visible order, final result and crash recovery passed")
+
+
 def main(mode="all", correlation_case="all"):
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-dispatch."))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-dispatch."))
     endpoint = FailureEndpoint()
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
@@ -381,6 +523,10 @@ def main(mode="all", correlation_case="all"):
     try:
         if mode == "failure-correlation":
             failure_correlation_cases(state, processes, endpoints, correlation_case)
+            completed = True
+            return
+        phased_message_cases(state, processes, endpoints)
+        if mode == "phased-messages":
             completed = True
             return
         endpoint_thread.start()
@@ -4642,8 +4788,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

@@ -213,7 +213,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Answer and tool-call acceptance](ARCHITECTURE.md#accepting-an-answer-or-tool-calls) | `'Bash descriptions'`, `'complete call outcomes'` | None |
+| [Answer and tool-call acceptance](ARCHITECTURE.md#accepting-an-answer-or-tool-calls) | `'Bash descriptions'`, `'complete call outcomes'`, `'message phases'`, `'synthetic gpt-6-luna shaped'`, `dispatch_integration.py phased-messages` | Synthetic streams, not recovered live captures. Phased and unphased messages interleave calls, select one result, replay exact items and survive Host crash/restart. Duplicate finals and unsupported phases reject |
 | Codex credentials, H2 and cache affinity | `codex-integration`, `codex-credential-integration`, `codex-h2-integration`, `'Codex affinity'` | Synthetic. H2 needs `h2==4.3.0` and is not in `check-full`. Refresh HTTP is unverified |
 | Live Codex journey | `python3 tests/integration/codex_live.py /absolute/path/to/rui --live --model EXACT_MODEL` | Opt-in with authorized credentials. Never a gate |
 | Compaction on context overflow | `'compaction overflow'`, `dispatch-integration`, `human_cli_integration.py` | Synthetic. Live compaction: none located |
@@ -352,7 +352,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Reply delivery inactivity and drain | `'reply delivery'`, `server-delivery-integration`, `PeerCensus` | Run apart from load. Not Mac drain or SIGPIPE |
 | Controls queue behind settlement | `'active model settlement'`, `control_integration.py` | Store hold proves exclusion, not latency. Unordered contention reports unavailable |
 | Control reply bounds | `'exact worst-case'` | Full 128-byte keys. No fixed 8 KiB allowance |
-| [Conversation pages](ARCHITECTURE.md#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `conversation_page_integration.py` | No earlier-prefix authentication or aggregate memory |
+| [Conversation pages](ARCHITECTURE.md#public-conversation-pages) and streaming | `'public'`, `'sequential work'`, `'public assistant message provenance'`, `conversation_page_integration.py` | Exact message item, public projection, Session, Turn and Attempt bindings. No earlier-prefix authentication or aggregate memory |
 | [Proposal reads](ARCHITECTURE.md#historical-proposal-reads) | `proposal-integration` | Not activity chronology. Cannot clear historical Mac reds |
 | [Session activity](ARCHITECTURE.md#public-session-activity) and tool labels | `activity-integration`, `'tool label'` | `RUI_ACTIVITY_MEASURE=1` samples. No latency bound |
 | [Content step faults fence](ARCHITECTURE.md#canonical-content-reads-and-retention) | `'public content SQLite step'` | None |

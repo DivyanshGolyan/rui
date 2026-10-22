@@ -147,6 +147,8 @@ A new named Session needs its Workspace, provider and model; later changes to it
 
 Replace `SAVED_HANDLE` with the handle that `session send` prints on stderr. `session send` returns once the message is admitted, not when the work finishes. `request inspect` reports that message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. To wait, run `request inspect` again later.
 
+The conversation shows commentary and the final answer as separate assistant messages, in provider stream order around tool calls. `request read-result` returns only the final answer. For responses whose messages have no phase, it returns the last assistant message.
+
 If approval is needed, inspect the reported Action ID before allowing it:
 
 ```sh
@@ -184,6 +186,8 @@ If the reply is lost, use the printed retry command. It targets the same Host in
 For foreground operation, use `host serve --store PATH --codex`. It uses the same default capacity; add `--active-capacity N` to choose another, for example `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
 
 ### Start fresh after a Store format change
+
+This build uses Store format 30. Earlier formats are incompatible and are not migrated or reset automatically.
 
 At Host startup, an incompatible build reports the Store path, its format and the format the build supports. Rui does not migrate or reset the Store. You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
 

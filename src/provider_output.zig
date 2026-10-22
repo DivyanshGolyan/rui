@@ -34,6 +34,7 @@ pub const Rejection = struct {
 pub const Validated = struct {
     item_count: u64,
     call_count: u64,
+    answer_item_ordinal: ?u64,
     answer_length: u64,
     answer_digest: [32]u8,
     evidence: Evidence,
@@ -668,6 +669,7 @@ const ItemValidation = struct {
     kind: output_format.OutputItemKind,
     id_digest: [32]u8,
     text_records: u64 = 0,
+    phase: enum { unphased, commentary, final_answer } = .unphased,
 };
 
 fn validateItem(
@@ -731,10 +733,13 @@ fn validateItem(
     var role: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, try fields.required("role"), &role);
     if (!role.eql("assistant")) return error.UnsupportedMessageRole;
+    var message_phase: @FieldType(ItemValidation, "phase") = .unphased;
     if (try fields.get("phase")) |phase_range| {
-        var phase: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, phase_range, &phase);
-        if (!phase.eql("commentary") and !phase.eql("final_answer")) return error.UnsupportedMessagePhase;
+        if (!try rangeEquals(io, file, phase_range, "null")) {
+            var phase: protocol.Bounded(max_evidence_bytes) = .{};
+            _ = try readString(io, file, phase_range, &phase);
+            message_phase = if (phase.eql("commentary")) .commentary else if (phase.eql("final_answer")) .final_answer else return error.UnsupportedMessagePhase;
+        }
     }
     const content = try fields.required("content");
     var array = try Array.init(io, file, content);
@@ -760,7 +765,7 @@ fn validateItem(
         text_records += 1;
     }
     if (text_records == 0) return error.MalformedProviderOutput;
-    return .{ .kind = .message, .id_digest = id_digest, .text_records = text_records };
+    return .{ .kind = .message, .id_digest = id_digest, .text_records = text_records, .phase = message_phase };
 }
 
 /// One sequential compatibility pass. Partial string/number tokens never own
@@ -1002,7 +1007,7 @@ pub const ReplayValidationCursor = struct {
                 }
                 if (!(try frame.requiredString("role", false)).is("assistant")) return error.ContinuationUnavailable;
                 const phase = try frame.get("phase");
-                if (phase.shape != .absent and !phase.is("commentary") and !phase.is("final_answer")) return error.ContinuationUnavailable;
+                if (phase.shape != .absent and phase.shape != .null_value and !phase.is("commentary") and !phase.is("final_answer")) return error.ContinuationUnavailable;
                 const content = try frame.get("content");
                 if (content.shape != .array or content.length == 0) return error.ContinuationUnavailable;
                 if (!content.output) return error.ContinuationUnavailable;
@@ -1531,6 +1536,30 @@ fn knownNonterminal(kind: []const u8) bool {
     return false;
 }
 
+const AnswerSelection = struct {
+    ordinal: ?u64 = null,
+    length: u64 = 0,
+    digest: [32]u8,
+    phased: bool = false,
+    finals: u64 = 0,
+
+    fn accept(self: *AnswerSelection, validation: ItemValidation, ordinal: u64, length: u64, digest: [32]u8) void {
+        if (validation.phase != .unphased) self.phased = true;
+        if (validation.phase == .final_answer) self.finals += 1;
+        if (validation.phase == .final_answer or (!self.phased and validation.phase == .unphased)) {
+            self.ordinal = ordinal;
+            self.length = length;
+            self.digest = digest;
+        } else if (self.phased and self.finals == 0) {
+            // Mixed phased/unphased text is visible, but only an explicit
+            // final can terminate a phased response without Tool Calls.
+            self.ordinal = null;
+            self.length = 0;
+            self.digest = protocol.contentDigest("");
+        }
+    }
+};
+
 fn processEvent(
     io: std.Io,
     file: std.Io.File,
@@ -1539,11 +1568,8 @@ fn processEvent(
     added: *Added,
     completed: *bool,
     item_count: *u64,
-    message_count: *u64,
     call_count: *u64,
-    saw_action: *bool,
-    answer_length: *u64,
-    answer_hash: *std.crypto.hash.sha2.Sha256,
+    answer: *AnswerSelection,
     evidence: *Evidence,
     operation: output_format.ModelOperationKind,
     compaction_count: *u64,
@@ -1569,7 +1595,9 @@ fn processEvent(
         rejection.output_index = index;
         if (index != item_count.*) return error.ContradictoryProviderOutput;
         const item = try fields.required("item");
-        const validation = try validateItem(io, file, item, index, metadata, answer_hash, operation);
+        var message_hash = protocol.contentHasher();
+        const previous_length = metadata.decoded_length;
+        const validation = try validateItem(io, file, item, index, metadata, &message_hash, operation);
         if (added.active and (added.index != index or added.kind != validation.kind or
             !std.mem.eql(u8, &added.id_digest, &validation.id_digest))) return error.ContradictoryProviderOutput;
         added.active = false;
@@ -1578,14 +1606,11 @@ fn processEvent(
             if (compaction_count.* > 1) return error.UnsupportedProviderOutput;
         }
         if (validation.kind == .message) {
-            if (saw_action.*) return error.UnsupportedMessageAfterAction;
-            message_count.* += 1;
+            answer.accept(validation, index, metadata.decoded_length - previous_length, message_hash.finalResult());
         }
         if (validation.kind == .function_call) {
-            saw_action.* = true;
             call_count.* += 1;
         }
-        answer_length.* = metadata.decoded_length;
         try metadata.append(.{
             .tag = .item,
             .kind = validation.kind,
@@ -1604,8 +1629,8 @@ fn processEvent(
         // rejection says which one failed; all share the malformed code.
         if (added.active) return error.UnfinishedProviderOutputItem;
         if (item_count.* == 0) return error.MissingProviderOutputItems;
-        if (operation == .assistant_response and message_count.* > 1) return error.MultipleAssistantMessages;
-        if (operation == .assistant_response and message_count.* == 0 and call_count.* == 0) return error.MissingAssistantAnswer;
+        if (answer.finals > 1) return error.MultipleFinalAnswers;
+        if (operation == .assistant_response and answer.ordinal == null and call_count.* == 0) return error.MissingAssistantAnswer;
         if (operation == .compaction and compaction_count.* != 1) return error.MissingCompactionItem;
         try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
@@ -1658,12 +1683,9 @@ pub fn validate(
     var completed = false;
     var done_marker = false;
     var item_count: u64 = 0;
-    var message_count: u64 = 0;
     var call_count: u64 = 0;
     var compaction_count: u64 = 0;
-    var saw_action = false;
-    var answer_length: u64 = 0;
-    var answer_hash = protocol.contentHasher();
+    var answer: AnswerSelection = .{ .digest = protocol.contentDigest("") };
     var evidence: Evidence = .{};
     var added: Added = .{};
     while (source.offset() < source.end) {
@@ -1702,11 +1724,8 @@ pub fn validate(
                         &added,
                         &completed,
                         &item_count,
-                        &message_count,
                         &call_count,
-                        &saw_action,
-                        &answer_length,
-                        &answer_hash,
+                        &answer,
                         &evidence,
                         operation,
                         &compaction_count,
@@ -1735,12 +1754,13 @@ pub fn validate(
     }
     if (data != null) return error.IncompleteSseEvent;
     if (!completed) return error.IncompleteProviderOutput;
-    if (operation == .assistant_response and answer_length == 0 and call_count == 0) return error.EmptyProviderAnswer;
+    if (operation == .assistant_response and answer.length == 0 and call_count == 0) return error.EmptyProviderAnswer;
     return .{
         .item_count = item_count,
         .call_count = call_count,
-        .answer_length = answer_length,
-        .answer_digest = answer_hash.finalResult(),
+        .answer_item_ordinal = answer.ordinal,
+        .answer_length = answer.length,
+        .answer_digest = answer.digest,
         .evidence = evidence,
     };
 }
@@ -1762,7 +1782,6 @@ pub fn failureCode(err: anyerror) []const u8 {
         error.UnsupportedMessagePhase,
         error.UnsupportedContentBlock,
         error.UnsupportedResponseStatus,
-        error.UnsupportedMessageAfterAction,
         error.UnsupportedEventType,
         => "unsupported_provider_output",
         error.ContinuationUnavailable => "continuation_unavailable",
@@ -1911,6 +1930,62 @@ test "SSE line framing accepts CRLF, field lines and DONE, and rejects malformed
     for (rejected) |case| try std.testing.expectError(case[0], validateTestingSse(&tmp, case[1], 4096));
 }
 
+test "synthetic gpt-6-luna shaped commentary interleaves calls and selects final answer" {
+    // Synthetic contract fixture, not a recovered live provider capture.
+    const before = "{\"type\":\"message\",\"id\":\"before\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Inspecting files\"}]}";
+    const call = "{\"type\":\"function_call\",\"id\":\"call\",\"name\":\"bash\",\"call_id\":\"k\",\"arguments\":\"{}\"}";
+    const between = "{\"type\":\"message\",\"id\":\"between\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Checking results\"}]}";
+    const final = "{\"type\":\"message\",\"id\":\"final\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"Only this answer\"}]}";
+    const stream = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ before ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ call ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":" ++ between ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":3,\"item\":" ++ final ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"synthetic-luna\",\"model\":\"gpt-6-luna\",\"status\":\"completed\",\"output\":[" ++ before ++ "," ++ call ++ "," ++ between ++ "," ++ final ++ "]}}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingSse(&tmp, stream, 64 * 1024);
+    try std.testing.expectEqual(@as(u64, 4), accepted.output.item_count);
+    try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
+    try std.testing.expectEqual(@as(u64, "Only this answer".len), accepted.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("Only this answer"), accepted.output.answer_digest);
+}
+
+test "message phases select one answer without dropping or concatenating text" {
+    const cases = [_]struct { first: []const u8, second: []const u8, answer: ?[]const u8 = null, failure: ?anyerror = null }{
+        .{ .first = "", .second = "", .answer = "second é" },
+        .{ .first = ",\"phase\":null", .second = "", .answer = "second é" },
+        .{ .first = ",\"phase\":\"commentary\"", .second = ",\"phase\":\"final_answer\"", .answer = "second é" },
+        .{ .first = "", .second = ",\"phase\":\"final_answer\"", .answer = "second é" },
+        .{ .first = ",\"phase\":\"final_answer\"", .second = ",\"phase\":\"commentary\"", .answer = "first" },
+        .{ .first = ",\"phase\":\"final_answer\"", .second = "", .answer = "first" },
+        .{ .first = ",\"phase\":\"commentary\"", .second = "", .failure = error.MissingAssistantAnswer },
+        .{ .first = "", .second = ",\"phase\":\"commentary\"", .failure = error.MissingAssistantAnswer },
+        .{ .first = ",\"phase\":\"final_answer\"", .second = ",\"phase\":\"final_answer\"", .failure = error.MultipleFinalAnswers },
+        .{ .first = ",\"phase\":\"analysis\"", .second = "", .failure = error.UnsupportedMessagePhase },
+        .{ .first = ",\"phase\":42", .second = "", .failure = error.ExpectedJsonString },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        const sse = try std.testing.allocator.print(
+            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\"{s},\"content\":[{{\"type\":\"output_text\",\"text\":\"first\"}}]}}}}\n\n" ++
+                "data: {{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{{\"type\":\"message\",\"id\":\"b\",\"role\":\"assistant\"{s},\"content\":[{{\"type\":\"output_text\",\"text\":\"second é\"}}]}}}}\n\n" ++
+                "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}}}\n\n",
+            .{ case.first, case.second },
+        );
+        defer std.testing.allocator.free(sse);
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, validateTestingSse(&tmp, sse, 64 * 1024));
+        } else {
+            const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
+            try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+            try std.testing.expectEqual(@as(u64, case.answer.?.len), accepted.output.answer_length);
+            try std.testing.expectEqual(protocol.contentDigest(case.answer.?), accepted.output.answer_digest);
+            try std.testing.expectEqual(@as(?u64, if (std.mem.eql(u8, case.answer.?, "first")) 0 else 1), accepted.output.answer_item_ordinal);
+        }
+    }
+}
+
 test "completion gate saves which requirement failed at the completed event" {
     const message = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\"}]}";
     const final = "{\"type\":\"message\",\"id\":\"f\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"b\"}]}";
@@ -1922,7 +1997,7 @@ test "completion gate saves which requirement failed at the completed event" {
         .{ error.UnfinishedProviderOutputItem, .assistant_response, done ++ "0,\"item\":" ++ message ++ "}\n\n" ++
             "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":" ++ call ++ "}\n\n" },
         .{ error.MissingProviderOutputItems, .assistant_response, ": keepalive\r\n\r\n" },
-        .{ error.MultipleAssistantMessages, .assistant_response, done ++ "0,\"item\":" ++ message ++ "}\r\n\r\n" ++ done ++ "1,\"item\":" ++ final ++ "}\r\n\r\n" },
+        .{ error.MultipleFinalAnswers, .assistant_response, done ++ "0,\"item\":" ++ final ++ "}\r\n\r\n" ++ done ++ "1,\"item\":" ++ final ++ "}\r\n\r\n" },
         .{ error.MissingAssistantAnswer, .assistant_response, done ++ "0,\"item\":" ++ reasoning ++ "}\n\n" },
         .{ error.MissingCompactionItem, .compaction, done ++ "0,\"item\":" ++ final ++ "}\n\n" },
     };
@@ -2158,10 +2233,12 @@ test "provider preserves ordered trustworthy function call envelopes" {
 
     const message = "{\"type\":\"message\",\"id\":\"message-1\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"late\",\"annotations\":[]}]}";
     const late_message = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ first ++ "}\n\n" ++
-        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ message ++ "}\n\n";
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ message ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"late\",\"status\":\"completed\",\"output\":[]}}\n\n";
     var order_tmp = std.testing.tmpDir(.{});
     defer order_tmp.cleanup();
-    try std.testing.expectError(error.UnsupportedMessageAfterAction, validateTestingSse(&order_tmp, late_message, 64 * 1024));
+    const late = try validateTestingSse(&order_tmp, late_message, 64 * 1024);
+    try std.testing.expectEqual(protocol.contentDigest("late"), late.output.answer_digest);
 }
 
 test "empty terminal output uses complete streamed items but partial terminal output contradicts them" {
