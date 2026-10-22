@@ -10,7 +10,11 @@ const tools = @import("tools.zig");
 
 pub const excerpt_bytes: usize = 10_000;
 pub const copy_window_bytes: usize = 16 * 1024;
-const command_write_window_bytes: usize = 4096;
+/// Bash receives the command as one `-c` argument. Linux rejects an
+/// argument of 128 KiB including its NUL (MAX_ARG_STRLEN with 4 KiB pages),
+/// and with a small stack rlimit the whole argv+environment shares a 128 KiB
+/// floor; 8 KiB stays for the shell path, environment and pointers.
+pub const max_command_bytes: usize = 120 * 1024;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
@@ -79,7 +83,7 @@ pub const LifecycleFault = enum {
 
 pub const Faults = struct {
     preparation: bool = false,
-    preparation_after_script: bool = false,
+    preparation_after_captures: bool = false,
     spawn: bool = false,
     service: bool = false,
     capture_read: bool = false,
@@ -173,14 +177,15 @@ const OwnedFile = struct {
         self.file = null;
     }
 
+    fn injectedCleanupFault(self: *const OwnedFile, scratch_path: []const u8) bool {
+        return self.cleanup_fault == .persistent or
+            (self.cleanup_fault == .gated and faultGateActive(self.io, scratch_path));
+    }
+
     fn cleanup(self: *OwnedFile, scratch_path: []const u8) !void {
         self.close();
         if (self.published) return;
-        if (self.cleanup_fault == .persistent or
-            (self.cleanup_fault == .gated and faultGateActive(self.io, scratch_path)))
-        {
-            return error.InjectedBashCleanupFailure;
-        }
+        if (self.injectedCleanupFault(scratch_path)) return error.InjectedBashCleanupFailure;
         var scratch = try std.Io.Dir.cwd().openDir(self.io, scratch_path, .{});
         defer scratch.close(self.io);
         scratch.deleteFile(self.io, self.name.slice()) catch |err| switch (err) {
@@ -206,45 +211,42 @@ pub const Prepared = struct {
     bash_path: []const u8,
     timeout_ms: u64,
     faults: Faults,
-    script: ?OwnedFile,
+    /// Decoded command, owned through `allocator`, at most max_command_bytes.
+    command: []u8,
     stdout_capture: ?OwnedFile,
     stderr_capture: ?OwnedFile,
 
     pub fn cleanup(self: *Prepared) !void {
-        return cleanupOwnedFiles(
-            self.scratch_path,
-            &self.script,
-            &self.stdout_capture,
-            &self.stderr_capture,
-        );
+        self.releaseCommand();
+        return cleanupOwnedFiles(self.scratch_path, &self.stdout_capture, &self.stderr_capture);
     }
 
     pub fn takeCleanup(self: *Prepared) PreparedCleanup {
+        self.releaseCommand();
         const resources = PreparedCleanup{
             .scratch_path = self.scratch_path,
-            .script = self.script,
             .stdout_capture = self.stdout_capture,
             .stderr_capture = self.stderr_capture,
         };
-        self.script = null;
         self.stdout_capture = null;
         self.stderr_capture = null;
         return resources;
     }
 
+    fn releaseCommand(self: *Prepared) void {
+        self.allocator.free(self.command);
+        self.command = &.{};
+    }
+
+    /// `bash -c` lets Bash replace itself with an eligible final command;
+    /// `$0` is `bash`, so diagnostics read `bash: line N:`.
     pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var child_environment = toolEnvironment(self.allocator, shared_environment, self.store_selector, self.session.slice()) catch return error.BashSpawnFailed;
         defer child_environment.deinit();
-        var script_path_buffer: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
-        const script_path = try std.fmt.bufPrint(
-            &script_path_buffer,
-            "{s}/{s}",
-            .{ self.scratch_path, self.script.?.name.slice() },
-        );
         const started = std.Io.Clock.Timestamp.now(self.io, .awake);
         var child = std.process.spawn(self.io, .{
-            .argv = &.{ self.bash_path, script_path },
+            .argv = &.{ self.bash_path, "-c", self.command, "bash" },
             .cwd = .{ .path = self.workspace.slice() },
             .environ_map = &child_environment,
             .stdin = .ignore,
@@ -252,14 +254,13 @@ pub const Prepared = struct {
             .stderr = .pipe,
             .pgid = 0,
         }) catch return error.BashSpawnFailed;
+        self.releaseCommand();
         const stdout_pipe = child.stdout.?;
         child.stdout = null;
         const stderr_pipe = child.stderr.?;
         child.stderr = null;
-        const script = self.script.?;
         const stdout_capture = self.stdout_capture.?;
         const stderr_capture = self.stderr_capture.?;
-        self.script = null;
         self.stdout_capture = null;
         self.stderr_capture = null;
         return .{
@@ -270,7 +271,6 @@ pub const Prepared = struct {
             .pipes = .init(.{ .stdout = stdout_pipe, .stderr = stderr_pipe }),
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
-            .script = script,
             .scratch_path = self.scratch_path,
             .started = started,
             .timeout_ms = self.timeout_ms,
@@ -281,24 +281,18 @@ pub const Prepared = struct {
 
 pub const PreparedCleanup = struct {
     scratch_path: []const u8,
-    script: ?OwnedFile = null,
     stdout_capture: ?OwnedFile = null,
     stderr_capture: ?OwnedFile = null,
 
     pub fn cleanup(self: *PreparedCleanup) !void {
-        return cleanupOwnedFiles(
-            self.scratch_path,
-            &self.script,
-            &self.stdout_capture,
-            &self.stderr_capture,
-        );
+        return cleanupOwnedFiles(self.scratch_path, &self.stdout_capture, &self.stderr_capture);
     }
 
     /// Test/slow-check aid: no file in this cleanup remains unreclaimed.
     /// Partial success nulls reclaimed slots and retains the rest with
     /// their residual charges; only a complete pass satisfies this.
     pub fn isComplete(self: *const PreparedCleanup) bool {
-        return self.script == null and self.stdout_capture == null and self.stderr_capture == null;
+        return self.stdout_capture == null and self.stderr_capture == null;
     }
 };
 
@@ -320,12 +314,11 @@ pub const PreparationProgress = union(enum) {
 
 fn cleanupOwnedFiles(
     scratch_path: []const u8,
-    script: *?OwnedFile,
     stdout_capture: *?OwnedFile,
     stderr_capture: *?OwnedFile,
 ) !void {
     var first_error: ?anyerror = null;
-    for ([_]*?OwnedFile{ script, stdout_capture, stderr_capture }) |slot| {
+    for ([_]*?OwnedFile{ stdout_capture, stderr_capture }) |slot| {
         if (slot.*) |*file| {
             file.cleanup(scratch_path) catch |err| {
                 if (first_error == null) first_error = err;
@@ -358,7 +351,6 @@ pub const Execution = struct {
     pipes: std.enums.EnumArray(BashLifecycle.Stream, ?std.Io.File),
     stdout_capture: OwnedFile,
     stderr_capture: OwnedFile,
-    script: OwnedFile,
     scratch_path: []const u8,
     started: std.Io.Clock.Timestamp,
     timeout_ms: u64,
@@ -476,7 +468,7 @@ pub const Execution = struct {
     }
 
     /// Test/slow-check aid: the process is gone and both pipes are closed.
-    /// Capture and script cleanup may still remain outstanding; retirement
+    /// Capture cleanup may still remain outstanding; retirement
     /// never claims reclamation. Lets tests verify the precondition
     /// without tripping the reclaim assertion.
     pub fn checkRetired(self: *const Execution) !void {
@@ -522,7 +514,9 @@ pub const Execution = struct {
             // producer aliases before publication makes the names reclaimable.
             self.stdout_capture.close();
             self.stderr_capture.close();
-            self.publishReservedOutput(retention) catch |err| {
+            if (self.stdout_capture.injectedCleanupFault(self.scratch_path)) {
+                first_error = error.InjectedBashCleanupFailure;
+            } else self.publishReservedOutput(retention) catch |err| {
                 first_error = err;
             };
         } else {
@@ -533,9 +527,6 @@ pub const Execution = struct {
                 first_error = err;
             };
         }
-        self.script.cleanup(self.scratch_path) catch |err| {
-            if (first_error == null) first_error = err;
-        };
         if (first_error) |err| return err;
     }
 
@@ -858,8 +849,7 @@ pub const Preparation = struct {
     source: ContentSource,
     parser: tools.BashParser = .{},
     cleanup: PreparedCleanup,
-    command_buffer: [command_write_window_bytes]u8 = undefined,
-    command_length: usize = 0,
+    command: std.ArrayList(u8) = .empty,
 
     pub fn advance(self: *Preparation) PreparationProgress {
         var writer = PreparationWriter{ .owner = self };
@@ -871,27 +861,7 @@ pub const Preparation = struct {
             .invalid => return self.fail(error.InvalidCanonicalBashDescriptor),
             .complete => {},
         }
-        self.flushCommand() catch |err| return self.fail(err);
-        self.cleanup.script.?.file.?.sync(self.io) catch |err| return self.fail(err);
-        const cleanup_fault = cleanupFault(self.faults);
-        self.cleanup.stdout_capture = createOwnedFile(
-            self.io,
-            self.scratch_path,
-            self.cleanup.script.?.budget,
-            "bash-stdout",
-            self.action_id,
-            self.attempt_ordinal,
-            cleanup_fault,
-        ) catch |err| return self.fail(err);
-        self.cleanup.stderr_capture = createOwnedFile(
-            self.io,
-            self.scratch_path,
-            self.cleanup.script.?.budget,
-            "bash-stderr",
-            self.action_id,
-            self.attempt_ordinal,
-            cleanup_fault,
-        ) catch |err| return self.fail(err);
+        const command = self.command.toOwnedSlice(self.allocator) catch |err| return self.fail(err);
         self.source.reader.close();
         const cleanup = self.takeCleanup();
         return .{ .prepared = .{
@@ -904,7 +874,7 @@ pub const Preparation = struct {
             .bash_path = self.bash_path,
             .timeout_ms = self.timeout_ms,
             .faults = self.faults,
-            .script = cleanup.script,
+            .command = command,
             .stdout_capture = cleanup.stdout_capture,
             .stderr_capture = cleanup.stderr_capture,
         } };
@@ -921,18 +891,11 @@ pub const Preparation = struct {
     }
 
     fn takeCleanup(self: *Preparation) PreparedCleanup {
+        self.command.deinit(self.allocator);
+        self.command = .empty;
         const cleanup = self.cleanup;
         self.cleanup = .{ .scratch_path = self.scratch_path };
         return cleanup;
-    }
-
-    fn flushCommand(self: *Preparation) !void {
-        if (self.command_length == 0) return;
-        const script = &self.cleanup.script.?;
-        if (!script.budget.allocate(self.command_length)) return error.ScratchCapacityExhausted;
-        script.charged += self.command_length;
-        try script.file.?.writeStreamingAll(self.io, self.command_buffer[0..self.command_length]);
-        self.command_length = 0;
     }
 };
 
@@ -940,20 +903,13 @@ const PreparationWriter = struct {
     owner: *Preparation,
 
     pub fn writeAll(self: *PreparationWriter, bytes: []const u8) !void {
-        var remaining = bytes;
-        while (remaining.len != 0) {
-            const count = @min(remaining.len, self.owner.command_buffer.len - self.owner.command_length);
-            @memcpy(
-                self.owner.command_buffer[self.owner.command_length..][0..count],
-                remaining[0..count],
-            );
-            self.owner.command_length += count;
-            remaining = remaining[count..];
-            if (self.owner.command_length == self.owner.command_buffer.len) try self.owner.flushCommand();
-        }
+        const command = &self.owner.command;
+        if (bytes.len > max_command_bytes - command.items.len) return error.BashCommandTooLong;
+        try command.appendSlice(self.owner.allocator, bytes);
     }
 };
 
+/// Creates both output captures, then decodes the command in memory.
 pub fn startPreparation(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -976,19 +932,16 @@ pub fn startPreparation(
         owned_reader.close();
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
-    cleanup.script = createOwnedFile(
-        io,
-        scratch_path,
-        budget,
-        "bash-input",
-        action_id,
-        attempt_ordinal,
-        cleanupFault(faults),
-    ) catch |err| {
-        owned_reader.close();
-        return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
-    };
-    if (faults.preparation_after_script) {
+    for ([_]struct { *?OwnedFile, []const u8 }{
+        .{ &cleanup.stdout_capture, "bash-stdout" },
+        .{ &cleanup.stderr_capture, "bash-stderr" },
+    }) |capture| {
+        capture[0].* = createOwnedFile(io, scratch_path, budget, capture[1], action_id, attempt_ordinal, cleanupFault(faults)) catch |err| {
+            owned_reader.close();
+            return .{ .failed = .{ .cause = err, .cleanup = cleanup } };
+        };
+    }
+    if (faults.preparation_after_captures) {
         owned_reader.close();
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
@@ -1057,7 +1010,6 @@ fn runningWithDeadline(started: std.Io.Clock.Timestamp, timeout_ms: u64) Executi
         .pipes = .initFill(null),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
-        .script = undefined,
         .scratch_path = "",
         .started = started,
         .timeout_ms = timeout_ms,
@@ -1178,7 +1130,6 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
             }),
             .stdout_capture = undefined,
             .stderr_capture = undefined,
-            .script = undefined,
             .scratch_path = root,
             .started = started,
             .timeout_ms = 100,
@@ -1191,8 +1142,6 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         defer execution.stdout_capture.cleanup(root) catch {};
         execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stderr_capture.cleanup(root) catch {};
-        execution.script = try createOwnedFile(std.testing.io, root, budget, "deadline-script", @backingInt(phase), @intFromBool(observation.cutoff), .none);
-        defer execution.script.cleanup(root) catch {};
         switch (phase) {
             .grace => {
                 execution.leader = 1;
@@ -1253,7 +1202,6 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         .pipes = .init(.{ .stdout = .{ .handle = gone_fds[0], .flags = .{ .nonblocking = false } }, .stderr = null }),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
-        .script = undefined,
         .scratch_path = root,
         .started = started,
         .timeout_ms = 100,
@@ -1265,8 +1213,6 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     defer gone.stdout_capture.cleanup(root) catch {};
     gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stderr", 1, 1, .none);
     defer gone.stderr_capture.cleanup(root) catch {};
-    gone.script = try createOwnedFile(std.testing.io, root, budget, "gone-script", 1, 1, .none);
-    defer gone.script.cleanup(root) catch {};
     var window: [copy_window_bytes]u8 = undefined;
     const gone_result = gone.serviceAt(&window, before, .none);
     try std.testing.expect(gone_result.fault == null);
@@ -1292,8 +1238,8 @@ test "cleanup ownership transfers consume their source" {
     const root = root_buffer[0..root_length];
     const baseline: u64 = 41;
     var used: std.atomic.Value(u64) = .init(baseline);
-    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
-    try std.testing.expect(budget.charge(6));
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 5 };
+    try std.testing.expect(budget.charge(5));
     var prepared = Prepared{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -1304,23 +1250,21 @@ test "cleanup ownership transfers consume their source" {
         .bash_path = "/bin/bash",
         .timeout_ms = 1,
         .faults = .{},
-        .script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none),
+        .command = try std.testing.allocator.dupe(u8, "true"),
         .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
         .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
     };
-    prepared.script.?.charged = 1;
     prepared.stdout_capture.?.charged = 2;
     prepared.stderr_capture.?.charged = 3;
 
     var cleanup = prepared.takeCleanup();
-    try std.testing.expect(prepared.script == null);
+    try std.testing.expectEqual(@as(usize, 0), prepared.command.len);
     try std.testing.expect(prepared.stdout_capture == null);
     try std.testing.expect(prepared.stderr_capture == null);
     try prepared.cleanup();
-    try std.testing.expectEqual(baseline + 6, used.load(.acquire));
+    try std.testing.expectEqual(baseline + 5, used.load(.acquire));
 
     try cleanup.cleanup();
-    try std.testing.expect(cleanup.script == null);
     try std.testing.expect(cleanup.stdout_capture == null);
     try std.testing.expect(cleanup.stderr_capture == null);
     try std.testing.expectEqual(baseline, used.load(.acquire));
@@ -1333,27 +1277,23 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const baseline: u64 = 41;
     var used: std.atomic.Value(u64) = .init(baseline);
-    const budget = ScratchBudget{ .used = &used, .limit = baseline + 6 };
-    try std.testing.expect(budget.charge(6));
+    const budget = ScratchBudget{ .used = &used, .limit = baseline + 5 };
+    try std.testing.expect(budget.charge(5));
     // Acquire each file before installing the aggregate guard: a later
     // acquisition failure must not leave earlier files unguarded. The
     // per-file guards live in this block so a successful break transfers
     // sole ownership into the aggregate cleanup owner.
     var cleanup: PreparedCleanup = blk: {
-        var script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none);
-        errdefer script.cleanup(root) catch {};
         var stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .persistent);
         errdefer stdout_capture.cleanup(root) catch {};
         var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
         errdefer stderr_capture.cleanup(root) catch {};
         break :blk .{
             .scratch_path = root,
-            .script = script,
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
         };
     };
-    cleanup.script.?.charged = 1;
     cleanup.stdout_capture.?.charged = 2;
     cleanup.stderr_capture.?.charged = 3;
     var complete = false;
@@ -1366,7 +1306,6 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     // same descriptor set as named-scratch failure: the failed descriptor
     // is already closed here.
     try std.testing.expectError(error.InjectedBashCleanupFailure, cleanup.cleanup());
-    try std.testing.expect(cleanup.script == null);
     try std.testing.expect(cleanup.stdout_capture != null);
     try std.testing.expect(cleanup.stdout_capture.?.file == null);
     try std.testing.expect(cleanup.stderr_capture == null);
@@ -1420,14 +1359,13 @@ test "retired execution is independent of outstanding capture reclamation" {
         .pipes = .initFill(null),
         .stdout_capture = undefined,
         .stderr_capture = undefined,
-        .script = undefined,
         .scratch_path = "",
         .started = started,
         .timeout_ms = 100,
         .faults = .{},
     };
-    // Gone with both pipes closed retires even though capture and script
-    // cleanup remain outstanding.
+    // Gone with both pipes closed retires even though capture cleanup
+    // remains outstanding.
     try std.testing.expect(execution.retired());
     try execution.checkRetired();
     // A closed capture cannot release custody while process/group cleanup is
@@ -1451,11 +1389,11 @@ test "output publication closes producer aliases before making output evictable"
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
-    const budget = ScratchBudget{ .used = &used, .limit = 6 };
+    const budget = ScratchBudget{ .used = &used, .limit = 4 };
     var entries: [2]output_retention.Entry = undefined;
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
-    try std.testing.expect(budget.charge(6));
+    try std.testing.expect(budget.charge(4));
     const started = std.Io.Timestamp.fromNanoseconds(0).withClock(.awake);
     // Acquire each file before installing the execution guard: a later
     // acquisition failure must not leave earlier files unguarded.
@@ -1465,8 +1403,6 @@ test "output publication closes producer aliases before making output evictable"
         errdefer stdout_capture.cleanup(root) catch {};
         var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
         errdefer stderr_capture.cleanup(root) catch {};
-        var script = try createOwnedFile(std.testing.io, root, budget, "script", 1, 1, .none);
-        errdefer script.cleanup(root) catch {};
         execution = .{
             .io = std.testing.io,
             .lifecycle = .{
@@ -1478,7 +1414,6 @@ test "output publication closes producer aliases before making output evictable"
             .pipes = .initFill(null),
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
-            .script = script,
             .scratch_path = root,
             .started = started,
             .timeout_ms = 100,
@@ -1487,19 +1422,17 @@ test "output publication closes producer aliases before making output evictable"
     }
     execution.stdout_capture.charged = 2;
     execution.stderr_capture.charged = 2;
-    execution.script.charged = 2;
     var done = false;
     errdefer if (!done) {
         execution.releaseOutputReservation(&retention);
         execution.stdout_capture.cleanup(root) catch {};
         execution.stderr_capture.cleanup(root) catch {};
-        execution.script.cleanup(root) catch {};
     };
     try execution.checkRetired();
     // Reserving output records entry charges without touching scratch bytes.
     try std.testing.expect(try execution.reserveOutput(&retention));
     try std.testing.expect(execution.output_reservation != null);
-    try std.testing.expectEqual(@as(u64, 6), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 4), used.load(.acquire));
     // The ordering boundary is executable, not just a postcondition:
     // publishing with open producer aliases fails and retains the
     // reservation instead of making output evictable while writable.
