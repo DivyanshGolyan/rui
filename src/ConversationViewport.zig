@@ -104,9 +104,6 @@ const summary_bit: u8 = 1 << 7;
 pub const sidenote_width = 60;
 const sidenote_margin = 7;
 const sidenote_cells = 5;
-/// From this width a peer line's `size · time` sidenote shows its size too.
-pub const size_sidenote_width = 72;
-const sidenote_cells_wide = 16;
 
 fn isSidenote(value: u8) bool {
     return value & (user_bit | summary_bit) == summary_bit;
@@ -311,18 +308,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             };
             // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
-            // A `size · time` sidenote shows whole from `size_sidenote_width`;
-            // narrower, its size goes first and the time alone remains.
-            var cells: u16 = sidenote_cells;
-            if (note) |*range| if (std.mem.lastIndexOf(u8, self.bytes[range.start..range.end], " · ")) |dot| {
-                if (window.width >= size_sidenote_width) {
-                    cells = @intCast(@min(gwidth.gwidth(self.bytes[range.start..range.end], self.width_method), sidenote_cells_wide));
-                } else range.start += dot + " · ".len;
-            };
-            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) cells + sidenote_margin - sidenote_cells else 0;
+            const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
             const body = window.child(.{ .width = window.width - margin });
             if (commit and margin != 0) if (note) |range| {
-                _ = self.printRange(window.child(.{ .x_off = window.width - cells, .y_off = row, .width = cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
+                _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain);
             };
             if (single) {
                 if (commit) {
@@ -486,20 +475,28 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
         }
 
-        /// Where each collapsed user block's summary (`┄`, drawn dim and
-        /// quiet) starts within text bytes `[from, to)`: their count, and the
-        /// last one's offset.
+        /// Where each collapsed block's summary starts within text bytes
+        /// `[from, to)`: a user block's `┄` row, or a peer Message's line
+        /// (`←` or `→`) ending in `…`, both drawn dim and quiet. Returns
+        /// their count, and the last one's offset.
         pub fn collapsed(self: *const Self, from: usize, to: usize) Summaries {
             comptime std.debug.assert(styled);
-            const marker = "┄";
+            const run = user_bit | summary_bit;
             const bytes = self.text();
             var result: Summaries = .{};
             var index = from;
             const end = @min(to, bytes.len);
-            while (std.mem.indexOfPos(u8, bytes[0..end], index, marker)) |found| : (index = found + marker.len) {
-                const run = user_bit | summary_bit;
+            // `┄`, `←` and `→` all start with this byte.
+            while (std.mem.indexOfScalarPos(u8, bytes[0..end], index, 0xe2)) |found| : (index = found + 1) {
                 if (self.styles[found] & run != run) continue;
                 if (found != 0 and self.styles[found - 1] & run == run) continue;
+                const rest = bytes[found..];
+                if (!std.mem.startsWith(u8, rest, "┄")) {
+                    if (!std.mem.startsWith(u8, rest, "← ") and !std.mem.startsWith(u8, rest, "→ ")) continue;
+                    var stop = found;
+                    while (stop < bytes.len and self.styles[stop] & run == run) stop += 1;
+                    if (!std.mem.endsWith(u8, bytes[found..stop], "…")) continue;
+                }
                 result.count += 1;
                 result.last = found;
             }
@@ -759,19 +756,21 @@ test "a sidenote shows in the right margin of its line's first row from 60 colum
     try std.testing.expectEqual(vaxis.Style{}, test_screen.screen.readCell(59, 0).?.style);
 }
 
-test "a peer line keeps one row and drops its size before its time as the view narrows" {
-    const line = "← 9f8e7d · Please review";
+test "a peer line keeps one row with its time in the right margin, as a user block's" {
+    const line = "← 9f8e7d · Please review…";
     const outbound = "→ 9f8e7d · " ++ @as([40]u8, @splat('x'));
     var view: Sized(256, true) = .{ .sidenotes = true };
-    try view.append("\x1b[2;8m" ++ line ++ "\x1b[8m0.3 KB · 08:00\x1b[0m\n\x1b[2;8m" ++ outbound ++ "\x1b[0m");
+    try view.append("\x1b[2;8m" ++ line ++ "\x1b[8m08:00\x1b[0m\n\x1b[2;8m" ++ outbound ++ "\x1b[0m");
     var test_screen: TestScreen = undefined;
     var storage: [256]u8 = undefined;
     const Case = struct { width: u16, rows: [2][]const u8 };
+    // `line` is 25 columns; the time takes the last five.
     for ([_]Case{
-        .{ .width = 80, .rows = .{ line ++ @as([66 - 24]u8, @splat(' ')) ++ "0.3 KB · 08:00", outbound } },
-        .{ .width = 72, .rows = .{ line ++ @as([58 - 24]u8, @splat(' ')) ++ "0.3 KB · 08:00", outbound } },
-        // Below 72 columns the size goes first; the time remains.
-        .{ .width = 64, .rows = .{ line ++ @as([59 - 24]u8, @splat(' ')) ++ "08:00", outbound } },
+        .{ .width = 80, .rows = .{ line ++ @as([75 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
+        .{ .width = 64, .rows = .{ line ++ @as([59 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
+        // From 60 the margin shows; at 50 the 51-column outbound line clips.
+        .{ .width = 60, .rows = .{ line ++ @as([55 - 25]u8, @splat(' ')) ++ "08:00", outbound } },
+        .{ .width = 50, .rows = .{ line, "→ 9f8e7d · " ++ @as([38]u8, @splat('x')) ++ "…" } },
         // Below 60 no margin shows, and a long line ends in `…` on its one row.
         .{ .width = 40, .rows = .{ line, "→ 9f8e7d · " ++ @as([28]u8, @splat('x')) ++ "…" } },
     }) |case| {
@@ -784,6 +783,22 @@ test "a peer line keeps one row and drops its size before its time as the view n
     _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{});
     const style = test_screen.screen.readCell(0, 0).?.style;
     try std.testing.expect(style.dim and !style.italic);
+    // A peer line ending in `…` is a collapsed block for Ctrl-O, like a `┄`
+    // row; the clipping `…` drawn above is not. Nor are a typed arrow, a
+    // failed send, or a `┄` or `…` within a peer line's text.
+    var blocks: Sized(512, true) = .{};
+    try blocks.append("\x1b[2;8m← a · x ┄ y\x1b[8m08:00\x1b[0m\n" ++
+        "\x1b[2;8m→ b · first…\x1b[8m08:00\x1b[0m\n" ++
+        "› \x1b[2m← typed…\x1b[0m\n" ++
+        "\x1b[2;8m! → c — Failed\x1b[0m\n" ++
+        "\x1b[2;8m← d · …x\x1b[0m\n" ++
+        "  \x1b[2;8m┄ 2 more lines\x1b[0m\n" ++
+        "\x1b[2;8m← e · …\x1b[0m\n");
+    const text = blocks.text();
+    const found = blocks.collapsed(0, text.len);
+    try std.testing.expectEqual(@as(usize, 3), found.count);
+    try std.testing.expectEqual(std.mem.indexOf(u8, text, "← e").?, found.last.?);
+    try std.testing.expectEqual(@as(usize, 2), blocks.collapsed(std.mem.indexOf(u8, text, "→ b").? + 1, text.len).count);
 }
 
 test "a peer line's wide last cluster yields to the ellipsis instead of crossing the edge" {
