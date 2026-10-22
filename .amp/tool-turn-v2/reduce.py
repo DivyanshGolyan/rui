@@ -37,41 +37,41 @@ def last(run, name, column):
 
 
 def forks(path):
-    """Host fork (clone return in a Host thread) to the child's execve entry."""
-    text = path.read_text()
-    host_tids, clone_at, exec_at, exec_path = set(), {}, {}, {}
-    pending = {}
-    first_pid = None
-    for line in text.splitlines():
+    """Parent clone ENTRY to the child's first execve ENTRY.
+
+    strace -ttt stamps each line when it starts printing it: a complete line
+    or an `<unfinished ...>` line carries the syscall's entry time, and a
+    `<... resumed>` line carries the return time. A resumed clone takes its
+    entry time from the same thread's preceding unfinished line.
+    """
+    entry_pending, clone_entry, exec_at, exec_path = {}, {}, {}, {}
+    for line in path.read_text().splitlines():
         match = re.match(r"(\d+) +(\d+\.\d+) (.*)", line)
         if not match:
             continue
         tid, at, rest = int(match[1]), float(match[2]), match[3]
-        if rest.startswith("clone(") or rest.startswith("<... clone resumed>"):
+        if rest.startswith("clone(") and rest.endswith("<unfinished ...>"):
+            entry_pending[tid] = at
+        elif rest.startswith("clone(") or rest.startswith("<... clone resumed>"):
             result = re.search(r"= (\d+)$", rest)
-            if rest.endswith("<unfinished ...>"):
-                pending[tid] = True
-                continue
+            entered = entry_pending.pop(tid) if rest.startswith("<...") else at
             if result:
-                clone_at[int(result[1])] = (tid, at)
+                clone_entry[int(result[1])] = entered
         elif rest.startswith("execve("):
             target = re.match(r'execve\("([^"]+)"', rest)
-            exec_at.setdefault(tid, at)
-            exec_path.setdefault(tid, target[1] if target else None)
-    # Host threads are the parents of bash children.
-    rows = []
-    for child, (parent, at) in clone_at.items():
-        if child in exec_at:
-            rows.append({"parent": parent, "child": child, "exec": exec_path[child], "fork_to_exec_seconds": exec_at[child] - at})
-    host_rows = [row for row in rows if row["exec"] == "/bin/bash"]
-    send_rows = [row for row in rows if row["exec"] and row["exec"].endswith("/rui")]
+            if tid not in exec_at:
+                exec_at[tid], exec_path[tid] = at, target[1] if target else None
+    rows = [{"child": child, "exec": exec_path[child], "seconds": exec_at[child] - at}
+            for child, at in clone_entry.items() if child in exec_at]
+    assert all(row["seconds"] >= 0 for row in rows), "clone entry after child execve"
     def stats(values):
         if not values:
             return None
         values = sorted(values)
         return {"count": len(values), "min": values[0], "median": statistics.median(values), "max": values[-1]}
-    return {"host_to_bash": stats([row["fork_to_exec_seconds"] for row in host_rows]),
-            "bash_to_rui_send": stats([row["fork_to_exec_seconds"] for row in send_rows]),
+    return {"method": "parent clone entry to child execve entry, strace -f -ttt (instrumented)",
+            "host_to_bash": stats([r["seconds"] for r in rows if r["exec"] == "/bin/bash"]),
+            "bash_to_rui_send": stats([r["seconds"] for r in rows if r["exec"] and r["exec"].endswith("/rui")]),
             "pairs": len(rows)}
 
 
@@ -123,6 +123,22 @@ for path in sorted(campaign.glob("*.json")):
         "sampling_wall_seconds": run["process_tree"].get("sampling_wall_seconds"),
         "pss_steady_after_per_column": {c: last(run, "idle_after", c) for c in ("host", "bash", "clients", "tui", "send", "total")},
     }
+    # Request phases from raw provider facts, not the harness's 2N label.
+    begin, end = points["before_submit"]["unix_ns"], points["active_end"]["unix_ns"]
+    phases = {}
+    for fact in provider["session_facts"]:
+        for kind, field in (("seed", "seed_received_unix_ns"), ("measured", "measured_received_unix_ns"), ("continuation", "continuation_received_unix_ns")):
+            at = fact[field]
+            phases[kind + "_total"] = phases.get(kind + "_total", 0) + 1
+            phases[kind + "_in_window"] = phases.get(kind + "_in_window", 0) + (begin <= at <= end)
+    n = run["sessions"]
+    assert phases == {"seed_total": n, "seed_in_window": 0, "measured_total": n, "measured_in_window": n, "continuation_total": n, "continuation_in_window": n}, (label, phases)
+    assert provider["requests"] == 3 * n, (label, provider["requests"])
+    in_window = phases["measured_in_window"] + phases["continuation_in_window"]
+    row["model_requests"] = {"campaign_total_provider": provider["requests"], **phases, "cpu_window_denominator": in_window}
+    row["host_cpu_seconds_per_model_request_in_window"] = run["cpu"]["host_self_cpu_seconds"] / in_window
+    row["host_cpu_seconds_per_workload_call"] = run["cpu"]["host_self_cpu_seconds"] / provider["workload_calls"]
+    row["host_cpu_seconds_per_tool_call_incl_dispatch"] = run["cpu"]["host_self_cpu_seconds"] / (provider["workload_calls"] + provider["dispatch_calls"])
     trace = pathlib.Path(run["artifacts"]) / "host-forks.strace"
     if run["instrumented"] and trace.exists():
         row["fork_to_exec"] = forks(trace)

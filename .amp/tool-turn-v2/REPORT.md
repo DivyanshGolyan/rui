@@ -8,11 +8,11 @@
 
 - **Start barrier (bounded).** Each workload shell prints a park timestamp, creates `parked-<i>`, and blocks in `read -t 120` on a FIFO, all bash builtins, so parking adds no process. The controller polls the barrier directory every 5 ms and writes N release lines once all N shells have parked, or after 60 s. **Achieved, every non-strace run: all N parked before release (no timeout), and N of N workload calls overlapped** (from in-shell `$EPOCHREALTIME` start/end markers). This is synchronized, therefore artificial, concurrency: real agents would not start N reads in the same millisecond.
 - **Active-phase sampling at 200 ms or 25 ms**, 3 repeats each, plus **coverage**: processes seen in at least one sample versus processes the turn must create.
-- Unchanged: ~400 KiB history per Session (409,600 B seed; ≈102,400 tokens **estimated** by bytes/4, no tokenizer), exactly one real `rui session resume` TUI on the coordinator, and every `rui session send` is launched by a coordinator Bash call. Per N=100 run: 99 dispatch + 100 workload calls, 199 succeeded, 0 failed, 300 model requests over 1 H2 connection.
+- Unchanged: ~400 KiB history per Session (409,600 B seed; ≈102,400 tokens **estimated** by bytes/4, no tokenizer), exactly one real `rui session resume` TUI on the coordinator, and every `rui session send` is launched by a coordinator Bash call. Per N=100 run: 99 dispatch + 100 workload calls, 199 succeeded, 0 failed, over 1 H2 connection. **Request counts by phase**, derived by [reduce.py](reduce.py) from each run's raw provider facts (`provider.session_facts` received timestamps) against the CPU window (the `before_submit` to `active_end` points): the provider saw 3N requests per run (300 at N=100). N are history seeds, all received **before** the window; N measured-turn requests and N continuations, 2N in total (200 at N=100), all received **inside** it. The reducer asserts this for all 38 v2 and all 22 v1 runs; the harness now also derives and checks it (test `TestToolRequestPhasesUseReceivedTimes`).
 
 ## Results (median of 3 fresh Hosts; Linux PSS from `smaps_rollup`)
 
-Peaks are the **highest observed sample**, not true peaks. Columns are deduplicated: each PID+start time is counted once per sample; sends run under Bash but are counted only as clients.
+Peaks are the **highest observed sample**, not true peaks. Columns are deduplicated: each PID+start time is counted once per sample; sends run under Bash but are counted only as clients. **The Host, Bash and Clients peak columns are each that column's own maximum, which can come from different samples, so they need not sum to the total.** Only "Total, peak sample" is one simultaneous sample.
 
 | Workload, N, interval | In flight | Host PSS idle → peak | Bash peak | Clients peak | Total, peak sample | Host CPU in turn | Observer CPU |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
@@ -29,7 +29,7 @@ The combined realistic case from the brief is the read N=100 row: 100 Sessions w
 
 - **Steady state after the turn (all intervals):** total 17.48–18.20 MB = Host 10.8–11.5 MB + TUI 6.7 MB. Bash 0, sends 0.
 - **Per process (median of each process's max sample, N=100):** workload shell 0.32–0.33 MB; `sleep` 0.10–0.17 MB; `cat` 0.21 MB; `rui session send` 0.74–1.03 MB; TUI 6.7–7.7 MB. At N≤10, shells are 0.41–0.62 MB because PSS divides shared pages among fewer processes.
-- **Host CPU per call (read N=100, 200 ms):** 8.63 s / 100 workload calls = 86 ms; / 199 tool calls including dispatch = 43 ms; / 200 model requests = 43 ms. Sleep N=100: 91 / 46 / 45 ms. These are whole-turn totals divided by counts, not marginal costs.
+- **Host CPU per call (read N=100, 200 ms):** 8.63 s / 100 workload calls = 86 ms; / 199 tool calls including dispatch = 43 ms; / 200 in-window model requests (measured-turn requests plus continuations; the 100 seed requests fall before the window and are excluded) = 43 ms. Sleep N=100: 91 / 46 / 45 ms. Per-run values are in `summary-v2.json` (`host_cpu_seconds_per_model_request_in_window`). These are whole-turn totals divided by counts, not marginal costs.
 - **Read now costs about the same Host CPU as sleep** (8.6 vs 9.1 s at N=100), whereas v1 measured 5.5 vs 9.6 s. With the barrier, read shells stay parked for up to 4.8 s (park-to-start max) before running. This is consistent with Host CPU scaling with how long tool shells stay alive. It is still an aggregate observation; the polling cause is an unprofiled hypothesis.
 - **Reaped descendant CPU** (shells, workload children and sends, inseparable): 0.67–0.71 s at N=100. TUI 0.13–0.16 s.
 - **Dispatch sends still run 2–3 at a time**, 6–8 ms each: the barrier gates only workload calls, and the coordinator's 99 sends are close to serial in this Host.
@@ -47,7 +47,7 @@ The combined realistic case from the brief is the read N=100 row: 100 Sessions w
 
 - At 25 ms, every shell and every parked or running workload child is seen. Sends, which live ≈7–8 ms, remain only 21–37% covered. Observed counts above 100 are subshells that `bash` forks briefly.
 - 25 ms sampling costs 3.6× the observer CPU, but Host CPU moved within run-to-run spread (read 8.69 vs 8.63 s; sleep 8.56 vs 9.06 s). On 2 vCPUs the observer competes for the second core, so a small Host effect cannot be excluded.
-- **Exact peak PSS is not obtained.** Send PSS (0.74–1.03 MB each) is measured only for the sends that were sampled. With 2–3 sends overlapping, the unobserved send contribution to any instant is **estimated** at ≤3 × 1.03 ≈ 3.1 MB.
+- **Exact peak PSS is not obtained.** Send PSS (0.74–1.03 MB each) is measured only for the sends that were sampled. A napkin **estimate**, not a bound: with 2–3 sends overlapping and the largest *sampled* send at 1.03 MB, unsampled sends might add about 3 × 1.03 ≈ 3.1 MB at an instant. Unsampled sends were never measured, so they could be larger, and this does not cap the missing peak memory.
 
 ## Disk and page cache
 
@@ -57,13 +57,21 @@ The combined realistic case from the brief is the read N=100 row: 100 Sessions w
 
 ## Fork-to-exec (instrumented, pending independent review)
 
-Two strace runs (read and sleep N=100) show Host fork to bash `execve` median 0.78–0.80 ms and bash to `rui` send median 0.84–0.92 ms, matching v1 (0.77–0.85 ms). **Method limit:** the start time is the parent's `clone` *return* as strace logs it. One read-run pair is negative (−1.05 ms) because the child exec'd before strace logged the parent's return, so these figures are approximate. strace also cut achieved overlap to 53–54 and inflated CPU; strace runs are used for nothing else. The fork-safety, fd-19 and signal-mask findings in the v1 report remain owner findings pending independent review. No launch or fd change was made.
+**Corrected method.** The first reduction started each interval at the parent's `clone` *return*, which is not a valid start; one pair came out negative. The retained raw logs support an entry-based pairing: `strace -f -ttt` stamps a complete line, or an `<unfinished ...>` line, with the syscall's entry time, and stamps a `<... resumed>` line with its return. The reducer now pairs the parent's `clone` **entry** (from the same thread's unfinished line when the call was split; 59 of 398 clones in the v2 read run) with the child's first `execve` **entry**, and asserts every interval is non-negative. All 1,632 pairs across the 6 strace runs (v1 and v2) are non-negative.
+
+| Run | Host clone → bash execve, median (min–max) | bash clone → `rui` send execve, median (min–max) |
+| --- | --- | --- |
+| v2 read N=100 | 0.781 ms (0.268–1.684), 199 | 0.849 ms (0.323–1.989), 99 |
+| v2 sleep N=100 | 0.807 ms (0.292–4.735), 199 | 0.928 ms (0.286–3.343), 99 |
+| v1 sleep N=1 / 10 / 100, read N=100 | 0.800 / 0.770 / 0.782 / 0.771 ms | — / 0.855 / 0.823 / 0.792 ms |
+
+**v1 erratum:** the v1 report's fork-to-exec figures used the clone-return start. Re-reduced with entry pairing, its medians are those in the last row ([summary-v1-rereduced.json](summary-v1-rereduced.json)); the v1 file itself is unchanged. These are durations **under strace**, which stops the tracee at every syscall and timestamps when strace handles each stop. They are instrumented upper-bound-style figures, not untraced fork-to-exec, which remains unavailable. strace also cut achieved overlap to 53–54 and inflated CPU; strace runs are used for nothing else. The fork-safety, fd-19 and signal-mask findings in the v1 report remain owner findings pending independent review. No launch or fd change was made.
 
 ## Limits
 
 - The concurrency is synchronized by the barrier, not natural; v1 records natural overlap (sleep 96–99, read 1–2).
 - PSS columns are observed sample peaks, with quantified coverage above; true peaks are unobserved.
-- CPU uses 10 ms ticks; per-call figures include TUI submit, 2N history-sized model requests, Store commits, barrier wait and a 3 s tail.
+- CPU uses 10 ms ticks; per-call figures include TUI submit, the 2N in-window history-sized model requests, Store commits, barrier wait and a 3 s tail.
 - Controller and fixture CPU and memory are excluded; the observer's CPU is reported, not subtracted.
 - Pre-campaign smoke attempts: two failed from the wrong working directory (kept in `smoke/` on this branch as `v2-read-n*.json.gz`); two passed (`v2b-*`).
 

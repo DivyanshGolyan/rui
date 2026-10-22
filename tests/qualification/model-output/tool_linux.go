@@ -899,19 +899,24 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	tuiCPU, tuiOK := tickDelta(points, 3, 4, "tui_cpu_self_ticks")
 	activeSeconds := float64(points[4]["unix_ns"].(int64)-points[3]["unix_ns"].(int64)) / 1e9
 	completed := done.SucceededCalls + done.FailedCalls
+	requests := toolRequestPhases(done.SessionFacts, points[3]["unix_ns"].(int64), points[4]["unix_ns"].(int64))
+	inWindow := requests["measured_in_window"] + requests["continuation_in_window"] + requests["seed_in_window"]
 	cpu := map[string]any{"window": "before_submit point to active_end point (provider done + 3 s tail)", "window_seconds": activeSeconds,
 		"host_self_cpu_seconds": hostCPU, "host_reaped_descendants_cpu_seconds": childCPU, "tui_cpu_seconds": tuiCPU,
-		"workload_calls_completed": done.WorkloadCalls, "dispatch_calls_completed": done.DispatchCalls, "model_requests_in_window": 2 * sessions,
+		"workload_calls_completed": done.WorkloadCalls, "dispatch_calls_completed": done.DispatchCalls, "model_requests": requests, "model_requests_in_window": inWindow,
 		"basis": "Linux utime+stime at 10 ms ticks; reaped descendants include Bash shells, workload children and dispatched sends, inseparably"}
 	if hostOK && childOK && tuiOK && completed > 0 {
 		cpu["host_self_cpu_seconds_per_workload_call"] = hostCPU / float64(done.WorkloadCalls)
 		cpu["host_self_cpu_seconds_per_tool_call_including_dispatch"] = hostCPU / float64(completed)
-		cpu["host_self_cpu_seconds_per_model_request"] = hostCPU / float64(2*sessions)
+		cpu["host_self_cpu_seconds_per_model_request_in_window"] = hostCPU / float64(inWindow)
 	} else {
 		cpu["status"] = "unavailable"
 	}
 	result["cpu"] = cpu
 	result["concurrency"] = toolConcurrency(done)
+	if requests["seed_in_window"] != 0 || requests["measured_in_window"] != sessions || requests["continuation_in_window"] != sessions {
+		return result, fmt.Errorf("model requests outside the CPU window: %v", requests)
+	}
 	if len(done.Errors) != 0 || done.Done != sessions || done.FailedCalls != 0 || done.WorkloadCalls != sessions || done.DispatchCalls != sessions-1 {
 		return result, fmt.Errorf("tool turn incomplete or failed: %+v", done.Errors)
 	}
@@ -1037,4 +1042,27 @@ func toolCoverage(s *toolSampler, sessions int) map[string]any {
 		"workload_child": row("bash_child", sessions),
 		"send":           row("send", sessions-1),
 	}
+}
+
+// toolRequestPhases classifies each Session's three provider requests by
+// phase and by whether the provider received them inside the CPU window
+// [begin, end]. Seeds precede the window; the measured turn should place
+// every measured request and continuation inside it.
+func toolRequestPhases(facts []provider.ToolSessionFact, begin, end int64) map[string]int {
+	result := map[string]int{"seed_in_window": 0, "measured_in_window": 0, "continuation_in_window": 0}
+	count := func(phase string, at int64) {
+		if at == 0 {
+			return
+		}
+		result[phase+"_total"]++
+		if at >= begin && at <= end {
+			result[phase+"_in_window"]++
+		}
+	}
+	for _, fact := range facts {
+		count("seed", fact.SeedReceivedNS)
+		count("measured", fact.MeasuredReceivedNS)
+		count("continuation", fact.ContinuationReceivedNS)
+	}
+	return result
 }
