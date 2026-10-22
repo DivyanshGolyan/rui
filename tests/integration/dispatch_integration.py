@@ -541,16 +541,11 @@ def phased_message_cases(state, processes, endpoints):
         ], replay
 
         def public_messages():
-            with sqlite3.connect(store / "rui.sqlite3") as database:
-                rows = database.execute("SELECT e.session_position,e.source_item_ordinal,i.item_ordinal "
-                    "FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id "
-                    "AND i.item_ordinal=e.source_item_ordinal WHERE e.entry_kind=3 ORDER BY e.session_position").fetchall()
-                call_positions = [row[0] for row in database.execute(
-                    "SELECT session_position FROM model_output_item WHERE item_kind=3 ORDER BY session_position")]
-                assert rows[0][0] < call_positions[0] < rows[1][0] < call_positions[1] < rows[2][0], rows
-                assert [row[1:] for row in rows] == [(0, 0), (2, 2), (4, 4), (0, 0), (1, 1), (2, 2)], rows
+            report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+            positions = [int(entry["position"]) for entry in report["full"]["conversation"]
+                         if entry["kind"] == "assistant"]
             actual = []
-            for position, _, _ in rows:
+            for position in positions:
                 result = subprocess.run([str(RUI), "session", "read-conversation", "--store", str(store),
                     "--session", session, "--position", str(position), "--ordinal", "0"],
                     capture_output=True, timeout=10)
@@ -558,14 +553,25 @@ def phased_message_cases(state, processes, endpoints):
                 actual.append(result.stdout.decode())
             assert actual == ["Inspecting files", "Checking sibling calls", "Waiting for tool results",
                               "Inspecting files", "Tools settled", "Canonical answer é"], actual
+            return positions
 
-        public_messages()
+        positions = public_messages()
         crash_host(host, state, f"{label}-saved")
         processes.remove(host)
+        # The Host owns SQLite exclusively; inspect provenance only after reap.
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            rows = database.execute("SELECT e.session_position,e.source_item_ordinal,i.item_ordinal "
+                "FROM conversation_entry e JOIN model_output_item i ON i.operation_id=e.source_operation_id "
+                "AND i.item_ordinal=e.source_item_ordinal WHERE e.entry_kind=3 ORDER BY e.session_position").fetchall()
+            call_positions = [row[0] for row in database.execute(
+                "SELECT session_position FROM model_output_item WHERE item_kind=3 ORDER BY session_position")]
+            assert rows[0][0] < call_positions[0] < rows[1][0] < call_positions[1] < rows[2][0], rows
+            assert [row[1:] for row in rows] == [(0, 0), (2, 2), (4, 4), (0, 0), (1, 1), (2, 2)], rows
+            assert [row[0] for row in rows] == positions, rows
         host = start_host(store, url)
         processes.append(host)
         assert read_result(store, key) == "Canonical answer é".encode()
-        public_messages()
+        assert public_messages() == positions
         message(state, store, f"{label}-newer", session, "Continue after restart")
         wait_for(lambda: completed_observation(store, f"{label}-newer"), "newer answer")
         assert read_result(store, f"{label}-newer") == b"Newer answer"
@@ -597,13 +603,13 @@ def phased_message_cases(state, processes, endpoints):
     report = command("session", "inspect", "--store", store, "--session", "direct/bad-finals", "--profile", "full")
     detail = json.loads(report["full"]["model_operations"][0]["resolution"]["content"]["text"])
     assert detail["reason"] == "MultipleFinalAnswers" and detail["stage"] == "response", detail
+    stop_host(host)
+    processes.remove(host)
     with sqlite3.connect(store / "rui.sqlite3") as database:
         for table in ("model_output_item", "model_tool_call", "action_operation"):
             assert database.execute(f"SELECT count(*) FROM {table}").fetchone() == (0,), table
         assert database.execute("SELECT count(*) FROM conversation_entry WHERE entry_kind=3").fetchone() == (0,)
     assert not forbidden.exists(), "malformed candidate launched Bash"
-    stop_host(host)
-    processes.remove(host)
     stop_endpoint(endpoint, endpoints)
     print("Synthetic gpt-6-luna phase and unphased streams: exact replay, visible order, final result and crash recovery passed")
 
@@ -730,11 +736,9 @@ def main(mode="all", correlation_case="all"):
         assert len(recovered["actions"]["unresolved"]) == 1, recovered
         assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
         assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
-        with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
-            assert database.execute(
-                "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
-                (int(first_request["action"]),),
-            ).fetchone() == (2, "denied")
+        # The Host holds its Store exclusively: canonical rows are checked
+        # after it stops; later controls never touch these resolved rows.
+        expected_action_rows = {}
         # Replay preserves canonical work; a live inspection may sample a
         # temporary no-work admission reservation before its owner releases it.
         assert recovered["work"]["status"] == "waiting_for_permission", recovered
@@ -836,16 +840,7 @@ def main(mode="all", correlation_case="all"):
                 )["execution"],
                 release_deadline,
             )
-            with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
-                rows = database.execute(
-                    "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
-                    "WHERE session_ref=? ORDER BY call_ordinal",
-                    (session,),
-                ).fetchall()
-                assert rows == expected_rows, rows
-                assert database.execute(
-                    "SELECT outcome_code FROM turn WHERE session_ref=?", (session,)
-                ).fetchone() == ("cancelled",)
+            expected_action_rows[session] = expected_rows
             for action, expected in zip(actions, order_calls):
                 assert read_action(proposal_store, session, action["action"], "call-id") == expected[1].encode()
                 assert read_action(proposal_store, session, action["action"], "arguments") == expected[2].encode()
@@ -854,6 +849,21 @@ def main(mode="all", correlation_case="all"):
 
         stop_host(proposal_host)
         processes.remove(proposal_host)
+        with sqlite3.connect(proposal_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT permission_state,resolution_code FROM action_operation WHERE action_id=?",
+                (int(first_request["action"]),),
+            ).fetchone() == (2, "denied")
+            for session, expected_rows in expected_action_rows.items():
+                rows = database.execute(
+                    "SELECT call_ordinal,permission_state,resolution_code FROM action_operation "
+                    "WHERE session_ref=? ORDER BY call_ordinal",
+                    (session,),
+                ).fetchall()
+                assert rows == expected_rows, (session, rows)
+                assert database.execute(
+                    "SELECT outcome_code FROM turn WHERE session_ref=?", (session,)
+                ).fetchone() == ("cancelled",)
         starts = [record for record in proposal_milestones.records
                   if record["rui_test_phase"].startswith("connection_request_")]
         assert [record["rui_test_phase"] for record in starts] == [
@@ -1038,6 +1048,9 @@ def main(mode="all", correlation_case="all"):
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
+        # The Host holds its Store exclusively; inspect rows between Hosts.
+        stop_host(continuation_host)
+        processes.remove(continuation_host)
         with sqlite3.connect(continuation_store / "rui.sqlite3") as database:
             assert database.execute("SELECT count(*) FROM model_operation").fetchone() == (2,)
             assert database.execute(
@@ -1056,6 +1069,11 @@ def main(mode="all", correlation_case="all"):
             assert database.execute(
                 "SELECT count(*) FROM sqlite_schema WHERE name LIKE '%tool_result%'"
             ).fetchone() == (0,)
+        continuation_host = start_host(
+            continuation_store,
+            f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
+        )
+        processes.append(continuation_host)
 
         configure(state, continuation_store, "queued-config", "direct/queued-continuation", "model-a")
         message(
@@ -1416,6 +1434,8 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
         assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session="direct/retry")
+        stop_host(retry_host)
+        processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
@@ -1428,8 +1448,6 @@ def main(mode="all", correlation_case="all"):
             "answer",
         )
         database.close()
-        stop_host(retry_host)
-        processes.remove(retry_host)
         stop_endpoint(retry_endpoint, endpoints)
 
         # A date four seconds ahead expires during five seconds of progressing
@@ -1504,12 +1522,12 @@ def main(mode="all", correlation_case="all"):
             assert permanent_failure["result"]["code"] == "provider_http_401"
             time.sleep(1.2)
             assert len(permanent_endpoint.requests) == index + 1
+            stop_host(permanent_host)
+            processes.remove(permanent_host)
             with sqlite3.connect(permanent_store / "rui.sqlite3") as database:
                 assert database.execute(
                     "SELECT resolution_code,resolution_content_id,request_id FROM model_operation"
                 ).fetchone() == ("provider_http_401", None, request_id)
-            stop_host(permanent_host)
-            processes.remove(permanent_host)
             reopened = start_host(permanent_store, None)
             processes.append(reopened)
             report = command(
@@ -1891,6 +1909,8 @@ def main(mode="all", correlation_case="all"):
             reopened = start_host(evidence_store, None)
             processes.append(reopened)
             assert read_result(evidence_store, f"evidence-{name}-message") == f"answer-{name}".encode()
+            stop_host(reopened)
+            processes.remove(reopened)
             database = sqlite3.connect(evidence_store / "rui.sqlite3")
             actual_evidence = database.execute(
                 "SELECT model_evidence,request_id FROM model_operation"
@@ -1898,8 +1918,6 @@ def main(mode="all", correlation_case="all"):
             database.close()
             actual_evidence = (*decode_model_evidence(actual_evidence[0]), actual_evidence[1])
             assert actual_evidence == expected_evidence, (name, actual_evidence, expected_evidence)
-            stop_host(reopened)
-            processes.remove(reopened)
         stop_endpoint(evidence_endpoint, endpoints)
 
         contradictory_sse, _, _ = sse_answer(
@@ -1959,6 +1977,8 @@ def main(mode="all", correlation_case="all"):
             contradictory_failure["result"]["code"] == "contradictory_provider_output"
         ), contradictory_failure
         assert len(contradictory_endpoint.requests) == 1
+        stop_host(contradictory_host)
+        processes.remove(contradictory_host)
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
         assert database.execute(
             "SELECT uncertain,resolution_code,response_id,model_evidence,request_id FROM model_operation"
@@ -1969,8 +1989,6 @@ def main(mode="all", correlation_case="all"):
         ).fetchone()[0] == 0
         assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
         database.close()
-        stop_host(contradictory_host)
-        processes.remove(contradictory_host)
         contradictory_reopened = start_host(contradictory_store, None)
         processes.append(contradictory_reopened)
         restarted_failure = observe(contradictory_store, "contradictory-message")
@@ -2135,6 +2153,13 @@ def main(mode="all", correlation_case="all"):
             resources = wait_model_cleanup(schema_diagnostics, schema_store, "direct/unsupported-schema", schema_failure, schema_deadline)
             assert not resources["dispatch_fenced"], resources
             assert not list((schema_store / "scratch").glob("response-metadata-*.tmp"))
+            before_operation = command(
+                "session", "inspect", "--store", schema_store,
+                "--session", "direct/unsupported-schema", "--profile", "full",
+            )["full"]["model_operations"][0]
+            stop_host(schema_host)
+            assert_model_cleanup_census(schema_diagnostics, schema_failure)
+            processes.remove(schema_host)
             with sqlite3.connect(schema_store / "rui.sqlite3") as database:
                 assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
                 assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
@@ -2143,13 +2168,6 @@ def main(mode="all", correlation_case="all"):
                     "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
                 ).fetchone()[0] == 0
                 assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
-            before_operation = command(
-                "session", "inspect", "--store", schema_store,
-                "--session", "direct/unsupported-schema", "--profile", "full",
-            )["full"]["model_operations"][0]
-            stop_host(schema_host)
-            assert_model_cleanup_census(schema_diagnostics, schema_failure)
-            processes.remove(schema_host)
             reopened = start_host(schema_store, None)
             processes.append(reopened)
             report = command(
@@ -2330,16 +2348,7 @@ def main(mode="all", correlation_case="all"):
                 f"invalid output {index}",
             )
             assert rejected["result"]["code"] == expected_code, rejected
-            database = sqlite3.connect(invalid_store / "rui.sqlite3")
-            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
-            assert database.execute(
-                "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
-            ).fetchone()[0] == 0
-            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
-            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
             expected_request_id = None if index == 0 else f"request-{index + 1}"
-            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
-            database.close()
             before_operation = command(
                 "session", "inspect", "--store", invalid_store,
                 "--session", f"direct/invalid-{index}", "--profile", "full",
@@ -2347,6 +2356,15 @@ def main(mode="all", correlation_case="all"):
             assert before_operation["request_id"] == expected_request_id, before_operation
             stop_host(invalid_host)
             processes.remove(invalid_host)
+            database = sqlite3.connect(invalid_store / "rui.sqlite3")
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+            assert database.execute(
+                "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
+            ).fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
+            assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
+            assert database.execute("SELECT request_id FROM model_operation").fetchone()[0] == expected_request_id
+            database.close()
             # Rejection evidence must survive scratch disposal and Host restart,
             # without turning a diagnostic into an answer or continuation.
             reopened = start_host(invalid_store, None)
@@ -2545,12 +2563,12 @@ def main(mode="all", correlation_case="all"):
                 f"{fault} rejection",
             )
             assert rejected["result"]["code"] == expected_code, rejected
+            stop_host(fault_host)
+            processes.remove(fault_host)
             with sqlite3.connect(fault_store / "rui.sqlite3") as database:
                 assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
                 assert database.execute("SELECT count(*) FROM model_tool_call").fetchone()[0] == 0
                 assert database.execute("SELECT count(*) FROM action_operation").fetchone()[0] == 0
-            stop_host(fault_host)
-            processes.remove(fault_host)
 
         for index, fault in enumerate(("response-read", "response-import", "response-commit")):
             fault_store = state / f"{fault}-store"
@@ -2717,13 +2735,6 @@ def main(mode="all", correlation_case="all"):
         with complete_path.open("rb") as complete_source:
             actual_digest = hashlib.file_digest(complete_source, "sha256").digest()
         assert actual_digest == hashlib.sha256(large_answer.encode()).digest()
-        database = sqlite3.connect(growth_store / "rui.sqlite3")
-        assert database.execute(
-            "SELECT count(*) FROM model_output_item WHERE operation_id=1"
-        ).fetchone()[0] == 33
-        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
-        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
-        database.close()
         resources = growth_peers.call("inspect", lambda: command(
             "session", "inspect", "--store", growth_store, "--session", "direct/growth-b"
         ))["execution"]
@@ -2732,6 +2743,13 @@ def main(mode="all", correlation_case="all"):
         growth_peers.finish(time.monotonic() + 5)
         assert_model_cleanup_census(growth_diagnostics, counted, imported)
         processes.remove(growth_host)
+        database = sqlite3.connect(growth_store / "rui.sqlite3")
+        assert database.execute(
+            "SELECT count(*) FROM model_output_item WHERE operation_id=1"
+        ).fetchone()[0] == 33
+        assert database.execute("SELECT payload IS NULL,byte_length FROM content WHERE byte_length=? AND private=0", (len(large_answer),)).fetchall() == [(1, len(large_answer))]
+        assert database.execute("SELECT coalesce(sum(length(payload)),0) FROM content WHERE private=0").fetchone()[0] < 1024
+        database.close()
         stop_endpoint(growth_endpoint, endpoints)
 
         # Public answers are projections of immutable provider items. Exercise
@@ -3969,14 +3987,14 @@ def main(mode="all", correlation_case="all"):
         )
         assert observe(exhaustion_store, "exhaustion-first")["result"]["code"] == "retry_exhausted"
         assert read_result(exhaustion_store, "exhaustion-later") == b"later input answer"
+        assert len(exhaustion_endpoint.requests) == 5
+        stop_host(exhaustion_host)
+        processes.remove(exhaustion_host)
         database = sqlite3.connect(exhaustion_store / "rui.sqlite3")
         assert database.execute(
             "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation ORDER BY operation_id"
         ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "answer")]
         database.close()
-        assert len(exhaustion_endpoint.requests) == 5
-        stop_host(exhaustion_host)
-        processes.remove(exhaustion_host)
         stop_endpoint(exhaustion_endpoint, endpoints)
 
         # One reactor fills two fixed custody records without allocating a
@@ -4353,14 +4371,14 @@ def main(mode="all", correlation_case="all"):
             "preparation stop cleanup",
         )
         assert stopped_resources["execution"]["dispatch_fenced"] is False, stopped_resources
+        assert preparation_stop_endpoint.requests == []
+        stop_process(preparation_stop_host)
+        processes.remove(preparation_stop_host)
         with sqlite3.connect(preparation_stop_store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,resolution_code FROM model_operation"
             ).fetchall() == [(1, "interrupted")]
             assert database.execute("SELECT outcome_code FROM turn").fetchall() == [("cancelled",)]
-        assert preparation_stop_endpoint.requests == []
-        stop_process(preparation_stop_host)
-        processes.remove(preparation_stop_host)
         stop_endpoint(preparation_stop_endpoint, endpoints)
 
         # Infrastructure shutdown owns the same cancellation path. Populate
@@ -4767,29 +4785,34 @@ def main(mode="all", correlation_case="all"):
         endpoint.requests.clear()
         endpoint.release.clear()
         race_store = state / "fence-race-store"
-        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        host = start_host(race_store, url)
         processes.append(host)
         configure(state, race_store, "race-config", "direct/race", "model-a")
+        configure(state, race_store, "race-other-config", "direct/other", "model-a")
+        stop_host(host)
+        processes.remove(host)
+        # The Host holds its Store exclusively, so damage another Session
+        # while it is stopped: admitting and preparing direct/race never read
+        # it, and the inspection below reads it inside the launch delay.
+        database = sqlite3.connect(race_store / "rui.sqlite3")
+        original_instructions = database.execute(
+            "SELECT instructions_content_id FROM session WHERE session_ref='direct/other'"
+        ).fetchone()[0]
+        database.execute("PRAGMA foreign_keys=OFF")
+        database.execute(
+            "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/other'"
+        )
+        database.commit()
+        database.close()
+        host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
+        processes.append(host)
         message(state, race_store, "race-message", "direct/race", "race")
-
-        # Observe through the Store owner: an external SQLite reader can
-        # contend with admission in DELETE-journal/zero-busy-timeout mode.
         wait_for(
             lambda: observe(race_store, "race-message")["queue"]["status"] == "processing",
             "admitted request before launch",
         )
-        database = sqlite3.connect(race_store / "rui.sqlite3", timeout=5)
-        original_instructions = database.execute(
-            "SELECT instructions_content_id FROM session WHERE session_ref='direct/race'"
-        ).fetchone()[0]
-        database.execute("PRAGMA foreign_keys=OFF")
-        database.execute(
-            "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/race'"
-        )
-        database.commit()
-        database.close()
         canonical_read = subprocess.run(
-            [str(RUI), "session", "inspect", "--store", str(race_store), "--session", "direct/race"],
+            [str(RUI), "session", "inspect", "--store", str(race_store), "--session", "direct/other"],
             text=True,
             capture_output=True,
             timeout=10,
@@ -4806,7 +4829,7 @@ def main(mode="all", correlation_case="all"):
         ).fetchone()
         database.execute("PRAGMA foreign_keys=OFF")
         database.execute(
-            "UPDATE session SET instructions_content_id=? WHERE session_ref='direct/race'",
+            "UPDATE session SET instructions_content_id=? WHERE session_ref='direct/other'",
             (original_instructions,),
         )
         database.commit()

@@ -413,17 +413,24 @@ func TimedExchangeUnix(deadline Deadline, socketPath string, route string, value
 	return float64(time.Since(started).Microseconds()) / 1000, err
 }
 
+// DatabaseSize includes the WAL, which holds committed pages until checkpoint.
 func DatabaseSize(store string) (map[string]uint64, error) {
-	info, err := os.Stat(filepath.Join(store, "rui.sqlite3"))
-	if err != nil {
-		return nil, err
-	}
-	allocated := uint64(0)
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		allocated = uint64(stat.Blocks) * 512
+	logical, allocated := uint64(0), uint64(0)
+	for _, name := range []string{"rui.sqlite3", "rui.sqlite3-wal"} {
+		info, err := os.Stat(filepath.Join(store, name))
+		if name != "rui.sqlite3" && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		logical += uint64(info.Size())
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			allocated += uint64(stat.Blocks) * 512
+		}
 	}
 	return map[string]uint64{
-		"database_logical_bytes":   uint64(info.Size()),
+		"database_logical_bytes":   logical,
 		"database_allocated_bytes": allocated,
 	}, nil
 }

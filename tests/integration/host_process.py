@@ -11,6 +11,7 @@ import os
 import pathlib
 import selectors
 import socketserver
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -20,6 +21,20 @@ import threading
 import time
 from collections import Counter
 
+
+class _ClosingConnection(sqlite3.Connection):
+    """Plain sqlite3 only commits at the end of `with`. A Host cannot open a
+    Store that any other connection holds (ARCHITECTURE.md, "Store
+    durability"), so every fixture connection closes with its block."""
+
+    def __exit__(self, *failure):
+        try:
+            return super().__exit__(*failure)
+        finally:
+            self.close()
+
+
+sqlite3.connect = functools.partial(sqlite3.connect, factory=_ClosingConnection)
 
 READINESS_LIMIT = 16 * 1024
 STDERR_TAIL_LIMIT = 16 * 1024

@@ -151,8 +151,6 @@ def run():
         ))
         assert "synthetic-private-reasoning" not in public_report
         assert ACCESS not in public_report
-        assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"synthetic-private-reasoning",)) == [(1,)]
-        assert not bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (ACCESS.encode(),))
         assert len(endpoint.requests) == 2
         continuation = json.loads(endpoint.requests[1])
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
@@ -161,6 +159,9 @@ def run():
         assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session="managed/session")
 
         fixture.stop_host(host)
+        # The Host holds its Store exclusively; inspect private rows between Hosts.
+        assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"synthetic-private-reasoning",)) == [(1,)]
+        assert not bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (ACCESS.encode(),))
         host = start(store, url)
         assert fixture.retry_message(state, store, "message")["answer"]["replayed"] is True
         assert fixture.read_result(store, "message") == b"managed answer"

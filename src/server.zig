@@ -1507,6 +1507,10 @@ const NativeTurn = struct {
         return self.host.controls_changed.swap(false, .acq_rel);
     }
 
+    pub fn commitGeneration(self: *const NativeTurn) u64 {
+        return self.host.store.commitGeneration();
+    }
+
     pub fn reconcileControls(self: *NativeTurn) void {
         cancelSupersededTransfers(
             self.host,
