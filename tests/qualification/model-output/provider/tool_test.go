@@ -84,7 +84,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	}
 	outputs := []any{user}
 	for index, item := range coordinator {
-		text := "Bash succeeded. Exit code: 0.\nrui-measure-start 1700000000.000250\nrui-measure-end 1700000001.500000"
+		text := "Bash succeeded. Exit code: 0.\nrui-measure-start 1700000000.000250"
 		if index == 1 {
 			text = "Bash failed. Exit code: 7."
 		}
@@ -96,7 +96,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 		t.Fatalf("summary = %+v", summary)
 	}
 	for _, output := range summary.SessionFacts[0].Outputs {
-		if output.Kind == "workload" && (output.ShellStartNS != 1700000000000250000 || output.ShellSeconds != 1.49975) {
+		if output.Kind == "workload" && output.ShellStartNS != 1700000000000250000 {
 			t.Fatalf("workload markers = %+v", output)
 		}
 	}
@@ -105,15 +105,16 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	}
 }
 
-// Only exactly one output per issued call, each with ordered markers, counts.
+// Only exactly one output per issued call, each with ordered markers and no
+// end marker, counts.
 func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
 	issued := []toolCall{{ID: "tool-000-dispatch-001", Kind: "dispatch"}, {ID: "tool-000-workload", Kind: "workload"}}
 	output := func(id, text string) json.RawMessage {
 		encoded, _ := json.Marshal(map[string]any{"type": "function_call_output", "call_id": id, "output": text})
 		return encoded
 	}
-	good := "Bash succeeded. Exit code: 0.\nrui-measure-park 1.000000\nrui-measure-start 2.000000\nrui-measure-end 3.000000"
-	send := "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000\nrui-measure-end 3.000000"
+	good := "Bash succeeded. Exit code: 0.\nrui-measure-park 1.000000\nrui-measure-start 2.000000"
+	send := "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000"
 	for _, test := range []struct {
 		name    string
 		barrier bool
@@ -125,9 +126,10 @@ func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
 		{"unissued same-prefix ID replaces workload", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-never-issued", send)}, 1},
 		{"missing workload output", false, []json.RawMessage{output("tool-000-dispatch-001", send)}, 1},
 		{"duplicate output", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", send), output("tool-000-workload", send)}, 1},
-		{"missing end marker", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000")}, 1},
-		{"end before start", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 4.000000\nrui-measure-end 3.000000")}, 1},
-		{"barrier workload without park", true, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000\nrui-measure-end 3.000000")}, 1},
+		{"missing start marker", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.")}, 1},
+		{"end marker kept Bash resident", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000\nrui-measure-end 3.000000")}, 1},
+		{"park after start", true, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-park 3.000000\nrui-measure-start 2.000000")}, 1},
+		{"barrier workload without park", true, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000")}, 1},
 		{"failed command", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash failed. Exit code: 124.")}, 1},
 	} {
 		rows, failures := validateOutputs(issued, test.input, test.barrier)
@@ -168,8 +170,38 @@ func TestTimedCommandKeepsFailureStatus(t *testing.T) {
 	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 3 {
 		t.Fatalf("exit = %v", err)
 	}
-	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 2 || markers[0][1] != "start" || markers[1][1] != "end" {
+	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 1 || markers[0][1] != "start" {
 		t.Fatalf("markers in %q", stderr.String())
+	}
+}
+
+// The workload is the shell's final simple command, so `bash -c` (5.1 and
+// later) execs it in place, with and without the barrier prefix: `cat
+// /proc/self/stat` then reports this test as its parent, not a Bash shell.
+func TestWorkloadIsExecutedInPlaceByBash(t *testing.T) {
+	for _, barrier := range []bool{false, true} {
+		directory := t.TempDir()
+		config := ToolConfig{Sessions: 1, Workload: "read", ReadFile: "/proc/self/stat"}
+		if barrier {
+			if err := syscall.Mkfifo(directory+"/release", 0o600); err != nil {
+				t.Fatal(err)
+			}
+			config.Barrier = directory
+			writer, err := os.OpenFile(directory+"/release", os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			writer.Write([]byte("\n"))
+		}
+		output, err := exec.Command("bash", "-c", config.workloadCommand(0)).Output()
+		if err != nil {
+			t.Fatalf("barrier=%v: %v", barrier, err)
+		}
+		fields := strings.Fields(string(output[bytes.LastIndexByte(output, ')')+1:]))
+		if len(fields) < 2 || fields[1] != fmt.Sprint(os.Getpid()) {
+			t.Fatalf("barrier=%v: workload parent in %q, want %d", barrier, output, os.Getpid())
+		}
 	}
 }
 
@@ -218,7 +250,7 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	if err := command.Wait(); err != nil || output() != "payload" {
 		t.Fatalf("after release: %v %q", err, output())
 	}
-	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 3 || markers[0][1] != "park" {
+	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 2 || markers[0][1] != "park" || markers[1][1] != "start" {
 		t.Fatalf("markers in %q", stderr.String())
 	}
 }

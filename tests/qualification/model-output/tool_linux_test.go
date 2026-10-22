@@ -15,8 +15,10 @@ import (
 	"rui.local/qualification/model-output/provider"
 )
 
-// A `rui` under a Host shell is a client, never Bash; every process lands in
-// exactly one column, so the columns sum to the total.
+// A `rui` under a Host shell is a client, never Bash, and so is a `rui
+// session send` that replaced the Host's shell; a Host child that execed
+// another command is Bash. Every process lands in exactly one column, so the
+// columns sum to the total.
 func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	directory := t.TempDir()
 	sleep, err := exec.LookPath("sleep")
@@ -31,7 +33,26 @@ func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	if err := os.WriteFile(send, data, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	host := exec.Command("bash", "-c", "bash -c '"+sleep+" 30 & "+send+" 30 & wait' & wait")
+	// The direct send is a `cat` copy named rui; it blocks opening the FIFO
+	// named `session`, so its argv is `./rui session send`.
+	direct := filepath.Join(directory, "direct")
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip("cat unavailable")
+	}
+	if data, err = os.ReadFile(cat); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(direct, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(direct, "rui"), data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(direct, "session"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	host := exec.Command("bash", "-c", "bash -c '"+sleep+" 30 & "+send+" 30 & wait' & "+sleep+" 30 & (cd "+direct+" && exec ./rui session send) & wait")
 	host.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := host.Start(); err != nil {
 		t.Fatal(err)
@@ -45,11 +66,11 @@ func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		sampler.sample()
 		sample = sampler.samples[len(sampler.samples)-1]
-		if sample.Counts["send"] == 1 && sample.Counts["bash_child"] == 1 {
+		if sample.Counts["send"] == 2 && sample.Counts["bash_child"] == 1 && sample.Counts["bash_exec"] == 1 {
 			break
 		}
 	}
-	want := map[string]int{"host": 1, "bash_shell": 1, "bash_child": 1, "send": 1, "bash": 2, "clients": 1, "total": 4}
+	want := map[string]int{"host": 1, "bash_shell": 1, "bash_child": 1, "bash_exec": 1, "send": 2, "bash": 3, "clients": 2, "total": 6}
 	for name, count := range want {
 		if sample.Counts[name] != count {
 			t.Fatalf("counts = %v, want %v", sample.Counts, want)
