@@ -1,0 +1,4 @@
+9d8bf0eb74eabcef5372b738cd324a052af3c4df4de7b2271a130aaffcec8e46  tests/qualification/model-output/main.go
+e680a69cf5a2d5c9a35e4b4d40d1daa5abd1b0c076cb9da304ddc26a3d965934  tests/qualification/model-output/provider/main.go
+62166ec9ec547ec25918d2eaec91cbbe45ae5a0af35d38e126075f105b195c73  tests/qualification/go.mod
+31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd  tests/qualification/go.sum

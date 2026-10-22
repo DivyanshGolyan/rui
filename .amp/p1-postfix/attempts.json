@@ -1,0 +1,40 @@
+{
+  "source_revision": "d4f870002b1eeef370fb8f4c7aa3fd8b14343159",
+  "strict_single_launch_compliance": false,
+  "attempts": [
+    {
+      "case": "STREAM100",
+      "start_utc": "2026-10-22T01:03:52Z",
+      "end_utc": "2026-10-22T01:05:04Z",
+      "status": "completed_observation",
+      "exit": 0,
+      "final_json": "raw/run-stream100.json"
+    },
+    {
+      "case": "HOLD100",
+      "start_utc": "2026-10-22T01:05:04Z",
+      "end_utc": "2026-10-22T01:06:16Z",
+      "status": "completed_observation",
+      "exit": 0,
+      "final_json": "raw/run-hold100.json"
+    },
+    {
+      "case": "STREAM100_unintended_service_restart",
+      "start_utc": "2026-10-22T01:06:19Z",
+      "service_stopped_utc": "2026-10-22T01:06:42Z",
+      "status": "aborted_incomplete_observation",
+      "exit": null,
+      "complete_window_host_cpu_seconds": null,
+      "complete_window_switches": null,
+      "completed_events": null,
+      "final_json": null,
+      "partial_artifacts": "raw/aborted-autorestart-stream100",
+      "included_as_replicate": false
+    }
+  ],
+  "record_gaps": [
+    "The automatic restart overwrote the original full build log, identity file and STREAM invocation log; current files at those paths describe the cached rebuild/restarted invocation.",
+    "Original final JSON, raw endpoints, estimates in run-notes and append-only campaign timestamps/exits are retained.",
+    "The original full build summary/hash was inspected in this Amp thread before overwrite; the raw first-build file cannot be independently replayed from this artifact."
+  ]
+}

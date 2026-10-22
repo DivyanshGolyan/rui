@@ -1,0 +1,109 @@
+{
+  "label": "Linux PSS (macOS footprint pending)",
+  "iqr_method": "inclusive quartiles for three repeats: (max-min)/2",
+  "event_rate_limit": "STREAM in-window delivery counts unavailable; fixture counters publish only after the offer, so no CPU/event ratio is derived",
+  "rows": [
+    {
+      "file": "run-hold100.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "98bfb3f135bef819485fc4c2d959417964f84f0622c8571550e86552464ef719",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": true,
+      "host_pss_start_bytes": 13415424,
+      "host_pss_end_bytes": 13415424,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 1.42,
+      "window_seconds": 60.000260626,
+      "host_average_cores": 0.023666563864635438,
+      "host_threads": 5,
+      "host_pid": 330291,
+      "actual_fixture_events_between_queries": 0,
+      "fixture_events_per_second_lower": 0,
+      "fixture_events_per_second_upper": 0,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "zero response bytes enforced by HOLD",
+      "distinct_wakeups_per_second": null,
+      "switch_counter_scope": "per-thread voluntary switches, not distinct wakeups",
+      "thread_switch_deltas": {
+        "330291": [
+          60,
+          0
+        ],
+        "330292": [
+          0,
+          0
+        ],
+        "330293": [
+          0,
+          0
+        ],
+        "330294": [
+          2315,
+          81
+        ],
+        "330296": [
+          0,
+          0
+        ]
+      },
+      "voluntary_switches": 2375,
+      "nonvoluntary_switches": 81,
+      "voluntary_switches_per_second_lower": 39.58283045326384,
+      "voluntary_switches_per_second_upper": 39.583011000958145
+    },
+    {
+      "file": "run-stream100.json",
+      "status": "passed",
+      "measurement_revision": "a204296c7289cf0a90f95df155c4f27832c924fe",
+      "binary_sha256": "98bfb3f135bef819485fc4c2d959417964f84f0622c8571550e86552464ef719",
+      "harness_sha256": "7f4fe110b5efbab175a51006d5a563cd2624ab6d0b86c35554ccbe9a2e05ade6",
+      "sessions": 100,
+      "hold": false,
+      "host_pss_start_bytes": 13520896,
+      "host_pss_end_bytes": 13594624,
+      "steady_state_client_count": 0,
+      "steady_state_client_pss_bytes": 0,
+      "transient_client_peak_pss_bytes": null,
+      "host_cpu_seconds": 21.98,
+      "window_seconds": 60.057214438,
+      "host_average_cores": 0.36598434019431636,
+      "host_threads": 5,
+      "host_pid": 323774,
+      "actual_fixture_events_between_queries": null,
+      "fixture_events_per_second_lower": null,
+      "fixture_events_per_second_upper": null,
+      "host_cpu_us_per_fixture_event_approximate": null,
+      "rate_status": "unavailable: provider publishes delivery totals only after the complete offer; mid-offer zero counters are not measured zero delivery"
+    }
+  ],
+  "populations": [
+    {
+      "sessions": 0,
+      "completed_repeats": 0,
+      "host_pss_end_bytes": [],
+      "median_host_pss_bytes": null,
+      "iqr_host_pss_bytes": null
+    },
+    {
+      "sessions": 10,
+      "completed_repeats": 0,
+      "host_pss_end_bytes": [],
+      "median_host_pss_bytes": null,
+      "iqr_host_pss_bytes": null
+    },
+    {
+      "sessions": 100,
+      "completed_repeats": 1,
+      "host_pss_end_bytes": [
+        13594624
+      ],
+      "median_host_pss_bytes": 13594624,
+      "iqr_host_pss_bytes": null
+    }
+  ],
+  "fit": null
+}
