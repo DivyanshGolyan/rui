@@ -19,6 +19,7 @@ test {
     _ = @import("bash.zig");
     _ = @import("named_scratch.zig");
     _ = @import("output_retention.zig");
+    _ = @import("failed_responses.zig");
     _ = @import("provider.zig");
     _ = @import("provider_selection.zig");
     _ = @import("preferences.zig");

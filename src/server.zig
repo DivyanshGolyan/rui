@@ -10,6 +10,7 @@ const product_defaults = @import("product_defaults.zig");
 const descriptor_limit = @import("descriptor_limit.zig");
 const execution = @import("execution.zig");
 const execution_turn = @import("execution_turn.zig");
+const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_format = @import("output_format.zig");
@@ -132,6 +133,9 @@ const Host = struct {
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
     retention: *output_retention.Queue = undefined,
+    /// The Store directory for optional failed-response records; null in
+    /// owner tests that have no lease.
+    failed_response_store: ?std.Io.Dir = null,
     custody: execution.CustodyPool = .{ .records = &.{} },
     execution_shutdown: std.atomic.Value(bool) = .init(false),
     effect_shutdown: std.atomic.Value(bool) = .init(false),
@@ -1027,6 +1031,7 @@ pub fn serve(
     );
     host.retention = &retention;
     defer retention.cleanupAll();
+    host.failed_response_store = lease.store_dir;
     var provider_initialization_owned = false;
     if (provider_endpoint) |endpoint| {
         try provider.validateEndpoint(endpoint);
@@ -2642,20 +2647,36 @@ fn completeTransfer(
         writeTestTrace(host, &trace, &publication);
     }
     var error_response: execution.ErrorResponse = .ordinary;
+    var answered_response: ?provider.ResponseCapture = null;
+    var http_status: ?u16 = null;
     switch (completion.outcome) {
-        .transport_finished => |evidence| if (evidence.disposition.answered()) {
-            // The transport has sealed this HTTP answer. Interpretation
-            // borrows it; this owner still disposes it before settlement.
-            var response = active.transfer.takeResponse();
-            defer response.deinit();
-            error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
-            if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
+        .transport_finished => |evidence| {
+            http_status = evidence.http_status;
+            if (evidence.disposition.answered()) {
+                // The transport has sealed this HTTP answer. Interpretation
+                // borrows it; this owner still disposes it before settlement.
+                answered_response = active.transfer.takeResponse();
+                const response = &answered_response.?;
+                error_response = model_adapter.interpretErrorResponse(host.io, response.file, response.length, evidence.http_status);
+                if (error_response == .unreadable) stderr.print("rui: provider error capture unreadable for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(error_response.unreadable) });
+            }
         },
         else => {},
     }
-    switch (execution.transferDecision(completion.outcome, error_response)) {
+    const decision = execution.transferDecision(completion.outcome, error_response);
+    var code_buffer: [96]u8 = undefined;
+    if (answered_response) |*response| {
+        retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
+            .binding = owner.binding,
+            .code = decision.fail.codeText(&code_buffer),
+            .http_status = http_status,
+            .request_id = active.transfer.requestId(),
+        });
+        response.deinit();
+    }
+    switch (decision) {
         .interpret_output => {
-            switch (completeSuccessfulTransfer(host, active)) {
+            switch (completeSuccessfulTransfer(host, active, http_status.?)) {
                 .cleanup => finishCustodyNow(host, slot, owner.token),
                 .named_scratch => |scratch| {
                     host.custody.detach(owner.token) catch unreachable;
@@ -2669,13 +2690,20 @@ fn completeTransfer(
         },
         .fence_request_source => fenceDispatch(host, "request scratch read", error.RequestScratchReadFailed),
         .fail => |failure| {
-            var code_buffer: [96]u8 = undefined;
             const code = failure.codeText(&code_buffer);
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 answered.fail(code, disposition);
             } else {
+                // The writer has drained, so the unsealed capture holds every
+                // byte accepted before the transfer or capture failed.
+                const response = &active.transfer.response;
+                if (response.length != 0) retainFailedResponse(host, .{
+                    .file = response.file,
+                    .length = response.length,
+                    .transfer = if (completion.outcome == .response_capture_failed) .capture_failed else .interrupted,
+                }, .{ .binding = owner.binding, .code = code, .request_id = active.transfer.requestId() });
                 settleUnansweredFailure(host, owner.token, owner.binding, code, disposition);
             }
         },
@@ -2706,7 +2734,7 @@ const SuccessfulCompletion = union(enum) {
     named_scratch: named_scratch.Owner,
 };
 
-fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulCompletion {
+fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u16) SuccessfulCompletion {
     const owner = active.owner;
     const structured_output = active.transfer.hasStructuredOutput();
     const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
@@ -2717,9 +2745,12 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
     var response = active.transfer.takeResponse();
     active.transfer.deinit();
     defer response.deinit();
+    const rejected: failed_responses.Source = .{ .file = response.file, .length = response.length, .transfer = .complete };
     if (model_adapter.outputSchemaRejection(structured_output, response.length)) |rejection| {
         var detail: [512]u8 = undefined;
-        answered.reject(rejection.code, rejection.format(&detail), .ordinary);
+        const diagnostic = rejection.format(&detail);
+        retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
+        answered.reject(rejection.code, diagnostic, .ordinary);
         return .cleanup;
     }
 
@@ -2763,7 +2794,9 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
             traceOperation(host, "validation_failed", owner.binding);
             stderr.print("rui: provider output rejected for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(rejection.reason) });
             var detail: [512]u8 = undefined;
-            answered.reject(rejection.code, rejection.format(&detail), failureClass(host, rejection.kind, null, null));
+            const diagnostic = rejection.format(&detail);
+            retainFailedResponse(host, rejected, answered.retention(rejection.code, diagnostic, http_status));
+            answered.reject(rejection.code, diagnostic, failureClass(host, rejection.kind, null, null));
             return .cleanup;
         },
     };
@@ -2798,9 +2831,11 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot) SuccessfulComp
         } else if (err == error.InvalidProviderEnvelope) {
             const rejection: model_adapter.Output.Rejection = .{ .stage = .response, .byte_offset = response.length };
             var detail: [512]u8 = undefined;
+            const diagnostic = rejection.format(err, &detail);
+            retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
             host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
                 "contradictory_provider_output",
-                rejection.format(err, &detail),
+                diagnostic,
             ), .ordinary, .{
                 .before_commit = host.faults.result_before_commit,
             }) catch |failure_err| if (failure_err != error.SupersededByControl)
@@ -2938,7 +2973,36 @@ const AnsweredAttempt = struct {
     fn rejection(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8) store_module.ModelFailure {
         return .{ .rejected = .{ .code = code, .diagnostic = diagnostic, .request_id = self.request_id } };
     }
+
+    /// The same failure facts for its optional failed-response record.
+    fn retention(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, http_status: u16) failed_responses.Failure {
+        return .{
+            .binding = self.owner.binding,
+            .code = code,
+            .diagnostic = diagnostic,
+            .http_status = http_status,
+            .request_id = self.request_id.slice(),
+        };
+    }
 };
+
+/// Best effort, before the owner settles and disposes the capture it just
+/// classified: retains those same bytes as a private local record. Faults
+/// are reported once and never change settlement, custody or cleanup. The
+/// directory and record file are this serial execution transition's only
+/// descriptors, within `descriptor_capacity`'s serial excess.
+fn retainFailedResponse(host: *Host, source: failed_responses.Source, failure: failed_responses.Failure) void {
+    const store_dir = host.failed_response_store orelse return;
+    const status = status: {
+        var dir = failed_responses.open(host.io, store_dir) catch |err| break :status err;
+        defer dir.close(host.io);
+        const retained = failed_responses.retain(host.io, dir, .{}, source, failure) catch |err| break :status err;
+        break :status retained.omission orelse return;
+    };
+    stderr.print("rui: failed response for operation {d} attempt {d} not retained ({s}); its saved failure is unchanged\n", .{
+        failure.binding.operation_id, failure.binding.attempt_ordinal, @errorName(status),
+    });
+}
 
 /// A failure with no provider answer to correlate. Answered paths settle
 /// through `AnsweredAttempt` instead.

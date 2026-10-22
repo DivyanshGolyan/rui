@@ -460,6 +460,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Records](ARCHITECTURE.md#diagnostic-records-and-export): 128 MiB, 16 files, 4 KiB | `'startup diagnostics rotate'` | Reduced cap only |
+| [Failed-response records](ARCHITECTURE.md#diagnostic-records-and-export): exact bytes, association, status, 16 MiB, 64 MiB, 256 records, private modes | `'failed response'` tests; `dispatch-integration` invalid-output, transient HTTP, stall and concurrent-retention cases | Truncation, eviction and omitted bodies use reduced caps or an unreadable capture in unit tests. The integration fault is an undeletable record entry, not disk exhaustion |
 | Bounded export | none located | None |
 ## Release demonstrations
 

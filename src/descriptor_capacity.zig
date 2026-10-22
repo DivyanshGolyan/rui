@@ -78,8 +78,9 @@ pub fn calculate(
     // excess of five covers Bash spawn, which holds only the two child pipe
     // ends in the Host: posix_spawn opens the child's /dev/null itself and
     // reports exec failure directly. Model preparation (two files
-    // plus a directory), cleanup (three files plus a directory), transport
-    // trust loading, and self-contained native callbacks are smaller and
+    // plus a directory), cleanup (three files plus a directory), failed-
+    // response retention beside its occupied slot (one file plus a
+    // directory), transport trust loading, and self-contained native callbacks are smaller and
     // mutually exclusive with that serial excess.
     const execution = (try executionPopulation(active_capacity)).maximum;
 
