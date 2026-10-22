@@ -7619,7 +7619,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
                 .bash_path = undefined, // Native construction must not run.
                 .timeout_ms = 1,
                 .faults = .{},
-                .command = try std.testing.allocator.dupe(u8, "exit 0"),
+                .command = try std.testing.allocator.dupeSentinel(u8, "exit 0", 0),
                 .stdout_capture = .{
                     .io = std.testing.io,
                     .file = file,
@@ -7637,7 +7637,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
             @field(host, flag).store(true, .release);
             launchPreparedBash(&host, &slots[0], token, binding, &prepared);
             try std.testing.expect(prepared.stdout_capture == null);
-            try std.testing.expectEqual(@as(usize, 0), prepared.command.len);
+            try std.testing.expect(prepared.command == null);
             // A retained cleanup fence must not become an effect shutdown.
             try std.testing.expectEqual(std.mem.eql(u8, flag, "effect_shutdown"), host.effect_shutdown.load(.acquire));
             if (fail_cleanup) {

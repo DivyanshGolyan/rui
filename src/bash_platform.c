@@ -1,12 +1,19 @@
-#define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#else
+#define _GNU_SOURCE
+#endif
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 struct rui_bash_observation {
     int32_t kind;
@@ -97,4 +104,70 @@ int rui_bash_group_absent(pid_t pgid) {
         return 0;
     }
     return -errno;
+}
+
+static int make_pipe(int fds[2]) {
+#ifdef __APPLE__
+    if (pipe(fds) != 0) return errno;
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(fds[1], F_SETFD, FD_CLOEXEC) == 0) return 0;
+    int err = errno;
+    close(fds[0]);
+    close(fds[1]);
+    return err;
+#else
+    return pipe2(fds, O_CLOEXEC) == 0 ? 0 : errno;
+#endif
+}
+
+/* Launch Bash as the leader of a new process group with /dev/null stdin and
+   piped stdout/stderr. The child starts with an empty signal mask and every
+   signal at its default action, whatever the Host thread blocked or the Host
+   inherited as ignored; caught handlers never survive exec anyway. /dev/null
+   is opened by the spawn itself, so the Host keeps no inheritable descriptor.
+   Other descriptors keep their own close-on-exec flags. A path without '/'
+   is searched on the Host's PATH. Returns 0 or errno; on success the parent
+   owns both read ends, close-on-exec. */
+int rui_bash_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
+                   pid_t *pid, int *stdout_read, int *stderr_read) {
+    int out[2], err_pipe[2];
+    int result = make_pipe(out);
+    if (result != 0) return result;
+    result = make_pipe(err_pipe);
+    if (result != 0) {
+        close(out[0]);
+        close(out[1]);
+        return result;
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    sigset_t empty, all;
+    sigemptyset(&empty);
+    sigfillset(&all);
+    int have_actions = 0, have_attributes = 0;
+    result = posix_spawn_file_actions_init(&actions);
+    if (result == 0) have_actions = 1;
+    if (result == 0) result = posix_spawn_file_actions_addchdir_np(&actions, cwd);
+    if (result == 0) result = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDWR, 0);
+    if (result == 0) result = posix_spawn_file_actions_adddup2(&actions, out[1], 1);
+    if (result == 0) result = posix_spawn_file_actions_adddup2(&actions, err_pipe[1], 2);
+    if (result == 0) result = posix_spawnattr_init(&attributes);
+    if (result == 0) have_attributes = 1;
+    if (result == 0) result = posix_spawnattr_setflags(&attributes,
+        POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    if (result == 0) result = posix_spawnattr_setpgroup(&attributes, 0);
+    if (result == 0) result = posix_spawnattr_setsigmask(&attributes, &empty);
+    if (result == 0) result = posix_spawnattr_setsigdefault(&attributes, &all);
+    if (result == 0) result = posix_spawnp(pid, path, &actions, &attributes, argv, envp);
+    if (have_attributes) posix_spawnattr_destroy(&attributes);
+    if (have_actions) posix_spawn_file_actions_destroy(&actions);
+    close(out[1]);
+    close(err_pipe[1]);
+    if (result != 0) {
+        close(out[0]);
+        close(err_pipe[0]);
+        return result;
+    }
+    *stdout_read = out[0];
+    *stderr_read = err_pipe[0];
+    return 0;
 }

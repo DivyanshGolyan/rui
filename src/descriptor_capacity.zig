@@ -74,9 +74,10 @@ pub fn calculate(
     // A model slot owns one request file, two response aliases, and at most
     // two Happy Eyeballs transport sockets: five. A running Bash slot owns its
     // two capture files and two parent pipe ends: four. Only
-    // one serial preparation/spawn/cleanup transition exists. Its largest
-    // excess is Bash spawn: two child pipe ends, the two-end exec-error pipe,
-    // and Threaded.Io's lazily opened /dev/null. Model preparation (two files
+    // one serial preparation/spawn/cleanup transition exists. Its budgeted
+    // excess of five covers Bash spawn, which holds only the two child pipe
+    // ends in the Host: posix_spawn opens the child's /dev/null itself and
+    // reports exec failure directly. Model preparation (two files
     // plus a directory), cleanup (three files plus a directory), transport
     // trust loading, and self-contained native callbacks are smaller and
     // mutually exclusive with that serial excess.

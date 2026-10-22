@@ -69,6 +69,15 @@ extern fn rui_bash_observe(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_reap(pid: c_int, observation: *BashObservation) c_int;
 extern fn rui_bash_pipe_queued_bytes(fd: c_int, bytes: *u64) c_int;
 extern fn rui_bash_group_absent(pgid: c_int) c_int;
+extern fn rui_bash_spawn(
+    path: [*:0]const u8,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+    cwd: [*:0]const u8,
+    pid: *std.c.pid_t,
+    stdout_read: *c_int,
+    stderr_read: *c_int,
+) c_int;
 
 pub const LifecycleFault = enum {
     none,
@@ -211,8 +220,9 @@ pub const Prepared = struct {
     bash_path: []const u8,
     timeout_ms: u64,
     faults: Faults,
-    /// Decoded command, owned through `allocator`, at most max_command_bytes.
-    command: []u8,
+    /// Decoded command, owned through `allocator` until launch or cleanup,
+    /// at most max_command_bytes.
+    command: ?[:0]u8,
     stdout_capture: ?OwnedFile,
     stderr_capture: ?OwnedFile,
 
@@ -234,31 +244,30 @@ pub const Prepared = struct {
     }
 
     fn releaseCommand(self: *Prepared) void {
-        self.allocator.free(self.command);
-        self.command = &.{};
+        if (self.command) |command| self.allocator.free(command);
+        self.command = null;
     }
 
     /// `bash -c` lets Bash replace itself with an eligible final command;
-    /// `$0` is `bash`, so diagnostics read `bash: line N:`.
+    /// `$0` is `bash`, so diagnostics read `bash: line N:`. The native spawn
+    /// resets the child's signal mask and dispositions and opens its own
+    /// /dev/null stdin.
     pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
-        var child_environment = toolEnvironment(self.allocator, shared_environment, self.store_selector, self.session.slice()) catch return error.BashSpawnFailed;
-        defer child_environment.deinit();
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var child_environment = toolEnvironment(arena, shared_environment, self.store_selector, self.session.slice()) catch return error.BashSpawnFailed;
+        const environment_block = child_environment.createPosixBlock(arena, .{ .zig_progress_fd = -1 }) catch return error.BashSpawnFailed;
+        const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
+        const cwd = arena.dupeSentinel(u8, self.workspace.slice(), 0) catch return error.BashSpawnFailed;
+        const argv = [_:null]?[*:0]const u8{ path, "-c", self.command.?.ptr, "bash" };
+        var pid: std.c.pid_t = undefined;
+        var stdout_fd: c_int = undefined;
+        var stderr_fd: c_int = undefined;
         const started = std.Io.Clock.Timestamp.now(self.io, .awake);
-        var child = std.process.spawn(self.io, .{
-            .argv = &.{ self.bash_path, "-c", self.command, "bash" },
-            .cwd = .{ .path = self.workspace.slice() },
-            .environ_map = &child_environment,
-            .stdin = .ignore,
-            .stdout = .pipe,
-            .stderr = .pipe,
-            .pgid = 0,
-        }) catch return error.BashSpawnFailed;
+        if (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd) != 0) return error.BashSpawnFailed;
         self.releaseCommand();
-        const stdout_pipe = child.stdout.?;
-        child.stdout = null;
-        const stderr_pipe = child.stderr.?;
-        child.stderr = null;
         const stdout_capture = self.stdout_capture.?;
         const stderr_capture = self.stderr_capture.?;
         self.stdout_capture = null;
@@ -266,9 +275,12 @@ pub const Prepared = struct {
         return .{
             .io = self.io,
             .lifecycle = .start(started, self.timeout_ms),
-            .leader = child.id.?,
-            .pgid = child.id.?,
-            .pipes = .init(.{ .stdout = stdout_pipe, .stderr = stderr_pipe }),
+            .leader = pid,
+            .pgid = pid,
+            .pipes = .init(.{
+                .stdout = .{ .handle = stdout_fd, .flags = .{ .nonblocking = false } },
+                .stderr = .{ .handle = stderr_fd, .flags = .{ .nonblocking = false } },
+            }),
             .stdout_capture = stdout_capture,
             .stderr_capture = stderr_capture,
             .scratch_path = self.scratch_path,
@@ -861,7 +873,7 @@ pub const Preparation = struct {
             .invalid => return self.fail(error.InvalidCanonicalBashDescriptor),
             .complete => {},
         }
-        const command = self.command.toOwnedSlice(self.allocator) catch |err| return self.fail(err);
+        const command = self.command.toOwnedSliceSentinel(self.allocator, 0) catch |err| return self.fail(err);
         self.source.reader.close();
         const cleanup = self.takeCleanup();
         return .{ .prepared = .{
@@ -1250,7 +1262,7 @@ test "cleanup ownership transfers consume their source" {
         .bash_path = "/bin/bash",
         .timeout_ms = 1,
         .faults = .{},
-        .command = try std.testing.allocator.dupe(u8, "true"),
+        .command = try std.testing.allocator.dupeSentinel(u8, "true", 0),
         .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
         .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
     };
@@ -1258,7 +1270,7 @@ test "cleanup ownership transfers consume their source" {
     prepared.stderr_capture.?.charged = 3;
 
     var cleanup = prepared.takeCleanup();
-    try std.testing.expectEqual(@as(usize, 0), prepared.command.len);
+    try std.testing.expect(prepared.command == null);
     try std.testing.expect(prepared.stdout_capture == null);
     try std.testing.expect(prepared.stderr_capture == null);
     try prepared.cleanup();
@@ -1317,6 +1329,73 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     complete = true;
     try std.testing.expect(cleanup.isComplete());
     try std.testing.expectEqual(baseline, used.load(.acquire));
+}
+
+fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_retention.Queue, ordinal: u64, command: []const u8) !Outcome {
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(root);
+    var prepared = Prepared{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .session = .{},
+        .store_selector = root,
+        .workspace = workspace,
+        .scratch_path = root,
+        .bash_path = "/bin/bash",
+        .timeout_ms = 10_000,
+        .faults = .{},
+        .command = try std.testing.allocator.dupeSentinel(u8, command, 0),
+        .stdout_capture = null,
+        .stderr_capture = null,
+    };
+    defer prepared.cleanup() catch {};
+    prepared.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", ordinal, 1, .none);
+    prepared.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", ordinal, 1, .none);
+    var execution = try prepared.launch(&empty_environment);
+    var window: [copy_window_bytes]u8 = undefined;
+    while (!execution.retired()) {
+        const progress = execution.service(&window);
+        try std.testing.expect(progress.fault == null);
+        if (!progress.made_progress) try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    const result = try execution.outcome(false);
+    try execution.reclaim(retention);
+    return result;
+}
+
+test "launched Bash starts with default signal actions, an empty mask and no inherited /dev/null" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
+    var entries: [8]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    // The Host may inherit an ignored SIGHUP (nohup) and its spawning thread
+    // may block signals; neither may reach the tool.
+    const ignore: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var previous_hangup: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.HUP, &ignore, &previous_hangup);
+    defer std.posix.sigaction(.HUP, &previous_hangup, null);
+    var blocked = std.posix.sigemptyset();
+    std.posix.sigaddset(&blocked, .USR2);
+    var previous_mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous_mask);
+    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "kill -HUP $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.HUP)}) },
+        .{ "kill -USR2 $$; echo survived", std.fmt.comptimePrint("Signal: {d}.", .{@backingInt(std.posix.SIG.USR2)}) },
+        // fds 0-2 are the tool's own; any later /dev/null was inherited.
+        .{ "for f in /dev/fd/*; do n=${f##*/}; [ \"$n\" -gt 2 ] && [ \"$f\" -ef /dev/null ] && echo leaked-$n; done; echo checked", "Exit code: 0.\nstdout tail:\nchecked\n" },
+    }, 1..) |case, ordinal| {
+        const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
+        if (std.mem.indexOf(u8, result.text(), case[1]) == null) {
+            std.debug.print("{s}\n", .{result.text()});
+            return error.TestUnexpectedResult;
+        }
+    }
 }
 
 test "an owned file closes its descriptor before reporting removal failure" {
