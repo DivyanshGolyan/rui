@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"rui.local/qualification/model-output/provider"
 	"time"
 )
 
@@ -53,5 +55,25 @@ func TestToolSamplerCountsSendOnceAsClient(t *testing.T) {
 	}
 	if sample.PSSFailures == 0 && sample.PSS["host"]+sample.PSS["bash"]+sample.PSS["clients"] != sample.PSS["total"] {
 		t.Fatalf("columns do not sum to total: %v", sample.PSS)
+	}
+}
+
+// Only requests the provider received inside the CPU window count toward
+// its denominator; seeds before it and a late continuation do not.
+func TestToolRequestPhasesUseReceivedTimes(t *testing.T) {
+	facts := []provider.ToolSessionFact{
+		{SeedReceivedNS: 5, MeasuredReceivedNS: 20, ContinuationReceivedNS: 30},
+		{SeedReceivedNS: 6, MeasuredReceivedNS: 21, ContinuationReceivedNS: 41},
+		{SeedReceivedNS: 7},
+	}
+	got := toolRequestPhases(facts, 10, 40)
+	want := map[string]int{"seed_total": 3, "seed_in_window": 0, "measured_total": 2, "measured_in_window": 2, "continuation_total": 2, "continuation_in_window": 1}
+	if len(got) != len(want) {
+		t.Fatalf("phases = %v, want %v", got, want)
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Fatalf("phases = %v, want %v", got, want)
+		}
 	}
 }
