@@ -1,0 +1,1706 @@
+{
+  "active_capacity": 100,
+  "active_sample_interval_ns": 200000000,
+  "argv": [
+    "/home/user/workspace/.perf-tool/r-fixes/measure-model-output",
+    "--tool-sessions",
+    "10",
+    "--tool-workload",
+    "read",
+    "--tool-barrier",
+    "--tool-sample-ms",
+    "200",
+    "--expectation",
+    "smoke, not a measurement: ~10 completed originals, 19 succeeded calls, overlap 10; ~45 s",
+    "--output",
+    "/home/user/workspace/.perf-tool/r-fixes/smoke-read-n10.json",
+    "/home/user/workspace/.perf-tool/build-d4f87000/bin/rui"
+  ],
+  "artifacts": "/tmp/rui-tool-turn-2631030938",
+  "barrier": true,
+  "barrier_release": {
+    "expected": 10,
+    "parked_at_release": 10,
+    "release_unix_ns": 1792649968311728172,
+    "timed_out": false,
+    "wait_begin_unix_ns": 1792649967825307891
+  },
+  "binary_build_provenance": {
+    "build_mode": null,
+    "reason": "externally supplied binary; attach its actual build log/source identity separately; current checkout hashes do not establish its origin",
+    "source_revision": null,
+    "status": "unavailable"
+  },
+  "binary_sha256": "993c3eb1a70d2c75d785ce91d032d7aee8f098358942777705ddfc22483954f2",
+  "checkout_source_sha256": {
+    "build.zig": "2a7eaa4829c4bfa2c89f12c0d1b3bd770990db8bb1de4ff570ea08c1482531d8",
+    "build.zig.zon": "93a949b901befce96a86e38d0f07ac2673c946ec9191e28bba3ba85191f9e5b3",
+    "src/AnswerRenderer.zig": "b0e299dce3473929f186cafe97fc208b463ee04ecb182c2d98a95590e0594c7f",
+    "src/BashLifecycle.zig": "b86361fb0e188e548cce34d44565a5d8b79f919846a63eb3ef8237ce826ad03b",
+    "src/ChoiceLine.zig": "3c45fa2a88e88a9911fe6e9de152c03686a783180bcaf03310a8ed63832cfe00",
+    "src/ClientTask.zig": "a76f4359f676758d440f08f96065a80c639db787f7b83eb2d8dc2b31d85aae64",
+    "src/ConversationViewport.zig": "71010b8fc053a73ceaef9a161f0206404b985d25375f03185e5286b0648f8daf",
+    "src/HostDiagnostics.zig": "ddf54a7ac86c908c38312b6b8278b45c787e772cb02ef9682668b6fa6298a19b",
+    "src/ResponseTiming.zig": "566b29e4ce681a92e82d7922b18fe30f1d69fc212d3dc854d34b965beefa338a",
+    "src/ScratchBudget.zig": "a2bbbbab64a020787bf8be46b2f4a8b444be3e82d2caa5f22cbc504b1ab49062",
+    "src/SessionFrontend.zig": "764e5186b5e829fee0cdc110d9cdeb3c8cc70e4c6ba7e379e1312bad65ee3930",
+    "src/SessionInput.zig": "5de7c50ca64cb10878b7a1889f4ee9e741cec83a2e8a7e4a38c3b45d05c3ff2c",
+    "src/SessionScreen.zig": "57d7190076b8186b4acdda00cecf73518a3b4a73d9d5dd692b122c032f03ddbf",
+    "src/SessionSubmission.zig": "1b0d37cc387d600e4e0d66da9ec89a94cbf129b9b0b67e1bc7808417588ad765",
+    "src/SessionTerminal.zig": "b789e0ca08d9ca9255eb763e047ac60fecbc3933f1dd6fd213030713614c4000",
+    "src/TerminalEditor.zig": "232020cdc00db4126a27a378cbc216a3cac0ef20f30380dd97ce31b368ac3ef2",
+    "src/TerminalFrame.zig": "1d321fb0e0d9fc24df7c6558a6dcb73a729adde4f37599a371769bafb7183270",
+    "src/TerminalInput.zig": "4e946623e59f320393875d8a8d7247ce5b6c82684ad3481f2323ecf806207610",
+    "src/TerminalText.zig": "5519f0a7ad1acb3b7423d155aa7e1e4f2d07aecfc376c7a8fc3153691b5810af",
+    "src/TestObservation.zig": "9a1efb6e1e30c4a0b1fe297667713b55b666adbe0af20a9a7144a4b28e6b1e59",
+    "src/attempt.zig": "79a28bffbe9ddaf010a89a756c2e386baca0ffc98338696a1e5bbf0b6df62281",
+    "src/bash.zig": "ba5a3b636e18814ea13254b5f830b12985cb6103875a164b3b71c84a1160fcb9",
+    "src/bash_platform.c": "5adc5b83a78ac8a68d1016b189ced26c36a5d765f95023935b9d4f8089b60d4e",
+    "src/bounded.zig": "7eb0c03ffedd7b1f41bb70e1e658a67923ca26d50520e5c7d31c49655b7d73df",
+    "src/build_evaluator.sh": "040c1bda5ff00f2b754e21f9e064d41f20553ce7262034d287e559a4442afbe0",
+    "src/build_transport.sh": "a5c05ef688807c6f9d0a8b13ce988ab4fbeb2a755ce083b8428f6f762643198b",
+    "src/cli.zig": "6e85ec49845bac817d8e9bf085e50ee4748b8bcde6dbf05dd5e4949adb7d465e",
+    "src/cli_args.zig": "87425ea6315abb02f2b7f56b611d068a3a441518d391229b752ba87d37794bea",
+    "src/client.zig": "09d980d153beba7aa7274327132d00d029e01de959597b81b98d033a276ae5b6",
+    "src/codex_auth.zig": "d30a43399a1a630779946499af2928e229d31a1b53da0c3e939da74565a23565",
+    "src/codex_credential_policy.zig": "a1a79621994a8cef0a24f60ca285c75ac85c5598fe5ff8d2bb621e23e81eab8c",
+    "src/codex_credentials.zig": "776ede8f037f4c98ce83ddb4da8bda6f70479fc9e24b801e8640981b5cb7caea",
+    "src/codex_token_wire.zig": "6fe152ad25553ea037041c1f29ff0b8710fa0c080779e259df3505ad99e3c19f",
+    "src/core_boundary.zig": "82f93dda0c3f31484381fbc38d9630e0e70859a383787dbdfad46bdc9480acf0",
+    "src/curl-post-retry.patch": "851ff59f8c082ce7ce956a3e1ce90a5073cc3d0d875b179260671505f4dd22bb",
+    "src/deadline.zig": "a59693c66cbe83f82b640a58efd5e6364e6c9e3e9fa9ac2c11e779cea7b01c04",
+    "src/descriptor_capacity.zig": "56651462e2124690ea422bd321a5ce034e7073603a152b48b4fd37e46ebbfb37",
+    "src/descriptor_limit.zig": "be42cc9cf731b1987295544270195849a619e31e22bdd850b70007d6d0fda70d",
+    "src/evaluator.zig": "b2529219b8d78ed2157353a8f83f11d9b51e72c626d101811b317939f9b7ebed",
+    "src/evaluator_child.c": "96895b7d6373fab3f0f67d010c93b16980179bf7df7f65399fd9543a4cd31fc6",
+    "src/evaluator_parent.c": "ff0e328863ecbeca8ca537c7452457021213445f47142e52be3c81ec5d4abe17",
+    "src/evaluator_parent.h": "c8512e8cd56e8645cd67a20f17a868afeee5df85335cc9a9e2925c5696035c38",
+    "src/evaluator_policy.h": "a00bc5597e99667e60d305031c511b7a8803bdac05fb2f3885b5e2b64902d2ed",
+    "src/evaluator_policy.patch": "7759f9b7361dd2963e50801af392f7025296ad14750535f6792539423169918c",
+    "src/evaluator_string_reader.h": "d4ce3e038aa3d804948003b30e5e9d9d1c0bf0e6a46fe943462f6767778795a0",
+    "src/execution.zig": "a257b3438ce2fb467ce425cf3ef86ec8cc21861c4a58e33a474d13a45e684bbb",
+    "src/execution_turn.zig": "ff7ce55749db942e6eb9b7a883624c2fc88d4f8a9b2d9184511f8a1b52f3cab7",
+    "src/fetch_dependencies.sh": "bb6729fe7e41851802de34165965381561fb6206c44e0f5de954de541293fbd2",
+    "src/host_launch.c": "37780c335cdcc6442105a350e18353d8f43f045164f4faa48e1da2fd04bef3b6",
+    "src/json_ascii.zig": "441f04d32b5c55d11331da47592bf8d3f608430c040c0834dca2645ad04b2697",
+    "src/logic_tests.zig": "92fd8363a5569811ce9eea0d487c9e189c9ee3a28593822505786f104aa9786c",
+    "src/model_adapter.zig": "3b4ce4b33d76b45007a24af42a7a11e23ccaa8fdfdff99d4e48a85f93633f672",
+    "src/model_capability.zig": "5b960c3ca5d4850ba2a52884e7dac4ed3defc40e17a31422bd90a6e01a9cb660",
+    "src/named_scratch.zig": "0e89e188b6b74d52b5bf988d29ef38f8bba996c5754b8473aeb9915811e6f050",
+    "src/new_session_selection.zig": "ebf7ebf1a7db182da9bf96584d7d93803060bb15205ec7527ab2c6e14060941f",
+    "src/output_format.zig": "7951fa5fe8dfc96046429410afb872ce02d717b3abf4681c5e4ab3c7339b54bb",
+    "src/output_retention.zig": "bba17ccebbd813eeb65251a9e7e157c9edf311e9fd0e7d877f3a7ee3218812ca",
+    "src/platform.zig": "55ec3026c54ff9f1ea5a68769365ae7030b5b47ba154538059dbff4df6c22683",
+    "src/preference_values.zig": "903c974cf6454cbeabde9cb185fbbf62ec8f126ab938f38915c1c0ad328563b6",
+    "src/preferences.zig": "7c74a3577dd7a3e94db85ae5f9d0847a7c88f36d6a7e1f7892143848b2c58597",
+    "src/prepare_vaxis.sh": "effe90521486ecdffe3f47fdd24ea45d1cd34e365eaae4df91562c716ba329c0",
+    "src/product_defaults.zig": "6d66b59f23c0745be2c0772af682fe79c288c19c23ce64eccb01281cb69e6f80",
+    "src/protocol.zig": "16908d3f998cfa86ac6830d8882ae582ec567425d361cd9177ce3e0e02fdaf72",
+    "src/provider.zig": "b0911f7d03322a89ce2e59a476a0ec05b95731a4785ed128008ea01e388e88ab",
+    "src/provider_output.zig": "1cd64219f8ccfed53d8d95b23941d465f21c33089d23b4d5ed694a6177e3178a",
+    "src/provider_selection.zig": "0e13cfab2bb47ab8aac2a6b85c7ed6a2669c45918f239afaf70ffd0ce7535f31",
+    "src/request_encoding.zig": "3c53b1a03adff112fc90d80a6f51719c0536237119afe18faae2c882c3a0f3da",
+    "src/retry_policy.zig": "187377c448b292c8bf7e64002f9c75f319571b628981f1005945a6dbdb3b3576",
+    "src/server.zig": "72bada193608a47eab6cdf80beef2341529f828ffcacf16b17a172964d43296c",
+    "src/session_consent.zig": "8136059ef58f18c5f859178361f10978040aadd099730c6ee8dba4687ca0933e",
+    "src/session_departure.zig": "b5ff93fba07ecd114955a3192731e5715b70a764793e6e5ee722201e7f2d8c0d",
+    "src/session_history.zig": "66a13d65526480b8a1d835dd22c9123468f00ee9bce953576c45cd481e9f747a",
+    "src/session_reads.zig": "90996319ee93817f433340a59bcddf1c0e7bee27f310b6497c99aa0340d728a3",
+    "src/session_sequence_model_test.zig": "279b292247a599f2d2884b7bb4807f37a2c83ffd6928f334ebcb900e4ac68c5b",
+    "src/session_view.zig": "bd6e6118db0f316e1b550cf5fd167d491bc0ecbdda25b2d360429ac4afc428bf",
+    "src/socket_fixture.zig": "02be8f3f2defeefdca57d5aeabc992c2f8d1654f048bfc1276fd737628ab5837",
+    "src/stderr.zig": "2c5fa4ce6b7eaa8a29839df204f4e2867c6cfc1c2da518f991a6c6ae5e20becd",
+    "src/store.zig": "628b17644b80b430452f46a56389933c93d485001c88f45aeaae34dd27ec9c61",
+    "src/terminal_input_equivalence_test.zig": "c755d87455c8660522f22b05eff38241209cb62bbf2a02ff7b549c98604cf62b",
+    "src/terminal_notice_test.zig": "4663314922d4f1ce14e73a8947a9891bf5e5e9073499a4d2ce3c9a24af47f441",
+    "src/tests.zig": "05893a91ffc07eec1dcfdad653e98903c8e71517b87900942527e726f755bfb0",
+    "src/tools.zig": "4d1d906f838f5d535f0c666cafa776d18b1ec739dd5205fcc24e113901a9b1a6",
+    "src/transport_policy.zig": "8e3d2accf9c06732d95404914ca27739b2a395770fc3deb7fa50e94173956a25",
+    "src/turn_policy.zig": "f8392b2c663ad8301dfe35ff8348438ce9c04a910d7bdd5f18a1bb1a33dabc0e",
+    "src/vaxis-parser.patch": "ae8ff193506fe64dbabfcf2740524f7493711ccb36057ce4f6ff56e44876e9ed",
+    "tests/qualification/go.mod": "62166ec9ec547ec25918d2eaec91cbbe45ae5a0af35d38e126075f105b195c73",
+    "tests/qualification/go.sum": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "tests/qualification/measurement/client.go": "4e1c28e289455ec10f60a11a8dfe9b0cd247fb399d57b5f9ca97cbce6191be7b",
+    "tests/qualification/measurement/linux_memory.go": "09c4ba21348607ac2755b1db9c3503a3ad0c0a379a85acf21ca674f0ddfbdd62",
+    "tests/qualification/measurement/linux_memory_test.go": "3d41d5543feabdfc72ed0cb42632e0c749be460a0c4fa906fb7a3e6b1ec7a41a",
+    "tests/qualification/measurement/measurement.go": "45f63ce6c5bd5ba548f8c71aa06fe92c2be79eebbf996aa747b85535149ea4c5",
+    "tests/qualification/measurement/measurement_test.go": "cd7d0cb36b14f56fa6c6f53115f68fafed1570b96b749b8ff552c6249223c86d",
+    "tests/qualification/model-output/evidence_test.go": "cc2cae05b19a1b1596799eaeec422a50d18bb5ca7b4d1bd3ca30a6c86601b617",
+    "tests/qualification/model-output/main.go": "e2fcacdc60832aea788619f5a2abb18420046015d68c8c91842147da3218baaa",
+    "tests/qualification/model-output/main_test.go": "97deaf0881d6743ddaa0670248374fe03e35a19aa33a9e94707cd6b3337d9c81",
+    "tests/qualification/model-output/provider/main.go": "e680a69cf5a2d5c9a35e4b4d40d1daa5abd1b0c076cb9da304ddc26a3d965934",
+    "tests/qualification/model-output/provider/provider_test.go": "086c92c39be1e9a13c38de0fb0eebde0ab3c22808a28c4070e63f149b469fd1c",
+    "tests/qualification/model-output/provider/tool.go": "a473e549261242521fc89c089415ac698aca8a695dc435cefa3646b7b4134b5c",
+    "tests/qualification/model-output/provider/tool_test.go": "1ea975bd25f9b0ebeb59d314628ccba46c546120d9b5f3cbb7973a520ab2ec4e",
+    "tests/qualification/model-output/tool_linux.go": "760d2210879720e108589f33e1de09646043c141dcd6210ce0d296884c89a95b",
+    "tests/qualification/model-output/tool_linux_test.go": "da2de70ad70c4b41fe17bd6fc866a3f1021a0e8f3f256b609ac41fc48c534f75",
+    "tests/qualification/model-output/tool_other.go": "25038fd875081eaecd932b58a25799cf392b3682bb46dc865cc9254dcc13ddc0"
+  },
+  "concurrency": {
+    "basis": "bash $EPOCHREALTIME at command start/end inside each shell; excludes shell fork/exec",
+    "dispatch": {
+      "call_response_to_shell_start_seconds": {
+        "max": 0.081386096,
+        "median": 0.062510096,
+        "min": 0.035972096
+      },
+      "first_start_unix_ns": 1792649967904988000,
+      "intervals": 9,
+      "last_end_unix_ns": 1792649967956315000,
+      "max_overlapping": 2,
+      "missing_markers": 0,
+      "shell_seconds": {
+        "max": 0.008207,
+        "median": 0.005958,
+        "min": 0.005599
+      }
+    },
+    "workload": {
+      "call_response_to_shell_start_seconds": {
+        "max": 0.442871096,
+        "median": 0.271301961,
+        "min": 0.059462662
+      },
+      "first_start_unix_ns": 1792649968311797000,
+      "intervals": 10,
+      "last_end_unix_ns": 1792649968325145000,
+      "max_overlapping": 10,
+      "missing_markers": 0,
+      "park_to_start_seconds": {
+        "max": 0.356083,
+        "median": 0.259626,
+        "min": 0.003768
+      },
+      "shell_seconds": {
+        "max": 0.013181,
+        "median": 0.012276,
+        "min": 0.003496
+      }
+    }
+  },
+  "coordinator_inspection": {
+    "actionable_permissions": [],
+    "actions": {
+      "count": "0",
+      "resolved": [],
+      "unresolved": []
+    },
+    "execution": {
+      "custody_occupied": "0",
+      "dispatch_fenced": false,
+      "scratch_used_bytes": "1029271",
+      "status": "partial",
+      "unavailable": [
+        "structured_output"
+      ]
+    },
+    "pending_messages": "0",
+    "profile": "current",
+    "recent_messages": [
+      {
+        "message": "e7b0fcda-ae02-4d8b-8433-2a39d06dbfad",
+        "outcome": "completed",
+        "turn": "11"
+      },
+      {
+        "message": "seed-000",
+        "outcome": "completed",
+        "turn": "1"
+      }
+    ],
+    "rejected_calls": {
+      "count": "0",
+      "items": []
+    },
+    "selected_message": null,
+    "session": {
+      "compaction_trigger": null,
+      "compaction_trigger_override": null,
+      "instructions": {
+        "bytes": "0",
+        "sha256": "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528"
+      },
+      "model": "model-a",
+      "output_reservation": "0",
+      "output_reservation_override": null,
+      "output_schema": null,
+      "permission_mode": "bypass",
+      "provider": "codex",
+      "reference": "measure/tool-10/coordinator",
+      "revision": "1",
+      "tools": [
+        "bash"
+      ],
+      "workspace": "/home/user/workspace/repo"
+    },
+    "type": "session_report",
+    "version": "1",
+    "work": {
+      "latest_outcome": {
+        "code": "completed",
+        "content": {
+          "bytes": "46",
+          "sha256": "1c62b9bdb53d7f9ec7a079df258d551939babaf317af5aa237479cb416d4ecbf"
+        }
+      },
+      "operation": "21",
+      "status": "completed",
+      "turn": "11"
+    }
+  },
+  "cpu": {
+    "basis": "Linux utime+stime at 10 ms ticks; reaped descendants include Bash shells, workload children and dispatched sends, inseparably",
+    "dispatch_calls_completed": 9,
+    "host_reaped_descendants_cpu_seconds": 0.05,
+    "host_self_cpu_seconds": 0.55,
+    "host_self_cpu_seconds_per_model_request_in_window": 0.027500000000000004,
+    "host_self_cpu_seconds_per_tool_call_including_dispatch": 0.028947368421052635,
+    "host_self_cpu_seconds_per_workload_call": 0.05500000000000001,
+    "model_requests": {
+      "continuation_in_window": 10,
+      "continuation_total": 10,
+      "measured_in_window": 10,
+      "measured_total": 10,
+      "seed_in_window": 0,
+      "seed_total": 10
+    },
+    "model_requests_in_window": 20,
+    "tui_cpu_seconds": 0.03,
+    "window": "before_submit point to active_end point (provider done + 3 s tail)",
+    "window_seconds": 3.818803984,
+    "workload_calls_completed": 10
+  },
+  "expectation": "smoke, not a measurement: ~10 completed originals, 19 succeeded calls, overlap 10; ~45 s",
+  "fixture": true,
+  "format": "rui-tool-turn-v1",
+  "harness_sha256": "dbc87d55faa2dcc0298801df149303b615a20cd670608c27a129454c295b00a2",
+  "host_exit": {
+    "exited": true,
+    "code": -1,
+    "stop_signal_sent": true
+  },
+  "host_pid": 199495,
+  "host_ready": {
+    "active_capacity": "100",
+    "bash_execution": "enabled",
+    "curl": "8.22.0",
+    "custody_record_bytes": "72",
+    "descriptor_limit": "1024",
+    "descriptor_requirement": "922",
+    "execution": "enabled",
+    "execution_slot_bytes": "1680",
+    "intake_capacity": "100",
+    "model_preparation_bytes": "147696",
+    "openssl": "OpenSSL/3.6.3",
+    "retention_capacity": "481",
+    "retention_entry_bytes": "136",
+    "scratch_limit_bytes": "8589934592",
+    "socket": "/tmp/rui-1000/4ec79699a49a2ebf1989c3cf2149f9aa.sock",
+    "store": "/tmp/rui-tool-turn-2631030938/store"
+  },
+  "instrumented": false,
+  "limits": [
+    "PSS columns are sequential-scan sums of smaps_rollup over the processes read during each sample's [begin, end] span, not simultaneous snapshots; failed reads are counted per sample and omitted from sums; processes shorter than one interval plus scan are missed; the true peak is unobserved",
+    "send processes run under Bash and are counted once, as clients; Bash = shells, their non-rui children and Host forks seen before exec",
+    "page cache is system-wide meminfo plus per-file fincore residency; it is not process PSS and is never added to PSS columns",
+    "in-shell timestamps use bash $EPOCHREALTIME builtins around each command; they exclude fork/exec of the shell itself",
+    "fixture/controller excluded from Rui counters; observer CPU is reported separately and not subtracted"
+  ],
+  "measurement_checkout": {
+    "binary": "/home/user/workspace/.perf-tool/build-d4f87000/bin/rui",
+    "binary_sha256": "993c3eb1a70d2c75d785ce91d032d7aee8f098358942777705ddfc22483954f2",
+    "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "measurement_runtime": {
+      "go_arch": "amd64",
+      "go_os": "linux",
+      "go_version": "go1.27.1",
+      "gopsutil_version": "v4.26.7",
+      "logical_cpus": 2,
+      "module_path": "rui.local/qualification",
+      "physical_memory_bytes": 4122021888
+    },
+    "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Wed Sep 30 12:40:02 UTC 2026 x86_64 GNU/Linux",
+    "tested_revision": "0ceaea88256b206a4ad3c893f00bd999424aa45f",
+    "working_tree_dirty": true,
+    "zig": "0.17.0"
+  },
+  "measurement_revision": "0ceaea88256b206a4ad3c893f00bd999424aa45f",
+  "original_requests": [
+    {
+      "answer_bytes": 46,
+      "key": "e7b0fcda-ae02-4d8b-8433-2a39d06dbfad",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "46",
+          "sha256": "1c62b9bdb53d7f9ec7a079df258d551939babaf317af5aa237479cb416d4ecbf",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/coordinator"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-001",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "0fe7c19f615158bc0c321e7ecde03de2e2fce4cd1c7a62261a1c88170edde6db",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-001"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-002",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "e1a1e551224a3af0f3c5b293ea066ef79a99ee5441defcc95b8168c5be9cdc5e",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-002"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-003",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "01a4458a864b3aa42f070e667e7a2daa06db2b46c62bbe391bb0e80b218e7b7b",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-003"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-004",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "a29a218ca1ef09eff69c6af89e519ff11c40c6d60b3244d972ac0739ad4b6ea8",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-004"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-005",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "1aa4b37f0be8a61be3b43e84369a4727a8199cfeae1134462ff1391c6d5826eb",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-005"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-006",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "3e04acee9e4e84348e7907301170b49270572fb02a6444838a453fa711c4697d",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-006"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-007",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "1649cec9ebac3c0e99070a33cffad91c276b55cc7c1056742a9093b6634b403c",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-007"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-008",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "04c274baf53a2480e3fcddfd736acc6600ce66fef322a72288135fb8b424f30b",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-008"
+    },
+    {
+      "answer_bytes": 45,
+      "key": "dispatch-009",
+      "result": {
+        "status": "completed",
+        "text": {
+          "bytes": "45",
+          "sha256": "1b682448249298a606aef52fbc0165ad61b466b8a8a9a38986f05f247807fc88",
+          "type": "text"
+        }
+      },
+      "session": "measure/tool-10/worker-009"
+    }
+  ],
+  "points": [
+    {
+      "host_cpu_reaped_children_ticks": 0,
+      "host_cpu_self_ticks": 0,
+      "host_pss_bytes": 7263232,
+      "meminfo_system": {
+        "Active(file)_bytes": 2032570368,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3057389568,
+        "Dirty_bytes": 1093632,
+        "Inactive(file)_bytes": 1189675008,
+        "MemAvailable_bytes": 3588616192,
+        "MemFree_bytes": 466116608,
+        "Shmem_bytes": 1105920,
+        "Writeback_bytes": 0
+      },
+      "name": "host_started",
+      "observer_cpu_ns": 103033000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 296,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 258048,
+            "apparent_bytes": 258048,
+            "files": 1
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n258048 258048 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n"
+      },
+      "unix_ns": 1792649956377130464
+    },
+    {
+      "host_cpu_reaped_children_ticks": 0,
+      "host_cpu_self_ticks": 1,
+      "host_pss_bytes": 7709696,
+      "meminfo_system": {
+        "Active(file)_bytes": 2032570368,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3057389568,
+        "Dirty_bytes": 1093632,
+        "Inactive(file)_bytes": 1189675008,
+        "MemAvailable_bytes": 3587842048,
+        "MemFree_bytes": 465342464,
+        "Shmem_bytes": 1105920,
+        "Writeback_bytes": 102400
+      },
+      "name": "configured",
+      "observer_cpu_ns": 108882000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 390,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 258048,
+            "apparent_bytes": 258048,
+            "files": 1
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n258048 258048 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n"
+      },
+      "unix_ns": 1792649956427191481
+    },
+    {
+      "host_cpu_reaped_children_ticks": 0,
+      "host_cpu_self_ticks": 26,
+      "host_pss_bytes": 11857920,
+      "meminfo_system": {
+        "Active(file)_bytes": 2037895168,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3065880576,
+        "Dirty_bytes": 1052672,
+        "Inactive(file)_bytes": 1192841216,
+        "MemAvailable_bytes": 3575808000,
+        "MemFree_bytes": 444817408,
+        "Shmem_bytes": 1110016,
+        "Writeback_bytes": 77824
+      },
+      "name": "seeded",
+      "observer_cpu_ns": 147684000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 390,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 4366336,
+            "apparent_bytes": 4362240,
+            "files": 1
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n4362240 4362240 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n"
+      },
+      "unix_ns": 1792649956768963768
+    },
+    {
+      "host_cpu_reaped_children_ticks": 0,
+      "host_cpu_self_ticks": 37,
+      "host_pss_bytes": 10988544,
+      "meminfo_system": {
+        "Active(file)_bytes": 2038304768,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3065815040,
+        "Dirty_bytes": 499712,
+        "Inactive(file)_bytes": 1192361984,
+        "MemAvailable_bytes": 3573415936,
+        "MemFree_bytes": 442494976,
+        "Shmem_bytes": 1110016,
+        "Writeback_bytes": 0
+      },
+      "name": "before_submit",
+      "observer_cpu_ns": 267297000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 390,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 4366336,
+            "apparent_bytes": 4362240,
+            "files": 1
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n4362240 4362240 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n"
+      },
+      "tui_cpu_reaped_children_ticks": 0,
+      "tui_cpu_self_ticks": 5,
+      "tui_pss_bytes": 6641664,
+      "unix_ns": 1792649967823122667
+    },
+    {
+      "host_cpu_reaped_children_ticks": 5,
+      "host_cpu_self_ticks": 92,
+      "host_pss_bytes": 11218944,
+      "meminfo_system": {
+        "Active(file)_bytes": 2041167872,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3067166720,
+        "Dirty_bytes": 483328,
+        "Inactive(file)_bytes": 1190854656,
+        "MemAvailable_bytes": 3566710784,
+        "MemFree_bytes": 434434048,
+        "Shmem_bytes": 1110016,
+        "Writeback_bytes": 0
+      },
+      "name": "active_end",
+      "observer_cpu_ns": 324146000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 390,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 4534272,
+            "apparent_bytes": 4530176,
+            "files": 1
+          },
+          "scratch": {
+            "allocated_bytes": 1070592,
+            "apparent_bytes": 1029271,
+            "files": 38
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n4530176 4530176 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-1-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-10-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-11-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-12-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-13-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-14-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-15-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-16-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-17-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-18-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-19-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-2-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-3-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-4-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-5-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-6-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-7-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-8-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-9-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-1-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-10-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-11-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-12-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-13-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-14-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-15-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-16-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-17-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-18-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-19-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-2-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-3-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-4-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-5-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-6-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-7-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-8-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-9-1.tmp\n"
+      },
+      "tui_cpu_reaped_children_ticks": 0,
+      "tui_cpu_self_ticks": 8,
+      "tui_pss_bytes": 6718464,
+      "unix_ns": 1792649971641926651
+    },
+    {
+      "host_cpu_reaped_children_ticks": 5,
+      "host_cpu_self_ticks": 105,
+      "host_pss_bytes": 11218944,
+      "meminfo_system": {
+        "Active(file)_bytes": 2041167872,
+        "Buffers_bytes": 165969920,
+        "Cached_bytes": 3067179008,
+        "Dirty_bytes": 540672,
+        "Inactive(file)_bytes": 1190862848,
+        "MemAvailable_bytes": 3566718976,
+        "MemFree_bytes": 434434048,
+        "Shmem_bytes": 1110016,
+        "Writeback_bytes": 0
+      },
+      "name": "idle_after",
+      "observer_cpu_ns": 451569000,
+      "store": {
+        "entries": {
+          "diagnostics": {
+            "allocated_bytes": 4608,
+            "apparent_bytes": 390,
+            "files": 1
+          },
+          "host.lock": {
+            "allocated_bytes": 0,
+            "apparent_bytes": 0,
+            "files": 1
+          },
+          "rui.sqlite3": {
+            "allocated_bytes": 4534272,
+            "apparent_bytes": 4530176,
+            "files": 1
+          },
+          "scratch": {
+            "allocated_bytes": 1070592,
+            "apparent_bytes": 1029271,
+            "files": 38
+          }
+        },
+        "fincore_raw": "4096 390 /tmp/rui-tool-turn-2631030938/store/diagnostics/host-1.jsonl\n0 0 /tmp/rui-tool-turn-2631030938/store/host.lock\n4530176 4530176 /tmp/rui-tool-turn-2631030938/store/rui.sqlite3\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-1-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-10-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-11-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-12-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-13-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-14-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-15-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-16-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-17-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-18-1.tmp\n4096 105 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-19-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-2-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-3-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-4-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-5-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-6-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-7-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-8-1.tmp\n4096 70 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stderr-9-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-1-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-10-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-11-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-12-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-13-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-14-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-15-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-16-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-17-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-18-1.tmp\n102400 102400 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-19-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-2-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-3-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-4-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-5-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-6-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-7-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-8-1.tmp\n4096 399 /tmp/rui-tool-turn-2631030938/store/scratch/bash-stdout-9-1.tmp\n"
+      },
+      "tui_cpu_reaped_children_ticks": 0,
+      "tui_cpu_self_ticks": 14,
+      "tui_pss_bytes": 6718464,
+      "unix_ns": 1792649981717149023
+    }
+  ],
+  "process_tree": {
+    "active_interval_ns": 200000000,
+    "interval_ns": 200000000,
+    "observed_categories": {
+      "bash_shell": {
+        "max_max_pss_bytes": 455680,
+        "median_max_pss_bytes": 445440,
+        "min_max_pss_bytes": 437248,
+        "processes": 12
+      },
+      "host": {
+        "max_max_pss_bytes": 11231232,
+        "median_max_pss_bytes": 11231232,
+        "min_max_pss_bytes": 11231232,
+        "processes": 1
+      },
+      "tui": {
+        "max_max_pss_bytes": 6922240,
+        "median_max_pss_bytes": 6922240,
+        "min_max_pss_bytes": 6922240,
+        "processes": 1
+      }
+    },
+    "phases": {
+      "active": {
+        "first_begin_unix_ns": 1792649967920680809,
+        "last_end_unix_ns": 1792649971559144058,
+        "last_sample": {
+          "begin_unix_ns": 1792649971557692036,
+          "end_unix_ns": 1792649971559144058,
+          "phase": "active",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6718464,
+            "host": 11218944,
+            "total": 17937408,
+            "tui": 6718464
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "bash": 10,
+          "bash_shell": 10,
+          "clients": 1,
+          "host": 1,
+          "total": 12,
+          "tui": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649968122605233,
+          "end_unix_ns": 1792649968125011047,
+          "phase": "active",
+          "counts": {
+            "bash": 7,
+            "bash_shell": 7,
+            "clients": 1,
+            "host": 1,
+            "total": 9,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "bash": 3116032,
+            "bash_shell": 3116032,
+            "clients": 6849536,
+            "host": 11175936,
+            "total": 21141504,
+            "tui": 6849536
+          },
+          "pss_failures": 0
+        },
+        "samples": 19
+      },
+      "idle_after": {
+        "first_begin_unix_ns": 1792649971759550034,
+        "last_end_unix_ns": 1792649981677318730,
+        "last_sample": {
+          "begin_unix_ns": 1792649981675613496,
+          "end_unix_ns": 1792649981677318730,
+          "phase": "idle_after",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6718464,
+            "host": 11218944,
+            "total": 17937408,
+            "tui": 6718464
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "clients": 1,
+          "host": 1,
+          "total": 2,
+          "tui": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649971759550034,
+          "end_unix_ns": 1792649971760869805,
+          "phase": "idle_after",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6718464,
+            "host": 11218944,
+            "total": 17937408,
+            "tui": 6718464
+          },
+          "pss_failures": 0
+        },
+        "samples": 50
+      },
+      "idle_before": {
+        "first_begin_unix_ns": 1792649957992952833,
+        "last_end_unix_ns": 1792649967720097267,
+        "last_sample": {
+          "begin_unix_ns": 1792649967718706974,
+          "end_unix_ns": 1792649967720097267,
+          "phase": "idle_before",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6641664,
+            "host": 10988544,
+            "total": 17630208,
+            "tui": 6641664
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "clients": 1,
+          "host": 1,
+          "total": 2,
+          "tui": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649963671467608,
+          "end_unix_ns": 1792649963673088758,
+          "phase": "idle_before",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6797312,
+            "host": 10988544,
+            "total": 17785856,
+            "tui": 6797312
+          },
+          "pss_failures": 0
+        },
+        "samples": 49
+      },
+      "seed": {
+        "first_begin_unix_ns": 1792649956578971905,
+        "last_end_unix_ns": 1792649956580221246,
+        "last_sample": {
+          "begin_unix_ns": 1792649956578971905,
+          "end_unix_ns": 1792649956580221246,
+          "phase": "seed",
+          "counts": {
+            "host": 1,
+            "total": 1
+          },
+          "pss_bytes": {
+            "host": 10697728,
+            "total": 10697728
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "host": 1,
+          "total": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649956578971905,
+          "end_unix_ns": 1792649956580221246,
+          "phase": "seed",
+          "counts": {
+            "host": 1,
+            "total": 1
+          },
+          "pss_bytes": {
+            "host": 10697728,
+            "total": 10697728
+          },
+          "pss_failures": 0
+        },
+        "samples": 1
+      },
+      "setup": {
+        "first_begin_unix_ns": 1792649956377377093,
+        "last_end_unix_ns": 1792649956378692322,
+        "last_sample": {
+          "begin_unix_ns": 1792649956377377093,
+          "end_unix_ns": 1792649956378692322,
+          "phase": "setup",
+          "counts": {
+            "host": 1,
+            "total": 1
+          },
+          "pss_bytes": {
+            "host": 7263232,
+            "total": 7263232
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "host": 1,
+          "total": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649956377377093,
+          "end_unix_ns": 1792649956378692322,
+          "phase": "setup",
+          "counts": {
+            "host": 1,
+            "total": 1
+          },
+          "pss_bytes": {
+            "host": 7263232,
+            "total": 7263232
+          },
+          "pss_failures": 0
+        },
+        "samples": 1
+      },
+      "tui_attach": {
+        "first_begin_unix_ns": 1792649956780584049,
+        "last_end_unix_ns": 1792649957791799875,
+        "last_sample": {
+          "begin_unix_ns": 1792649957790147482,
+          "end_unix_ns": 1792649957791799875,
+          "phase": "tui_attach",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6641664,
+            "host": 10988544,
+            "total": 17630208,
+            "tui": 6641664
+          },
+          "pss_failures": 0
+        },
+        "max_observed_counts": {
+          "clients": 1,
+          "host": 1,
+          "total": 2,
+          "tui": 1
+        },
+        "observed_peak_total_sample": {
+          "begin_unix_ns": 1792649956780584049,
+          "end_unix_ns": 1792649956781948748,
+          "phase": "tui_attach",
+          "counts": {
+            "clients": 1,
+            "host": 1,
+            "total": 2,
+            "tui": 1
+          },
+          "pss_bytes": {
+            "clients": 6922240,
+            "host": 10988544,
+            "total": 17910784,
+            "tui": 6922240
+          },
+          "pss_failures": 0
+        },
+        "samples": 6
+      }
+    },
+    "processes": [
+      {
+        "pid": 199608,
+        "ppid": 199495,
+        "start_ticks": 770229,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 437248,
+        "last_pss_bytes": 437248,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199611,
+        "ppid": 199495,
+        "start_ticks": 770238,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968325216486,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 1,
+        "pss_failures": 1,
+        "pss_reads": 0,
+        "max_pss_bytes": 0,
+        "last_pss_bytes": 0,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199495,
+        "ppid": 199473,
+        "start_ticks": 769056,
+        "comm": "rui",
+        "category": "host",
+        "first_seen_unix_ns": 1792649956377377093,
+        "last_seen_unix_ns": 1792649981675613496,
+        "samples": 126,
+        "pss_failures": 0,
+        "pss_reads": 126,
+        "max_pss_bytes": 11231232,
+        "last_pss_bytes": 11218944,
+        "last_cpu_ticks": 105,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199536,
+        "ppid": 199473,
+        "start_ticks": 769096,
+        "comm": "rui",
+        "category": "tui",
+        "first_seen_unix_ns": 1792649956780584049,
+        "last_seen_unix_ns": 1792649981675613496,
+        "samples": 124,
+        "pss_failures": 0,
+        "pss_reads": 124,
+        "max_pss_bytes": 6922240,
+        "last_pss_bytes": 6718464,
+        "last_cpu_ticks": 14,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199586,
+        "ppid": 199495,
+        "start_ticks": 770210,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649967920680809,
+        "last_seen_unix_ns": 1792649967920680809,
+        "samples": 1,
+        "pss_failures": 1,
+        "pss_reads": 0,
+        "max_pss_bytes": 0,
+        "last_pss_bytes": 0,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199602,
+        "ppid": 199495,
+        "start_ticks": 770214,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 447488,
+        "last_pss_bytes": 447488,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199607,
+        "ppid": 199495,
+        "start_ticks": 770227,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 445440,
+        "last_pss_bytes": 445440,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199612,
+        "ppid": 199495,
+        "start_ticks": 770250,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968325216486,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 1,
+        "pss_failures": 1,
+        "pss_reads": 0,
+        "max_pss_bytes": 0,
+        "last_pss_bytes": 0,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199610,
+        "ppid": 199495,
+        "start_ticks": 770232,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968325216486,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 1,
+        "pss_failures": 1,
+        "pss_reads": 0,
+        "max_pss_bytes": 0,
+        "last_pss_bytes": 0,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199584,
+        "ppid": 199495,
+        "start_ticks": 770209,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649967920680809,
+        "last_seen_unix_ns": 1792649967920680809,
+        "samples": 1,
+        "pss_failures": 1,
+        "pss_reads": 0,
+        "max_pss_bytes": 0,
+        "last_pss_bytes": 0,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199603,
+        "ppid": 199495,
+        "start_ticks": 770217,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 444416,
+        "last_pss_bytes": 444416,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199604,
+        "ppid": 199495,
+        "start_ticks": 770219,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 438272,
+        "last_pss_bytes": 438272,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199606,
+        "ppid": 199495,
+        "start_ticks": 770224,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 455680,
+        "last_pss_bytes": 455680,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      },
+      {
+        "pid": 199605,
+        "ppid": 199495,
+        "start_ticks": 770221,
+        "comm": "bash",
+        "category": "bash_shell",
+        "first_seen_unix_ns": 1792649968122605233,
+        "last_seen_unix_ns": 1792649968325216486,
+        "samples": 2,
+        "pss_failures": 1,
+        "pss_reads": 1,
+        "max_pss_bytes": 447488,
+        "last_pss_bytes": 447488,
+        "last_cpu_ticks": 0,
+        "dispatch_shell": false
+      }
+    ],
+    "samples": 126,
+    "sampling_wall_seconds": 0.198566948
+  },
+  "provider": {
+    "sessions": 10,
+    "workload": "read",
+    "requests": 30,
+    "seeded": 10,
+    "measured": 10,
+    "done": 10,
+    "dispatch_calls": 9,
+    "workload_calls": 10,
+    "succeeded_calls": 19,
+    "failed_calls": 0,
+    "h2_streams": 30,
+    "h2_connections": 1,
+    "errors": [],
+    "session_facts": [
+      {
+        "session": "measure/tool-10/coordinator",
+        "index": 0,
+        "phase": 3,
+        "seed_request_bytes": 417284,
+        "measured_request_bytes": 417536,
+        "continuation_request_bytes": 441777,
+        "seed_received_unix_ns": 1792649956508351181,
+        "measured_received_unix_ns": 1792649967860423371,
+        "calls_sent_unix_ns": 1792649967869015904,
+        "continuation_received_unix_ns": 1792649968487783176,
+        "dispatch_calls": 9,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-000-dispatch-001",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967904988000,
+            "shell_end_unix_ns": 1792649967910587000,
+            "shell_seconds": 0.005599
+          },
+          {
+            "call_id": "tool-000-dispatch-002",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967912190000,
+            "shell_end_unix_ns": 1792649967918148000,
+            "shell_seconds": 0.005958
+          },
+          {
+            "call_id": "tool-000-dispatch-003",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967923594000,
+            "shell_end_unix_ns": 1792649967929464000,
+            "shell_seconds": 0.00587
+          },
+          {
+            "call_id": "tool-000-dispatch-004",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967927115000,
+            "shell_end_unix_ns": 1792649967933748000,
+            "shell_seconds": 0.006633
+          },
+          {
+            "call_id": "tool-000-dispatch-005",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967931526000,
+            "shell_end_unix_ns": 1792649967939566000,
+            "shell_seconds": 0.00804
+          },
+          {
+            "call_id": "tool-000-dispatch-006",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967935967000,
+            "shell_end_unix_ns": 1792649967941805000,
+            "shell_seconds": 0.005838
+          },
+          {
+            "call_id": "tool-000-dispatch-007",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967941758000,
+            "shell_end_unix_ns": 1792649967948403000,
+            "shell_seconds": 0.006645
+          },
+          {
+            "call_id": "tool-000-dispatch-008",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967945696000,
+            "shell_end_unix_ns": 1792649967953903000,
+            "shell_seconds": 0.008207
+          },
+          {
+            "call_id": "tool-000-dispatch-009",
+            "kind": "dispatch",
+            "succeeded": true,
+            "output_bytes": 681,
+            "shell_start_unix_ns": 1792649967950402000,
+            "shell_end_unix_ns": 1792649967956315000,
+            "shell_seconds": 0.005913
+          },
+          {
+            "call_id": "tool-000-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649967955804000,
+            "shell_start_unix_ns": 1792649968311887000,
+            "shell_end_unix_ns": 1792649968325068000,
+            "shell_seconds": 0.013181
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-001",
+        "index": 1,
+        "phase": 3,
+        "seed_request_bytes": 417285,
+        "measured_request_bytes": 418135,
+        "continuation_request_bytes": 429272,
+        "seed_received_unix_ns": 1792649956536135538,
+        "measured_received_unix_ns": 1792649967965710330,
+        "calls_sent_unix_ns": 1792649967970013997,
+        "continuation_received_unix_ns": 1792649968504101696,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-001-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649967977321000,
+            "shell_start_unix_ns": 1792649968312998000,
+            "shell_end_unix_ns": 1792649968324471000,
+            "shell_seconds": 0.011473
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-002",
+        "index": 2,
+        "phase": 3,
+        "seed_request_bytes": 417283,
+        "measured_request_bytes": 418133,
+        "continuation_request_bytes": 429270,
+        "seed_received_unix_ns": 1792649956559708340,
+        "measured_received_unix_ns": 1792649967984798615,
+        "calls_sent_unix_ns": 1792649967989558268,
+        "continuation_received_unix_ns": 1792649968520415623,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-002-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649967997166000,
+            "shell_start_unix_ns": 1792649968312826000,
+            "shell_end_unix_ns": 1792649968325145000,
+            "shell_seconds": 0.012319
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-003",
+        "index": 3,
+        "phase": 3,
+        "seed_request_bytes": 417284,
+        "measured_request_bytes": 418134,
+        "continuation_request_bytes": 429271,
+        "seed_received_unix_ns": 1792649956585085625,
+        "measured_received_unix_ns": 1792649968005871020,
+        "calls_sent_unix_ns": 1792649968010150352,
+        "continuation_received_unix_ns": 1792649968536903485,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-003-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968020426000,
+            "shell_start_unix_ns": 1792649968312587000,
+            "shell_end_unix_ns": 1792649968324214000,
+            "shell_seconds": 0.011627
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-004",
+        "index": 4,
+        "phase": 3,
+        "seed_request_bytes": 417282,
+        "measured_request_bytes": 418132,
+        "continuation_request_bytes": 429269,
+        "seed_received_unix_ns": 1792649956607328649,
+        "measured_received_unix_ns": 1792649968032363722,
+        "calls_sent_unix_ns": 1792649968041143039,
+        "continuation_received_unix_ns": 1792649968553062748,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-004-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968052819000,
+            "shell_start_unix_ns": 1792649968312445000,
+            "shell_end_unix_ns": 1792649968324805000,
+            "shell_seconds": 0.01236
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-005",
+        "index": 5,
+        "phase": 3,
+        "seed_request_bytes": 417282,
+        "measured_request_bytes": 418132,
+        "continuation_request_bytes": 429269,
+        "seed_received_unix_ns": 1792649956616514364,
+        "measured_received_unix_ns": 1792649968067334915,
+        "calls_sent_unix_ns": 1792649968071937769,
+        "continuation_received_unix_ns": 1792649968568850431,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-005-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968080474000,
+            "shell_start_unix_ns": 1792649968312300000,
+            "shell_end_unix_ns": 1792649968324175000,
+            "shell_seconds": 0.011875
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-006",
+        "index": 6,
+        "phase": 3,
+        "seed_request_bytes": 417283,
+        "measured_request_bytes": 418133,
+        "continuation_request_bytes": 429270,
+        "seed_received_unix_ns": 1792649956643413422,
+        "measured_received_unix_ns": 1792649968088478166,
+        "calls_sent_unix_ns": 1792649968093249943,
+        "continuation_received_unix_ns": 1792649968585974409,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-006-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968101601000,
+            "shell_start_unix_ns": 1792649968312148000,
+            "shell_end_unix_ns": 1792649968324424000,
+            "shell_seconds": 0.012276
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-007",
+        "index": 7,
+        "phase": 3,
+        "seed_request_bytes": 417281,
+        "measured_request_bytes": 418131,
+        "continuation_request_bytes": 429268,
+        "seed_received_unix_ns": 1792649956665469210,
+        "measured_received_unix_ns": 1792649968111455083,
+        "calls_sent_unix_ns": 1792649968115819287,
+        "continuation_received_unix_ns": 1792649968603189423,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-007-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968132942000,
+            "shell_start_unix_ns": 1792649968311990000,
+            "shell_end_unix_ns": 1792649968315486000,
+            "shell_seconds": 0.003496
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-008",
+        "index": 8,
+        "phase": 3,
+        "seed_request_bytes": 417283,
+        "measured_request_bytes": 418133,
+        "continuation_request_bytes": 429270,
+        "seed_received_unix_ns": 1792649956692972780,
+        "measured_received_unix_ns": 1792649968143787431,
+        "calls_sent_unix_ns": 1792649968150160914,
+        "continuation_received_unix_ns": 1792649968619959855,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-008-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968189327000,
+            "shell_start_unix_ns": 1792649968311797000,
+            "shell_end_unix_ns": 1792649968315305000,
+            "shell_seconds": 0.003508
+          }
+        ]
+      },
+      {
+        "session": "measure/tool-10/worker-009",
+        "index": 9,
+        "phase": 3,
+        "seed_request_bytes": 417281,
+        "measured_request_bytes": 418131,
+        "continuation_request_bytes": 429268,
+        "seed_received_unix_ns": 1792649956714365872,
+        "measured_received_unix_ns": 1792649968160491133,
+        "calls_sent_unix_ns": 1792649968252659338,
+        "continuation_received_unix_ns": 1792649968632521283,
+        "dispatch_calls": 0,
+        "workload_calls": 1,
+        "outputs": [
+          {
+            "call_id": "tool-009-workload",
+            "kind": "workload",
+            "succeeded": true,
+            "output_bytes": 10240,
+            "shell_park_unix_ns": 1792649968308354000,
+            "shell_start_unix_ns": 1792649968312122000,
+            "shell_end_unix_ns": 1792649968324741000,
+            "shell_seconds": 0.012619
+          }
+        ]
+      }
+    ],
+    "first_measured_unix_ns": 1792649967860423371,
+    "last_continuation_unix_ns": 1792649968632521283
+  },
+  "provider_done_unix_ns": 1792649968641738147,
+  "provider_pid": 199490,
+  "read_fixture": {
+    "bytes": 102400,
+    "path": "/tmp/rui-tool-turn-2631030938/read-fixture.txt",
+    "sha256": "79d62c90695f11cde2bc79e74852268d9183249c7e99d81a53b9dd68b4ced64c"
+  },
+  "sample_coverage": {
+    "bash_shell": {
+      "expected": 19,
+      "pss_read": 7,
+      "pss_read_fraction": 0.3684210526315789,
+      "seen": 12
+    },
+    "basis": "identities seen in at least one sample, and those with at least one successful PSS read, versus the minimum the turn creates; seen can exceed expected when shells fork subshells",
+    "send": {
+      "expected": 9,
+      "pss_read": 0,
+      "pss_read_fraction": 0,
+      "seen": 0
+    },
+    "workload_child": {
+      "expected": 10,
+      "pss_read": 0,
+      "pss_read_fraction": 0,
+      "seen": 0
+    }
+  },
+  "seed": {
+    "method": "one ordinary `rui session send --text` Message per Session, answered without tools",
+    "rows": [
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/coordinator",
+        "sha256": "7bbebc465defaa3c426672aa1470ae643b0dfb7c1d7fc028c2a928d459120722"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-001",
+        "sha256": "d31240f2ce573c17037ba6dfac512d8d1db7c08920de7f86332fd21aa98d5ed1"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-002",
+        "sha256": "4fe3736278f5f9df48bb59092a1cd0a4ed2c335fe68973f8931e501cea5f4019"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-003",
+        "sha256": "4d76200d6c9d32f29e525823642453835d79aa4a30e22d375d6c503410a53d8e"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-004",
+        "sha256": "053e123f03e50ccf1a101b48ac3353afb4b97296889efce17ec9c7d2c4667e90"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-005",
+        "sha256": "3b09895b037d5480e5559f2799c3035f346021246c25321a251d47279ce46095"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-006",
+        "sha256": "ae9e9c610450a02d1e8e7ae48a9dc8a98408e398a9d15e90a520fed0c8704a4a"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-007",
+        "sha256": "6fbf2c2eb0f41161bb381b58b62155fee78cb3beda2f2d6d5129fd196646a39c"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-008",
+        "sha256": "0d959ba985d84c93449c3bfb093ed967e4e4f080abc1959ba0024867973a2379"
+      },
+      {
+        "bytes": 409600,
+        "estimated_tokens_bytes_div_4": 102400,
+        "session": "measure/tool-10/worker-009",
+        "sha256": "fef2ccea640d9e0d198edba235a380774836db7261bcb82605c1f8330e75f4e9"
+      }
+    ],
+    "token_estimate_method": "bytes/4; no tokenizer was run"
+  },
+  "seed_seconds": 0.339288681,
+  "sessions": 10,
+  "status": "passed",
+  "submit_unix_ns": 1792649967825290710,
+  "topology": {
+    "coordinator_tui": 1,
+    "dispatch_calls_expected": 9,
+    "workload_calls_expected": 10
+  },
+  "tui": {
+    "exit_code": 0,
+    "transcript_bytes": 3577
+  },
+  "tui_pid": 199536,
+  "workload": "read"
+}

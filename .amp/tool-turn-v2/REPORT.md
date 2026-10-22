@@ -1,6 +1,6 @@
 # Coordinated Bash tool turns with a start barrier, campaign v2, 22 Oct 2026
 
-**Status: measured Linux fixture campaign, owner-verified, no independent review.** This supersedes nothing: the v1 campaign without a barrier ([../tool-turn/REPORT.md](../tool-turn/REPORT.md)) is kept unchanged. All 38 v2 attempts exited 0 ([attempts.tsv](attempts.tsv)); a one-line estimate was written before each run ([napkins.tsv](napkins.tsv)). Every number is **measured** unless labelled **estimated**.
+**Status: measured Linux fixture campaign. Sol's review of 8ee27b01 requested changes (R1–R5); this revision applies them, see [Review corrections](#review-corrections-r1r5).** This supersedes nothing: the v1 campaign without a barrier ([../tool-turn/REPORT.md](../tool-turn/REPORT.md)) is kept unchanged. All 38 v2 attempts exited 0 ([attempts.tsv](attempts.tsv)); a one-line estimate was written before each run ([napkins.tsv](napkins.tsv)). Every number is **measured** unless labelled **estimated**.
 
 **Identity.** Product: origin/main = stable [`d4f87000`](https://github.com/DivyanshGolyan/rui/commit/d4f870002b1eeef370fb8f4c7aa3fd8b14343159), ReleaseFast, binary SHA-256 `993c3eb1…54f2` (same binary as v1). Harness executable SHA-256 `ec190670…2311` ([identities.txt](identities.txt)), built from the tree committed as [`aeef8596`](https://github.com/DivyanshGolyan/rui/commit/aeef8596) on `perf/tool-turn-20261022`; each run JSON records per-file source hashes. Landing candidate with the same harness code: [`98c960b6`](https://github.com/DivyanshGolyan/rui/commit/98c960b6) on `perf/tool-turn-code`. 2-vCPU Linux 6.1 orb, 4,025,412 kB RAM, Host active capacity 100. The campaign directory is named `campaign-v2-v2` because a path substitution in the script ran twice; nothing else differs.
 
@@ -12,7 +12,7 @@
 
 ## Results (median of 3 fresh Hosts; Linux PSS from `smaps_rollup`)
 
-Peaks are the **highest observed sample**, not true peaks. Columns are deduplicated: each PID+start time is counted once per sample; sends run under Bash but are counted only as clients. **The Host, Bash and Clients peak columns are each that column's own maximum, which can come from different samples, so they need not sum to the total.** Only "Total, peak sample" is one simultaneous sample.
+Peaks are the **highest observed sample**, not true peaks. **Each sample is a sequential-scan sum, not a simultaneous snapshot:** the sampler reads `smaps_rollup` one process after another over the sample's `[begin, end]` span, and omits processes whose read failed. Columns are deduplicated: each PID+start time is counted once per sample; sends run under Bash but are counted only as clients. **The Host, Bash and Clients peak columns are each that column's own maximum, which can come from different samples, so they need not sum to the total.** "Total, peak sample" is the largest single scan sum; its scan duration and failed reads are in the coverage section. It does not bound the true peak.
 
 | Workload, N, interval | In flight | Host PSS idle → peak | Bash peak | Clients peak | Total, peak sample | Host CPU in turn | Observer CPU |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
@@ -42,10 +42,15 @@ The combined realistic case from the brief is the read N=100 row: 100 Sessions w
 | `cat` seen / 100 | 0, 100, 0 | 100, 102, 101 |
 | `sleep` seen / 100 | 100 | 100 |
 | Shells seen / 199 | 147–157 | 199 |
+| Shells with ≥1 successful PSS read / 199 | 102, 103, 102 (read); 106, 106, 104 (sleep) | 134, 131, 147 (read); 130, 138, 134 (sleep) |
+| Workload children seen → with PSS read (read) | 0→0, 100→78, 0→0 | 100→100, 102→99, 101→101 |
+| Sends seen → with PSS read (read) | 3→2, 4→4, 4→3 | 27→26, 21→18, 37→36 |
+| Peak-total sample: scan span, failed reads (read) | 5.1 ms/0, 14.5 ms/42, 5.3 ms/0 | 65.6 ms/0, 11.4 ms/0, 35.7 ms/10 |
+| Active-phase scan span, median / max (read) | 1.7–1.9 / 6.6–14.5 ms | 1.4–1.5 / 27.8–65.6 ms |
 | Observer CPU in turn | 0.41 s (read), 0.68 s (sleep) | 1.48 s (read), 2.48 s (sleep) |
 | Host CPU in turn | 8.63 s (read), 9.06 s (sleep) | 8.69 s (read), 8.56 s (sleep) |
 
-- At 25 ms, every shell and every parked or running workload child is seen. Sends, which live ≈7–8 ms, remain only 21–37% covered. Observed counts above 100 are subshells that `bash` forks briefly.
+- At 25 ms, every shell identity is *seen*, but only 131–147 of 199 have a successful PSS read; the rest exited between the `/proc/PID/stat` read and the `smaps_rollup` read. Coverage claims count only successful reads. The collector does not revalidate start time around the PSS read, so PID reuse within one scan is not excluded. Sends, which live ≈7–8 ms, remain only 21–37% covered. Observed counts above 100 are subshells that `bash` forks briefly.
 - 25 ms sampling costs 3.6× the observer CPU, but Host CPU moved within run-to-run spread (read 8.69 vs 8.63 s; sleep 8.56 vs 9.06 s). On 2 vCPUs the observer competes for the second core, so a small Host effect cannot be excluded.
 - **Exact peak PSS is not obtained.** Send PSS (0.74–1.03 MB each) is measured only for the sends that were sampled. A napkin **estimate**, not a bound: with 2–3 sends overlapping and the largest *sampled* send at 1.03 MB, unsampled sends might add about 3 × 1.03 ≈ 3.1 MB at an instant. Unsampled sends were never measured, so they could be larger, and this does not cap the missing peak memory.
 
@@ -65,7 +70,26 @@ The combined realistic case from the brief is the read N=100 row: 100 Sessions w
 | v2 sleep N=100 | 0.807 ms (0.292–4.735), 199 | 0.928 ms (0.286–3.343), 99 |
 | v1 sleep N=1 / 10 / 100, read N=100 | 0.800 / 0.770 / 0.782 / 0.771 ms | — / 0.855 / 0.823 / 0.792 ms |
 
-**v1 erratum:** the v1 report's fork-to-exec figures used the clone-return start. Re-reduced with entry pairing, its medians are those in the last row ([summary-v1-rereduced.json](summary-v1-rereduced.json)); the v1 file itself is unchanged. These are durations **under strace**, which stops the tracee at every syscall and timestamps when strace handles each stop. They are instrumented upper-bound-style figures, not untraced fork-to-exec, which remains unavailable. strace also cut achieved overlap to 53–54 and inflated CPU; strace runs are used for nothing else. The fork-safety, fd-19 and signal-mask findings in the v1 report remain owner findings pending independent review. No launch or fd change was made.
+**v1 erratum:** the v1 report's fork-to-exec figures used the clone-return start. Re-reduced with entry pairing, its medians are those in the last row ([summary-v1-rereduced.json](summary-v1-rereduced.json)); the v1 file itself is unchanged. These are durations **under strace**, which stops the tracee at every syscall and timestamps when strace handles each stop. They are instrumented upper-bound-style figures, not untraced fork-to-exec, which remains unavailable. strace also cut achieved overlap to 53–54 and inflated CPU; strace runs are used for nothing else. The fork-safety, fd-19 and signal-mask findings in the v1 report remain owner findings, with Sol's review limits applied:
+
+- `src/bash.zig:133` is a test-only `fork`; production launches through `std.process.spawn`. The async-signal-safety assessment covers only the normal child path (stack path conversion, `chdir`, three `dup2`, `setpgid`, `execve`, error-pipe write and `_exit`). Zig's Debug unexpected-errno diagnostics and `errnoBug` panic paths are outside it.
+- The inherited `/dev/null` descriptor and signal-mask/ignored-disposition findings are source-level. `fd-probe.txt` is an owner transcript, not an independently reproduced probe, and fd 19 is run-specific. SQLite and curl CLOEXEC paths do not establish that no other descriptor leaks.
+- `posix_spawn` would not close unrelated non-CLOEXEC descriptors by itself, and the source comparison does not show a speed benefit.
+- The report's claim about the binary's dynamic imports was not independently verified; the exact executable was not in the archive.
+
+No launch or fd change was made.
+
+## Review corrections (R1–R5)
+
+Harness fixes are on `perf/tool-turn-20261022` (commit `0ceaea88` onward) and are ported to `perf/tool-turn-code`. Red, mutation and `-race` logs are in [r-fixes/](r-fixes/).
+
+- **R1, original requests.** A run now passes only if every Session has exactly its seed and its original request (coordinator: the TUI's key; worker `i`: `dispatch-<i>` sent by the coordinator), both `completed`, and `rui request read-result` returns exactly `tool turn complete <session>`. The provider's `done` count is no longer sufficient.
+- **R2, call identity.** The provider keeps each Session's issued call IDs and kinds. Unissued, duplicate and missing outputs fail. A call counts as succeeded only with Bash exit 0 and exactly one ordered start/end marker pair, plus a park marker for barrier workloads only.
+- **R3, barrier.** The shell exits 124 without running the workload when `read -t` times out. A controller release with fewer than N parked, or a barrier run with workload overlap below N, fails acceptance; evidence is kept.
+- **R4, races.** The sampler reads the TUI PID under its mutex; the provider stamps `CallsSentNS` from a phase decided under the lock; the barrier test reads file-backed stdout. `go test -race` passes on both packages, including Sol's sampler overlay probe.
+- **R5, PSS semantics.** Covered above: sequential-scan sums, per-peak scan span and failures, seen versus successfully read identities ([summary-v2-r5.json](summary-v2-r5.json), [summary-v1-r5.json](summary-v1-r5.json); all earlier fields reproduce unchanged).
+
+**Retrospective audit under repaired rules** ([retained-audit.json](retained-audit.json), [audit_retained.py](audit_retained.py)). Each retained Store was served in place by the same d4f87000 binary, read through `request inspect` and `request read-result`, then restored from a backup with a matching SHA-256. **58 of 60 runs pass R1–R3.** The two strace N=100 runs fail R3: the controller barrier timed out with 53 and 52 of 100 parked, and overlap was 53 and 54. The old harness accepted them. Their strace timings remain valid as instrumented fork-to-exec data, not as N=100 concurrency. Duplicate call outputs are unavailable retrospectively, because the old provider stored outputs in a map. Acceptance for the 58 is verified retrospectively under the repaired rules; the measurements were not rerun with the repaired harness.
 
 ## Limits
 

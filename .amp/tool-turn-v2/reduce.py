@@ -31,6 +31,26 @@ def column_peak(run, name, column):
     return best
 
 
+def scan_coverage(run, name):
+    """Sequential-scan facts for the phase's peak-total sample and per-category
+    identities seen versus identities with at least one successful PSS read
+    (samples > pss_failures). A sample's sum spans [begin, end]; it is not a
+    simultaneous snapshot and omits failed reads."""
+    sample = phase(run, name).get("observed_peak_total_sample")
+    seen, read = {}, {}
+    for record in run["process_tree"]["processes"]:
+        category = record["category"]
+        seen[category] = seen.get(category, 0) + 1
+        read[category] = read.get(category, 0) + (record["samples"] > record["pss_failures"])
+    path = pathlib.Path(run["artifacts"]) / "tree-samples.jsonl"
+    spans = [(json.loads(line)["end_unix_ns"] - json.loads(line)["begin_unix_ns"]) / 1e6 for line in path.read_text().splitlines() if json.loads(line)["phase"] == name]
+    return {"peak_sample_scan_ms": None if sample is None else (sample["end_unix_ns"] - sample["begin_unix_ns"]) / 1e6,
+            "peak_sample_pss_failures": None if sample is None else sample["pss_failures"],
+            "peak_sample_processes": None if sample is None else sample["counts"].get("total"),
+            "phase_scan_ms_median_max": [statistics.median(spans), max(spans)] if spans else None,
+            "identities_seen": seen, "identities_with_pss_read": read}
+
+
 def last(run, name, column):
     sample = phase(run, name).get("last_sample")
     return None if sample is None else sample["pss_bytes"].get(column, 0)
@@ -119,6 +139,7 @@ for path in sorted(campaign.glob("*.json")):
         "tui": run["tui"],
         "barrier": run.get("barrier", False), "active_sample_interval_ms": run.get("active_sample_interval_ns", 200_000_000) / 1e6,
         "barrier_release": run.get("barrier_release"), "sample_coverage": run.get("sample_coverage"),
+        "active_scan": scan_coverage(run, "active"),
         "workload_park_to_start": run["concurrency"]["workload"].get("park_to_start_seconds"),
         "sampling_wall_seconds": run["process_tree"].get("sampling_wall_seconds"),
         "pss_steady_after_per_column": {c: last(run, "idle_after", c) for c in ("host", "bash", "clients", "tui", "send", "total")},
