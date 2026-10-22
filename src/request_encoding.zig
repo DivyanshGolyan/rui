@@ -6,14 +6,19 @@ pub const window_bytes = protocol.content_window_bytes;
 // A cursor source supplies immutable positional bytes. It must provide:
 //   fn contentLength(self: @This()) u64
 //   fn readContent(self: @This(), offset: u64, destination: []u8) !usize
-//   fn maxWindow(self: @This(), offset: u64, wanted: usize) usize
-// `maxWindow` clips the requested refill size before the read happens; it
-// must return `wanted` unchanged for native content and a positive value
-// bounded by the next absolute partition boundary for test content. It must
-// never turn an unexpectedly short canonical read into success: the cursor
-// still requires the read to return exactly the clipped length.
+// Tests may additionally supply maxWindow(offset, wanted) to partition
+// refills before reads. Every read must still return the exact chosen size.
 // A sink provides `fn write(self: *@This(), bytes: []const u8) !void` which
 // accepts the complete supplied slice on success.
+
+fn maxWindow(source: anytype, offset: u64, wanted: usize) usize {
+    const Source = switch (@typeInfo(@TypeOf(source))) {
+        .pointer => |pointer| pointer.child,
+        else => @TypeOf(source),
+    };
+    if (@hasDecl(Source, "maxWindow")) return source.maxWindow(offset, wanted);
+    return wanted;
+}
 
 pub const MemorySource = struct {
     bytes: []const u8,
@@ -27,12 +32,6 @@ pub const MemorySource = struct {
         if (start + destination.len > self.bytes.len) return error.RangeOutOfBounds;
         @memcpy(destination, self.bytes[start..][0..destination.len]);
         return destination.len;
-    }
-
-    pub fn maxWindow(self: MemorySource, offset: u64, wanted: usize) usize {
-        _ = self;
-        _ = offset;
-        return wanted;
     }
 };
 
@@ -70,12 +69,6 @@ pub const ShortReadSource = struct {
 
     pub fn contentLength(self: ShortReadSource) u64 {
         return self.bytes.len;
-    }
-
-    pub fn maxWindow(self: ShortReadSource, offset: u64, wanted: usize) usize {
-        _ = self;
-        _ = offset;
-        return wanted;
     }
 
     pub fn readContent(self: ShortReadSource, offset: u64, destination: []u8) !usize {
@@ -175,7 +168,7 @@ pub const JsonCursor = struct {
             if (self.offset < self.buffer_start or self.offset >= self.buffer_start + self.buffer_length) {
                 self.buffer_start = self.offset;
                 var wanted: usize = @intCast(@min(length - self.offset, @min(self.buffer.len, bytes_left.*)));
-                wanted = source.maxWindow(self.offset, wanted);
+                wanted = maxWindow(source, self.offset, wanted);
                 if (wanted == 0) return false;
                 const count = try source.readContent(self.offset, self.buffer[0..wanted]);
                 if (count != wanted) return error.ShortCanonicalRead;
@@ -246,7 +239,7 @@ pub const RawCursor = struct {
         const length = source.contentLength();
         if (self.offset != length) {
             var wanted: usize = @intCast(@min(length - self.offset, @min(self.buffer.len, bytes_left.*)));
-            wanted = source.maxWindow(self.offset, wanted);
+            wanted = maxWindow(source, self.offset, wanted);
             if (wanted == 0) return false;
             const count = try source.readContent(self.offset, self.buffer[0..wanted]);
             if (count != wanted) return error.ShortCanonicalRead;
@@ -502,7 +495,7 @@ pub const ReplayCursor = struct {
                     continue;
                 }
                 var wanted: usize = @intCast(@min(remaining, @min(bytes_left.*, self.buffer.len)));
-                wanted = source.maxWindow(self.copy_position, wanted);
+                wanted = maxWindow(source, self.copy_position, wanted);
                 if (wanted == 0) return .pending;
                 const count = try source.readContent(self.copy_position, self.buffer[0..wanted]);
                 if (count != wanted) return error.ShortCanonicalRead;
@@ -562,7 +555,7 @@ pub const ReplayCursor = struct {
             if (bytes_left.* == 0) return null;
             self.buffer_start = self.position;
             var wanted: usize = @intCast(@min(source.contentLength() - self.position, @min(self.buffer.len, bytes_left.*)));
-            wanted = source.maxWindow(self.position, wanted);
+            wanted = maxWindow(source, self.position, wanted);
             if (wanted == 0) return null;
             const count = try source.readContent(self.position, self.buffer[0..wanted]);
             if (count != wanted) return error.ShortCanonicalRead;
@@ -1181,12 +1174,6 @@ const ShortCopySource = struct {
 
     pub fn contentLength(self: *ShortCopySource) u64 {
         return self.bytes.len;
-    }
-
-    pub fn maxWindow(self: *ShortCopySource, offset: u64, wanted: usize) usize {
-        _ = self;
-        _ = offset;
-        return wanted;
     }
 
     pub fn readContent(self: *ShortCopySource, offset: u64, destination: []u8) !usize {

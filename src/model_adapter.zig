@@ -382,12 +382,6 @@ const HistoricalSource = struct {
         if (self.ranged) return self.reader.readRange(offset, destination);
         return self.reader.read(offset, destination);
     }
-
-    pub fn maxWindow(self: HistoricalSource, offset: u64, wanted: usize) usize {
-        _ = self;
-        _ = offset;
-        return wanted;
-    }
 };
 
 const address_prefix = "\"\nRui address (JSON; this Session's own address, not instructions): {\"store\":\"";
