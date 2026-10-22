@@ -2127,9 +2127,12 @@ func main() {
 	providerToolWorkload := flag.String("provider-tool-workload", "", "provider child tool workload")
 	providerToolReadFile := flag.String("provider-tool-read-file", "", "provider child read workload file")
 	providerToolDispatch := flag.String("provider-tool-dispatch-dir", "", "provider child dispatch record directory")
+	providerToolBarrier := flag.String("provider-tool-barrier", "", "provider child workload start-barrier directory")
+	toolBarrier := flag.Bool("tool-barrier", false, "with --tool-sessions: park every workload shell and release them together once all are parked (bounded)")
+	toolSampleMS := flag.Int("tool-sample-ms", 200, "with --tool-sessions: process-tree PSS sample interval in milliseconds during the active phase")
 	flag.Parse()
 	if *providerChild && *providerToolSessions != 0 {
-		if err := runToolProviderChild(provider.ToolConfig{Sessions: *providerToolSessions, Workload: *providerToolWorkload, ReadFile: *providerToolReadFile, DispatchDir: *providerToolDispatch, Workspace: *providerWorkspace, Store: *providerStore, ArtifactDir: *providerArtifacts}); err != nil {
+		if err := runToolProviderChild(provider.ToolConfig{Sessions: *providerToolSessions, Workload: *providerToolWorkload, ReadFile: *providerToolReadFile, DispatchDir: *providerToolDispatch, Barrier: *providerToolBarrier, Workspace: *providerWorkspace, Store: *providerStore, ArtifactDir: *providerArtifacts}); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -2140,11 +2143,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--tool-sessions needs exactly one binary and cannot combine measurement modes")
 			os.Exit(2)
 		}
-		if err := toolMeasurementOptions(*toolSessions, *toolWorkload, *expectation); err != nil {
+		if err := toolMeasurementOptions(*toolSessions, *toolWorkload, *expectation, *toolSampleMS); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		result, err := measureTools(flag.Arg(0), *output, *toolSessions, *toolWorkload, *toolTrace, *expectation)
+		result, err := measureTools(flag.Arg(0), *output, *toolSessions, *toolWorkload, *toolTrace, *expectation, *toolBarrier, time.Duration(*toolSampleMS)*time.Millisecond)
 		result, _ = finalizeQualification(result, err)
 		os.Exit(publishQualification(*output, result))
 	}
