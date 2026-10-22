@@ -1282,6 +1282,7 @@ pub const Store = struct {
     /// after every successful COMMIT. An unchanged value proves no canonical
     /// fact changed since it was read; a rolled-back change also advances it.
     commit_generation: std.atomic.Value(u64) = .init(0),
+    hot_statements: std.EnumArray(HotStatement, ?*c.sqlite3_stmt) = .initFill(null),
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) struct { decoded: std.atomic.Value(u64) = .init(0), closes: std.atomic.Value(u64) = .init(0) } else void = if (@import("builtin").is_test) .{} else {},
 
@@ -1582,11 +1583,28 @@ pub const Store = struct {
 
     pub fn close(self: *Store) !void {
         self.lockAdmin();
+        for (self.hot_statements.values) |statement| _ = c.sqlite3_finalize(statement);
         const close_result = c.sqlite3_close(self.database);
         self.mutex.unlock(self.io);
         if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
         _ = c.sqlite3_hard_heap_limit64(0);
         self.* = undefined;
+    }
+
+    /// Prepares `which` once for the Store's lifetime; the caller resets it
+    /// with `resetHot` before releasing the Store mutex.
+    fn hot(self: *Store, which: HotStatement) !*c.sqlite3_stmt {
+        const slot = self.hot_statements.getPtr(which);
+        if (slot.*) |statement| {
+            std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
+            return statement;
+        }
+        var statement: ?*c.sqlite3_stmt = null;
+        if (c.sqlite3_prepare_v3(self.database, which.sql(), -1, c.SQLITE_PREPARE_PERSISTENT, &statement, null) != c.SQLITE_OK) {
+            return error.StatementPrepareFailed;
+        }
+        slot.* = statement orelse return error.StatementPrepareFailed;
+        return slot.*.?;
     }
 
     pub fn validateRetryWaits(self: *Store, waits_ms: retry_policy.Waits) !void {
@@ -4383,17 +4401,8 @@ pub const Store = struct {
         bash_timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        const select = try prepare(
-            self.database,
-            "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
-                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
-                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
-                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-                "ORDER BY action.action_id LIMIT 1",
-        );
-        defer _ = c.sqlite3_finalize(select);
+        const select = try self.hot(.executable_action);
+        defer resetHot(select);
         const step = c.sqlite3_step(select);
         if (step == c.SQLITE_DONE) return null;
         if (step != c.SQLITE_ROW) return error.ActionSelectionFailed;
@@ -5068,11 +5077,11 @@ pub const Store = struct {
     }
 
     fn hasRunnableWorkLocked(self: *Store, kind: ModelAdmissionKind) !bool {
-        const statement = try prepare(self.database, switch (kind) {
-            .message => runnable_probe_sql,
-            .tool_continuation => tool_continuation_selection_sql,
+        const statement = try self.hot(switch (kind) {
+            .message => .runnable_probe,
+            .tool_continuation => .tool_continuation_probe,
         });
-        defer _ = c.sqlite3_finalize(statement);
+        defer resetHot(statement);
         return switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => true,
             c.SQLITE_DONE => {
@@ -5087,13 +5096,8 @@ pub const Store = struct {
     /// from malformed canonical classification. Only each active Turn's
     /// current Operation can be blocking successor discovery.
     fn validateBlockedToolCalls(self: *Store) !void {
-        const statement = try prepare(
-            self.database,
-            "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
-                "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
-                "AND " ++ resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.blocked_tool_calls);
+        defer resetHot(statement);
         while (true) switch (c.sqlite3_step(statement)) {
             c.SQLITE_ROW => {
                 const operation_id = c.sqlite3_column_int64(statement, 0);
@@ -5162,12 +5166,8 @@ pub const Store = struct {
     }
 
     fn validateCurrentAttempt(self: *Store, binding: AttemptBinding) !void {
-        const statement = try prepare(
-            self.database,
-            "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
-                "FROM model_operation WHERE operation_id=?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.current_attempt);
+        defer resetHot(statement);
         try bindU64(statement, 1, binding.operation_id);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return error.StaleAttemptBinding;
@@ -5645,11 +5645,8 @@ pub const Store = struct {
     }
 
     fn operationSupersededByControlLocked(self: *Store, binding: AttemptBinding) !?SupersedingControl {
-        const statement = try prepare(
-            self.database,
-            "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
-        );
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.operation_supersession);
+        defer resetHot(statement);
         try bindU64(statement, 1, binding.operation_id);
         const step = c.sqlite3_step(statement);
         if (step == c.SQLITE_DONE) return null;
@@ -6178,8 +6175,8 @@ pub const Store = struct {
     const ContentSlot = struct { id: i64, existing: bool };
 
     fn contentSlot(self: *Store, digest: *const [32]u8, length: u64, private: bool) !ContentSlot {
-        const find = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
-        defer _ = c.sqlite3_finalize(find);
+        const find = try self.hot(.content_lookup);
+        defer resetHot(find);
         try bindBlob(find, 1, digest);
         try bindU64(find, 2, length);
         try bindI64(find, 3, @as(i64, if (private) 1 else 0));
@@ -6535,8 +6532,8 @@ pub const Store = struct {
     }
 
     fn readExistingCommand(self: *Store, key: []const u8) !?ExistingCommand {
-        const statement = try prepare(self.database, "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.existing_command);
+        defer resetHot(statement);
         try bindText(statement, 1, key);
         const step_result = c.sqlite3_step(statement);
         if (step_result == c.SQLITE_DONE) return null;
@@ -6728,8 +6725,8 @@ pub const Store = struct {
     }
 
     fn readSession(self: *Store, session_ref: []const u8) !?CurrentConfiguration {
-        const statement = try prepare(self.database, "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.session);
+        defer resetHot(statement);
         try bindText(statement, 1, session_ref);
         const step_result = c.sqlite3_step(statement);
         if (step_result == c.SQLITE_DONE) return null;
@@ -6956,8 +6953,8 @@ pub const Store = struct {
     const ContentMetadata = struct { length: u64, digest: [32]u8, private: bool };
 
     fn readContentMetadata(self: *Store, content_id: i64) !ContentMetadata {
-        const statement = try prepare(self.database, "SELECT byte_length,digest,private FROM content WHERE content_id=?1");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.content_metadata);
+        defer resetHot(statement);
         try bindI64(statement, 1, content_id);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.CorruptStore;
         const length = c.sqlite3_column_int64(statement, 0);
@@ -6974,8 +6971,8 @@ pub const Store = struct {
     }
 
     fn resolveContentReference(self: *Store, reference: ContentReference, private: bool) !i64 {
-        const statement = try prepare(self.database, "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3");
-        defer _ = c.sqlite3_finalize(statement);
+        const statement = try self.hot(.content_lookup);
+        defer resetHot(statement);
         try bindBlob(statement, 1, &reference.digest);
         try bindU64(statement, 2, reference.length);
         try bindI64(statement, 3, @as(i64, if (private) 1 else 0));
@@ -7461,6 +7458,50 @@ fn prepare(database: *c.sqlite3, sql: [:0]const u8) !*c.sqlite3_stmt {
         return error.StatementPrepareFailed;
     }
     return statement orelse error.StatementPrepareFailed;
+}
+
+/// The ten statements measured most frequent under STREAM100 after the
+/// commit-generation skips; every other statement stays short-lived.
+const HotStatement = enum {
+    operation_supersession,
+    current_attempt,
+    content_metadata,
+    content_lookup,
+    blocked_tool_calls,
+    session,
+    executable_action,
+    runnable_probe,
+    tool_continuation_probe,
+    existing_command,
+
+    fn sql(self: HotStatement) [:0]const u8 {
+        return switch (self) {
+            .operation_supersession => "SELECT turn_id,attempt_ordinal,interrupted_by_command_key FROM model_operation WHERE operation_id=?1",
+            .current_attempt => "SELECT turn_id,attempt_ordinal,resolution_code,interrupted_by_command_key " ++
+                "FROM model_operation WHERE operation_id=?1",
+            .content_metadata => "SELECT byte_length,digest,private FROM content WHERE content_id=?1",
+            .content_lookup => "SELECT content_id FROM content WHERE digest=?1 AND byte_length=?2 AND private=?3",
+            .blocked_tool_calls => "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
+                "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
+                "AND " ++ resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
+            .session => "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1",
+            .executable_action => "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
+                "INDEXED BY action_operation_executable JOIN model_operation operation " ++
+                "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
+                "WHERE action.permission_state=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+                "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
+                "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+                "ORDER BY action.action_id LIMIT 1",
+            .runnable_probe => runnable_probe_sql,
+            .tool_continuation_probe => tool_continuation_selection_sql,
+            .existing_command => "SELECT kind,target,input_digest,accepted,code,revision,created,primary_content_id FROM core_command WHERE command_key=?1",
+        };
+    }
+};
+
+fn resetHot(statement: *c.sqlite3_stmt) void {
+    _ = c.sqlite3_reset(statement);
+    _ = c.sqlite3_clear_bindings(statement);
 }
 
 fn exec(database: *c.sqlite3, sql: [:0]const u8) !void {
