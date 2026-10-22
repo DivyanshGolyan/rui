@@ -30,10 +30,20 @@ The switch counts are a Linux voluntary-context-switch proxy; **distinct wakeups
 | SSE JSON second pass | 2 rereads/event, 274 B | small; curl/OpenSSL dominate stacks | Parse JSON from the scanned buffer |
 
 **Combined-head confirmation on `d4f87000`:** pending. These are independent methods; traced switches are not natural wakeups.
-- P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`. The ReleaseFast build of `d4f87000` finished at 01:03:51 UTC (42/42 steps, exit 0, binary SHA-256 `98bfb3f1…ef719`); STREAM100 started at 01:03:52 UTC. STREAM and HOLD each completed once with exit 0, at 01:05:04 and 01:06:16 UTC, and both final JSONs are kept. A later service restart left record gaps; see "Post-fix restart incident" in the appendix limits. Results (**measured**, Linux fixture, **owner-reported, artifact not yet published**; observation method only, not complete-work or Mac qualification):
-  - STREAM100: Host PSS 13,520,896 → 13,594,624 B across the window; 21.98 CPU-s / 60.057 s = 0.366 cores (estimate 0.45). Headline 1's pre-fix N=100 median was 13,596,672 B.
-  - HOLD100: Host PSS 13,415,424 B at both ends; 1.42 CPU-s / 60.000 s (pre-fix median 1.64, B median 1.54). Five threads: 2,375 voluntary and 81 nonvoluntary switches, a proxy of 39.583/s, matching the B median of 39.70/s. Distinct wakeups **unavailable**.
-  - Clients: steady-state count and PSS 0; transient peaks unavailable. One run each, so no spread; the aborted extra STREAM is not used as a replicate.
+- P1 started at 00:59:21 UTC: one STREAM100 then one HOLD100 window, a fresh Host and Store each, the frozen harness `7f4fe110`/`a204296c`, the existing 10 s + 60 s method and no instrumentation. Pre-run estimate (**estimated**): STREAM 13.6 MB PSS and 0.45 cores; HOLD 13.45 MB, 40 voluntary switches/s and 1.54 CPU-s. Target branch `perf/linux-postfix-confirm-20261022`. The ReleaseFast build of `d4f87000` finished at 01:03:51 UTC (42/42 steps, exit 0, binary SHA-256 `98bfb3f1…ef719`); STREAM100 started at 01:03:52 UTC. STREAM and HOLD each completed once with exit 0, at 01:05:04 and 01:06:16 UTC, and both final JSONs are kept. A later service restart left record gaps; see "Post-fix restart incident" in the appendix limits. Results below are **measured**, Linux fixture, **owner-reported, artifact not yet published**; observation method only, not complete-work or Mac qualification. One run each, a single observation and not a statistical A/B; the aborted extra STREAM is not used as a replicate.
+
+| Quantity | Pre-fix `240aef2e` (median) | Source-commit A/B after | Landed `d4f87000` (one run) |
+| --- | ---: | ---: | ---: |
+| STREAM100 Host PSS, start → end of window | 13,596,672 B (N=100) | — | 13,520,896 → 13,594,624 B |
+| STREAM100 Host CPU (30 events/s/stream window) | not measured in window | — | 21.98 CPU-s / 60.057214438 s = 0.365984 cores (estimate 0.45) |
+| HOLD100 Host PSS | 13,499,392 B | 13,450,240 B | 13,415,424 B at both ends |
+| HOLD100 Host CPU | 1.64 CPU-s / ≈60 s | 1.54 CPU-s | 1.42 CPU-s / 60.000260626 s |
+| HOLD100 voluntary switch proxy (5 threads) | 87.90/s | 39.70/s | 39.583/s (2,375 voluntary, 81 nonvoluntary) |
+| Distinct wakeups | unavailable | unavailable | **unavailable** |
+| Client steady-state count / PSS | 0 / 0 B | — | 0 / 0 B; transient peaks unavailable |
+
+The STREAM100 CPU here is an interior observation window at 30 events/s/stream. It is **not** a complete-work CPU-per-event figure and is not comparable with the SSE fix's 80.4458 → 77.0917 µs/event, which came from the separate 100 events/s complete-work runs. These numbers stay unverified until P1's artifact is published and checked.
+
 - P2 is preparing one instrumented HOLD100 window (10 s warmup + 60 s). Pre-run estimate (**estimated**): about 1,000 SELECT/s, since the fixes did not touch SQL polling.
 
 **Open items.**
