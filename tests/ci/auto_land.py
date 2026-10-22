@@ -78,6 +78,7 @@ def stable_ready(selected, upgrade):
     """Both complete workflows and a real Mac aggregate must pass on this SHA."""
     return bool(selected and upgrade
                 and STABLE_BASE.fullmatch(selected.get("display_title") or "")
+                and selected.get("covers", False)
                 and selected.get("macos") == "success"
                 and all(run["status"] == "completed" and run["conclusion"] == "success"
                         for run in (selected, upgrade)))
@@ -205,6 +206,8 @@ def promote_stable():
         selected = latest("check.yml", sha, "main")
         if not selected:
             continue
+        selected["covers"] = covers(selected, sha, stable_sha,
+                                    changed_paths(stable_sha, sha)[0], STABLE_BASE)
         selected["macos"] = aggregate(selected, "macos")
         upgrade = latest(UPGRADE, sha, "main")
         if not stable_ready(selected, upgrade):
@@ -217,17 +220,18 @@ def promote_stable():
     print(f"No newer exact-SHA Mac-and-upgrade-green main commit; stable remains {stable_sha}")
 
 
-def covers(selected, sha, main_sha, paths):
-    """Whether the Selected run's selection spans every path main..sha changes.
+def covers(selected, sha, destination_sha, paths, title=DISPATCH_BASE):
+    """Whether selection spans every changed path from the destination to sha.
 
     A push run selects from the main merge base, which the one open stack keeps
-    equal to main. A dispatch selects from its recorded base, which main must
-    contain and whose delta to sha must include every path main..sha changes.
+    equal to main. A dispatch selects from its recorded base, which the current
+    destination (main or stable) must contain; base..sha must include every
+    path destination..sha changes, including reversions after the base.
     """
     if selected["event"] == "push":
-        return True
-    base = DISPATCH_BASE.fullmatch(selected.get("display_title") or "")
-    if not base or not contains(main_sha, base[1]):
+        return title is DISPATCH_BASE
+    base = title.fullmatch(selected.get("display_title") or "")
+    if not base or not contains(destination_sha, base[1]):
         return False
     return set(paths) <= set(changed_paths(base[1], sha)[0])
 

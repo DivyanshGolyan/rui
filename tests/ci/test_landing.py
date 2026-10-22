@@ -87,7 +87,7 @@ class LandingTest(unittest.TestCase):
                          'unqualified')
 
     def test_stable_requires_completed_mac_and_upgrade_not_a_skipped_selector(self):
-        selected = dict(status='completed', conclusion='success', macos='success',
+        selected = dict(status='completed', conclusion='success', macos='success', covers=True,
                         display_title='Stable qualification from base ' + 'a' * 40)
         upgrade = dict(status='completed', conclusion='success')
         self.assertTrue(auto_land.stable_ready(selected, upgrade))
@@ -99,6 +99,7 @@ class LandingTest(unittest.TestCase):
         self.assertFalse(auto_land.stable_ready(dict(selected, status='in_progress'), upgrade))
         self.assertFalse(auto_land.stable_ready(selected, dict(upgrade, status='queued')))
         self.assertFalse(auto_land.stable_ready(dict(selected, display_title='Selected checks'), upgrade))
+        self.assertFalse(auto_land.stable_ready(dict(selected, covers=False), upgrade))
 
     def test_latest_takes_the_newest_push_or_dispatch_run_on_the_exact_commit(self):
         sha, other = 'a' * 40, 'b' * 40
@@ -186,12 +187,22 @@ class LandingTest(unittest.TestCase):
                 runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = green
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, base))
-                runs[('check.yml', tip, 'main')] = dict(green,
+                runs[('check.yml', tip, 'main')] = dict(green, event='workflow_dispatch',
                     display_title='Stable qualification from base ' + base)
                 runs[(auto_land.UPGRADE, tip, 'main')] = dict(green, conclusion='failure')
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, base))
                 runs[(auto_land.UPGRADE, tip, 'main')] = green
+                # Passing workflows cannot omit mapped native targets by selecting
+                # from the candidate itself or from a branch stable does not contain.
+                side = commit('docs/side.md', base)
+                for bad_base in (tip, side):
+                    runs[('check.yml', tip, 'main')] = dict(green, event='workflow_dispatch',
+                        display_title='Stable qualification from base ' + bad_base)
+                    auto_land.promote_stable()
+                    self.assertEqual(refs(), (tip, base), bad_base)
+                runs[('check.yml', tip, 'main')] = dict(green, event='workflow_dispatch',
+                    display_title='Stable qualification from base ' + base)
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, tip))
 
@@ -217,13 +228,13 @@ class LandingTest(unittest.TestCase):
                 self.assertFalse(auto_land.covers(dispatched(moved), restored, ahead, paths))
                 self.assertTrue(auto_land.covers(dispatched(ahead), restored, ahead, paths))
                 # An ancestor's green checks never qualify a descendant.
-                runs[('check.yml', ahead, 'main')] = dict(green,
+                runs[('check.yml', ahead, 'main')] = dict(green, event='workflow_dispatch',
                     display_title='Stable qualification from base ' + tip)
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (ahead, tip))
                 # Two qualified main commits: promote the newest, not the first completion.
                 runs[(auto_land.UPGRADE, moved, 'main')] = green
-                runs[('check.yml', moved, 'main')] = dict(green,
+                runs[('check.yml', moved, 'main')] = dict(green, event='workflow_dispatch',
                     display_title='Stable qualification from base ' + tip)
                 runs[(auto_land.UPGRADE, ahead, 'main')] = green
                 auto_land.promote_stable()
@@ -232,6 +243,27 @@ class LandingTest(unittest.TestCase):
                 auto_land.promote_stable()
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (ahead, ahead))
+                # Stable advanced since the dispatch base: ancestor identity alone
+                # cannot cover a changed-then-reverted strict path hidden by that base.
+                git('push', '-q', 'origin', f'{restored}:refs/heads/main')
+                runs[(auto_land.UPGRADE, restored, 'main')] = green
+                for old_base in (tip, moved):
+                    runs[('check.yml', restored, 'main')] = dict(green, event='workflow_dispatch',
+                        display_title='Stable qualification from base ' + old_base)
+                    auto_land.promote_stable()
+                    self.assertEqual(refs(), (restored, ahead))
+                runs[('check.yml', restored, 'main')] = dict(green, event='workflow_dispatch',
+                    display_title='Stable qualification from base ' + ahead)
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (restored, restored))
+                # A covering older base remains valid after stable moves.
+                newest = commit('docs/newest.md', restored)
+                git('push', '-q', 'origin', f'{newest}:refs/heads/main')
+                runs[(auto_land.UPGRADE, newest, 'main')] = green
+                runs[('check.yml', newest, 'main')] = dict(green, event='workflow_dispatch',
+                    display_title='Stable qualification from base ' + ahead)
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (newest, newest))
 
     def test_preflight_allows_one_open_landing_stack(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
