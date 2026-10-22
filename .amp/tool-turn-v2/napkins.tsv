@@ -1,0 +1,38 @@
+2026-10-22T05:10:23.427336435Z	sleep-n1-ms200-r1	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 200 ms
+2026-10-22T05:10:53.075071072Z	sleep-n10-ms200-r1	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 200 ms
+2026-10-22T05:11:23.556666883Z	sleep-n100-ms200-r1	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 200 ms
+2026-10-22T05:12:06.998806582Z	read-n1-ms200-r1	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 200 ms
+2026-10-22T05:12:31.617229074Z	read-n10-ms200-r1	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 200 ms
+2026-10-22T05:12:57.212793159Z	read-n100-ms200-r1	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 200 ms
+2026-10-22T05:13:35.773209172Z	sleep-n1-ms25-r1	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:14:05.359917175Z	sleep-n10-ms25-r1	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:14:35.867585328Z	sleep-n100-ms25-r1	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:15:18.523270555Z	read-n1-ms25-r1	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:15:43.135251126Z	read-n10-ms25-r1	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:16:08.603271956Z	read-n100-ms25-r1	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:16:47.248972861Z	sleep-n1-ms200-r2	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 200 ms
+2026-10-22T05:17:16.876501836Z	sleep-n10-ms200-r2	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 200 ms
+2026-10-22T05:17:47.332591075Z	sleep-n100-ms200-r2	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 200 ms
+2026-10-22T05:18:31.260232482Z	read-n1-ms200-r2	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 200 ms
+2026-10-22T05:18:55.890695450Z	read-n10-ms200-r2	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 200 ms
+2026-10-22T05:19:21.343023952Z	read-n100-ms200-r2	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 200 ms
+2026-10-22T05:19:59.783407950Z	sleep-n1-ms25-r2	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:20:29.487818279Z	sleep-n10-ms25-r2	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:20:59.954237801Z	sleep-n100-ms25-r2	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:21:43.015451197Z	read-n1-ms25-r2	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:22:07.647489903Z	read-n10-ms25-r2	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:22:33.088156165Z	read-n100-ms25-r2	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:23:10.960349467Z	sleep-n1-ms200-r3	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 200 ms
+2026-10-22T05:23:40.631464828Z	sleep-n10-ms200-r3	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 200 ms
+2026-10-22T05:24:11.139807365Z	sleep-n100-ms200-r3	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 200 ms
+2026-10-22T05:24:54.184381668Z	read-n1-ms200-r3	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 200 ms
+2026-10-22T05:25:18.819627047Z	read-n10-ms200-r3	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 200 ms
+2026-10-22T05:25:44.165492296Z	read-n100-ms200-r3	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 200 ms
+2026-10-22T05:26:22.525008820Z	sleep-n1-ms25-r3	estimated: barrier: 1 in flight; tree peak ~18.4 MB (Host 10.8 + TUI 6.8 + shell/sleep 0.9); Host CPU ~0.4 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:26:52.155752205Z	sleep-n10-ms25-r3	estimated: barrier: 10 in flight; tree peak ~23 MB; Host CPU ~1.7 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:27:22.629305613Z	sleep-n100-ms25-r3	estimated: barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:28:05.271765766Z	read-n1-ms25-r3	estimated: barrier: 1 in flight; tree peak ~18 MB; Host CPU ~0.1 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:28:29.897379971Z	read-n10-ms25-r3	estimated: barrier: 10 cats in flight; tree peak ~22 MB; Host CPU ~0.5 s; sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:28:55.358924535Z	read-n100-ms25-r3	estimated: barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 25 ms (observer ~0.23 s at N=1, ~1.5 s at N=100 per smoke; sends seen ~20%)
+2026-10-22T05:29:33.864753359Z	strace-read-n100	estimated: instrumented strace run, timings not comparable; fork-to-exec ~0.8 ms median (v1) / barrier: 100 cats in flight (smoke 100); tree peak ~58 MB; Host CPU ~8.6 s (smoke); sampler 200 ms
+2026-10-22T05:31:46.917767244Z	strace-sleep-n100	estimated: instrumented strace run, timings not comparable; fork-to-exec ~0.8 ms median (v1) / barrier: 100 in flight; tree peak ~58 MB (Host 11.4 + Bash ~40 + TUI 6.7); Host CPU ~10 s (v1 9.6 s plus parking); sampler 200 ms
