@@ -1,0 +1,9 @@
+== fixed: sampler probe -race
+ok  	rui.local/qualification/model-output	1.058s
+exit=0
+== fixed: full -race
+ok  	rui.local/qualification/model-output	1.795s
+ok  	rui.local/qualification/model-output/provider	7.558s
+exit=0
+ok  	rui.local/qualification/model-output	1.845s
+ok  	rui.local/qualification/model-output/provider	7.507s

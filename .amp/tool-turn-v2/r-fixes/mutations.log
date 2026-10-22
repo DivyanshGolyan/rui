@@ -1,0 +1,79 @@
+== mutation: R1 ignore request status
+--- FAIL: TestToolOriginalFailureRequiresCompletedExactAnswer (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output	1.147s
+ok  	rui.local/qualification/model-output/provider	6.440s
+== mutation: R1 ignore saved answer
+--- FAIL: TestToolOriginalFailureRequiresCompletedExactAnswer (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output	0.968s
+ok  	rui.local/qualification/model-output/provider	6.430s
+== mutation: R3 ignore partial barrier
+FAIL
+FAIL	rui.local/qualification/model-output [build failed]
+ok  	rui.local/qualification/model-output/provider	6.399s
+== mutation: R3 ignore overlap
+--- FAIL: TestToolAcceptanceFailsClosed (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output	1.030s
+ok  	rui.local/qualification/model-output/provider	6.406s
+== mutation: R3 shell runs after timeout
+--- FAIL: TestBarrierTimeoutFailsWithoutWorkload (0.05s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.440s
+ok  	rui.local/qualification/model-output	0.990s
+== mutation: R2 accept unissued
+ok  	rui.local/qualification/model-output	0.951s
+ok  	rui.local/qualification/model-output/provider	6.461s
+== mutation: R2 accept duplicate
+ok  	rui.local/qualification/model-output	1.007s
+ok  	rui.local/qualification/model-output/provider	6.426s
+== mutation: R4 sampler unlocked tui
+FAIL
+FAIL	rui.local/qualification/model-output [build failed]
+ok  	rui.local/qualification/model-output/provider	7.531s
+== rerun after fixture/mutation correction (unissued+duplicate fixtures used park markers on non-barrier calls; two mutations did not compile)
+== mutation: R3 ignore partial barrier
+--- FAIL: TestReleaseBarrierRecordsPartialPark (0.05s)
+--- FAIL: TestToolAcceptanceFailsClosed (0.00s)
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output	1.099s
+FAIL	rui.local/qualification/model-output/provider	6.412s
+== mutation: R2 accept unissued
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.464s
+ok  	rui.local/qualification/model-output	0.833s
+== mutation: R2 accept duplicate
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.445s
+ok  	rui.local/qualification/model-output	0.870s
+== mutation: R4 sampler unlocked tui
+--- FAIL: TestReviewSamplerConcurrentTUI (0.04s)
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output	1.223s
+FAIL	rui.local/qualification/model-output/provider	6.554s
+WARNING: DATA RACE
+== rerun after duplicate fix (first run of a duplicated call previously still counted succeeded; now every row of a duplicated call fails)
+== mutation: R2 accept duplicate
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.405s
+ok  	rui.local/qualification/model-output	1.014s
+== mutation: R2 accept unissued
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.413s
+ok  	rui.local/qualification/model-output	1.131s
+== mutation: R2 ignore missing
+ok  	rui.local/qualification/model-output	1.217s
+ok  	rui.local/qualification/model-output/provider	6.411s
+== rerun after adding missing-output case
+== mutation: R2 ignore missing
+--- FAIL: TestToolOutputsRequireExactIssuedCalls (0.00s)
+FAIL
+FAIL	rui.local/qualification/model-output/provider	6.398s
+ok  	rui.local/qualification/model-output	0.811s

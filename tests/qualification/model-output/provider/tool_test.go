@@ -92,7 +92,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	}
 	toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, 0), outputs...)
 	summary := server.Snapshot(true)
-	if summary.DispatchCalls != 2 || summary.WorkloadCalls != 1 || summary.SucceededCalls != 2 || summary.FailedCalls != 1 || summary.Done != 1 || len(summary.Errors) != 0 {
+	if summary.DispatchCalls != 2 || summary.WorkloadCalls != 1 || summary.SucceededCalls != 2 || summary.FailedCalls != 1 || summary.Done != 1 || len(summary.Errors) != 1 {
 		t.Fatalf("summary = %+v", summary)
 	}
 	for _, output := range summary.SessionFacts[0].Outputs {
@@ -102,6 +102,61 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	}
 	if items := toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, 1), user); len(items) != 1 || !strings.Contains(fmt.Sprint(items[0]["arguments"]), "cat ") {
 		t.Fatalf("worker calls = %v", items)
+	}
+}
+
+// Only exactly one output per issued call, each with ordered markers, counts.
+func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
+	issued := []toolCall{{ID: "tool-000-dispatch-001", Kind: "dispatch"}, {ID: "tool-000-workload", Kind: "workload"}}
+	output := func(id, text string) json.RawMessage {
+		encoded, _ := json.Marshal(map[string]any{"type": "function_call_output", "call_id": id, "output": text})
+		return encoded
+	}
+	good := "Bash succeeded. Exit code: 0.\nrui-measure-park 1.000000\nrui-measure-start 2.000000\nrui-measure-end 3.000000"
+	send := "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000\nrui-measure-end 3.000000"
+	for _, test := range []struct {
+		name    string
+		barrier bool
+		input   []json.RawMessage
+		valid   int
+	}{
+		{"dispatch must not park", true, []json.RawMessage{output("tool-000-dispatch-001", good), output("tool-000-workload", good)}, 1},
+		{"exact", true, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", good)}, 2},
+		{"unissued same-prefix ID replaces workload", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-never-issued", send)}, 1},
+		{"missing workload output", false, []json.RawMessage{output("tool-000-dispatch-001", send)}, 1},
+		{"duplicate output", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", send), output("tool-000-workload", send)}, 1},
+		{"missing end marker", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000")}, 1},
+		{"end before start", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 4.000000\nrui-measure-end 3.000000")}, 1},
+		{"barrier workload without park", true, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash succeeded. Exit code: 0.\nrui-measure-start 2.000000\nrui-measure-end 3.000000")}, 1},
+		{"failed command", false, []json.RawMessage{output("tool-000-dispatch-001", send), output("tool-000-workload", "Bash failed. Exit code: 124.")}, 1},
+	} {
+		rows, failures := validateOutputs(issued, test.input, test.barrier)
+		valid := 0
+		for _, row := range rows {
+			if row.Succeeded {
+				valid++
+			}
+		}
+		if valid != test.valid || (test.valid == len(issued)) != (len(failures) == 0) {
+			t.Errorf("%s: valid=%d failures=%v rows=%+v", test.name, valid, failures, rows)
+		}
+	}
+}
+
+// A barrier read that times out must fail the call without running the
+// workload; only a released line lets it run.
+func TestBarrierTimeoutFailsWithoutWorkload(t *testing.T) {
+	directory := t.TempDir()
+	if err := syscall.Mkfifo(directory+"/release", 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := ToolConfig{Sessions: 1, Workload: "read", ReadFile: directory + "/data", Barrier: directory, BarrierWait: "0.05"}
+	if err := os.WriteFile(config.ReadFile, []byte("READ_WITHOUT_RELEASE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("bash", "-c", config.workloadCommand(0)).CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 124 || strings.Contains(string(output), "READ_WITHOUT_RELEASE") {
+		t.Fatalf("unreleased barrier: %v %q", err, output)
 	}
 }
 
@@ -128,9 +183,17 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	if err := os.WriteFile(config.ReadFile, []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// File-backed stdout: the test reads it while the shell may write, so it
+	// must not share an unsynchronized buffer with os/exec's copier.
+	stdout, err := os.Create(directory + "/stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	output := func() string { data, _ := os.ReadFile(stdout.Name()); return string(data) }
 	command := exec.Command("bash", "-c", config.workloadCommand(4))
-	var stdout, stderr bytes.Buffer
-	command.Stdout, command.Stderr = &stdout, &stderr
+	var stderr bytes.Buffer
+	command.Stdout, command.Stderr = stdout, &stderr
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +206,8 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 		}
 	}
 	time.Sleep(200 * time.Millisecond)
-	if command.ProcessState != nil || stdout.Len() != 0 {
-		t.Fatalf("workload ran before release: %q", stdout.String())
+	if output() != "" {
+		t.Fatalf("workload ran before release: %q", output())
 	}
 	writer, err := os.OpenFile(directory+"/release", os.O_WRONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -152,8 +215,8 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	}
 	defer writer.Close()
 	writer.Write([]byte("\n"))
-	if err := command.Wait(); err != nil || stdout.String() != "payload" {
-		t.Fatalf("after release: %v %q", err, stdout.String())
+	if err := command.Wait(); err != nil || output() != "payload" {
+		t.Fatalf("after release: %v %q", err, output())
 	}
 	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 3 || markers[0][1] != "park" {
 		t.Fatalf("markers in %q", stderr.String())

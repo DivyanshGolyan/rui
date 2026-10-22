@@ -176,6 +176,7 @@ type toolProcessRecord struct {
 	LastSeenNS  int64  `json:"last_seen_unix_ns"`
 	Samples     int    `json:"samples"`
 	PSSFailures int    `json:"pss_failures"`
+	PSSReads    int    `json:"pss_reads"`
 	MaxPSS      uint64 `json:"max_pss_bytes"`
 	LastPSS     uint64 `json:"last_pss_bytes"`
 	CPUTicks    uint64 `json:"last_cpu_ticks"`
@@ -193,7 +194,9 @@ type toolSample struct {
 }
 
 // toolSampler walks /proc and sums smaps_rollup PSS over the Host tree and
-// the TUI tree. Every PID+start time appears once per sample under exactly
+// the TUI tree. One sample reads processes one after another between
+// begin_unix_ns and end_unix_ns, so its sum is a sequential-scan sum, not a
+// simultaneous snapshot, and omits every process whose read failed. Every PID+start time appears once per sample under exactly
 // one category; `rui` processes under a Bash shell are clients, not Bash.
 type toolSampler struct {
 	host, tui int
@@ -259,15 +262,15 @@ func (s *toolSampler) sample() {
 			walk(child, next)
 		}
 	}
+	s.mu.Lock()
+	phase, tui := s.phase, s.tui
+	s.mu.Unlock()
 	if _, ok := procs[s.host]; ok {
 		walk(s.host, "host")
 	}
-	if _, ok := procs[s.tui]; ok && s.tui != 0 {
-		walk(s.tui, "tui")
+	if _, ok := procs[tui]; ok && tui != 0 {
+		walk(tui, "tui")
 	}
-	s.mu.Lock()
-	phase := s.phase
-	s.mu.Unlock()
 	result := toolSample{Phase: phase, Counts: map[string]int{}, PSS: map[string]uint64{}}
 	for pid, category := range categories {
 		row := procs[pid]
@@ -286,6 +289,7 @@ func (s *toolSampler) sample() {
 			record.PSSFailures++
 			result.PSSFailures++
 		} else {
+			record.PSSReads++
 			record.LastPSS = pss
 			record.MaxPSS = max(record.MaxPSS, pss)
 			result.PSS[category] += pss
@@ -837,7 +841,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		return result, err
 	}
 	if barrier {
-		facts, release, err := releaseBarrier(deadline, barrierDir, sessions)
+		facts, release, err := releaseBarrier(deadline, barrierDir, sessions, 60*time.Second)
 		result["barrier_release"] = facts
 		if err != nil {
 			return result, err
@@ -861,23 +865,40 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		result["tracer_exit"] = fmt.Sprint(tracer.Wait())
 		tracer = nil
 	}
-	for index := 1; index < sessions; index++ {
-		observation, err := client.WaitResult(fmt.Sprintf("dispatch-%03d", index))
+	// Every Session's original request must reach a completed result whose
+	// saved answer is exactly the provider's final text. The provider's
+	// done count only says it received the continuation.
+	originals := make([]map[string]any, sessions)
+	var originalFailures []string
+	for index, name := range names {
+		key := fmt.Sprintf("dispatch-%03d", index)
+		if index == 0 {
+			coordinator, err := client.Inspect(name)
+			if err != nil {
+				return result, err
+			}
+			key = toolCoordinatorKey(coordinator)
+		}
+		observation, err := client.WaitResult(key)
 		if err != nil {
 			return result, err
 		}
-		if status, _ := measurement.StringField(observation, "result", "status"); status != "succeeded" && status != "completed" {
-			result["dispatch_result_example"] = observation
+		text, readError := measurement.Run(deadline, binary, "request", "read-result", "--store", store, "--key", key)
+		inspection, err := client.Inspect(name)
+		if err != nil {
+			return result, err
 		}
+		row := map[string]any{"session": name, "key": key, "result": observation["result"], "answer_bytes": len(text)}
+		if index == 0 {
+			result["coordinator_inspection"] = inspection
+		}
+		if failure := toolOriginalFailure(sessions, index, key, inspection, observation, text, readError); failure != nil {
+			row["failure"], row["observation"], row["inspection"] = failure.Error(), observation, inspection
+			originalFailures = append(originalFailures, failure.Error())
+		}
+		originals[index] = row
 	}
-	coordinator, err := client.Inspect(names[0])
-	if err != nil {
-		return result, err
-	}
-	result["coordinator_inspection"] = coordinator
-	if status, _ := measurement.StringField(coordinator, "work", "status"); status != "completed" {
-		return result, fmt.Errorf("coordinator work is %q, not completed", status)
-	}
+	result["original_requests"] = originals
 	sampler.setPhase("idle_after")
 	if err := deadline.SleepUntil(time.Now().Add(10 * time.Second)); err != nil {
 		return result, err
@@ -914,14 +935,14 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	}
 	result["cpu"] = cpu
 	result["concurrency"] = toolConcurrency(done)
-	if requests["seed_in_window"] != 0 || requests["measured_in_window"] != sessions || requests["continuation_in_window"] != sessions {
-		return result, fmt.Errorf("model requests outside the CPU window: %v", requests)
-	}
-	if len(done.Errors) != 0 || done.Done != sessions || done.FailedCalls != 0 || done.WorkloadCalls != sessions || done.DispatchCalls != sessions-1 {
-		return result, fmt.Errorf("tool turn incomplete or failed: %+v", done.Errors)
+	release, _ := result["barrier_release"].(map[string]any)
+	overlap, _ := result["concurrency"].(map[string]any)["workload"].(map[string]any)["max_overlapping"].(int)
+	if failures := append(originalFailures, toolAcceptance(sessions, done, requests, release, overlap)...); len(failures) != 0 {
+		result["acceptance_failures"] = failures
+		return result, fmt.Errorf("tool turn not accepted: %d failures, first: %s", len(failures), failures[0])
 	}
 	result["limits"] = []string{
-		"PSS columns sum smaps_rollup over processes seen at each sample; processes shorter than one 200 ms interval are missed, and the true peak between samples is unobserved",
+		"PSS columns are sequential-scan sums of smaps_rollup over the processes read during each sample's [begin, end] span, not simultaneous snapshots; failed reads are counted per sample and omitted from sums; processes shorter than one interval plus scan are missed; the true peak is unobserved",
 		"send processes run under Bash and are counted once, as clients; Bash = shells, their non-rui children and Host forks seen before exec",
 		"page cache is system-wide meminfo plus per-file fincore residency; it is not process PSS and is never added to PSS columns",
 		"in-shell timestamps use bash $EPOCHREALTIME builtins around each command; they exclude fork/exec of the shell itself",
@@ -986,11 +1007,12 @@ func toolConcurrency(summary provider.ToolSummary) map[string]any {
 	return result
 }
 
-// releaseBarrier waits until every workload shell has parked, at most 60 s,
+// releaseBarrier waits until every workload shell has parked, at most wait,
 // then releases one line per Session. The writer stays open until the turn
-// ends so a late shell still finds its line. Achieved overlap is measured
-// separately from in-shell markers; this records only what the controller saw.
-func releaseBarrier(deadline measurement.Deadline, directory string, sessions int) (map[string]any, *os.File, error) {
+// ends so a late shell still finds its line. A partial release is recorded
+// as timed_out and fails toolAcceptance; the turn still runs to the end so
+// its evidence is kept.
+func releaseBarrier(deadline measurement.Deadline, directory string, sessions int, wait time.Duration) (map[string]any, *os.File, error) {
 	begin := time.Now()
 	parked := 0
 	for {
@@ -999,7 +1021,7 @@ func releaseBarrier(deadline measurement.Deadline, directory string, sessions in
 			return nil, nil, err
 		}
 		parked = len(entries) - 1
-		if parked >= sessions || time.Since(begin) > 60*time.Second {
+		if parked >= sessions || time.Since(begin) > wait {
 			break
 		}
 		if _, err := deadline.Remaining(); err != nil {
@@ -1025,19 +1047,22 @@ func releaseBarrier(deadline measurement.Deadline, directory string, sessions in
 func toolCoverage(s *toolSampler, sessions int) map[string]any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	seen := map[string]int{}
+	seen, read := map[string]int{}, map[string]int{}
 	for _, record := range s.records {
 		seen[record.Category]++
+		if record.PSSReads != 0 {
+			read[record.Category]++
+		}
 	}
 	row := func(category string, expected int) map[string]any {
-		value := map[string]any{"observed": seen[category], "expected": expected}
+		value := map[string]any{"seen": seen[category], "pss_read": read[category], "expected": expected}
 		if expected > 0 {
-			value["fraction"] = float64(seen[category]) / float64(expected)
+			value["pss_read_fraction"] = float64(read[category]) / float64(expected)
 		}
 		return value
 	}
 	return map[string]any{
-		"basis":          "processes seen in at least one sample during the whole run versus the minimum the turn creates; observed can exceed expected when shells fork subshells",
+		"basis":          "identities seen in at least one sample, and those with at least one successful PSS read, versus the minimum the turn creates; seen can exceed expected when shells fork subshells",
 		"bash_shell":     row("bash_shell", 2*sessions-1),
 		"workload_child": row("bash_child", sessions),
 		"send":           row("send", sessions-1),
@@ -1065,4 +1090,68 @@ func toolRequestPhases(facts []provider.ToolSessionFact, begin, end int64) map[s
 		count("continuation", fact.ContinuationReceivedNS)
 	}
 	return result
+}
+
+// toolCoordinatorKey is the coordinator's one non-seed Message: the request
+// the attached TUI submitted.
+func toolCoordinatorKey(inspection map[string]any) string {
+	messages, _ := inspection["recent_messages"].([]any)
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		if key, _ := message["message"].(string); key != "" && key != "seed-000" {
+			return key
+		}
+	}
+	return ""
+}
+
+// toolOriginalFailure accepts one Session only when it has exactly its seed
+// and its original request, both completed, the worker request is the
+// coordinator's dispatch key, and the saved result is exactly the fixture's
+// final answer for that Session.
+func toolOriginalFailure(sessions, index int, key string, inspection, observation map[string]any, text []byte, readError error) error {
+	name := provider.ToolSession(sessions, index)
+	messages, _ := inspection["recent_messages"].([]any)
+	outcomes := map[string]any{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		outcomes[fmt.Sprint(message["message"])] = message["outcome"]
+	}
+	seed := fmt.Sprintf("seed-%03d", index)
+	switch {
+	case key == "" || index > 0 && key != fmt.Sprintf("dispatch-%03d", index):
+		return fmt.Errorf("%s: original request key %q", name, key)
+	case len(outcomes) != 2 || outcomes[seed] != "completed" || outcomes[key] != "completed":
+		return fmt.Errorf("%s: Messages %v, want %s and %s completed", name, outcomes, seed, key)
+	}
+	if status, _ := measurement.StringField(observation, "result", "status"); status != "completed" {
+		return fmt.Errorf("%s: request %s result %q", name, key, status)
+	}
+	if want := "tool turn complete " + name; readError != nil || string(text) != want {
+		return fmt.Errorf("%s: saved answer %q (%v), want %q", name, text, readError, want)
+	}
+	return nil
+}
+
+// toolAcceptance lists every provider, phase and barrier reason a run must
+// not pass. Counts come from validated outputs; a barrier run must release
+// only after all N shells parked and must reach N overlapping intervals.
+func toolAcceptance(sessions int, done provider.ToolSummary, requests map[string]int, release map[string]any, overlap int) []string {
+	var failures []string
+	failures = append(failures, done.Errors...)
+	if done.Done != sessions || done.WorkloadCalls != sessions || done.DispatchCalls != sessions-1 || done.FailedCalls != 0 || done.SucceededCalls != 2*sessions-1 {
+		failures = append(failures, fmt.Sprintf("calls done=%d workload=%d dispatch=%d succeeded=%d failed=%d, want %d sessions and %d succeeded", done.Done, done.WorkloadCalls, done.DispatchCalls, done.SucceededCalls, done.FailedCalls, sessions, 2*sessions-1))
+	}
+	if requests["seed_in_window"] != 0 || requests["measured_in_window"] != sessions || requests["continuation_in_window"] != sessions {
+		failures = append(failures, fmt.Sprintf("model requests outside the CPU window: %v", requests))
+	}
+	if release != nil {
+		if parked, _ := release["parked_at_release"].(int); parked != sessions || release["timed_out"] != false {
+			failures = append(failures, fmt.Sprintf("barrier released %v of %d parked", release["parked_at_release"], sessions))
+		}
+		if overlap != sessions {
+			failures = append(failures, fmt.Sprintf("barrier overlap %d of %d", overlap, sessions))
+		}
+	}
+	return failures
 }
