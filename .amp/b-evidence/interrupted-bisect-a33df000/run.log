@@ -1,0 +1,1 @@
+Running: zig build test -j2 --cache-dir /tmp/td1c-a33df000/build -Dtest-filter=TD1 sequence model retention --summary all --verbose

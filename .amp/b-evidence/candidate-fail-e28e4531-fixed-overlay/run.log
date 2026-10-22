@@ -1,0 +1,101 @@
+Running: zig build test -j2 --cache-dir /tmp/td1c-b/build -Dtest-filter=TD1 sequence model retention --summary all --verbose
+install
++- install rui
+   +- compile exe rui debug native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /tmp/td1c-b/source/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /tmp/td1c-b/source/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /tmp/td1c-b/source/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /tmp/td1c-b/source/src/curl-post-retry.patch /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig build-exe --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib --name configurer -fsingle-threaded --dep @build --dep @dependencies -Mroot=/home/user/.local/opt/zig-0.17.0/lib/compiler/configurer.zig -Maro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4=zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4/build.zig --dep aro=aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4 -Mtranslate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/build.zig -Muucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/build.zig --dep zigimg=zigimg-0.1.0-8_eo2sBLGACBebrhQZUwRliZNSUyDn6szp99eip_6-Rw --dep uucode=uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv -Mvaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM=zig-pkg/vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM/build.zig -Mzigimg-0.1.0-8_eo2sBLGACBebrhQZUwRliZNSUyDn6szp99eip_6-Rw=zig-pkg/zigimg-0.1.0-8_eo2sBLGACBebrhQZUwRliZNSUyDn6szp99eip_6-Rw/build.zig --dep aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4 --dep translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d --dep uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv --dep vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM --dep zigimg-0.1.0-8_eo2sBLGACBebrhQZUwRliZNSUyDn6szp99eip_6-Rw -M@dependencies=/tmp/td1c-b/build/o/5f104697c714240de2300043188ba364/dependencies.zig --dep translate_c=translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d --dep vaxis=vaxis-0.6.0-BWNV_O8ODQBFLRjA4D0q75pHPh63iPu_v0yhpCwsAMaM -M@build=build.zig --listen=-
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig build-exe -fllvm -Odebug --dep config.zig --dep storage.zig --dep build_config -Mroot=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/generate.zig -Odebug --dep storage.zig -Mconfig.zig=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/config.zig -Odebug --dep config.zig -Mstorage.zig=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/storage.zig -Odebug --dep config.zig --dep storage.zig -Mbuild_config=/tmp/td1c-b/build/o/821c3376afe365e5e901f761d135e9d8/build_config.zig --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --name uucode_generate --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib/ --listen=-
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig build-exe -Osafe --dep AnswerRenderer -Mroot=tests/integration/answer_renderer_allocation.zig -Osafe -MAnswerRenderer=src/AnswerRenderer.zig --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --name rui-answer-renderer-allocation-test --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib/ --listen=-
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig build-exe -fsingle-threaded -Mroot=zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4/build/generate_def.zig --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --name generate-def --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib/ --listen=-
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig build-exe -Ofast --dep aro --dep helpers --dep c_builtins --dep build_options -Mroot=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/src/main.zig --dep system_defaults --dep build_options=build_options0 --dep backend --dep Builtins/aarch64.def --dep Builtins/amdgcn.def --dep Builtins/arm.def --dep Builtins/bpf.def --dep Builtins/common.def --dep Builtins/hexagon.def --dep Builtins/loongarch.def --dep Builtins/mips.def --dep Builtins/neon.def --dep Builtins/nvptx.def --dep Builtins/powerpc.def --dep Builtins/riscv.def --dep Builtins/s390x.def --dep Builtins/ve.def --dep Builtins/wasm.def --dep Builtins/x86_64.def --dep Builtins/x86.def --dep Builtins/xcore.def -Maro=zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4/src/aro.zig -Mhelpers=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/lib/helpers.zig -Mc_builtins=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/lib/c_builtins.zig -Mbuild_options=/tmp/td1c-b/build/o/797e136f53a5ec47a4aa66d44b694080/options.zig -Msystem_defaults=/tmp/td1c-b/build/o/b1fd8d9b79865f4ae2e8b5e608822e78/options.zig -Mbuild_options0=/tmp/td1c-b/build/o/ba2b05cddc2713793d5914d0b0a7216e/options.zig --dep build_options=build_options0 -Mbackend=zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4/src/backend.zig -MBuiltins/aarch64.def=/tmp/td1c-b/build/o/54b3810bea91fdbaf009d22856a42d55/aarch64.zig -MBuiltins/amdgcn.def=/tmp/td1c-b/build/o/269f725f59cf4664996dbd6ac0033941/amdgcn.zig -MBuiltins/arm.def=/tmp/td1c-b/build/o/5ef0af0c4a6c89e04a05d800f24ff6a5/arm.zig -MBuiltins/bpf.def=/tmp/td1c-b/build/o/ee86f19a226da3c7ca28d4f18421cef1/bpf.zig -MBuiltins/common.def=/tmp/td1c-b/build/o/c144232ee8f4a029ea64ed0549718fee/common.zig -MBuiltins/hexagon.def=/tmp/td1c-b/build/o/e8d321cb365e9b3c7678dd1ed833cf3c/hexagon.zig -MBuiltins/loongarch.def=/tmp/td1c-b/build/o/1bc1a3e6c1643d52a3c72eb1eea2a1db/loongarch.zig -MBuiltins/mips.def=/tmp/td1c-b/build/o/9c280f453aa491c4cd555534c50ed955/mips.zig -MBuiltins/neon.def=/tmp/td1c-b/build/o/932685e550b8b9459b3952875692a33d/neon.zig -MBuiltins/nvptx.def=/tmp/td1c-b/build/o/491d19df9b9f8c700b26f7f0021020fb/nvptx.zig -MBuiltins/powerpc.def=/tmp/td1c-b/build/o/8e01457418ee83924e149420db6d60de/powerpc.zig -MBuiltins/riscv.def=/tmp/td1c-b/build/o/e672d56d014e4a54e1e7c75961d16f03/riscv.zig -MBuiltins/s390x.def=/tmp/td1c-b/build/o/a0358b4696647bf5c2b2db9d85faa1b8/s390x.zig -MBuiltins/ve.def=/tmp/td1c-b/build/o/01ae7e7b3212df07c9c135682f914e43/ve.zig -MBuiltins/wasm.def=/tmp/td1c-b/build/o/d3c54bbf47ef697af3294422e8670c91/wasm.zig -MBuiltins/x86_64.def=/tmp/td1c-b/build/o/4f4762e687d5ea15e824946142648ebe/x86_64.zig -MBuiltins/x86.def=/tmp/td1c-b/build/o/14761d8708302ccd60e0229d51d6f025/x86.zig -MBuiltins/xcore.def=/tmp/td1c-b/build/o/dd32be9c1b3763394898241757c80e2f/xcore.zig --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --name translate-c --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib/ --listen=-
+info(verbose): /tmp/td1c-b/build/o/c2ed0c1708df7583c9c50693646c5712/translate-c -o=/tmp/td1c-b/build/tmp/0e0662b1fac76f55/sqlite.zig -O=safe -lc --zig-lib=/home/user/.local/opt/zig-0.17.0/lib -fmodule-libs -- /tmp/td1c-b/build/o/0c9b2756c0da0c80b2bc44cd38570a88/sqlite.h -MD -MV -MF /tmp/td1c-b/build/tmp/0e0662b1fac76f55/deps.d -w -resource-dir ./zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4 -I ./zig-pkg/N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8/.
+info(verbose): /tmp/td1c-b/build/o/c2ed0c1708df7583c9c50693646c5712/translate-c -o=/tmp/td1c-b/build/tmp/c77ce7cefa09544e/curl.zig -O=safe -lc --zig-lib=/home/user/.local/opt/zig-0.17.0/lib -fmodule-libs -- /tmp/td1c-b/build/o/a8134fa75e7b644e49d94f4577434611/curl.h -MD -MV -MF /tmp/td1c-b/build/tmp/c77ce7cefa09544e/deps.d -w -resource-dir ./zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4 -I /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/include
+info(verbose): /tmp/td1c-b/build/o/c2ed0c1708df7583c9c50693646c5712/translate-c -o=/tmp/td1c-b/build/tmp/fe3d4fb6017d1c8f/posix.zig -O=safe -lc --zig-lib=/home/user/.local/opt/zig-0.17.0/lib -fmodule-libs -- /tmp/td1c-b/build/o/384bf7f15c071c91e812e437d19d61ec/posix.h -MD -MV -MF /tmp/td1c-b/build/tmp/fe3d4fb6017d1c8f/deps.d -w -resource-dir ./zig-pkg/aro-0.0.0-JSD1QqKGNwALqBes402gHE7CP3Ga6xHS1J4mjThB3ro4
+info(verbose): /home/user/.local/opt/zig-0.17.0/zig test -cflags -std=c99 -fno-strict-aliasing -- zig-pkg/N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8/sqlite3.c -cflags -std=c11 -- src/bash_platform.c -cflags -std=c11 -- src/host_launch.c -cflags -std=c99 -O2 -- zig-pkg/N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g/utf8proc.c /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/lib/libcurl.a /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/lib/libnghttp2.a /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/lib/libssl.a /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/lib/libcrypto.a -Osafe -I zig-pkg/N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8/. -I zig-pkg/N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g/. -DSQLITE_THREADSAFE=1 -DSQLITE_DEFAULT_PAGE_SIZE=4096 -DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096 -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DEFAULT_MMAP_SIZE=0 -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_DEFAULT_SYNCHRONOUS=3 -DSQLITE_DQS=0 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_SHARED_CACHE=1 -DSQLITE_MAX_ATTACHED=0 -DSQLITE_MAX_LENGTH=1073741824 -DSQLITE_DEFAULT_WORKER_THREADS=0 -DSQLITE_MAX_WORKER_THREADS=0 -DSQLITE_TEMP_STORE=1 -DSQLITE_USE_URI=0 -DSQLITE_ENABLE_API_ARMOR=1 --dep sqlite --dep posix --dep terminal_unicode --dep terminal_width --dep vaxis --dep transport_options --dep curl -Mroot=src/tests.zig -Osafe -I zig-pkg/N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8/. --dep c_builtins --dep helpers -Msqlite=/tmp/td1c-b/build/o/91eefbb46dac6371241d9c9da29af5ad/sqlite.zig -Osafe --dep c_builtins --dep helpers -Mposix=/tmp/td1c-b/build/o/2b688e7e94d905df00dd783cf6086454/posix.zig -Osafe --dep uucode -Mterminal_unicode=/tmp/td1c-b/build/o/66b648dc491cffa9339c3abf822424eb/vaxis/src/unicode.zig -Osafe --dep uucode -Mterminal_width=/tmp/td1c-b/build/o/66b648dc491cffa9339c3abf822424eb/vaxis/src/gwidth.zig -Osafe --dep zigimg --dep uucode --dep terminal_unicode --dep terminal_width -Mvaxis=/tmp/td1c-b/build/o/66b648dc491cffa9339c3abf822424eb/vaxis/src/main.zig -Mtransport_options=/tmp/td1c-b/build/o/0c8c81cd4fea0c31c8fb35eb51bd8bee/options.zig -Osafe -I /tmp/td1c-b/build/o/00dcf61dbe1a0609d781a21a1ab7df98/pinned-transport-x86_64-linux/include --dep c_builtins --dep helpers -Mcurl=/tmp/td1c-b/build/o/a5573ba377477851a88653d4094afc9f/curl.zig -Mc_builtins=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/lib/c_builtins.zig -Mhelpers=zig-pkg/translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d/lib/helpers.zig -Osafe --dep types.zig --dep config.zig --dep tables -Muucode=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/root.zig -Osafe --dep zigimg -Mzigimg=zig-pkg/zigimg-0.1.0-8_eo2sBLGACBebrhQZUwRliZNSUyDn6szp99eip_6-Rw/zigimg.zig -Osafe -Mtypes.zig=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/types.zig -Osafe --dep types.zig --dep storage.zig -Mconfig.zig=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/config.zig -Osafe --dep config.zig --dep storage.zig --dep build_config -Mtables=/tmp/td1c-b/build/o/e8850b77b7a6d39b4c624b8bb25cb714/tables.zig -Osafe --dep config.zig -Mstorage.zig=zig-pkg/uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv/src/storage.zig --dep config.zig --dep storage.zig -Mbuild_config=/tmp/td1c-b/build/o/821c3376afe365e5e901f761d135e9d8/build_config.zig -lc --test-filter "TD1 sequence model retention" --cache-dir /tmp/td1c-b/build --global-cache-dir /home/user/.cache/zig --build-root . --name test --zig-lib-dir /home/user/.local/opt/zig-0.17.0/lib/ --listen=-
+info(verbose): /tmp/td1c-b/build/o/b1c4cf1076c0105437a980919766eb65/rui-answer-renderer-allocation-test
+info(verbose): /tmp/td1c-b/build/o/a3146a099d95969b9e00ae5931f48b17/test --cache-dir=/tmp/td1c-b/build --seed=0x49f63606 --listen=-
+test
++- run test 1 pass, 1 fail (2 total)
+error: 'SessionFrontend.test.TD1 sequence model retention' failed without output
+failed command: /tmp/td1c-b/build/o/a3146a099d95969b9e00ae5931f48b17/test --cache-dir=/tmp/td1c-b/build --seed=0x49f63606 --listen=-
+
+Build Summary: 38/40 steps succeeded (1 failed); 1/2 tests passed (1 failed)
+test transitive failure
++- run test 1 pass, 1 fail (2 total)
+|  +- compile test safe native success 1m MaxRSS:859M
+|     +- run sh (pinned-transport-x86_64-linux) cached
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- translate-c sqlite success 107ms
+|     |  +- compile exe translate-c fast native cached 15ms MaxRSS:40M
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- options cached
+|     |  |  +- run exe generate-def (aarch64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native cached 18ms MaxRSS:39M
+|     |  |  +- run exe generate-def (amdgcn.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (arm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (bpf.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (common.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (hexagon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (loongarch.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (mips.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (neon.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (nvptx.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (powerpc.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (riscv.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (s390x.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (ve.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (wasm.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86_64.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (x86.zig) cached
+|     |  |  |  +- compile exe generate-def debug native (reused)
+|     |  |  +- run exe generate-def (xcore.zig) cached
+|     |  |     +- compile exe generate-def debug native (reused)
+|     |  +- WriteFile sqlite.h cached
+|     +- translate-c posix success 130ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile posix.h cached
+|     +- run bash (vaxis) cached
+|     +- run bash (vaxis) (reused)
+|     +- run bash (vaxis) (reused)
+|     +- options cached
+|     +- translate-c curl success 161ms
+|     |  +- compile exe translate-c fast native (+21 more reused dependencies)
+|     |  +- WriteFile curl.h cached
+|     |  +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run sh (pinned-transport-x86_64-linux) (reused)
+|     +- run exe uucode_generate (tables.zig) cached
+|     |  +- compile exe uucode_generate debug native cached 11ms MaxRSS:40M
+|     |     +- WriteFile build_config.zig cached
+|     +- WriteFile build_config.zig (reused)
++- run exe rui-answer-renderer-allocation-test success 327ms
+   +- compile exe rui-answer-renderer-allocation-test safe native success 28s MaxRSS:360M
+
+Retained TD1 fixture: /tmp/td1-retention-hralxfeo
+1/2 tests.test_0...OK
+2/2 SessionFrontend.test.TD1 sequence model retention...FAIL (TruncatedResponse)
+1 passed; 0 skipped; 1 failed.
+Retained TD1 fixture: /tmp/td1-retention-yvj9cjs8
+EXIT 1
