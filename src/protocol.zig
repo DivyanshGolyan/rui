@@ -1541,9 +1541,9 @@ const ContentCapture = struct {
     fn init(options: ParseOptions, ordinal: u8) !ContentCapture {
         if (options.fault_content_acquire) return error.InjectedContentAcquireFailure;
         var capture: ContentCapture = undefined;
-        const path = try std.fmt.bufPrint(&capture.path, "{s}/request-{d}-{d}.tmp", .{
-            options.scratch_path, options.request_number, ordinal,
-        });
+        var name_buffer: [96]u8 = undefined;
+        const name = try named_scratch.NumericName.request.format(&name_buffer, options.request_number, ordinal);
+        const path = try std.fmt.bufPrint(&capture.path, "{s}/{s}", .{ options.scratch_path, name });
         const writer = try std.Io.Dir.createFileAbsolute(options.io, path, .{
             .read = true,
             .exclusive = true,

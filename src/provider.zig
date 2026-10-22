@@ -433,10 +433,11 @@ pub const ResponseCapture = struct {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "response-{d}-{d}.tmp", .{
+        const name = try named_scratch.NumericName.response.format(
+            &name_buffer,
             binding.operation_id,
             binding.attempt_ordinal,
-        });
+        );
         const file = try scratch.createFile(io, name, .{
             .read = true,
             .exclusive = true,

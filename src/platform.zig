@@ -250,40 +250,10 @@ fn validatePrivateDirectory(dir: std.Io.Dir, io: std.Io) !void {
     if (stat.permissions.toMode() & 0o077 != 0) return error.InsecureDirectoryPermissions;
 }
 
-fn isOwnedIngressName(name: []const u8) bool {
-    return isOwnedNumericScratch(name, "request-") or
-        isOwnedNumericScratch(name, "response-") or
-        isOwnedNumericScratch(name, "response-metadata-") or
-        isOwnedNumericScratch(name, "bash-stdout-") or
-        isOwnedNumericScratch(name, "bash-stderr-") or
-        isOwnedNumericScratch(name, "report-") or
-        named_scratch.EvaluatorName.isOwned(name);
-}
-
-fn isOwnedNumericScratch(name: []const u8, prefix: []const u8) bool {
-    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".tmp")) return false;
-    const middle = name[prefix.len .. name.len - ".tmp".len];
-    const separator = std.mem.indexOfScalar(u8, middle, '-') orelse return false;
-    if (std.mem.indexOfScalar(u8, middle[separator + 1 ..], '-') != null) return false;
-    const zero_request_number = (std.mem.eql(u8, prefix, "request-") or
-        std.mem.eql(u8, prefix, "report-")) and std.mem.eql(u8, middle[0..separator], "0");
-    return (zero_request_number or isCanonicalPositiveDecimal(middle[0..separator])) and
-        isCanonicalPositiveDecimal(middle[separator + 1 ..]);
-}
-
-fn isCanonicalPositiveDecimal(value: []const u8) bool {
-    if (value.len == 0 or value[0] < '1' or value[0] > '9') return false;
-    for (value[1..]) |byte| {
-        if (byte < '0' or byte > '9') return false;
-    }
-    _ = std.fmt.parseInt(u64, value, 10) catch return false;
-    return true;
-}
-
 fn cleanupOwnedIngress(scratch: *std.Io.Dir, io: std.Io, fault_cleanup: bool) !void {
     var iterator = scratch.iterate();
     while (try iterator.next(io)) |entry| {
-        if (!isOwnedIngressName(entry.name)) continue;
+        if (!named_scratch.isOwned(entry.name)) continue;
         if (entry.kind != .file) return error.UnexpectedIngressLeftover;
         if (fault_cleanup) return error.InjectedCleanupFailure;
         try scratch.deleteFile(io, entry.name);
@@ -595,38 +565,38 @@ test "invalid UTF-8 Store path remains distinct from path overflow" {
 }
 
 test "startup cleanup recognizes only owned ingress names" {
-    try std.testing.expect(isOwnedIngressName("request-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("response-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("response-metadata-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("bash-stdout-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("bash-stderr-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("report-12-2.tmp"));
-    try std.testing.expect(isOwnedIngressName("evaluator-0.tmp"));
-    try std.testing.expect(isOwnedIngressName("evaluator-ffffffffffffffff.tmp"));
+    try std.testing.expect(named_scratch.isOwned("request-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("response-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("response-metadata-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("bash-stdout-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("bash-stderr-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("report-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("evaluator-0.tmp"));
+    try std.testing.expect(named_scratch.isOwned("evaluator-ffffffffffffffff.tmp"));
     for ([_]u64{ 0, 0x1a2b3c, std.math.maxInt(u64) }) |id| {
         var buffer: [64]u8 = undefined;
-        try std.testing.expect(isOwnedIngressName(try named_scratch.EvaluatorName.format(&buffer, id)));
+        try std.testing.expect(named_scratch.isOwned(try named_scratch.EvaluatorName.format(&buffer, id)));
     }
     inline for (.{ "request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}--.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}x-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}--.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}x-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}12-x.tmp", .{prefix})));
         try std.testing.expectEqual(
             std.mem.eql(u8, prefix, "request-") or std.mem.eql(u8, prefix, "report-"),
-            isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})),
+            named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}0-2.tmp", .{prefix})),
         );
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-0.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}00-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}18446744073709551616-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-18446744073709551616.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}999999999999999999999999999999-2.tmp", .{prefix})));
-        try std.testing.expect(!isOwnedIngressName(try std.fmt.bufPrint(&name_buffer, "{s}2-999999999999999999999999999999.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-0.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}00-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}02-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}18446744073709551616-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-18446744073709551616.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}999999999999999999999999999999-2.tmp", .{prefix})));
+        try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-999999999999999999999999999999.tmp", .{prefix})));
     }
-    try std.testing.expect(!isOwnedIngressName("response-secret.tmp"));
+    try std.testing.expect(!named_scratch.isOwned("response-secret.tmp"));
     inline for (.{
         "evaluator-.tmp",
         "evaluator-00.tmp",
@@ -636,8 +606,8 @@ test "startup cleanup recognizes only owned ingress names" {
         "evaluator-10000000000000000.tmp",
         "evaluator-1.tmp.extra",
         "evaluator-1.index.tmp",
-    }) |name| try std.testing.expect(!isOwnedIngressName(name));
-    try std.testing.expect(!isOwnedIngressName("canonical.sqlite3"));
+    }) |name| try std.testing.expect(!named_scratch.isOwned(name));
+    try std.testing.expect(!named_scratch.isOwned("canonical.sqlite3"));
 }
 
 test "startup cleanup removes owned files and preserves lookalikes" {
