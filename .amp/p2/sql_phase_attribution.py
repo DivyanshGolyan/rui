@@ -65,7 +65,8 @@ for window in evidence["windows"]:
 output = {"fixture": True, "instrumented_counts_only": True,
           "execution_tid": execution_tids[0], "windows": rows,
           "limits": evidence["limits"]}
-if len(sys.argv) == 2:
+# A single held-window confirmation intentionally has no matched-zero phase.
+if len(sys.argv) == 2 and "zero_start_snapshot" in evidence:
     assert evidence["host_capacity"] == evidence["configured_sessions"] == 100
     assert evidence["warmup_seconds_each"] == 10 and evidence["requested_window_seconds_each"] == 60
     assert evidence["tools"] == "none"
@@ -106,4 +107,12 @@ if len(sys.argv) == 2:
         "control_selects_per_held_operation_per_second": full["select_owners"]["control_reconciliation"] / full["observed_seconds"] / 100,
         "select_caller_contributions": contributions,
         "limits": "One sequential same-Host configured-zero versus held100 observation, not repeated/fresh-Host statistics. Admission lies outside both windows. Rates normalize instrumented first-execution counts; neither CPU causality nor an optimization speedup is measured. Held connections and durable Message/Operation rows are the intentional population difference."}
+elif len(sys.argv) == 2:
+    assert evidence["product_revision"] == "d4f870002b1eeef370fb8f4c7aa3fd8b14343159"
+    assert evidence["host_capacity"] == evidence["configured_sessions"] == 100
+    assert evidence["warmup_seconds"] == 10 and evidence["requested_window_seconds"] == 60
+    assert held["terminal_finished_streams"] == 0 and held["h2_connections"] == 1
+    assert [row["name"] for row in rows] == ["configure_and_admit", "held_100", "stop_and_drain"]
+    assert rows[0]["end_unix_ns"] < rows[1]["start_unix_ns"] < rows[1]["end_unix_ns"] <= rows[2]["start_unix_ns"]
+    assert rows[1]["observed_seconds"] >= 60
 print(json.dumps(output, indent=2))

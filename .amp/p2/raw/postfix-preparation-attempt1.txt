@@ -1,0 +1,16 @@
+Preparation observer/copy error, not a workload capture.
+At 2026-10-22T00:59:48Z the shell working directory was:
+/home/user/workspace/repo/.amp/p2/postfix-source
+The copy/inspection commands incorrectly used checkout-root-relative paths.
+The tool transcript retained:
+cp: cannot stat '.amp/p2/research-source/src/p2_sql_trace.c': No such file or directory
+cp: cannot stat 'zig-pkg': No such file or directory
+sed: can't read .amp/p2/postfix-source/build.zig: No such file or directory
+sed: can't read .amp/p2/postfix-source/src/server.zig: No such file or directory
+cmp: .amp/p2/research-source/src/p2_sql_trace.c: No such file or directory
+rg: .amp/p2/postfix-source/tests/qualification/model-output/main.go: No such file or directory (os error 2)
+rg: .amp/p2/postfix-source/tests/qualification/model-output/provider/main.go: No such file or directory (os error 2)
+sha256sum: .amp/p2/postfix-source/src/p2_sql_trace.c: No such file or directory
+The shell did not stop on those preparation failures and launched the build.
+Its separate unmodified output is build-postfix-sql.log.
+No Host/provider workload had started and no completed build was used.

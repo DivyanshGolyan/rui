@@ -243,3 +243,38 @@ This is a future design to test, not an accepted contract change or implemented 
 3. Wake for committed execution/admission changes without making time or local resources depend on a commit. Preserve transport readiness, authentication/preparation, Bash I/O and child exit, retry eligibility, inactivity, retained cleanup, shutdown and all earliest deadlines. Startup must begin with canonical recovery; full-capacity recovery and capacity/custody-release progress remain required. Keep existing bounded service waits until a replacement proves those obligations.
 
 Before any implementation could qualify, preserve absent/suppressed-hint and replay/dropped-reply behavior; test commit-versus-rollback/failure publication, scan/sleep races, saturated/coalesced wake delivery, startup recovery, full/empty capacity, retry/inactivity/Bash deadlines, cleanup and bounded resource release. This proposal changes neither durability nor Store format and promises no measured CPU saving. No production code, Store wake or SQLite/journal setting was changed for this finding.
+
+## FOUND counts and memory step need separate cost and ownership decisions
+
+**Fsync, measured count; waiting cost ESTIMATED.** Original baseline STREAM captures measured 24.06 fsync/Message at N100 and 29.5 at N1, amortizing whole-run startup, configuration and settlement. For a rounded 24–30 calls/Message, assume a synchronous wait per call, not a CPU cost:
+
+| Assumed wait/fsync, unmeasured | Estimated summed wait/Message |
+| --- | ---: |
+| 0.1ms | 2.4–3ms |
+| 1ms | 24–30ms |
+| 10ms | 240–300ms |
+
+These are sensitivity calculations, not measured device latency, critical-path Message latency or promised savings. Calls and Messages have different scopes; concurrent work can overlap waits. Proposed investigation: map retained fsync calls to their transaction/metadata owners and measure uninstrumented filesystem latency before assigning a cost. **Any weaker durability, synchronous or journal policy is a USER-only decision.** No durability change is proposed as an automatic optimization, and none was made.
+
+**Memory activation, measured Linux PSS; cause unattributed.** P1's baseline median Host PSS rises from 7,362,560 bytes at N0 to 11,345,920 at N10: **3,983,360 bytes total**. Dividing by ten gives **398,336 bytes/Session**, an arithmetic average of this activation step, not a constant marginal allocation or scaling law. Capacity stays 100; N10 activates one TLS/H2 connection and ten streams, while N0 has no active provider connection. Reaped clients contribute no steady-window client PSS; transient client peaks are unavailable.
+
+The source is baseline 240aef2e, harness a204296c and P1's independently reviewed [baseline evidence](https://github.com/DivyanshGolyan/rui/commit/ab9f3e410e4d06ad77c8a2fea6b8db6ccd5513e0), retained on `perf/linux-pss-20261021`. Raw paths are `.amp/p1/raw/run-n0-r{1,2,3}.json`, `run-n10-r{1,2,3}.json` and their endpoint `smaps_rollup.gz` captures; reduction is `.amp/p1/summary.json`. N0 end-window samples are 7,362,560 / 7,353,344 / 7,363,584 bytes; N10 samples are 11,324,416 / 11,351,040 / 11,345,920. These are sequential endpoint samples on fresh Hosts, not peaks, Mac physical footprint or post-fix d4f measurements. The wider fit has substantial residuals and does not identify TLS alone as the cause.
+
+Proposed investigation, not an approved fix: use the existing allocation/smaps evidence and source ownership to distinguish shared Host/connection activation, per-active-Session storage and allocator retention. Match resident pages and allocation lifetimes to their owners before choosing a reduction. Neither the 398,336-byte average nor the N1 allocator-call count identifies the responsible allocation. No memory optimization is implemented here. The Store-commit wake proposal above is likewise future work with explicit lost-hint/deadline obligations, not a result of the landed framing/intake changes.
+
+## FOUND confirmed on post-fix main: HOLD100 still executes about 1,000 SELECTs/second
+
+One successful held-window observation used exact [post-fix main d4f87000](https://github.com/DivyanshGolyan/rui/commit/d4f870002b1eeef370fb8f4c7aa3fd8b14343159), ReleaseFast plus the same isolated SQL/turn tracing. The test ran **01:17:37–01:18:57 UTC on October 22**, PASS/exit 0. After configuring/admitting 100 Messages and accepting all 100 H2 streams, it warmed up 10 seconds. The held window was 01:17:54.114094–01:18:54.122049 UTC: **60,380 SELECT first executions / 60.007954823 seconds = 1,006.1999/s**. Response bytes, events and terminal completions remained zero; all 2,320 turns had zero free slots and returned to transport wait. Admission and explicit cancellation/drain lie outside this window.
+
+| Held SELECT caller | First executions | Per observed second |
+| --- | ---: | ---: |
+| Per-Operation control reconciliation | 58,000 | 966.5385 |
+| Uncertain-Action recovery | 2,320 | 38.6615 |
+| Exhausted-retry recovery | 60 | 0.9999 |
+| Total | 60,380 | 1,006.1999 |
+
+There are no other SQL verbs in the held window. The pre-run estimate was 1,000 SELECTs/s, about 0.62% below observation; its nominal 60,000-count estimate is 380 below the observed count. The old matched baseline measured 1,004.3855/s. This is a post-fix confirmation of substantial polling, not a randomized before/after comparison or evidence of SQL CPU causality, natural wakeups, latency or fix qualification. No new HOLD0 was run. Assuming the same unmeasured 1µs or 10µs inclusive cost per control SELECT would imply 0.0966539% or 0.966539% of one core, respectively; those remain estimates, not measured query costs.
+
+The [summary](raw/postfix-hold100-summary.json), [raw Host trace](raw/postfix-hold100-attempt2/host-stderr.log.gz), [fixture boundaries/snapshot](raw/postfix-hold100-attempt2/evidence.json) and [controller outcome](raw/postfix-hold100-attempt2-controller.log) retain the result. [Identity](raw/postfix-identity.txt.gz) separates the 87 exact-main source files, [trace-only patch](postfix-sql-instrumentation.patch.gz), patched source hashes, main-revision Go harness and [temporary test](p2_postfix_hold_test.go.txt). The instrumented Rui binary SHA-256 is `06529a20415960ea2c8e179575bc3c11c6781b31ab80fd69603f9582855701bc`; harness binary SHA-256 is `2e412d81fd424dd652c64a57f011b8db5dc17a1aa403a84416cec0c3a48c952b`. Post-run hashes match. Read-only [Store facts](raw/postfix-store-facts.json) confirm 100 subsequently cancelled Messages, zero Actions and no unresolved Operations; Host and controller have exited.
+
+Failures are not hidden: incorrect copy paths first omitted the C extension and the [initial build](raw/build-postfix-sql.log.gz) failed; the diagnosed correction built 42/42 steps. The [first test attempt](raw/postfix-hold100-controller.log) failed before Configure because its precreated artifact directory was mode 0755, correctly rejected by `client.Capture.open`. One diagnosed retry used a fresh mode-0700 directory and produced the only held-window result. Its failed-attempt [Host trace](raw/postfix-hold100/host-stderr.log.gz) remains intact. No production, durability, REPORT or landing change accompanies this packet.

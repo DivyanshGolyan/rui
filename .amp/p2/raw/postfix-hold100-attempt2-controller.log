@@ -1,0 +1,8 @@
+run_start_utc=2026-10-22T01:17:37Z
+diagnosis=attempt1_precreated_artifact_directory_mode0755_rejected_before_Configure;fresh_attempt2_directory_mode0700;no_prior_held_window
+estimate_before_run=1000_SELECT_first_executions_per_second;60000_per_60s_window;no_CPU_claim
+=== RUN   TestP2PostfixHold
+--- PASS: TestP2PostfixHold (79.32s)
+PASS
+run_end_utc=2026-10-22T01:18:57Z
+run_exit=0
