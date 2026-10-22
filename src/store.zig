@@ -1052,14 +1052,18 @@ pub const ContentReader = struct {
     }
 
     pub fn close(self: *ContentReader) void {
+        if (self.blob.handle == null) return self.closeHeld();
+        self.store.lockAdmin();
+        defer self.store.mutex.unlock(self.store.io);
+        self.closeHeld();
+    }
+
+    /// Close from Store code that already holds the Store mutex.
+    fn closeHeld(self: *ContentReader) void {
         std.debug.assert(self.active);
         self.active = false;
-        if (self.blob.handle) |handle| {
-            self.store.lockAdmin();
-            // Close reports only an earlier read failure, already returned.
-            _ = c.sqlite3_blob_close(handle);
-            self.store.mutex.unlock(self.store.io);
-        }
+        // Close reports only an earlier read failure, already returned.
+        if (self.blob.handle) |handle| _ = c.sqlite3_blob_close(handle);
         if (@import("builtin").is_test) _ = self.store.testing_content_work.closes.fetchAdd(1, .monotonic);
     }
 };
@@ -3179,7 +3183,7 @@ pub const Store = struct {
         }
         if (authenticate) {
             var source = try ContentSource.init(self, try readNullablePositiveI64(statement, 10) orelse return error.CorruptStore, true);
-            defer source.reader.close();
+            defer source.reader.closeHeld();
             @import("provider_output.zig").authenticateCall(&source, result.metadata.fields) catch return error.CorruptStore;
         }
         return result;
@@ -4166,6 +4170,7 @@ pub const Store = struct {
         const metadata = try self.readContentMetadata(content_id);
         const raw = try self.contentIsRaw(content_id, metadata.length);
         var reader = ContentReader{ .content_id = content_id, .representation = if (raw) .raw else .{ .projection = .{} }, .store = self, .reference = .{ .length = metadata.length, .digest = metadata.digest } };
+        defer reader.closeHeld();
         try capture.appendFmt("{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"", .{metadata.length});
         try capture.append(&std.fmt.bytesToHex(metadata.digest, .lower));
         try capture.append("\",\"text\":\"");
@@ -5468,7 +5473,7 @@ pub const Store = struct {
                 return error.HistoricalPending;
             try scan.validation.authenticateIdentity(.function_call, scan.fields[0].digest);
             try scan.validation.authenticate(scan.fields);
-            reader.close();
+            reader.closeHeld();
             scan.reader = null;
             return error.HistoricalPending;
         }
@@ -7754,6 +7759,21 @@ fn testingBytesContent(tmp: *std.testing.TmpDir, name: []const u8, bytes: []cons
     };
 }
 
+/// Test aid: statements left mid-step. Cached statements are reset and idle;
+/// each open reader's blob handle is the only expected busy statement.
+fn busyStatements(database: *c.sqlite3) usize {
+    var count: usize = 0;
+    var statement = c.sqlite3_next_stmt(database, null);
+    while (statement) |current| : (statement = c.sqlite3_next_stmt(database, current)) {
+        if (c.sqlite3_stmt_busy(current) != 0) count += 1;
+    }
+    return count;
+}
+
+fn readerStatements(reader: *const ContentReader) usize {
+    return @intFromBool(reader.blob.handle != null);
+}
+
 fn queryU64(database: *c.sqlite3, sql: [:0]const u8) !u64 {
     const statement = try prepare(database, sql);
     defer _ = c.sqlite3_finalize(statement);
@@ -9557,6 +9577,9 @@ test "production turn preserves skipped continuation preference through actual S
         pub fn noteLifecycleOpportunity(_: *@This()) void {}
         pub fn consumeControlHint(_: *@This()) bool {
             return false;
+        }
+        pub fn commitGeneration(self: *@This()) u64 {
+            return self.storage.commitGeneration();
         }
         pub fn reconcileControls(_: *@This()) void {}
         pub fn advanceBashPreparation(_: *@This()) bool {
@@ -12107,7 +12130,7 @@ test "failed commit saves neither answer nor partial Session" {
     }
 }
 
-test "real SQLite busy saves no answer and fences the connection" {
+test "an outside SQLite writer cannot take the open Store's lock" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -12132,8 +12155,9 @@ test "real SQLite busy saves no answer and fences the connection" {
     defer if (blocker_open) {
         _ = c.sqlite3_close(blocker);
     };
+    // The Store's exclusive lock refuses the outside writer, never the Host.
     try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_OK),
+        @as(c_int, c.SQLITE_BUSY),
         c.sqlite3_exec(blocker, "BEGIN IMMEDIATE", null, null, null),
     );
 
@@ -12145,18 +12169,9 @@ test "real SQLite busy saves no answer and fences the connection" {
         workspace,
         "model-a",
     );
-    try std.testing.expect(storage.configure(&command, true, .{}) == .infrastructure_failure);
-    try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_BUSY),
-        c.sqlite3_extended_errcode(storage.database),
-    );
-    try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.observeCommand("busy-save"));
+    try std.testing.expect(storage.configure(&command, true, .{}) != .infrastructure_failure);
+    try std.testing.expect(!storage.isFenced());
 
-    try std.testing.expectEqual(
-        @as(c_int, c.SQLITE_OK),
-        c.sqlite3_exec(blocker, "ROLLBACK", null, null, null),
-    );
     try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_close(blocker));
     blocker_open = false;
     try storage.close();
@@ -12164,8 +12179,8 @@ test "real SQLite busy saves no answer and fences the connection" {
 
     var reopened = try Store.open(std.testing.io, database, root);
     defer reopened.close() catch unreachable;
-    try std.testing.expect((try reopened.observeCommand("busy-save")).status == .absent);
-    try std.testing.expect(!(try reopened.inspectSession("direct/busy-save")).found);
+    try std.testing.expect((try reopened.observeCommand("busy-save")).status != .absent);
+    try std.testing.expect((try reopened.inspectSession("direct/busy-save")).found);
 }
 
 test "real SQLite full during import publishes no canonical prefix" {
@@ -13395,7 +13410,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13476,7 +13491,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13560,7 +13575,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.publicConversationPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -13746,7 +13761,7 @@ test "public projected content sequential work excludes repeated prefixes" {
     }
     try std.testing.expectEqual(@as(u64, 147456), storage.testing_content_work.decoded.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 8), storage.testing_content_work.closes.load(.monotonic));
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13776,7 +13791,7 @@ test "public projected content equal-length repoint fences at complete-stream EO
         try std.testing.expectError(error.CorruptStore, if (range) reader.readRange(4990, &bytes) else reader.read(4096, &bytes));
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, reader.read(5000, &bytes));
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -13815,7 +13830,7 @@ test "public projected content EOF rejects nonempty trailing parts" {
             try std.testing.expectError(error.CorruptStore, reader.readRange(start, &bytes));
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, reader.readRange(8, &bytes));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -13839,7 +13854,7 @@ test "public projected content trailing empty parts retain final byte and repeat
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expectEqual(@as(usize, 0), try reader.readRange(8, &bytes));
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
 }
 
@@ -13865,7 +13880,7 @@ test "public projected content ranges own positioning across windows and scalar 
         const wanted = @min(bytes.len, expected.len - start);
         try std.testing.expectEqual(wanted, count);
         try std.testing.expectEqualStrings(expected[@intCast(start)..][0..count], bytes[0..count]);
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
     try std.testing.expectError(error.RangeOutOfBounds, reader.readRange(expected.len + 1, &bytes));
@@ -13909,7 +13924,7 @@ test "public projected content empty identity and repeated EOF" {
             try std.testing.expectEqual(@as(usize, 0), try reader.readRange(0, &bytes));
             try std.testing.expect(!storage.isFenced());
         }
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -13940,7 +13955,7 @@ test "public projected content range positioning preserves decoding and backing 
         var bytes: [1]u8 = undefined;
         try std.testing.expectError(if (missing) error.ContentReadFailed else error.InvalidJsonEscape, reader.readRange(1, &bytes));
         try std.testing.expect(storage.isFenced());
-        try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+        try std.testing.expectEqual(readerStatements(&reader), busyStatements(storage.database));
         try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     }
 }
@@ -14283,7 +14298,7 @@ test "continued accepted output keeps model immutable and public projection read
     try std.testing.expectEqual(@as(usize, 1), before_answer.count);
     try std.testing.expect(before_answer.items[0].kind == .user);
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
     {
         const resolution = try prepare(
@@ -15241,7 +15256,7 @@ test "public proposal structural corruption fences independently on every route"
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.proposalPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -15306,7 +15321,7 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
@@ -15384,7 +15399,7 @@ test "persisted tool label corruption fences every publication route" {
             try std.testing.expectError(description.failure, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, storage.activityPage(request));
-            try std.testing.expect(c.sqlite3_next_stmt(storage.database, null) == null);
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
             try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
         }
     }
