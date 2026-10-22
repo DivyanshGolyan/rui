@@ -44,7 +44,7 @@ Before changing the build graph or enabling experimental incremental compilation
 
 ## Review
 
-Review correctness and simplicity using the [product-tenet gate](VERIFICATION.md#product-tenets-at-stage-completion), with one independent review.
+Run one independent correctness, design and complecting review on `main` after landing, using the [product tenets](VERIFICATION.md#product-tenets-at-stage-completion). Review signoff does not gate a coherent green change; [Landing](AGENTS.md#landing) owns the required proof and handling of known failed counterexamples.
 
 Trace beyond changed lines to owning state/control flow and existing causes of workarounds. Identify duplicated authority, scattered policy and dependencies on private representation, call order or cleanup details; connect findings to the change. Justify affected state, layers, caches, queues and per-slot allocations by required behavior or demonstrated cost.
 

@@ -39,19 +39,21 @@ Resolve reversible choices within the accepted contract. For unresolved conseque
 
 Own one implementation outcome through its applicable checks and authorized publication. Advance without routine grants, candidate ledgers, evidence-adoption ceremonies, or frozen fixture policies. Serialize actual shared-file, target-branch, or interfering native operations; independent work continues. Historical failed attempts remain failures.
 
-Implementation approval alone does not authorize publication. A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures. Carry that authorization across agent handoffs without asking again for each commit or correction.
+Outside the standing [Landing](#landing) grant, implementation approval alone does not authorize publication. A request to create or update a PR authorizes pushing its relevant branch and maintaining that PR within the approved scope, including follow-up pushes for requested fixes, review findings and CI failures. Carry that authorization across agent handoffs without asking again for each commit or correction.
 
 Ask before publishing to a different destination, expanding scope, force-pushing or acting outside the approved outcome. Deploying and closing issues still require explicit authorization. Honor narrower user limits.
 
 ## Landing
 
-Standing grant: an item ready for main lands under these rules without further approval. Passing their gates is the authority; there is no separate human approval or qualification stage.
+Standing grant: land each small, coherent green change without further stage approval or waiting for lane completion. Proof gates landing, not review signoff. Known failed counterexamples require fixes and passing proof before the affected change joins the stack. Existing one-way-door approvals still apply.
 
-- Stack ready items on `wip/land-N` and gate only the tip. At most one `wip/land-N` is open; later ready work waits for the next stack. Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists. Retire an abandoned stack (back it up, then delete it) before starting another. Selected's plan job repeats the check.
-- If the stack touches a strict path, the tip must pass Linux and Mac Selected plus the upgrade check before the push. Otherwise, Linux Selected green on the tip is enough.
+- Append each coherent green change immediately to the single open `wip/land-N` and gate only the current tip. If no stack is open, start the next number. Serialize shared-ref writes. Before every push, run `python3 tests/ci/auto_land.py --preflight wip/land-N` on the tip; it fails when any other unlanded `wip/land-*` exists, even one the tip contains, or a higher number exists. Retire an abandoned stack (back it up, then delete it) before starting another. Selected's plan job repeats the check.
+- Before exact-tip qualification, every introduced landing commit must state its actual test commands and results, plus applicable performance A/B numbers. TUI changes also include a real-screen tmux capture. Each commit carries its owning lane's `Amp-Thread-ID: <thread URL>` trailer; inspect Amp's generated trailers and avoid duplicates. Preserve published source refs rather than rewriting them. Changing a commit message changes its SHA and invalidates its exact-tip receipts.
+- Before landing, the exact tip must pass Linux Selected and all mapped hosted Mac checks. Strict paths also require Mac Selected and the upgrade check. Keep all mapped recovery checks.
 - Only [Auto-land](.github/workflows/auto-land.yml) pushes `main`: one atomic non-force fast-forward of a passing tip to both `main` and `stable`. Agents only assemble and push `wip/land-N`. GITHUB_TOKEN cannot push workflow-file changes, so Auto-land holds such tips for the user.
+- Run independent design and complecting reviews on `main` after landing under [Review](CODING_STANDARDS.md#review); they do not block green changes.
 - Main is not re-tested after the push. Daily full runs on main file an issue when red; fix forward.
-- After ready, at most one rerun per item, and no commits except fixes for red CI.
+- After ready, at most one rerun per item. New coherent green items may join the open stack; fixes for red CI retain the failure evidence.
 - `stable` is the last landed tip; install from `stable`.
 
 The strict paths are `src/store*`, `src/*schema*`, `src/server*`, `src/execution*`, `src/*recovery*`, `tests/integration/*recovery*`, `tests/integration/bash*`, `build.zig`, `build.zig.zon` and `install.sh`. [strict_paths.py](tests/ci/strict_paths.py) owns this list; the [upgrade check](.github/workflows/previous-release-upgrade.yml) runs on exactly these paths. A `wip/land-N` push runs [Selected checks](.github/workflows/check.yml) on the tip, and the upgrade check when the tip touches a strict path.

@@ -16,7 +16,7 @@ Integration fixtures require Python 3.11 or newer on PATH; the composed driver r
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig). Run `python3 tests/ci/select_tests.py --base origin/main --phase review` on the candidate. The selector unions affected subsystems and falls back to `check` for unmapped source or integration code. It does not infer dependencies. Long, churn, full Debug and H2 targets follow their mappings, not an unconditional per-PR gate.
 
-| Subsystem | Review-ready minimum | Exceptions and notes |
+| Subsystem | Landing-tip minimum | Exceptions and notes |
 | --- | --- | --- |
 | Portable turn, request encoding, answer rendering | `test-logic` | Value transitions do not change native adapters |
 | CLI, client, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
@@ -41,13 +41,13 @@ The executable minimum is [select_tests.py](tests/ci/select_tests.py), using tar
 | [Strict paths](AGENTS.md#landing) | Also the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS | `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate |
 | CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap |
 
-`test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`. Neither composed gate covers that root, so run it with a selected composed gate. The compiler and dependency setup action is bootstrap, not CI policy. An unavailable review base is an error. `wip/land-*` pushes select the tip's complete delta against the main merge base. An exact-tip dispatch replaces a cancelled push run; a dispatched Selected run lands only if main contains its `base` and `base..tip` spans `main..tip`'s paths.
+`test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`. Neither composed gate covers that root, so run it with a selected composed gate. The compiler and dependency setup action is bootstrap, not CI policy. An unavailable selection base is an error. `wip/land-*` pushes select the tip's complete delta against the main merge base. An exact-tip dispatch replaces a cancelled push run; a dispatched Selected run lands only if main contains its `base` and `base..tip` spans `main..tip`'s paths.
 
 Qualification Go changes select `measurement-check`. Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux. Other qualification changes state manual syntax or compilation requirements. Stored historical results select no product suites. Syntax checks, probe compilation and unrelated product tests do not qualify a resource claim.
 
 ### Landing cadence
 
-[AGENTS.md](AGENTS.md#landing) owns the landing rule. Stack ready items on `wip/land-N` and gate only the tip; focused checks on changed layers are development feedback. Daily suites do not qualify intermediate merges.
+[AGENTS.md](AGENTS.md#landing) owns the landing rule and per-commit proof. Append each small, coherent green change to the single open `wip/land-N` immediately and qualify its current exact tip. Lane completion and review signoff are not prerequisites. Focused checks on changed layers are development feedback. Daily suites do not qualify intermediate merges.
 
 Selected CI uses affected-owner targets on Linux and macOS for PRs and `wip/land-*`. Main is not re-tested after landing; daily full Linux and macOS qualification on main files an issue when red. Renderer-only diffs omit `check`; strict mixed changes retain it. Other branches run nothing. Draft PRs keep `test-logic`; ready PRs test the merge ref. Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes. Keep sensible timeouts and cleanup and resource guards.
 
@@ -130,7 +130,7 @@ Measurement runners use Go 1.27.1 and modules pinned in `tests/qualification/go.
 Release evidence includes deterministic Session, model, tool, permission, context, compaction, workflow and server fixtures; hard-termination recovery at each acknowledgement and effect boundary; compiler-backed discovery of both production graphs; and the opt-in live Codex repair through those owners. Classify unused, conditional and test declarations and remove obsolete interfaces. Never label interrupted or unrun checks passed.
 ### Product tenets at stage completion
 
-Each implementation stage demonstrates the following through its completed caller flow, alongside its correctness and recovery checks:
+After each coherent change lands, independently review its completed caller flow on `main` against the following tenets. This design review is not a landing gate. Required behavior, recovery and resource proof remains in the [canonical gates](#canonical-gates).
 
 - **Simplicity:** explain the required behavior or demonstrated cost that justifies each added module, durable fact, cache or queue. Check for duplicate authority and caller-owned coordination that belongs inside an existing owner; compare a simpler approach where one could preserve the required behavior. Identify dependencies introduced or removed on another owner's representation, call order or lifetime, and justify each retained one by required behavior. Passing tests establish tested behavior, not design simplicity.
 - **Explainability:** walk ordinary work, failure and recovery in plain language using the stage's normal results and inspection. A reader can tell what happened, what remains uncertain and what can happen next. Explanations follow owning facts and do not treat optional diagnostics as recovery authority. Check this as each caller path appears, before final presentation work.
