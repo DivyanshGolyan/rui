@@ -1,0 +1,7 @@
+== mutation: key barrier checks on release presence (pre-fix behaviour)
+--- FAIL: TestToolAcceptanceFailsClosed (0.00s)
+    tool_linux_test.go:141: barrier without release accepted
+    tool_linux_test.go:141: release without barrier accepted
+FAIL
+FAIL	rui.local/qualification/model-output	0.004s
+FAIL
