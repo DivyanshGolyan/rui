@@ -21,11 +21,18 @@ pub const Outcome = union(enum) {
     terminate,
 };
 
+const ActionRecoveryKey = struct { generation: u64, free_slots: usize };
+
 pub const State = struct {
     preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
     retry_admission_due: bool = true,
     last_retry_poll: ?std.Io.Clock.Timestamp = null,
     next_control_reconciliation: ?std.Io.Clock.Timestamp = null,
+    /// Commit generation read before the last complete reconciliation.
+    reconciled_generation: ?u64 = null,
+    /// Generation and free slots before the last scan found nothing; only a
+    /// commit or a released slot can make an uncertain Action eligible.
+    idle_action_recovery: ?ActionRecoveryKey = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
 };
@@ -40,7 +47,13 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
     const hint = context.consumeControlHint();
     var made_progress = false;
     if (hint or due(state.next_control_reconciliation, now)) {
-        context.reconcileControls();
+        // A lost hint still follows its control's commit, so the fallback
+        // reads controls only after the generation moved.
+        const generation = context.commitGeneration();
+        if (hint or state.reconciled_generation != generation) {
+            context.reconcileControls();
+            state.reconciled_generation = generation;
+        }
         state.next_control_reconciliation = deadline.after(now, control_reconciliation_interval_ms);
         made_progress = hint;
     }
@@ -58,7 +71,14 @@ fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error
         last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
     else
         true;
-    if (try context.recoverUncertainAction()) made_progress = true;
+    const action_recovery: ActionRecoveryKey = .{ .generation = context.commitGeneration(), .free_slots = context.freeSlots() };
+    const unchanged = if (state.idle_action_recovery) |previous| std.meta.eql(previous, action_recovery) else false;
+    if (!unchanged) {
+        if (try context.recoverUncertainAction()) {
+            made_progress = true;
+            state.idle_action_recovery = null;
+        } else state.idle_action_recovery = action_recovery;
+    }
     const maintain_retries = context.providerConfigured() and (retry_poll_due or capacity_released);
     if (maintain_retries) {
         state.retry_admission_due = true;
@@ -142,6 +162,9 @@ const Recording = struct {
     now_ns: i96 = 0,
     auto_advance: i96 = 1,
     hint: bool = false,
+    // Each read observes a new commit unless a test holds the Store still.
+    generation: u64 = 0,
+    generation_advance: u64 = 1,
     fenced: bool = false,
     provider: bool = true,
     free: usize = 1,
@@ -201,6 +224,11 @@ const Recording = struct {
         const value = self.hint;
         self.hint = false;
         return value;
+    }
+
+    fn commitGeneration(self: *Recording) u64 {
+        self.generation += self.generation_advance;
+        return self.generation;
     }
 
     fn reconcileControls(self: *Recording) void {
@@ -459,6 +487,45 @@ test "absent control hint still reconciles when the fallback deadline is due" {
     context.now_ns = 1_000 + 100 * std.time.ns_per_ms;
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
+    // Without a commit, a due fallback has nothing a lost hint could hide.
+    context.generation_advance = 0;
+    context.generation += 1;
+    context.now_ns = 1_000 + 300 * std.time.ns_per_ms;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.reconcile_count);
+    context.now_ns = 1_000 + 500 * std.time.ns_per_ms;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.reconcile_count);
+    context.hint = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.reconcile_count);
+    // A commit whose hint was lost is found by the next due fallback.
+    context.generation += 1;
+    context.now_ns = 1_000 + 700 * std.time.ns_per_ms;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 5), context.reconcile_count);
+}
+
+test "uncertain Action recovery rescans only after a commit or a released slot" {
+    var context = idle();
+    context.generation_advance = 0;
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_action));
+    context.free = 2;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_action));
+    context.generation += 1;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
+    // A recovery commits; the next turn scans for another candidate.
+    context.recover_action = true;
+    context.generation += 1;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 5), context.count(.recover_action));
 }
 
 test "live Bash observes a later clock than Bash preparation in the same lifecycle service" {
