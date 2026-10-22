@@ -1,0 +1,12 @@
+Browsing · Esc returns
+
+› Folded line 1                                                            11:57
+  Folded line 2
+  ┄ 4 more lines
+
+Noted.
+
+← reviewer · Looks good to me.                                             11:57
+
+Noted.
+›

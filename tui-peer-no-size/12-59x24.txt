@@ -1,0 +1,24 @@
+
+Noted.
+
+← reviewer · Looks good to me.
+
+Noted.
+
+← reviewer · Please review the patch…
+
+Noted.
+
+← reviewer · Long single line word word word word word wor…
+
+Noted.
+
+→ reviewer · done
+
+→ reviewer · Plan follows…
+
+›
+
+
+
+

@@ -1,0 +1,24 @@
+Browsing · Esc returns
+Start of conversation
+
+› Short question for the agent.                                            11:57
+
+Noted.
+
+› Folded line 1                                                            11:57
+  Folded line 2
+  ┄ 4 more lines
+
+Noted.
+
+← reviewer · Looks good to me.                                             11:57
+
+Noted.
+
+← reviewer · Please review the patch…                                      11:57
+
+Noted.
+
+← reviewer · Long single line word word word word word word word word wo…  11:57
+
+›

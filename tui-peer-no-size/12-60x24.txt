@@ -1,0 +1,24 @@
+
+Noted.
+
+← reviewer · Looks good to me.                         11:57
+
+Noted.
+
+← reviewer · Please review the patch…                  11:57
+
+Noted.
+
+← reviewer · Long single line word word word word wo…  11:57
+
+Noted.
+
+→ reviewer · done                                      11:57
+
+→ reviewer · Plan follows…                             11:57
+
+›
+
+
+
+
