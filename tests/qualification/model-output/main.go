@@ -682,8 +682,11 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if err != nil {
 		return nil, err
 	}
+	hostNeedsStop := true
 	defer func() {
-		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		if hostNeedsStop {
+			measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
+		}
 	}()
 	cold, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-cold.txt"))
 	if err != nil {
@@ -717,6 +720,11 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	}
 	retained, err := measurement.SampleProcess(host.Process, filepath.Join(directory, "footprint-retained.txt"))
 	if err != nil {
+		return nil, err
+	}
+	// The Host holds its Store exclusively; audit offline after reaping it.
+	hostNeedsStop = false
+	if err := host.Stop(measurement.TeardownAllowance); err != nil {
 		return nil, err
 	}
 	audit, err := readOutputAudit(deadline, store)
