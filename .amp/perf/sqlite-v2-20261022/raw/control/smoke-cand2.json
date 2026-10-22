@@ -1,0 +1,34 @@
+{
+ "binary": "/home/user/workspace/repo/.amp/sqlv2/bin/rui-cand2",
+ "timeout_ms": 100,
+ "state": "/tmp/rui-same-group-control.ldqb14nd",
+ "rows": [
+  {
+   "trial": 0,
+   "action": "1",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.367,
+   "spawn_to_pid_published_ms": 4.173,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 102.825
+  },
+  {
+   "trial": 1,
+   "action": "2",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.031,
+   "spawn_to_pid_published_ms": 3.753,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 101.9
+  },
+  {
+   "trial": 2,
+   "action": "3",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 2.082,
+   "spawn_to_pid_published_ms": 3.874,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 101.312
+  }
+ ]
+}

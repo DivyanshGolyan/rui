@@ -1,0 +1,1 @@
+tree=f75f592a (fixture timeout_ms=1000, DIAGNOSTIC ONLY). Completed: bash-integration, check (23/23 legs), admission-debug, dispatch-debug, codex-credential, codex-h2, current-facts all EXIT=0; server-delivery onward stopped. Not acceptance of the 100 ms contract.

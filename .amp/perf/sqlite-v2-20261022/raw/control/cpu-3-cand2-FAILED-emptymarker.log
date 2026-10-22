@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/home/user/workspace/repo/.amp/sqlv2/control/same_group_control.py", line 73, in <module>
+    "spawn_to_pid_published_ms": ms(markers / f"{i}-published"),
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/workspace/repo/.amp/sqlv2/control/same_group_control.py", line 70, in ms
+    return round((float(path.read_text()) - spawn) * 1000, 3) if path.exists() and spawn is not None else None
+                  ^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: could not convert string to float: ''

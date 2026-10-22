@@ -1,0 +1,307 @@
+{
+ "binary": "/home/user/workspace/repo/.amp/sqlv2/bin/rui-cand2",
+ "timeout_ms": 100,
+ "state": "/tmp/rui-same-group-control.8p5ompe7",
+ "rows": [
+  {
+   "trial": 0,
+   "action": "1",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 17.434,
+   "spawn_to_pid_published_ms": 46.043,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 131.129,
+   "trace_missing": []
+  },
+  {
+   "trial": 1,
+   "action": "2",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 30.039,
+   "spawn_to_pid_published_ms": 47.439,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 107.44,
+   "trace_missing": []
+  },
+  {
+   "trial": 2,
+   "action": "3",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 44.825,
+   "spawn_to_pid_published_ms": 52.788,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 104.872,
+   "trace_missing": []
+  },
+  {
+   "trial": 3,
+   "action": "4",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": null,
+   "spawn_to_pid_published_ms": null,
+   "pid_published": false,
+   "spawn_to_deadline_serviced_ms": 116.798,
+   "trace_missing": []
+  },
+  {
+   "trial": 4,
+   "action": "5",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 64.294,
+   "spawn_to_pid_published_ms": 109.0,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 112.391,
+   "trace_missing": []
+  },
+  {
+   "trial": 5,
+   "action": "6",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 22.557,
+   "spawn_to_pid_published_ms": 34.371,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 114.738,
+   "trace_missing": []
+  },
+  {
+   "trial": 6,
+   "action": "7",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 33.454,
+   "spawn_to_pid_published_ms": 76.881,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 125.479,
+   "trace_missing": []
+  },
+  {
+   "trial": 7,
+   "action": "8",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 21.687,
+   "spawn_to_pid_published_ms": 48.135,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 102.467,
+   "trace_missing": []
+  },
+  {
+   "trial": 8,
+   "action": "9",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 50.343,
+   "spawn_to_pid_published_ms": 67.364,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 101.23,
+   "trace_missing": []
+  },
+  {
+   "trial": 9,
+   "action": "10",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 27.938,
+   "spawn_to_pid_published_ms": 37.125,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 105.257,
+   "trace_missing": []
+  },
+  {
+   "trial": 10,
+   "action": "11",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 47.004,
+   "spawn_to_pid_published_ms": 78.909,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 105.507,
+   "trace_missing": []
+  },
+  {
+   "trial": 11,
+   "action": "12",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 30.841,
+   "spawn_to_pid_published_ms": null,
+   "pid_published": false,
+   "spawn_to_deadline_serviced_ms": 105.846,
+   "trace_missing": []
+  },
+  {
+   "trial": 12,
+   "action": "13",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 38.707,
+   "spawn_to_pid_published_ms": 47.725,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 111.872,
+   "trace_missing": []
+  },
+  {
+   "trial": 13,
+   "action": "14",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 42.497,
+   "spawn_to_pid_published_ms": 56.721,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 110.776,
+   "trace_missing": []
+  },
+  {
+   "trial": 14,
+   "action": "15",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 50.043,
+   "spawn_to_pid_published_ms": 81.879,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 113.672,
+   "trace_missing": []
+  },
+  {
+   "trial": 15,
+   "action": "16",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 42.279,
+   "spawn_to_pid_published_ms": 80.181,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 111.254,
+   "trace_missing": []
+  },
+  {
+   "trial": 16,
+   "action": "17",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 24.825,
+   "spawn_to_pid_published_ms": 55.456,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 117.833,
+   "trace_missing": []
+  },
+  {
+   "trial": 17,
+   "action": "18",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 46.214,
+   "spawn_to_pid_published_ms": 96.817,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 119.499,
+   "trace_missing": []
+  },
+  {
+   "trial": 18,
+   "action": "19",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 32.838,
+   "spawn_to_pid_published_ms": 112.752,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 167.339,
+   "trace_missing": []
+  },
+  {
+   "trial": 19,
+   "action": "20",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 31.038,
+   "spawn_to_pid_published_ms": 82.925,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 123.311,
+   "trace_missing": []
+  },
+  {
+   "trial": 20,
+   "action": "21",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 32.571,
+   "spawn_to_pid_published_ms": null,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 114.805,
+   "trace_missing": []
+  },
+  {
+   "trial": 21,
+   "action": "22",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 110.441,
+   "spawn_to_pid_published_ms": null,
+   "pid_published": false,
+   "spawn_to_deadline_serviced_ms": 114.596,
+   "trace_missing": []
+  },
+  {
+   "trial": 22,
+   "action": "23",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 47.049,
+   "spawn_to_pid_published_ms": 78.036,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 114.164,
+   "trace_missing": []
+  },
+  {
+   "trial": 23,
+   "action": "24",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 30.844,
+   "spawn_to_pid_published_ms": 46.436,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 125.766,
+   "trace_missing": []
+  },
+  {
+   "trial": 24,
+   "action": "25",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 6.912,
+   "spawn_to_pid_published_ms": 8.67,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 112.41,
+   "trace_missing": []
+  },
+  {
+   "trial": 25,
+   "action": "26",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 28.435,
+   "spawn_to_pid_published_ms": 41.986,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 102.723,
+   "trace_missing": []
+  },
+  {
+   "trial": 26,
+   "action": "27",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 9.301,
+   "spawn_to_pid_published_ms": 10.94,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 113.091,
+   "trace_missing": []
+  },
+  {
+   "trial": 27,
+   "action": "28",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 54.067,
+   "spawn_to_pid_published_ms": 58.51,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 101.843,
+   "trace_missing": []
+  },
+  {
+   "trial": 28,
+   "action": "29",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 55.451,
+   "spawn_to_pid_published_ms": 111.327,
+   "pid_published": true,
+   "spawn_to_deadline_serviced_ms": 120.694,
+   "trace_missing": []
+  },
+  {
+   "trial": 29,
+   "action": "30",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 94.87,
+   "spawn_to_pid_published_ms": null,
+   "pid_published": false,
+   "spawn_to_deadline_serviced_ms": 120.111,
+   "trace_missing": []
+  }
+ ]
+}

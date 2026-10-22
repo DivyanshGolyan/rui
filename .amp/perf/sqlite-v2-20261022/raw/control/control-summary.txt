@@ -1,0 +1,7 @@
+Same-group fixture command, 100 ms Bash timeout; ms are measured from Bash spawn (deadline_ns - 100 ms)
+cpu   baseline n= 60 PID-unpublished-at-kill= 8 (13%) publish med/p95/max=48.2/73.4/117.0 serviced med/max=114.4/140.9 files=['cpu-1-baseline.json', 'cpu-4-baseline.json']
+cpu   cand2    n= 60 PID-unpublished-at-kill=11 (18%) publish med/p95/max=63.6/103.8/112.8 serviced med/max=112.9/173.6 files=['cpu-2-cand2.json', 'cpu-5-cand2.json']
+fsync baseline n= 60 PID-unpublished-at-kill= 0 (0%) publish med/p95/max=31.7/81.9/94.7 serviced med/max=113.0/168.0 files=['fsync-1-baseline.json', 'fsync-4-baseline.json']
+fsync cand2    n= 60 PID-unpublished-at-kill= 1 (2%) publish med/p95/max=27.9/85.5/91.0 serviced med/max=109.6/128.2 files=['fsync-2-cand2.json', 'fsync-3-cand2.json']
+none  baseline n= 60 PID-unpublished-at-kill= 0 (0%) publish med/p95/max=5.2/15.5/21.1 serviced med/max=104.6/124.9 files=['none-1-baseline.json', 'none-4-baseline.json']
+none  cand2    n= 60 PID-unpublished-at-kill= 0 (0%) publish med/p95/max=9.2/19.5/31.8 serviced med/max=108.4/121.8 files=['none-2-cand2.json', 'none-3-cand2.json']

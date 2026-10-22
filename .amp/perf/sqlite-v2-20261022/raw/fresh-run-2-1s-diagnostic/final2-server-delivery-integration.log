@@ -1,0 +1,2 @@
+{"phase": "held", "baseline": {"rss_kib": 11928, "fds": 13}, "held": {"rss_kib": 12216, "fds": 28}}
+{"delivery": "passed", "bytes": 264006, "sha256": "76452414254a32bfb3e82011d105d54b4c4d7f22ce8fc37aea40fde4c53b7a73", "drain_seconds": 60.04812285200023, "baseline": {"rss_kib": 11928, "fds": 13}, "held": {"rss_kib": 12216, "fds": 28}, "restart": {"rss_kib": 8560, "fds": 11}}

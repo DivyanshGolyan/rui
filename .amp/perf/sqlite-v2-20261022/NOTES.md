@@ -48,3 +48,29 @@ LD_PRELOAD unset (all six: 200 Messages, 1,200,000 events, all results audited, 
 - candidate: 27.62, 27.84, 29.07 µs/event (mean 28.18)
 - candidate − baseline: −7.56 µs/event (−21.2%); the ranges do not overlap. The napkin estimate
   was a 1–5% reduction. Linux fixture diagnostic only; not a macOS or qualification verdict.
+
+## Bash same-group timeout failure: causal control (2026-10-22)
+
+The fresh Linux run on tree 965fe8a5 (100 ms fixture) failed in bash-integration with "timed out
+waiting for same-group child identity". Evidence: raw/fresh-run-1-failed. The run with the fixture
+timeout at 1000 ms (tree f75f592a) is diagnostic history only: raw/fresh-run-2-1s-diagnostic.
+
+Control: control/same_group_control.py runs the exact fixture command with timeout_ms=100, plus
+$EPOCHREALTIME markers, on one Host per block. Timing comes from the Host's bash_deadline_* trace
+(spawn = deadline − 100 ms). Blocks are 30 trials each, ordered B C C B under each load. Loads:
+none, CPU (4 busy loops on 2 vCPU), and fsync (2 writers doing fsync in a loop). Binaries are the
+same measured baseline (d4f87000) and candidate (26857f7c), which have identical Bash owners.
+Failed and aborted blocks are kept in raw/control and listed in attempts.md.
+
+PID unpublished when the 100 ms kill landed:
+- no load: baseline 0/60, candidate 0/60
+- CPU load: baseline 8/60 (13%), candidate 11/60 (18%)
+- fsync load: baseline 0/60, candidate 1/60
+Spawn→publish median, baseline vs candidate: 5.2 vs 9.2 ms (no load), 48.2 vs 63.6 ms (CPU),
+31.7 vs 27.9 ms (fsync).
+
+Conclusion: under matched CPU load the pre-WAL baseline fails the same way, so the 100 ms fixture
+race exists independently of WAL/FULL. The control does not rule out a small candidate contribution:
+under CPU load the candidate's failure rate and publish median are somewhat higher. That difference
+is within block-to-block variation (no-load baseline block medians were 9.4 and 4.1 ms), and it is
+not resolved.

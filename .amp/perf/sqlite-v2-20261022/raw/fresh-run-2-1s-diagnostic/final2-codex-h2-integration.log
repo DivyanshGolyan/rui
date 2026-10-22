@@ -1,0 +1,6 @@
+managed descriptor rejection passed: {'active_capacity': 1, 'required': 435, 'soft_limit': 74, 'inherited': 3, 'fixed_host': 9, 'clients': 403, 'execution': 10, 'authentication': 8, 'self_wake': 2}
+codex synthetic TLS/H2 production transfers passed: intake_capacity=100, descriptor_limit=435, native_receipts=False, ALPN h2, one connection, three streams, conditional FedRAMP header
+managed descriptor rejection passed: {'active_capacity': 1, 'required': 435, 'soft_limit': 74, 'inherited': 3, 'fixed_host': 9, 'clients': 403, 'execution': 10, 'authentication': 8, 'self_wake': 2}
+codex synthetic TLS/H2 production transfers passed: intake_capacity=100, descriptor_limit=437, native_receipts=True, ALPN h2, one connection, three streams, conditional FedRAMP header
+managed descriptor rejection passed: {'active_capacity': 1, 'required': 435, 'soft_limit': 74, 'inherited': 3, 'fixed_host': 9, 'clients': 403, 'execution': 10, 'authentication': 8, 'self_wake': 2}
+codex synthetic TLS/H2 production transfers passed: intake_capacity=10, descriptor_limit=75, native_receipts=False, ALPN h2, one connection, three streams, conditional FedRAMP header
