@@ -88,7 +88,7 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
     (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig",
-      "src/model_capability.zig"),
+      "src/model_capability.zig", "src/failed_responses.zig"),
      ("test", "dispatch-integration", "transport-h2-integration"),
      ("test", "dispatch-integration", "transport-h2-integration"), "Model admission and transport"),
     (("tests/integration/dispatch_integration.py",),
