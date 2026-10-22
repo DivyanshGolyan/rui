@@ -114,26 +114,28 @@ func TestToolOriginalFailureRequiresCompletedExactAnswer(t *testing.T) {
 	}
 }
 
-// Validated counts, request phases and a complete barrier with N overlapping
-// intervals are each required; any one missing rejects the run.
+// Validated counts, request phases and, in barrier mode, release facts for a
+// complete park and N overlapping intervals are each required.
 func TestToolAcceptanceFailsClosed(t *testing.T) {
 	done := provider.ToolSummary{Done: 3, WorkloadCalls: 3, DispatchCalls: 2, SucceededCalls: 5}
 	requests := map[string]int{"seed_in_window": 0, "measured_in_window": 3, "continuation_in_window": 3}
 	release := map[string]any{"parked_at_release": 3, "timed_out": false}
-	if failures := toolAcceptance(3, done, requests, release, 3); len(failures) != 0 {
+	if failures := toolAcceptance(3, done, requests, true, release, 3); len(failures) != 0 {
 		t.Fatalf("complete run rejected: %v", failures)
 	}
-	if failures := toolAcceptance(3, done, requests, nil, 1); len(failures) != 0 {
+	if failures := toolAcceptance(3, done, requests, false, nil, 1); len(failures) != 0 {
 		t.Fatalf("natural run needs no overlap: %v", failures)
 	}
 	short := done
 	short.SucceededCalls = 4
 	for name, failures := range map[string][]string{
-		"partial barrier":    toolAcceptance(3, done, requests, map[string]any{"parked_at_release": 2, "timed_out": true}, 3),
-		"overlap below N":    toolAcceptance(3, done, requests, release, 2),
-		"one call invalid":   toolAcceptance(3, short, requests, nil, 3),
-		"provider error":     toolAcceptance(3, provider.ToolSummary{Done: 3, WorkloadCalls: 3, DispatchCalls: 2, SucceededCalls: 5, Errors: []string{"x"}}, requests, nil, 3),
-		"request off window": toolAcceptance(3, done, map[string]int{"measured_in_window": 3, "continuation_in_window": 2}, nil, 3),
+		"barrier without release": toolAcceptance(3, done, requests, true, nil, 1),
+		"release without barrier": toolAcceptance(3, done, requests, false, release, 3),
+		"partial barrier":         toolAcceptance(3, done, requests, true, map[string]any{"parked_at_release": 2, "timed_out": true}, 3),
+		"overlap below N":         toolAcceptance(3, done, requests, true, release, 2),
+		"one call invalid":        toolAcceptance(3, short, requests, false, nil, 3),
+		"provider error":          toolAcceptance(3, provider.ToolSummary{Done: 3, WorkloadCalls: 3, DispatchCalls: 2, SucceededCalls: 5, Errors: []string{"x"}}, requests, false, nil, 3),
+		"request off window":      toolAcceptance(3, done, map[string]int{"measured_in_window": 3, "continuation_in_window": 2}, false, nil, 3),
 	} {
 		if len(failures) == 0 {
 			t.Errorf("%s accepted", name)
@@ -160,7 +162,7 @@ func TestReleaseBarrierRecordsPartialPark(t *testing.T) {
 		t.Fatal(err)
 	}
 	writer.Close()
-	if facts["parked_at_release"] != 1 || facts["timed_out"] != true || len(toolAcceptance(2, provider.ToolSummary{Done: 2, WorkloadCalls: 2, DispatchCalls: 1, SucceededCalls: 3}, map[string]int{"measured_in_window": 2, "continuation_in_window": 2}, facts, 2)) == 0 {
+	if facts["parked_at_release"] != 1 || facts["timed_out"] != true || len(toolAcceptance(2, provider.ToolSummary{Done: 2, WorkloadCalls: 2, DispatchCalls: 1, SucceededCalls: 3}, map[string]int{"measured_in_window": 2, "continuation_in_window": 2}, true, facts, 2)) == 0 {
 		t.Fatalf("facts = %v", facts)
 	}
 }

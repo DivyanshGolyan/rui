@@ -937,7 +937,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	result["concurrency"] = toolConcurrency(done)
 	release, _ := result["barrier_release"].(map[string]any)
 	overlap, _ := result["concurrency"].(map[string]any)["workload"].(map[string]any)["max_overlapping"].(int)
-	if failures := append(originalFailures, toolAcceptance(sessions, done, requests, release, overlap)...); len(failures) != 0 {
+	if failures := append(originalFailures, toolAcceptance(sessions, done, requests, barrier, release, overlap)...); len(failures) != 0 {
 		result["acceptance_failures"] = failures
 		return result, fmt.Errorf("tool turn not accepted: %d failures, first: %s", len(failures), failures[0])
 	}
@@ -1134,9 +1134,11 @@ func toolOriginalFailure(sessions, index int, key string, inspection, observatio
 }
 
 // toolAcceptance lists every provider, phase and barrier reason a run must
-// not pass. Counts come from validated outputs; a barrier run must release
-// only after all N shells parked and must reach N overlapping intervals.
-func toolAcceptance(sessions int, done provider.ToolSummary, requests map[string]int, release map[string]any, overlap int) []string {
+// not pass. Counts come from validated outputs. The configured barrier mode,
+// not the presence of release facts, decides: a barrier run must have
+// release facts showing all N shells parked and must reach N overlapping
+// intervals; a run without a barrier must have no release facts.
+func toolAcceptance(sessions int, done provider.ToolSummary, requests map[string]int, barrier bool, release map[string]any, overlap int) []string {
 	var failures []string
 	failures = append(failures, done.Errors...)
 	if done.Done != sessions || done.WorkloadCalls != sessions || done.DispatchCalls != sessions-1 || done.FailedCalls != 0 || done.SucceededCalls != 2*sessions-1 {
@@ -1145,7 +1147,12 @@ func toolAcceptance(sessions int, done provider.ToolSummary, requests map[string
 	if requests["seed_in_window"] != 0 || requests["measured_in_window"] != sessions || requests["continuation_in_window"] != sessions {
 		failures = append(failures, fmt.Sprintf("model requests outside the CPU window: %v", requests))
 	}
-	if release != nil {
+	switch {
+	case barrier && release == nil:
+		failures = append(failures, "barrier run has no release facts")
+	case !barrier && release != nil:
+		failures = append(failures, "release facts on a run without a barrier")
+	case barrier:
 		if parked, _ := release["parked_at_release"].(int); parked != sessions || release["timed_out"] != false {
 			failures = append(failures, fmt.Sprintf("barrier released %v of %d parked", release["parked_at_release"], sessions))
 		}
