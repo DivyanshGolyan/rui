@@ -12,43 +12,7 @@ pub const Intent = struct {
     pub fn needsPreferences(self: Intent) bool {
         return self.store == null or self.provider == null or self.model == null;
     }
-
-    /// A Session's tool process creates peers on the model that Session
-    /// actually runs, never a saved default it may have outlived. Explicit
-    /// model or a different explicit provider still wins. Borrows `caller`.
-    pub fn inheriting(self: Intent, caller: *const Binding) Intent {
-        if (self.model != null) return self;
-        if (self.provider) |provider| if (!std.mem.eql(u8, provider, caller.provider.slice())) return self;
-        var result = self;
-        result.provider = caller.provider.slice();
-        result.model = caller.model.slice();
-        return result;
-    }
 };
-
-test "a caller Session's binding replaces defaults unless the model or another provider is explicit" {
-    var caller: Binding = .{};
-    try caller.provider.set("codex");
-    try caller.model.set("caller-model");
-    var defaults: preferences.Values = .{};
-    try defaults.provider.set("codex");
-    try defaults.model.set("stale-saved-model");
-    for ([_]struct { Intent, ?[]const u8 }{
-        .{ .{}, "caller-model" },
-        .{ .{ .provider = "codex" }, "caller-model" },
-        .{ .{ .model = "explicit-model" }, "explicit-model" },
-        .{ .{ .provider = "codex", .model = "explicit-model" }, "explicit-model" },
-        .{ .{ .provider = "other" }, null },
-    }) |case| {
-        const intent = case[0].inheriting(&caller);
-        if (case[1]) |model| {
-            const snapshot: Snapshot = .{ .intent = intent, .defaults = defaults };
-            try std.testing.expectEqualStrings(model, (try snapshot.resolve(.configured)).?.model.slice());
-        }
-        // Only an absent model inherits; anything explicit passes through.
-        if (case[0].model != null or case[1] == null) try std.testing.expectEqualDeep(case[0], intent);
-    }
-}
 
 /// One observation of prospective defaults. Replace the whole snapshot after
 /// external choice/login; no selected slice survives that replacement.

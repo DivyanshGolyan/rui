@@ -178,7 +178,6 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Model self-address, Bash send to a peer with its Host-recorded sender (`RUI_ADDRESS`, leading sender part and rule, capture recovery of the saved sender) and installed CLI | `peer_integration.py`, `human_cli_integration.py` | Native Linux x86-64 and macOS arm64. Compaction, replacement Attempt, restart and maximum-length or NUL addresses: none located |
-| Fresh Configure inside a Session inherits the caller's model; explicit `--model` wins; unreadable caller captures nothing | `'a caller Session's binding replaces defaults'`, `human_cli_integration.py` | Linux and macOS native |
 | 5 s reply inactivity | `'renews mutation inactivity'` | Intake independence, held credit, peer burst and native stall: none located |
 | Peer selection progress and Host stop | `'skipped continuation'`, `host-stop-integration` | Peer input: none located. Iterated stops are not group cancellation |
 
