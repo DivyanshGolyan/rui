@@ -2759,10 +2759,11 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     }
 
     var metadata_name_buffer: [96]u8 = undefined;
-    const metadata_name = std.fmt.bufPrint(&metadata_name_buffer, "response-metadata-{d}-{d}.tmp", .{
+    const metadata_name = named_scratch.NumericName.@"response-metadata".format(
+        &metadata_name_buffer,
         owner.binding.operation_id,
         owner.binding.attempt_ordinal,
-    }) catch unreachable;
+    ) catch unreachable;
     var retained_metadata: ?named_scratch.Owner = null;
     const metadata_budget = host.retention.sharedBudget().narrowed(host.limits.request_scratch_limit_bytes);
     var metadata = output_format.OutputMetadataWriter.init(

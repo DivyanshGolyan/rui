@@ -525,10 +525,11 @@ pub const Preparation = struct {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{
+        const name = try named_scratch.NumericName.request.format(
+            &name_buffer,
             view.binding.operation_id,
             view.binding.attempt_ordinal,
-        });
+        );
         const file = try scratch.createFile(io, name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
             retained.* = .init(io, file, null, name, budget, 0, .native);
@@ -2049,7 +2050,7 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectEqual(named_scratch.Reclamation.removed, reclamation);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var name_buffer: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "request-{d}-{d}.tmp", .{ binding.operation_id, binding.attempt_ordinal });
+        const name = try named_scratch.NumericName.request.format(&name_buffer, binding.operation_id, binding.attempt_ordinal);
         try std.testing.expectError(error.FileNotFound, setup.tmp.dir.statFile(std.testing.io, name, .{}));
     }
 }

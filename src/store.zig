@@ -845,7 +845,7 @@ const SessionReportCapture = struct {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "report-{d}-1.tmp", .{request_number});
+        const name = try named_scratch.NumericName.report.format(&name_buffer, request_number, 1);
         const writer = try scratch.createFile(io, name, .{
             .read = true,
             .exclusive = true,

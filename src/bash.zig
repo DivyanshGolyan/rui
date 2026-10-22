@@ -1,4 +1,5 @@
 const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
 const output_retention = @import("output_retention.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -941,9 +942,9 @@ pub fn startPreparation(
         owned_reader.close();
         return .{ .failed = .{ .cause = error.BashPreparationFailed, .cleanup = cleanup } };
     }
-    for ([_]struct { *?OwnedFile, []const u8 }{
-        .{ &cleanup.stdout_capture, "bash-stdout" },
-        .{ &cleanup.stderr_capture, "bash-stderr" },
+    for ([_]struct { *?OwnedFile, named_scratch.NumericName }{
+        .{ &cleanup.stdout_capture, .@"bash-stdout" },
+        .{ &cleanup.stderr_capture, .@"bash-stderr" },
     }) |capture| {
         capture[0].* = createOwnedFile(io, scratch_path, budget, capture[1], action_id, attempt_ordinal, cleanupFault(faults)) catch |err| {
             owned_reader.close();
@@ -984,7 +985,7 @@ fn createOwnedFile(
     io: std.Io,
     scratch_path: []const u8,
     budget: ScratchBudget,
-    prefix: []const u8,
+    kind: named_scratch.NumericName,
     action_id: u64,
     attempt_ordinal: u64,
     cleanup_fault: CleanupFault,
@@ -993,7 +994,7 @@ fn createOwnedFile(
     defer scratch.close(io);
     var name: protocol.Bounded(96) = .{};
     var name_buffer: [96]u8 = undefined;
-    try name.set(try std.fmt.bufPrint(&name_buffer, "{s}-{d}-{d}.tmp", .{ prefix, action_id, attempt_ordinal }));
+    try name.set(try kind.format(&name_buffer, action_id, attempt_ordinal));
     return .{
         .io = io,
         .file = try scratch.createFile(io, name.slice(), .{
@@ -1147,9 +1148,9 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
         stdout_read_owned = false;
         stderr_read_owned = false;
         defer for (execution.pipes.values) |pipe| if (pipe) |file| file.close(std.testing.io);
-        execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stdout", @backingInt(phase), @intFromBool(observation.cutoff), .none);
+        execution.stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stdout_capture.cleanup(root) catch {};
-        execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "deadline-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
+        execution.stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", @backingInt(phase), @intFromBool(observation.cutoff), .none);
         defer execution.stderr_capture.cleanup(root) catch {};
         switch (phase) {
             .grace => {
@@ -1218,9 +1219,9 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     };
     gone_read_owned = false;
     defer if (gone.pipes.get(.stdout)) |file| file.close(std.testing.io);
-    gone.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stdout", 1, 1, .none);
+    gone.stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", 1, 1, .none);
     defer gone.stdout_capture.cleanup(root) catch {};
-    gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "gone-stderr", 1, 1, .none);
+    gone.stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", 1, 1, .none);
     defer gone.stderr_capture.cleanup(root) catch {};
     var window: [copy_window_bytes]u8 = undefined;
     const gone_result = gone.serviceAt(&window, before, .none);
@@ -1263,8 +1264,8 @@ test "cleanup ownership transfers consume their source" {
         .timeout_ms = 1,
         .faults = .{},
         .command = try std.testing.allocator.dupeSentinel(u8, "true", 0),
-        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none),
-        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none),
+        .stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", 1, 1, .none),
+        .stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", 1, 1, .none),
     };
     prepared.stdout_capture.?.charged = 2;
     prepared.stderr_capture.?.charged = 3;
@@ -1296,9 +1297,9 @@ test "prepared cleanup reclaims partially and retries through the same owner" {
     // per-file guards live in this block so a successful break transfers
     // sole ownership into the aggregate cleanup owner.
     var cleanup: PreparedCleanup = blk: {
-        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .persistent);
+        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", 1, 1, .persistent);
         errdefer stdout_capture.cleanup(root) catch {};
-        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
+        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", 1, 1, .none);
         errdefer stderr_capture.cleanup(root) catch {};
         break :blk .{
             .scratch_path = root,
@@ -1349,8 +1350,8 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
         .stderr_capture = null,
     };
     defer prepared.cleanup() catch {};
-    prepared.stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", ordinal, 1, .none);
-    prepared.stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", ordinal, 1, .none);
+    prepared.stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", ordinal, 1, .none);
+    prepared.stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", ordinal, 1, .none);
     var execution = try prepared.launch(&empty_environment);
     var window: [copy_window_bytes]u8 = undefined;
     while (!execution.retired()) {
@@ -1437,7 +1438,7 @@ test "an owned file closes its descriptor before reporting removal failure" {
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 2 };
     try std.testing.expect(budget.charge(2));
-    var file = try createOwnedFile(std.testing.io, root, budget, "owned", 1, 1, .persistent);
+    var file = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", 1, 1, .persistent);
     file.charged = 2;
     // The fault strikes after the descriptor closes: the handle is gone
     // while the charge and the pathname stay with the owner.
@@ -1509,9 +1510,9 @@ test "output publication closes producer aliases before making output evictable"
     // acquisition failure must not leave earlier files unguarded.
     var execution: Execution = undefined;
     {
-        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, "stdout", 1, 1, .none);
+        var stdout_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stdout", 1, 1, .none);
         errdefer stdout_capture.cleanup(root) catch {};
-        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, "stderr", 1, 1, .none);
+        var stderr_capture = try createOwnedFile(std.testing.io, root, budget, .@"bash-stderr", 1, 1, .none);
         errdefer stderr_capture.cleanup(root) catch {};
         execution = .{
             .io = std.testing.io,
