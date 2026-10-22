@@ -253,3 +253,23 @@ pub const EncodedStringReader = struct {
         return byte;
     }
 };
+
+pub const JsonStringSource = struct {
+    encoded: EncodedStringReader,
+    lookahead: ?u8 = null,
+    has_lookahead: bool = false,
+
+    pub fn peek(self: *JsonStringSource) !?u8 {
+        if (!self.has_lookahead) {
+            self.lookahead = try self.encoded.next();
+            self.has_lookahead = true;
+        }
+        return self.lookahead;
+    }
+
+    pub fn take(self: *JsonStringSource) !u8 {
+        const byte = try self.peek() orelse return error.InvalidDescriptorJson;
+        self.has_lookahead = false;
+        return byte;
+    }
+};

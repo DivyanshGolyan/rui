@@ -6108,14 +6108,18 @@ pub const Store = struct {
                     else => return error.OutputReadFailed,
                 }
 
-                const call_facts = try provider_output.inspectCall(self.io, output.source, name, record);
+                const call_facts = facts: {
+                    var call_name = try output_format.EncodedStringReader.init(self.io, output.source, name);
+                    var arguments = output_format.JsonStringSource{ .encoded = try output_format.EncodedStringReader.init(self.io, output.source, record) };
+                    break :facts try tool_catalog.inspectCall(&call_name, name.decoded_length, &arguments);
+                };
                 const bash_arguments = call_facts.bash_arguments;
                 const rejection_code = tool_catalog.classifyCall(call_facts.name, bash_arguments != null, frozen_tools);
                 var rejection_buffer: [192]u8 = undefined;
-                const rejection_text = if (rejection_code) |code|
-                    try provider_output.rejectionResult(self.io, output.source, code, name, &rejection_buffer)
-                else
-                    null;
+                const rejection_text = if (rejection_code) |code| text: {
+                    var rejected_name = try output_format.EncodedStringReader.init(self.io, output.source, name);
+                    break :text try tool_catalog.rejectionResult(code, &rejected_name, name.decoded_length, name.content_digest, &rejection_buffer);
+                } else null;
                 const rejection_content_id = if (rejection_text) |text|
                     try self.importBytesContent(text, false, faults.output_import)
                 else

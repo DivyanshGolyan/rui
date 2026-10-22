@@ -17,6 +17,45 @@ pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.chil
 pub const ToolSet = std.EnumSet(Tool);
 pub const CallName = enum { bash, edit, unknown };
 
+pub const CallFacts = struct {
+    name: CallName,
+    bash_arguments: ?BashArguments,
+};
+
+/// Inspect certified decoded sources; the caller retains their storage and
+/// owns admission against the frozen catalog in its publication transaction.
+pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !CallFacts {
+    var name: [4]u8 = undefined;
+    var length: usize = 0;
+    if (name_length == name.len) {
+        while (length < name.len) : (length += 1) name[length] = (try name_source.next()) orelse break;
+    }
+    const kind: CallName = if (length == name.len and try name_source.next() == null)
+        if (std.mem.eql(u8, &name, "bash")) .bash else if (std.mem.eql(u8, &name, "edit")) .edit else .unknown
+    else
+        .unknown;
+    return .{ .name = kind, .bash_arguments = if (kind == .bash) try inspectBashArguments(arguments) else null };
+}
+
+pub fn rejectionResult(code: protocol.ProposalRejection, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
+    switch (code) {
+        .invalid_arguments => return "Invalid arguments for tool 'bash'.",
+        .tool_unavailable => return "Tool 'edit' is unavailable.",
+        .unknown_tool => {
+            var prefix: [32]u8 = undefined;
+            var prefix_length: usize = 0;
+            while (prefix_length < prefix.len) {
+                prefix[prefix_length] = (try name.next()) orelse break;
+                prefix_length += 1;
+            }
+            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
+            if (name_length <= prefix.len) return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
+            const digest_hex = std.fmt.bytesToHex(name_digest, .lower);
+            return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{ prefix[0..prefix_length], &digest_hex });
+        },
+    }
+}
+
 /// Admission policy over adapter-certified descriptor facts and frozen tools.
 /// Call this under the transaction that publishes the proposal and Action.
 pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {

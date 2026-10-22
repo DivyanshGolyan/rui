@@ -2,7 +2,6 @@ const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const output_format = @import("output_format.zig");
-const tools = @import("tools.zig");
 
 pub const max_evidence_bytes = 256;
 
@@ -39,65 +38,6 @@ pub const Validated = struct {
     answer_digest: [32]u8,
     evidence: Evidence,
 };
-
-pub const CallFacts = struct {
-    name: tools.CallName,
-    bash_arguments: ?tools.BashArguments,
-};
-
-/// Interpret the authenticated source ranges without retaining provider text.
-pub fn inspectCall(io: std.Io, file: std.Io.File, name: output_format.OutputMetadataRecord, arguments: output_format.OutputMetadataRecord) !CallFacts {
-    const kind: tools.CallName = if (try metadataStringEql(io, file, name, "bash")) .bash else if (try metadataStringEql(io, file, name, "edit")) .edit else .unknown;
-    var source = JsonStringSource{ .encoded = try output_format.EncodedStringReader.init(io, file, arguments) };
-    return .{ .name = kind, .bash_arguments = if (kind == .bash) try tools.inspectBashArguments(&source) else null };
-}
-
-const JsonStringSource = struct {
-    encoded: output_format.EncodedStringReader,
-    lookahead: ?u8 = null,
-    has_lookahead: bool = false,
-
-    pub fn peek(self: *JsonStringSource) !?u8 {
-        if (!self.has_lookahead) {
-            self.lookahead = try self.encoded.next();
-            self.has_lookahead = true;
-        }
-        return self.lookahead;
-    }
-
-    pub fn take(self: *JsonStringSource) !u8 {
-        const byte = try self.peek() orelse return error.InvalidDescriptorJson;
-        self.has_lookahead = false;
-        return byte;
-    }
-};
-
-fn metadataStringEql(io: std.Io, file: std.Io.File, record: output_format.OutputMetadataRecord, expected: []const u8) !bool {
-    if (record.decoded_length != expected.len) return false;
-    var source = try output_format.EncodedStringReader.init(io, file, record);
-    for (expected) |byte| if (try source.next() != byte) return false;
-    return try source.next() == null;
-}
-
-pub fn rejectionResult(io: std.Io, source_file: std.Io.File, code: protocol.ProposalRejection, name: output_format.OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
-    switch (code) {
-        .invalid_arguments => return "Invalid arguments for tool 'bash'.",
-        .tool_unavailable => return "Tool 'edit' is unavailable.",
-        .unknown_tool => {
-            var decoded = try output_format.EncodedStringReader.init(io, source_file, name);
-            var prefix: [32]u8 = undefined;
-            var prefix_length: usize = 0;
-            while (prefix_length < prefix.len) {
-                prefix[prefix_length] = (try decoded.next()) orelse break;
-                prefix_length += 1;
-            }
-            while (!std.unicode.utf8ValidateSlice(prefix[0..prefix_length])) prefix_length -= 1;
-            if (name.decoded_length <= prefix.len) return std.fmt.bufPrint(buffer, "Unknown tool: {s}.", .{prefix[0..prefix_length]});
-            const digest_hex = std.fmt.bytesToHex(name.content_digest, .lower);
-            return std.fmt.bufPrint(buffer, "Unknown tool: {s}… (name continues; Rui content digest {s}).", .{ prefix[0..prefix_length], &digest_hex });
-        },
-    }
-}
 
 const Range = struct { start: u64, length: u64 };
 
