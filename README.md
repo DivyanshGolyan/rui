@@ -20,16 +20,18 @@ Before using Rui on a project:
 
 Requires Zig 0.17.0, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
 
-From the checkout you want to install, run:
+Install from `stable`, the newest main commit that passed Mac and upgrade qualification. From a clean checkout, run:
 
 ```sh
+git fetch origin stable
+git switch --detach origin/stable
 ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation).
 
-Run `./install.sh` again to update. It builds the current checkout, including local changes; it does not fetch or switch branches. It prepares the selected Zig cache, validates the built command, and replaces `~/.local/bin/rui` and its evaluator with links to a complete build under `~/.local/lib/rui`. Failed builds leave the previous installation unchanged. Earlier installed builds remain available because running processes may still use them.
+Repeat the fetch, switch and install commands to update from `stable`. The installer builds the current checkout, including local changes; it does not fetch or switch branches. `main` receives Linux-green changes before Mac and upgrade qualification, so it may be ahead of `stable`. The installer prepares the selected Zig cache, validates the built command, and replaces `~/.local/bin/rui` and its evaluator with links to a complete build under `~/.local/lib/rui`. Failed builds leave the previous installation unchanged. Earlier installed builds remain available because running processes may still use them.
 
 Installation preserves Stores, credentials and shell profiles. It reports the selected Store's Host status without starting or stopping anything. A running Host retains its old executable. After its work finishes, run `rui host stop`, wait for `rui host status` to report unavailable, then start `rui` again. If your shell still runs an older command, inspect `type -a rui` and run `rehash` in Zsh or `hash -r` in Bash.
 

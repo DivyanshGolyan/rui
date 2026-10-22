@@ -1,6 +1,6 @@
 name: Selected checks
-# Auto-land reads a dispatched run's base from this title to bind its coverage.
-run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
+# Auto-land reads dispatch titles to distinguish main landing from stable qualification.
+run-name: ${{ inputs.stable && format('Stable qualification from base {0}', inputs.base) || github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
 on:
   push:
     branches: ['wip/land-*']
@@ -14,6 +14,10 @@ on:
       base:
         description: Base commit; selection covers base..ref
         required: true
+      stable:
+        description: Qualify current main on Mac, including candidates with no selected native targets
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,7 +25,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}-${{ inputs.stable && github.sha || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -43,7 +47,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Refuse a second open landing stack before native jobs start
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && github.ref_name != 'main' }}
         run: python3 -B tests/ci/auto_land.py --preflight "$GITHUB_REF_NAME"
       - name: Select existing targets
         id: select
@@ -52,6 +56,7 @@ jobs:
           # Pushes use the same affected-owner mapping, not an unconditional full run.
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
+          STABLE: ${{ inputs.stable || false }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = push ]; then
@@ -66,7 +71,18 @@ jobs:
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
           from qualification import shards
+          from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
+          if os.environ['STABLE'] == 'true':
+              assert os.environ['GITHUB_REF_NAME'] == 'main', 'stable qualifies main only'
+              p['targets'] = []
+              p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS)
+                                           | {'check', 'admission-debug-integration'})
+              p['retry'] = False
+          elif os.environ['EVENT_NAME'] != 'pull_request':
+              # Landing is Linux-only, even for strict paths. Mac runs after main.
+              p['native_targets'] = []
+          p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
@@ -174,7 +190,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15]
+        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || github.event_name == 'pull_request' && fromJSON('["ubuntu-24.04", "macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:

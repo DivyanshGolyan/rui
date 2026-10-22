@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Fast-forward main and stable to a green wip/land-N tip.
+"""Land Linux-green tips on main; promote exact Mac-and-upgrade-green main SHAs to stable.
 
-Runs from trusted main code when Selected checks or the upgrade check
-completes on a landing tip. The tip is fetched as data and pushed, never run.
-It lands only the branch's current tip, only as a non-force fast-forward, and
-only on the latest Selected push or dispatched run for that exact commit; a
-dispatched Selected run counts only when main contains its base. A strict
-delta against main also needs its upgrade run and the Mac aggregate. One atomic
-push moves main and stable together, so stable is always the last landed
-tip. Anything else waits for the next completion or for the lander lane to
-restack.
+Runs from trusted main code. Main and stable writes share one serialized
+workflow and are non-force. Landing dispatches the existing qualification
+workflows explicitly because GITHUB_TOKEN pushes do not emit push workflows.
+Missing or failed Mac qualification holds stable, never main.
 """
 import argparse
 import json
@@ -18,12 +13,12 @@ import re
 import subprocess
 
 from select_tests import changed_paths
-from strict_paths import strict
 
 BRANCH = re.compile(r"wip/land-[0-9]+")
 UPGRADE = "previous-release-upgrade.yml"
 # check.yml's run-name for a dispatch; the base it selected from.
 DISPATCH_BASE = re.compile(r"Selected checks from base ([0-9a-f]{40})")
+STABLE_BASE = re.compile(r"Stable qualification from base ([0-9a-f]{40})")
 # GITHUB_TOKEN has no `workflows` permission, so GitHub rejects its push of
 # any commit that changes a workflow file.
 WORKFLOW_FILES = ".github/workflows/"
@@ -51,37 +46,41 @@ def latest(workflow, sha, branch):
     return max(rows, key=lambda row: row["id"], default=None)
 
 
-def decide(fast_forward, selected, upgrade, changed):
+def decide(fast_forward, selected, changed):
     """Return 'not-fast-forward', 'unqualified', 'pending', 'red', 'manual' or 'land'.
 
-    selected and upgrade are the latest runs on the tip, or None; selected
-    carries `covers`, whether its selection base spans main to the tip, and
-    its `macos` aggregate conclusion when the delta is strict.
+    selected carries coverage and the Linux aggregate. Overall run status and
+    Mac results cannot delay or reject a successful Linux aggregate.
     """
     if not fast_forward:
         return "not-fast-forward"
     if selected is not None and not selected["covers"]:
         # A dispatch from a base main does not contain may have skipped owners.
         return "unqualified"
-    required = [selected, *([upgrade] if strict(changed) else [])]
-    if any(run is None or run["status"] != "completed" for run in required):
+    if selected is None or selected.get("linux") is None:
         return "pending"
-    if any(run["conclusion"] != "success" for run in required):
-        return "red"
-    if strict(changed) and selected.get("macos") != "success":
-        # Selection always runs Mac for strict paths; never land without it.
+    if selected["linux"] != "success":
         return "red"
     if any(path.startswith(WORKFLOW_FILES) for path in changed):
         return "manual"
     return "land"
 
 
-def macos(run):
-    """Conclusion of the Selected run's Mac aggregate in its latest attempt."""
+def aggregate(run, name):
+    """Conclusion of a Selected aggregate in its latest attempt."""
     repository = os.environ["GITHUB_REPOSITORY"]
     jobs = json.loads(gh("api", f"repos/{repository}/actions/runs/{run['id']}/jobs"
                                 "?filter=latest&per_page=100"))["jobs"]
-    return next((job["conclusion"] for job in jobs if job["name"] == "macos"), None)
+    return next((job["conclusion"] for job in jobs if job["name"] == name), None)
+
+
+def stable_ready(selected, upgrade):
+    """Both complete workflows and a real Mac aggregate must pass on this SHA."""
+    return bool(selected and upgrade
+                and STABLE_BASE.fullmatch(selected.get("display_title") or "")
+                and selected.get("macos") == "success"
+                and all(run["status"] == "completed" and run["conclusion"] == "success"
+                        for run in (selected, upgrade)))
 
 
 def number(branch):
@@ -127,9 +126,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight", metavar="BRANCH",
                         help="fail unless BRANCH at HEAD is the only open landing stack")
+    parser.add_argument("--qualify-main", action="store_true",
+                        help="dispatch exact current-main Mac and upgrade qualification")
+    parser.add_argument("--promote-stable", action="store_true",
+                        help="promote the newest exact-SHA qualified main commit")
     args = parser.parse_args()
     if args.preflight:
         return preflight(args.preflight, git("rev-parse", "HEAD"))
+    if args.qualify_main:
+        return qualify_main()
+    if args.promote_stable:
+        return promote_stable()
     # The triggering event only wakes the lander: GitHub drops a pending run
     # when a newer one queues, so every run decides the current open stack.
     refs = tips()
@@ -145,40 +152,69 @@ def main():
 
 
 def land(branch, sha, main_sha):
-    """Decide one tip and land it; True when main and stable are now sha."""
+    """Decide one tip and fast-forward main only, then start its qualification."""
     fast_forward = contains(sha, main_sha)
     # NUL-delimited, so Git never quotes a strict path out of recognition.
     paths = changed_paths(main_sha, sha)[0] if fast_forward else []
     selected = latest("check.yml", sha, branch)
     if selected:
         selected["covers"] = covers(selected, sha, main_sha, paths)
-    upgrade = latest(UPGRADE, sha, branch) if strict(paths) else None
-    if selected and strict(paths):
-        selected["macos"] = macos(selected)
-    verdict = decide(fast_forward, selected, upgrade, paths)
+        selected["linux"] = aggregate(selected, "linux")
+    verdict = decide(fast_forward, selected, paths)
     links = "\n".join(f"- {name}: {run['conclusion'] or run['status']} {run['html_url']}"
-                      for name, run in (("Selected", selected), ("upgrade", upgrade)) if run)
+                      for name, run in (("Selected", selected),) if run)
     print(f"{branch} {sha} onto main {main_sha}: {verdict}\n{links}")
     if verdict == "manual":
         print("GITHUB_TOKEN cannot push workflow-file changes; this tip needs a manual push.")
     if verdict != "land":
         return False
-    # The classification above is against main_sha. A main that moved, even to
-    # an ancestor of sha, may make the actual delta strict, so re-decide on the
-    # next run. Only this lander writes main, inside one concurrency group, so
-    # main cannot move between this check and the push.
+    # Re-decide coverage if main moved. The workflow serializes both ref writers.
     if moved(main_sha, branch):
         return False
-    # Atomic and non-force: a diverged main or a stable off main's line rejects
-    # both refs, so stable never names a tip that main did not take.
-    pushed = subprocess.run(["git", "push", "--atomic", "origin", f"{sha}:refs/heads/main",
-                             f"{sha}:refs/heads/stable"], capture_output=True, text=True)
+    pushed = subprocess.run(["git", "push", "origin", f"{sha}:refs/heads/main"],
+                            capture_output=True, text=True)
     if pushed.returncode:
         if moved(main_sha, branch):
             return False
-        raise SystemExit(f"Push of {sha} to main and stable failed; neither moved:\n{pushed.stderr}")
-    print(f"Fast-forwarded main and stable from {main_sha} to {sha}")
+        raise SystemExit(f"Push of {sha} to main failed:\n{pushed.stderr}")
+    print(f"Fast-forwarded main from {main_sha} to {sha}; stable unchanged")
+    qualify_main()
     return True
+
+
+def qualify_main():
+    """Dispatch while the writer is serialized, pinning both run heads to main."""
+    git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
+        "+refs/heads/stable:refs/remotes/origin/stable")
+    sha = git("rev-parse", "origin/main")
+    base = git("rev-parse", "origin/stable")
+    gh("workflow", "run", "check.yml", "--ref", "main", "-f", f"base={base}", "-f", "stable=true")
+    gh("workflow", "run", UPGRADE, "--ref", "main")
+    print(f"Dispatched Mac and upgrade qualification on main {sha} from stable {base}")
+
+
+def promote_stable():
+    """Newest qualified main ancestor wins; old completions cannot rewind stable."""
+    git("fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main",
+        "+refs/heads/stable:refs/remotes/origin/stable")
+    main_sha, stable_sha = (git("rev-parse", f"origin/{ref}") for ref in ("main", "stable"))
+    if not contains(main_sha, stable_sha):
+        print("stable is not on main's history; stable promotion held")
+        return
+    for sha in git("rev-list", "--first-parent", f"{stable_sha}..{main_sha}").splitlines():
+        selected = latest("check.yml", sha, "main")
+        if not selected:
+            continue
+        selected["macos"] = aggregate(selected, "macos")
+        upgrade = latest(UPGRADE, sha, "main")
+        if not stable_ready(selected, upgrade):
+            continue
+        # Non-force rejects divergence or a concurrent promotion past this SHA.
+        git("push", "origin", f"{sha}:refs/heads/stable")
+        print(f"Promoted stable from {stable_sha} to {sha}\n"
+              f"Mac: {selected['html_url']}\nUpgrade: {upgrade['html_url']}")
+        return
+    print(f"No newer exact-SHA Mac-and-upgrade-green main commit; stable remains {stable_sha}")
 
 
 def covers(selected, sha, main_sha, paths):

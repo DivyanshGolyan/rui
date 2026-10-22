@@ -1,20 +1,7 @@
 name: Previous installed-release upgrade
-# Strict landing paths: tests/ci/strict_paths.py owns this list.
+# Strict PR paths; every main-tip stable candidate runs by explicit dispatch.
 on:
   pull_request:
-    paths:
-      - 'src/store*'
-      - 'src/*schema*'
-      - 'src/server*'
-      - 'src/execution*'
-      - 'src/*recovery*'
-      - 'tests/integration/*recovery*'
-      - 'tests/integration/bash*'
-      - 'build.zig'
-      - 'build.zig.zon'
-      - 'install.sh'
-  push:
-    branches: ['wip/land-*']
     paths:
       - 'src/store*'
       - 'src/*schema*'
@@ -35,7 +22,7 @@ permissions:
 cache-mode: read
 
 concurrency:
-  group: previous-release-upgrade-${{ github.ref }}
+  group: previous-release-upgrade-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

@@ -8,11 +8,12 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
 import auto_land
-from select_tests import select
+from select_tests import CHECK_COVERS, select
 from strict_paths import STRICT, strict
 
 
@@ -25,10 +26,11 @@ class LandingTest(unittest.TestCase):
         text = workflow('previous-release-upgrade.yml')
         on = text.split('\npermissions:', 1)[0]
         lists = re.findall(r"(?m)^    paths:\n((?:      - '[^']+'\n)+)", on)
-        self.assertEqual(len(lists), 2, 'pull_request and push both filter')
+        self.assertEqual(len(lists), 1, 'strict PRs filter; stable dispatch never filters')
         for block in lists:
             self.assertEqual(tuple(re.findall(r"'([^']+)'", block)), STRICT)
-        self.assertIn("branches: ['wip/land-*']", on)
+        self.assertNotIn('  push:', on)
+        self.assertIn('  workflow_dispatch:', on)
 
     def test_strict_patterns_match_like_github_path_filters(self):
         self.assertEqual(strict([
@@ -41,34 +43,41 @@ class LandingTest(unittest.TestCase):
             'tests/integration/bash_recovery_integration.py'])
 
     def test_auto_land_decisions(self):
-        def run(status='completed', conclusion='success', mac=None, covers=True):
-            return dict(status=status, conclusion=conclusion, macos=mac, covers=covers)
+        def run(status='completed', conclusion='success', linux='success', covers=True):
+            return dict(status=status, conclusion=conclusion, linux=linux, covers=covers)
 
-        def decide_tip(selected=run(), upgrade=None, changed=('src/cli.zig',), fast_forward=True):
-            return auto_land.decide(fast_forward, selected, upgrade, list(changed))
+        def decide_tip(selected=run(), changed=('src/cli.zig',), fast_forward=True):
+            return auto_land.decide(fast_forward, selected, list(changed))
         store = ('src/cli.zig', 'src/store.zig')
         self.assertEqual(decide_tip(fast_forward=False), 'not-fast-forward')
         self.assertEqual(decide_tip(selected=None), 'pending')
-        self.assertEqual(decide_tip(selected=run('in_progress', None)), 'pending')
-        self.assertEqual(decide_tip(selected=run(conclusion='failure')), 'red')
-        self.assertEqual(decide_tip(selected=run(conclusion='cancelled')), 'red')
-        # A strict tip waits for its upgrade run and its Mac aggregate.
-        self.assertEqual(decide_tip(selected=run(mac='success'), changed=store), 'pending')
-        self.assertEqual(decide_tip(selected=run(mac='success'), upgrade=run('queued', None), changed=store), 'pending')
-        self.assertEqual(decide_tip(selected=run(mac='success'), upgrade=run(conclusion='failure'), changed=store),
-                         'red')
-        self.assertEqual(decide_tip(selected=run(mac=None), upgrade=run(), changed=store), 'red')
-        self.assertEqual(decide_tip(selected=run(mac='skipped'), upgrade=run(), changed=store), 'red')
-        self.assertEqual(decide_tip(selected=run(mac='success'), upgrade=run(), changed=store), 'land')
-        self.assertEqual(decide_tip(), 'land')
-        # A non-strict tip lands without an upgrade run, and a red one does not hold it.
-        self.assertEqual(decide_tip(upgrade=run(conclusion='failure')), 'land')
+        self.assertEqual(decide_tip(selected=run('in_progress', None, linux=None)), 'pending')
+        for failed in ('failure', 'cancelled', 'skipped'):
+            self.assertEqual(decide_tip(selected=run(linux=failed)), 'red')
+        # Strict and non-strict tips use the Linux aggregate, not Mac or overall status.
+        for changed in (store, ('src/cli.zig',)):
+            self.assertEqual(decide_tip(selected=run('in_progress', None), changed=changed), 'land')
+            self.assertEqual(decide_tip(selected=run(conclusion='failure'), changed=changed), 'land')
         self.assertEqual(decide_tip(changed=('.github/workflows/check.yml',)), 'manual')
-        self.assertEqual(decide_tip(selected=run(conclusion='failure'), changed=('.github/workflows/check.yml',)),
+        self.assertEqual(decide_tip(selected=run(linux='failure'), changed=('.github/workflows/check.yml',)),
                          'red')
         # A green Selected run whose selection does not span main..tip never lands.
-        self.assertEqual(decide_tip(selected=run(mac='success', covers=False), upgrade=run(), changed=store),
+        self.assertEqual(decide_tip(selected=run(covers=False), changed=store),
                          'unqualified')
+
+    def test_stable_requires_completed_mac_and_upgrade_not_a_skipped_selector(self):
+        selected = dict(status='completed', conclusion='success', macos='success',
+                        display_title='Stable qualification from base ' + 'a' * 40)
+        upgrade = dict(status='completed', conclusion='success')
+        self.assertTrue(auto_land.stable_ready(selected, upgrade))
+        self.assertFalse(auto_land.stable_ready(None, upgrade))
+        self.assertFalse(auto_land.stable_ready(selected, None))
+        for verdict in (None, 'skipped', 'failure', 'cancelled'):
+            self.assertFalse(auto_land.stable_ready(dict(selected, macos=verdict), upgrade))
+            self.assertFalse(auto_land.stable_ready(selected, dict(upgrade, conclusion=verdict)))
+        self.assertFalse(auto_land.stable_ready(dict(selected, status='in_progress'), upgrade))
+        self.assertFalse(auto_land.stable_ready(selected, dict(upgrade, status='queued')))
+        self.assertFalse(auto_land.stable_ready(dict(selected, display_title='Selected checks'), upgrade))
 
     def test_latest_takes_the_newest_push_or_dispatch_run_on_the_exact_commit(self):
         sha, other = 'a' * 40, 'b' * 40
@@ -91,7 +100,7 @@ class LandingTest(unittest.TestCase):
             rows['workflow_dispatch'] = rows['workflow_dispatch'][1:]
             self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 1)
 
-    def test_auto_land_moves_main_and_stable_together_or_not_at_all(self):
+    def test_main_and_stable_advance_independently_on_exact_sha_evidence(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
             def git(*args):
                 return subprocess.run(['git', *args], check=True, capture_output=True, text=True).stdout.strip()
@@ -117,40 +126,55 @@ class LandingTest(unittest.TestCase):
             tip = commit('src/store_é.zig', base)
             git('push', '-q', 'origin', f'{base}:refs/heads/main', f'{base}:refs/heads/stable',
                 f'{tip}:refs/heads/wip/land-1')
-            green = dict(status='completed', conclusion='success', html_url='u', event='push')
+            green = dict(status='completed', conclusion='success', html_url='u', event='push',
+                         linux='success', macos='success')
 
             def dispatched(from_base=None, **run):
                 title = f'Selected checks from base {from_base}' if from_base else 'Selected checks'
                 return dict(green, event='workflow_dispatch', display_title=title, **run)
             # Runs are keyed by exact workflow, commit and branch, as latest() filters them.
             runs = {('check.yml', tip, 'wip/land-1'): green}
+            dispatches = []
+
+            def dispatch(*args):
+                dispatches.append((git('rev-parse', 'origin/main'), args))
+                return ''
+
             with mock.patch.object(auto_land, 'latest',
                                    lambda workflow, sha, branch: dict(runs.get((workflow, sha, branch)) or {}) or None), \
-                    mock.patch.object(auto_land, 'macos', lambda run: 'success'), \
+                    mock.patch.object(auto_land, 'aggregate', lambda run, name: run.get(name)), \
+                    mock.patch.object(auto_land, 'gh', dispatch), \
                     mock.patch.object(sys, 'argv', ['auto_land.py']), contextlib.redirect_stdout(io.StringIO()):
-                # Strict without its upgrade run: nothing moves.
-                auto_land.main()
-                self.assertEqual(refs(), (base, base))
-                # A cancelled push upgrade run does not land.
-                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = dict(green, conclusion='cancelled')
-                auto_land.main()
-                self.assertEqual(refs(), (base, base))
-                # A dispatched upgrade run on the exact tip replaces it, but a dispatched
-                # Selected run lands only with a recorded base main contains.
-                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = dispatched()
+                # A dispatch must cover the current main delta even when Linux passes.
                 for unqualified in (dispatched(), dispatched(tip), dispatched('f' * 40)):
                     runs[('check.yml', tip, 'wip/land-1')] = unqualified
                     auto_land.main()
                     self.assertEqual(refs(), (base, base))
                 runs[('check.yml', tip, 'wip/land-1')] = dispatched(base)
                 auto_land.main()
-                self.assertEqual(refs(), (tip, tip))
+                self.assertEqual(refs(), (tip, base))
+                self.assertEqual({(sha, args[2]) for sha, args in dispatches},
+                                 {(tip, 'check.yml'), (tip, auto_land.UPGRADE)})
+                self.assertTrue(all('--ref' in args and 'main' in args for _, args in dispatches))
                 # A landed tip is skipped, not pushed again.
                 auto_land.main()
+                self.assertEqual(refs(), (tip, base))
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (tip, base))
+                # Qualification on the landing branch cannot qualify stable.
+                runs[(auto_land.UPGRADE, tip, 'wip/land-1')] = green
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (tip, base))
+                runs[('check.yml', tip, 'main')] = dict(green,
+                    display_title='Stable qualification from base ' + base)
+                runs[(auto_land.UPGRADE, tip, 'main')] = dict(green, conclusion='failure')
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (tip, base))
+                runs[(auto_land.UPGRADE, tip, 'main')] = green
+                auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, tip))
 
-                # main moved between the decision and the push: stable alone could
-                # fast-forward, but the atomic push moves neither.
+                # A changed main cannot be overwritten using an earlier coverage decision.
                 late = commit('src/cli.zig', tip)
                 moved = commit('docs/other.md', tip)
                 git('push', '-q', 'origin', f'{moved}:refs/heads/main')
@@ -158,9 +182,7 @@ class LandingTest(unittest.TestCase):
                 self.assertFalse(auto_land.land('wip/land-2', late, tip))
                 self.assertEqual(refs(), (moved, tip))
 
-                # main moved forward to an ancestor of the tip: moved→restored is
-                # clean, but ahead→restored undoes a strict change, so the push
-                # made from the stale classification must not land.
+                # A stale dispatch base must still cover a strict path hidden by a later undo.
                 ahead = commit('src/store.zig', moved)
                 git('rm', '-q', 'src/store.zig')
                 restored = commit('src/cli2.zig', 'HEAD')
@@ -173,19 +195,22 @@ class LandingTest(unittest.TestCase):
                 paths = auto_land.changed_paths(ahead, restored)[0]
                 self.assertFalse(auto_land.covers(dispatched(moved), restored, ahead, paths))
                 self.assertTrue(auto_land.covers(dispatched(ahead), restored, ahead, paths))
-                git('push', '-q', '--force', 'origin', f'{moved}:refs/heads/main')
-
-                # stable off main's line: main alone could fast-forward, but the
-                # push fails loudly and main stays.
-                side = commit('docs/side.md', base)
-                git('push', '-q', '--force', 'origin', f'{side}:refs/heads/stable')
-                after = commit('src/client.zig', moved)
-                git('push', '-q', 'origin', f'{after}:refs/heads/wip/land-3')
-                runs[('check.yml', after, 'wip/land-3')] = green
-                with self.assertRaises(SystemExit) as failure:
-                    auto_land.main()
-                self.assertIn('neither moved', str(failure.exception))
-                self.assertEqual(refs(), (moved, side))
+                # An ancestor's green checks never qualify a descendant.
+                runs[('check.yml', ahead, 'main')] = dict(green,
+                    display_title='Stable qualification from base ' + tip)
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (ahead, tip))
+                # Two qualified main commits: promote the newest, not the first completion.
+                runs[(auto_land.UPGRADE, moved, 'main')] = green
+                runs[('check.yml', moved, 'main')] = dict(green,
+                    display_title='Stable qualification from base ' + tip)
+                runs[(auto_land.UPGRADE, ahead, 'main')] = green
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (ahead, ahead))
+                # Replayed/older completions and repeated promotion are harmless no-ops.
+                auto_land.promote_stable()
+                auto_land.promote_stable()
+                self.assertEqual(refs(), (ahead, ahead))
 
     def test_preflight_allows_one_open_landing_stack(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
@@ -236,24 +261,60 @@ class LandingTest(unittest.TestCase):
                 preflight('wip/land-6', commit('combined', beside))
 
     def test_selected_runs_mac_for_every_strict_path(self):
-        # Auto-land relies on Selected's Mac aggregate for strict tips.
+        # Native mappings remain available for post-main stable qualification.
         available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path('build.zig').read_text()))
         for pattern in STRICT:
             path = pattern.replace('*', '_x')
             self.assertEqual(strict([path]), [path])
             self.assertTrue(select([path], 'review', available)['native_required'], path)
 
+    def test_executed_plan_keeps_main_linux_only_and_forces_real_stable_mac(self):
+        script = textwrap.dedent(re.search(
+            r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow('check.yml'))[1])
+        available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', Path('build.zig').read_text()))
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / 'tests').symlink_to(Path('tests').resolve(), target_is_directory=True)
+            for path in ('README.md', 'tests/qualification/model-output/main.go', 'src/store.zig'):
+                selection = select([path], 'review', available)
+                for event, stable in (('push', False), ('workflow_dispatch', True), ('pull_request', False)):
+                    with self.subTest(path=path, event=event, stable=stable):
+                        (root / 'selection.json').write_text(json.dumps(selection))
+                        (root / 'output').write_text('')
+                        subprocess.run([sys.executable, '-B', '-c', script], cwd=root, check=True,
+                            env=dict(os.environ, STABLE=str(stable).lower(), EVENT_NAME=event,
+                                     GITHUB_REF_NAME='main' if stable else 'wip/land-21',
+                                     GITHUB_OUTPUT=str(root / 'output'),
+                                     GITHUB_STEP_SUMMARY=str(root / 'summary')))
+                        outputs = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                        if stable:
+                            expected = sorted((set(selection['native_targets']) - CHECK_COVERS)
+                                              | {'check', 'admission-debug-integration'})
+                            self.assertEqual(json.loads(outputs['targets']), [])
+                            self.assertEqual(json.loads(outputs['native_targets']), expected)
+                            self.assertEqual(outputs['native'], 'true')
+                            self.assertEqual(outputs['retry'], 'false')
+                            self.assertTrue(json.loads(outputs['macos_matrix'])['include'])
+                        else:
+                            self.assertEqual(json.loads(outputs['targets']), selection['targets'])
+                            expected = selection['native_targets'] if event == 'pull_request' else []
+                            self.assertEqual(json.loads(outputs['native_targets']), expected)
+                            self.assertEqual(outputs['native'], str(bool(expected)).lower())
+
     def test_auto_land_wiring(self):
         on = workflow('auto-land.yml').split('\npermissions:', 1)[0]
         self.assertIn('workflows: [Selected checks, Previous installed-release upgrade]', on)
-        self.assertIn("branches: ['wip/land-*']", on)
+        self.assertIn("branches: ['wip/land-*', main]", on)
         self.assertIn('auto_land.py', workflow('auto-land.yml'))
         self.assertIn('group: auto-land\n  cancel-in-progress: false', workflow('auto-land.yml'))
+        self.assertIn('actions: write', workflow('auto-land.yml'))
+        self.assertIn('auto_land.py --promote-stable', workflow('auto-land.yml'))
         self.assertIn("""contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event)""",
                       workflow('auto-land.yml'))
         # Auto-land parses the dispatch base from Selected's run name.
-        name = re.search(r"(?m)^run-name: .*format\('([^']*)', inputs\.base\)", workflow('check.yml'))[1]
-        self.assertTrue(auto_land.DISPATCH_BASE.fullmatch(name.format('0' * 40)))
+        names = re.findall(r"format\('([^']*)', inputs\.base\)", workflow('check.yml'))
+        self.assertTrue(any(auto_land.DISPATCH_BASE.fullmatch(name.format('0' * 40)) for name in names))
+        self.assertTrue(any(auto_land.STABLE_BASE.fullmatch(name.format('0' * 40)) for name in names))
         self.assertTrue(auto_land.BRANCH.fullmatch('wip/land-12'))
         self.assertFalse(auto_land.BRANCH.fullmatch('wip/land-12x'))
 

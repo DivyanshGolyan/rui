@@ -1,15 +1,15 @@
 name: Auto-land
-# Fast-forward main and stable to a wip/land-N tip whose gates passed.
+# Land Linux-green tips on main; promote exact qualified main SHAs to stable separately.
 # See tests/ci/auto_land.py.
 on:
   workflow_run:
     workflows: [Selected checks, Previous installed-release upgrade]
     types: [completed]
-    branches: ['wip/land-*']
+    branches: ['wip/land-*', main]
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 concurrency:
   # One landing decision at a time; a running push is never cancelled. A newer
@@ -33,3 +33,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/auto_land.py
+      - name: Promote the newest exact Mac-and-upgrade-green main SHA
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -B tests/ci/auto_land.py --promote-stable
