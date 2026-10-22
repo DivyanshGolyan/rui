@@ -1,0 +1,4 @@
+0b202d4ab3adba3c84ad19fb05c83a98e414c03dffccca1358943c387a479178  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/zig-out/bin/rui
+6cd7670789a29fa505c850ec882c99dd10008d8fbde83d8303e39b084fdfc219  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/cand-source/zig-out/bin/rui
+8b8fa2422c8a6bf5b7b47465794963f948818338553db93285ab20a8f37bf13b  /home/user/workspace/repo/.amp/sqlv2/launch-mem/mem_probe.py
+6c2261d8edb64bb393a66f36b0b80b0d501aca90e74dd4e9b8c5c3f77ee0d9d7  ./run-mem.sh

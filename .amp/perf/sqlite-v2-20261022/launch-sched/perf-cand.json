@@ -1,0 +1,30 @@
+{
+ "binary": "/home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/cand-source/zig-out/bin/rui",
+ "timeout_ms": 100,
+ "host_pid": 1747297,
+ "host_tids": [
+  1747297,
+  1747298,
+  1747299,
+  1747300,
+  1747302
+ ],
+ "realtime_minus_monotonic_s": 1792644160.1021092,
+ "state": "/tmp/rui-same-group-control.8cgysn3u",
+ "rows": [
+  {
+   "trial": 0,
+   "action": "1",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 9.249,
+   "spawn_to_pid_published_ms": 20.443,
+   "pid_published": true,
+   "deadline_ns": 24957137230546,
+   "serviced_at_ns": 24957145203456,
+   "start_realtime": "1792669117.148589",
+   "published_realtime": "1792669117.159783",
+   "spawn_to_deadline_serviced_ms": 107.973,
+   "trace_missing": []
+  }
+ ]
+}

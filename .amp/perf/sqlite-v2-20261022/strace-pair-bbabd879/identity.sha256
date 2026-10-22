@@ -1,0 +1,9 @@
+0b202d4ab3adba3c84ad19fb05c83a98e414c03dffccca1358943c387a479178  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/zig-out/bin/rui
+6cd7670789a29fa505c850ec882c99dd10008d8fbde83d8303e39b084fdfc219  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/cand-source/zig-out/bin/rui
+ca8536d9a3fc2a087472942619ccfc2f42f6a3851834abc0baa0e78898d6de1f  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/strace-launch.py
+cde2c5389f57de0f4f20b6085aa219beed5775305bef80892fa81f857b2ed472  ./run-pair.sh
+a7fdd28438f7a4763ea46624cff67cb88ef3854b03e9f2edf0ca337c294f503c  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/../control/same_group_control_v2.py
+d9ac38f4ac69b7ca4db15035885cbf0a22b7037fc5ceacd5dd0a342339485f6c  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/tests/integration/bash_integration.py
+c9092ee9f5a22703714a83bd32dffb24f387d91f315aafa59f709ebb6713cb71  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/tests/integration/model_fixture.py
+b06f0cd0961d6b47c066c053891e3b16f1858033fca84dea89f2a6cbf682945e  /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/tests/integration/host_process.py
+aebaf212ce84a12208c5fa25f08c892029e6f6949b778da55e071ac145404a1e  /usr/bin/strace

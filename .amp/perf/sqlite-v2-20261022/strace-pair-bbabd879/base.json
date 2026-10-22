@@ -1,0 +1,30 @@
+{
+ "binary": "/home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/strace-launch.py",
+ "timeout_ms": 100,
+ "host_pid": 1563812,
+ "host_tids": [
+  1563812,
+  1563817,
+  1563818,
+  1563819,
+  1563822
+ ],
+ "realtime_minus_monotonic_s": 1792644160.1021092,
+ "state": "/tmp/rui-same-group-control.yunochte",
+ "rows": [
+  {
+   "trial": 0,
+   "action": "1",
+   "resolution": "timed_out",
+   "spawn_to_script_start_ms": 4.708,
+   "spawn_to_pid_published_ms": 21.393,
+   "pid_published": true,
+   "deadline_ns": 24555436957626,
+   "serviced_at_ns": 24555443627406,
+   "start_realtime": "1792668715.443775",
+   "published_realtime": "1792668715.460460",
+   "spawn_to_deadline_serviced_ms": 106.67,
+   "trace_missing": []
+  }
+ ]
+}

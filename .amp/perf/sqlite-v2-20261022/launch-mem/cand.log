@@ -1,0 +1,1 @@
+{"binary": "/home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/cand-source/zig-out/bin/rui", "vma_count": 36, "VmPTE": "88 kB", "VmRSS": "8364 kB", "RssAnon": "1796 kB", "RssFile": "6568 kB", "RssShmem": "0 kB", "VmSize": "246720 kB", "VmData": "36688 kB", "Threads": "5"}

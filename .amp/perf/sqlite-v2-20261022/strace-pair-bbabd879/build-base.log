@@ -1,0 +1,9 @@
+install
++- install rui
+   +- compile exe rui fast native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/src/curl-post-retry.patch /home/user/workspace/repo/.amp/sqlv2/strace-pair-bbabd879/base-source/.zig-cache/o/9efe4fca6c803089c291fa03a81bc3f7/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+

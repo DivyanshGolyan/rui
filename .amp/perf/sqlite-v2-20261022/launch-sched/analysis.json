@@ -1,0 +1,492 @@
+{
+ "perf-base": {
+  "child_pid": 1747266,
+  "parent_tid": 1747254,
+  "child_exec_comm": "bash",
+  "clone_entry_to_return_ms": 0.142,
+  "clone_entry_to_fork_event_ms": 0.138,
+  "clone_entry_to_wakeup_new_ms": 0.142,
+  "clone_return_to_child_first_syscall_ms": 10.784,
+  "wakeup_new_to_child_first_syscall_ms": 10.785,
+  "first_syscall_nr": 273,
+  "clone_entry_to_execve_entry_ms": 11.042,
+  "clone_entry_to_exec_done_ms": 11.299,
+  "child_states_birth_to_first_syscall_ms": {
+   "on-cpu": 0.015,
+   "runnable": 10.77
+  },
+  "child_states_first_syscall_to_exec_done_ms": {
+   "on-cpu": 0.372
+  },
+  "child_user_faults_before_first_syscall": 1,
+  "child_user_faults_first_syscall_to_execve_entry": 28,
+  "child_user_faults_after_execve_entry_to_exec_done": 0,
+  "parent_user_faults_clone_return_to_exec_done": 11,
+  "child_syscalls_before_execve": [
+   273,
+   80,
+   33,
+   33,
+   33,
+   109,
+   59
+  ],
+  "child_migrations": 0,
+  "child_segments_ms": [
+   [
+    "runnable",
+    0.142,
+    10.912
+   ],
+   [
+    "on-cpu",
+    10.912,
+    11.299
+   ]
+  ]
+ },
+ "perf-cand": {
+  "child_pid": 1747313,
+  "parent_tid": 1747300,
+  "child_exec_comm": "bash",
+  "clone_entry_to_return_ms": 0.175,
+  "clone_entry_to_fork_event_ms": 0.172,
+  "clone_entry_to_wakeup_new_ms": 0.174,
+  "clone_return_to_child_first_syscall_ms": 6.599,
+  "wakeup_new_to_child_first_syscall_ms": 6.6,
+  "first_syscall_nr": 273,
+  "clone_entry_to_execve_entry_ms": 6.86,
+  "clone_entry_to_exec_done_ms": 7.112,
+  "child_states_birth_to_first_syscall_ms": {
+   "on-cpu": 0.014,
+   "runnable": 6.586
+  },
+  "child_states_first_syscall_to_exec_done_ms": {
+   "on-cpu": 0.31,
+   "runnable": 0.027
+  },
+  "child_user_faults_before_first_syscall": 1,
+  "child_user_faults_first_syscall_to_execve_entry": 25,
+  "child_user_faults_after_execve_entry_to_exec_done": 0,
+  "parent_user_faults_clone_return_to_exec_done": 10,
+  "child_syscalls_before_execve": [
+   273,
+   80,
+   33,
+   33,
+   33,
+   109,
+   59
+  ],
+  "child_migrations": 1,
+  "child_segments_ms": [
+   [
+    "runnable",
+    0.174,
+    6.761
+   ],
+   [
+    "on-cpu",
+    6.761,
+    6.889
+   ],
+   [
+    "runnable",
+    6.889,
+    6.916
+   ],
+   [
+    "on-cpu",
+    6.916,
+    7.112
+   ]
+  ]
+ },
+ "strace-base": {
+  "child_pid": 1747363,
+  "parent_tid": 1747351,
+  "child_exec_comm": "bash",
+  "clone_entry_to_return_ms": 0.149,
+  "clone_entry_to_fork_event_ms": 0.139,
+  "clone_entry_to_wakeup_new_ms": 0.142,
+  "clone_return_to_child_first_syscall_ms": 17.542,
+  "wakeup_new_to_child_first_syscall_ms": 17.549,
+  "first_syscall_nr": 273,
+  "clone_entry_to_execve_entry_ms": 18.083,
+  "clone_entry_to_exec_done_ms": 24.744,
+  "child_states_birth_to_first_syscall_ms": {
+   "blocked:t": 0.062,
+   "on-cpu": 0.025,
+   "runnable": 17.461
+  },
+  "child_states_first_syscall_to_exec_done_ms": {
+   "blocked:t": 0.272,
+   "on-cpu": 0.387,
+   "runnable": 6.394
+  },
+  "child_user_faults_before_first_syscall": 1,
+  "child_user_faults_first_syscall_to_execve_entry": 26,
+  "child_user_faults_after_execve_entry_to_exec_done": 0,
+  "parent_user_faults_clone_return_to_exec_done": 10,
+  "child_syscalls_before_execve": [
+   273,
+   80,
+   33,
+   33,
+   33,
+   109,
+   59
+  ],
+  "child_migrations": 2,
+  "child_segments_ms": [
+   [
+    "runnable",
+    0.142,
+    17.603
+   ],
+   [
+    "on-cpu",
+    17.603,
+    17.618
+   ],
+   [
+    "blocked:t",
+    17.618,
+    17.635
+   ],
+   [
+    "on-cpu",
+    17.635,
+    17.645
+   ],
+   [
+    "blocked:t",
+    17.645,
+    17.69
+   ],
+   [
+    "on-cpu",
+    17.69,
+    17.692
+   ],
+   [
+    "blocked:t",
+    17.692,
+    17.701
+   ],
+   [
+    "on-cpu",
+    17.701,
+    17.781
+   ],
+   [
+    "blocked:t",
+    17.781,
+    17.804
+   ],
+   [
+    "on-cpu",
+    17.804,
+    17.809
+   ],
+   [
+    "blocked:t",
+    17.809,
+    17.816
+   ],
+   [
+    "on-cpu",
+    17.816,
+    17.824
+   ],
+   [
+    "blocked:t",
+    17.824,
+    17.861
+   ],
+   [
+    "on-cpu",
+    17.861,
+    17.864
+   ],
+   [
+    "blocked:t",
+    17.864,
+    17.874
+   ],
+   [
+    "on-cpu",
+    17.874,
+    17.876
+   ],
+   [
+    "blocked:t",
+    17.876,
+    17.894
+   ],
+   [
+    "on-cpu",
+    17.894,
+    17.897
+   ],
+   [
+    "blocked:t",
+    17.897,
+    17.907
+   ],
+   [
+    "on-cpu",
+    17.907,
+    17.909
+   ],
+   [
+    "blocked:t",
+    17.909,
+    17.926
+   ],
+   [
+    "on-cpu",
+    17.926,
+    17.928
+   ],
+   [
+    "blocked:t",
+    17.928,
+    18.033
+   ],
+   [
+    "on-cpu",
+    18.033,
+    18.036
+   ],
+   [
+    "blocked:t",
+    18.036,
+    18.046
+   ],
+   [
+    "on-cpu",
+    18.046,
+    18.049
+   ],
+   [
+    "blocked:t",
+    18.049,
+    18.056
+   ],
+   [
+    "on-cpu",
+    18.056,
+    18.063
+   ],
+   [
+    "blocked:t",
+    18.063,
+    18.083
+   ],
+   [
+    "on-cpu",
+    18.083,
+    18.114
+   ],
+   [
+    "runnable",
+    18.114,
+    24.508
+   ],
+   [
+    "on-cpu",
+    24.508,
+    24.744
+   ]
+  ]
+ },
+ "strace-cand": {
+  "child_pid": 1747408,
+  "parent_tid": 1747397,
+  "child_exec_comm": "bash",
+  "clone_entry_to_return_ms": 0.146,
+  "clone_entry_to_fork_event_ms": 0.137,
+  "clone_entry_to_wakeup_new_ms": 0.139,
+  "clone_return_to_child_first_syscall_ms": 15.4,
+  "wakeup_new_to_child_first_syscall_ms": 15.407,
+  "first_syscall_nr": 273,
+  "clone_entry_to_execve_entry_ms": 15.827,
+  "clone_entry_to_exec_done_ms": 16.077,
+  "child_states_birth_to_first_syscall_ms": {
+   "blocked:t": 0.035,
+   "on-cpu": 0.018,
+   "runnable": 15.354
+  },
+  "child_states_first_syscall_to_exec_done_ms": {
+   "blocked:t": 0.165,
+   "on-cpu": 0.366
+  },
+  "child_user_faults_before_first_syscall": 1,
+  "child_user_faults_first_syscall_to_execve_entry": 26,
+  "child_user_faults_after_execve_entry_to_exec_done": 0,
+  "parent_user_faults_clone_return_to_exec_done": 9,
+  "child_syscalls_before_execve": [
+   273,
+   80,
+   33,
+   33,
+   33,
+   109,
+   59
+  ],
+  "child_migrations": 0,
+  "child_segments_ms": [
+   [
+    "runnable",
+    0.139,
+    15.493
+   ],
+   [
+    "on-cpu",
+    15.493,
+    15.502
+   ],
+   [
+    "blocked:t",
+    15.502,
+    15.513
+   ],
+   [
+    "on-cpu",
+    15.513,
+    15.521
+   ],
+   [
+    "blocked:t",
+    15.521,
+    15.546
+   ],
+   [
+    "on-cpu",
+    15.546,
+    15.548
+   ],
+   [
+    "blocked:t",
+    15.548,
+    15.556
+   ],
+   [
+    "on-cpu",
+    15.556,
+    15.634
+   ],
+   [
+    "blocked:t",
+    15.634,
+    15.653
+   ],
+   [
+    "on-cpu",
+    15.653,
+    15.659
+   ],
+   [
+    "blocked:t",
+    15.659,
+    15.666
+   ],
+   [
+    "on-cpu",
+    15.666,
+    15.673
+   ],
+   [
+    "blocked:t",
+    15.673,
+    15.702
+   ],
+   [
+    "on-cpu",
+    15.702,
+    15.704
+   ],
+   [
+    "blocked:t",
+    15.704,
+    15.714
+   ],
+   [
+    "on-cpu",
+    15.714,
+    15.716
+   ],
+   [
+    "blocked:t",
+    15.716,
+    15.733
+   ],
+   [
+    "on-cpu",
+    15.733,
+    15.735
+   ],
+   [
+    "blocked:t",
+    15.735,
+    15.744
+   ],
+   [
+    "on-cpu",
+    15.744,
+    15.746
+   ],
+   [
+    "blocked:t",
+    15.746,
+    15.764
+   ],
+   [
+    "on-cpu",
+    15.764,
+    15.766
+   ],
+   [
+    "blocked:t",
+    15.766,
+    15.775
+   ],
+   [
+    "on-cpu",
+    15.775,
+    15.777
+   ],
+   [
+    "blocked:t",
+    15.777,
+    15.792
+   ],
+   [
+    "on-cpu",
+    15.792,
+    15.795
+   ],
+   [
+    "blocked:t",
+    15.795,
+    15.802
+   ],
+   [
+    "on-cpu",
+    15.802,
+    15.808
+   ],
+   [
+    "blocked:t",
+    15.808,
+    15.827
+   ],
+   [
+    "on-cpu",
+    15.827,
+    16.077
+   ]
+  ]
+ }
+}

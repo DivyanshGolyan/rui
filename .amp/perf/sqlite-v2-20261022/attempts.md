@@ -155,3 +155,7 @@
 - 2026-10-22T09:33:24Z strace pair (user request): ReleaseFast builds of current main 4f478c32 and candidate 2586290c exports; main exit=0 09:44:18Z, cand exit=0 09:51:45Z
 - 2026-10-22T09:52:14Z strace pair main start; exit=0 09:52:15Z (published 1/1, timed_out)
 - 2026-10-22T09:52:16Z strace pair cand start; exit=0 09:52:18Z (published 1/1, timed_out). Analysis: strace-pair/analysis.md
+- 2026-10-22T11:13Z rebase: cherry-pick 2586290c onto bbabd879 = af5ecee8 (wip/sqlite-v2-on-bbabd879); ReleaseFast builds base exit=0 11:23:12Z, cand exit=0 11:31:42Z
+- 2026-10-22T11:31:54Z strace pair base/cand exit=0 (published, timed_out). Note: first extraction helper raised AttributeError on a resumed line; replaced by extract.py.
+- 2026-10-22T11:36:52Z pre-spawn memory probe base/cand exit=0 (launch-mem)
+- 2026-10-22T11:38:33Z perf sched/fault runs perf-base, perf-cand, strace-base, strace-cand exit=0 (launch-sched/analysis.md)
