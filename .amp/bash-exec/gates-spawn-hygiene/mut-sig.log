@@ -1,0 +1,16 @@
+test
++- run test 1 pass, 1 fail (2 total)
+error: 'bash.test.launched Bash starts with default signal actions, an empty mask and no inherited /dev/null' failed:
+       Bash succeeded. Exit code: 0.
+       stdout tail:
+       survived
+       
+       stderr tail:
+       
+       Full output was not retained.
+failed command: RUI_TEST_EXACT_INACTIVITY=0 ./.zig-cache/o/b9ac35b4c2d2571f5619705b894ad60f/test --cache-dir=./.zig-cache --seed=0x52321b21 --listen=-
+
+Build Summary: 38/40 steps succeeded (1 failed); 1/2 tests passed (1 failed)
+test transitive failure
++- run test 1 pass, 1 fail (2 total)
+

@@ -1,0 +1,60 @@
+cross-check
++- cross-check-linux
+   +- compile exe rui-aarch64-linux small aarch64-linux-gnu
+      +- run sh (pinned-transport-aarch64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/src/curl-post-retry.patch /home/user/workspace/repo/.zig-cache/o/13544fd2600e097c4cc325469bee97f5/pinned-transport-aarch64-linux aarch64-linux /home/user/.local/opt/zig-0.17.0/zig
+
+cross-check
++- cross-check-macos
+   +- compile exe rui-aarch64-macos small aarch64-macos
+      +- run sh (pinned-transport-aarch64-macos) failure
+./src/build_transport.sh: 18: xcrun: not found
+error: process exited with code 127
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/src/curl-post-retry.patch /home/user/workspace/repo/.zig-cache/o/ec058ff5a397fbb8b1de1ad98b1f81c4/pinned-transport-aarch64-macos aarch64-macos /home/user/.local/opt/zig-0.17.0/zig
+
+cross-check
++- cross-check-macos
+   +- compile exe rui-x86_64-macos small x86_64-macos
+      +- translate-c curl
+         +- run sh (pinned-transport-x86_64-macos) failure
+./src/build_transport.sh: 26: xcrun: not found
+error: process exited with code 127
+failed command: sh ./src/build_transport.sh /home/user/workspace/repo/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /home/user/workspace/repo/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /home/user/workspace/repo/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /home/user/workspace/repo/src/curl-post-retry.patch /home/user/workspace/repo/.zig-cache/o/5ce8fffa0c8dd66701f0ee072d356ed9/pinned-transport-x86_64-macos x86_64-macos /home/user/.local/opt/zig-0.17.0/zig
+
+Build Summary: 78/86 steps succeeded (2 failed)
+cross-check transitive failure
++- cross-check-macos transitive failure
+   +- compile exe rui-aarch64-macos small aarch64-macos transitive failure
+   |  +- run sh (pinned-transport-aarch64-macos) failure
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- translate-c curl transitive failure
+   |  |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   |  +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- compile exe rui-x86_64-macos small x86_64-macos transitive failure
+      +- run sh (pinned-transport-x86_64-macos) failure
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- translate-c curl transitive failure
+      |  +- run sh (pinned-transport-x86_64-macos) (reused)
+      |  +- run sh (pinned-transport-x86_64-macos) (reused)
+      |  +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+      +- run sh (pinned-transport-x86_64-macos) (reused)
+

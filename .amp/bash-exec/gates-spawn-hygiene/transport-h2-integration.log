@@ -1,0 +1,35 @@
+.managed descriptor rejection passed: {'active_capacity': 1, 'required': 439, 'soft_limit': 78, 'inherited': 3, 'fixed_host': 11, 'clients': 403, 'execution': 10, 'authentication': 10, 'self_wake': 2}
+managed descriptor rejection passed: {'active_capacity': 1, 'required': 440, 'soft_limit': 78, 'inherited': 4, 'fixed_host': 11, 'clients': 403, 'execution': 10, 'authentication': 10, 'self_wake': 2}
+....Connection failure diagnostics unavailable: AttributeError
+Connection failure diagnostics unavailable: AttributeError
+Connection failure diagnostics unavailable: AttributeError
+................
+----------------------------------------------------------------------
+Ran 21 tests in 1.253s
+
+OK
+{"case": "bounded_loopback_h1", "capacity": 8, "rounds": 2, "requests": 16, "tcp_connections": 16, "maximum_simultaneous_requests": 1, "held_host_cpu_seconds_in_3s": 0.0, "held_fds": 37, "completed_idle_fds": [12, 12]}
+{"case": "queued_h1_inactivity", "received_requests": 1, "queued_attempt_failure": "provider_transport_failure"}
+{"case": "round_trip", "capacity": 1, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 2, "complete_request_histories_validated": 2, "request_bytes": 5090, "offered_sse_bytes": 19016, "native_connection_observations": true, "host_physical_peak_bytes": null, "host_physical_peaks_by_round": [], "completed_idle_fds": [13, 13]}
+{"case": "round_trip", "capacity": 100, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 200, "complete_request_histories_validated": 200, "request_bytes": 920970, "offered_sse_bytes": 1906555, "native_connection_observations": true, "host_physical_peak_bytes": null, "host_physical_peaks_by_round": [], "completed_idle_fds": [13, 13]}
+{"case": "observed_shape_wave", "round": 1, "capacity": 1, "host_physical_peak_bytes": null, "native_connection_observations": true, "completed_idle_fds": 13}
+{"case": "observed_shape_wave", "round": 2, "capacity": 1, "host_physical_peak_bytes": null, "native_connection_observations": true, "completed_idle_fds": 13}
+{"case": "observed_shape", "capacity": 1, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 2, "complete_request_histories_validated": 2, "request_bytes": 6641, "offered_sse_bytes": 253792, "native_connection_observations": true, "host_physical_peak_bytes": null, "host_physical_peaks_by_round": [null, null], "completed_idle_fds": [13, 13]}
+{"case": "observed_shape_wave", "round": 1, "capacity": 100, "host_physical_peak_bytes": null, "native_connection_observations": true, "completed_idle_fds": 13}
+{"case": "observed_shape_wave", "round": 2, "capacity": 100, "host_physical_peak_bytes": null, "native_connection_observations": true, "completed_idle_fds": 13}
+{"case": "observed_shape", "capacity": 100, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 200, "complete_request_histories_validated": 200, "request_bytes": 666530, "offered_sse_bytes": 25381270, "native_connection_observations": true, "host_physical_peak_bytes": null, "host_physical_peaks_by_round": [null, null], "completed_idle_fds": [13, 13]}
+{"case": "stalled_observed_shape", "phase": "observed-before-first-write", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 0, "stalled_host_rss_kib": 18800, "completed_idle_host_rss_kib": 17020, "held_physical_peak_bytes": null, "completed_idle_physical_peak_bytes": null}
+{"case": "stalled_observed_shape", "phase": "observed-after-progress", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 15145, "stalled_host_rss_kib": 18900, "completed_idle_host_rss_kib": 18940, "held_physical_peak_bytes": null, "completed_idle_physical_peak_bytes": null}
+{"case": "stalled_local_capture", "phase": "before-first-write", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 0, "stalled_host_rss_kib": 17644, "completed_idle_host_rss_kib": 16892, "held_physical_peak_bytes": null, "completed_idle_physical_peak_bytes": null}
+{"case": "stalled_local_capture", "phase": "after-progress", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 15121, "stalled_host_rss_kib": 17740, "completed_idle_host_rss_kib": 17996, "held_physical_peak_bytes": null, "completed_idle_physical_peak_bytes": null}
+{"case": "paused_capture_inactivity", "streams": 20, "attempts": 20, "hold_seconds": 3.5}
+{"case": "capture_failure_on_resume", "capture_failures": 1, "unaffected_siblings": 19, "new_admission": "completed"}
+{"case": "refused_headers", "attempts": 1, "observed_streams": 2, "connections": 2}
+{"case": "refused_upload", "attempts": 1, "observed_streams": 2, "connections": 2}
+{"case": "dead_reuse", "attempts_for_dead": 2, "observed_streams": 3, "connections": 2}
+{"case": "sibling_header_failure", "streams": 2, "connections": 1}
+{"case": "sibling_cancel", "streams": 2, "connections": 1, "target_resets": 1, "sibling": "completed"}
+{"case": "sibling_capture", "streams": 2, "connections": 1, "target_resets": 1, "sibling": "completed"}
+{"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}
+{"case": "negotiated_h2_early_error", "posts": 4, "result": "retry_exhausted"}
+{"case": "non_h2_https", "result": "provider_http2_required", "posts": 0, "attempts": 1}
