@@ -770,10 +770,12 @@ pub const Execution = struct {
         } else if (self.lifecycle.captureIncomplete()) {
             try writer.writeAll("Capture may be incomplete because writers outlived process-group termination.\n");
         }
+        // A result exists only after the reap and an ESRCH absence probe
+        // confirmed retirement; a probe EPERM keeps the group present until the
+        // cleanup watchdog fences instead. macOS group-signal EPERM (an exited,
+        // unreaped leader) therefore needs no qualification here and stays a
+        // lifecycle fact only. Other signal failures remain visible.
         if (self.lifecycle.signal_failure) try writer.writeAll("Process-group signaling reported a failure.\n");
-        if (self.lifecycle.group_permission_denied) {
-            try writer.writeAll("Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial.\n");
-        }
         var tail: [excerpt_bytes]u8 = undefined;
         const stdout_length = try self.stdout_capture.file.?.length(self.io);
         const stderr_length = try self.stderr_capture.file.?.length(self.io);
@@ -807,32 +809,27 @@ pub const Execution = struct {
             validUtf8Length(stderr_bytes) - stderr_encoded_base,
             excerpt_bytes - stderr_encoded_base - stdout_allowance,
         );
-        try writer.writeAll("stdout tail:\n");
-        const stdout_sanitized_omission = try appendValidUtf8Tail(writer, stdout_bytes, stdout_allowance);
-        try writer.writeAll("\nstderr tail:\n");
-        const stderr_sanitized_omission = try appendValidUtf8Tail(writer, stderr_bytes, stderr_allowance);
-        if (stdout_length + stderr_length > stdout_take + stderr_take or
-            stdout_sanitized_omission or stderr_sanitized_omission)
-        {
-            try writer.writeAll("\n[earlier output omitted]\n");
+        // An empty stream has no section. A full-output pointer appears only
+        // for a stream whose tail omits earlier bytes.
+        var stdout_omitted = stdout_length > stdout_take;
+        if (stdout_take != 0) {
+            try writer.writeAll("stdout tail:\n");
+            stdout_omitted = try appendValidUtf8Tail(writer, stdout_bytes, stdout_allowance) or stdout_omitted;
         }
+        var stderr_omitted = stderr_length > stderr_take;
+        if (stderr_take != 0) {
+            try writer.writeAll(if (stdout_take != 0) "\nstderr tail:\n" else "stderr tail:\n");
+            stderr_omitted = try appendValidUtf8Tail(writer, stderr_bytes, stderr_allowance) or stderr_omitted;
+        }
+        if (!stdout_omitted and !stderr_omitted) return;
+        try writer.writeAll("\n[earlier output omitted]\n");
         if (!include_paths) {
             try writer.writeAll("\nFull output was not retained.\n");
             return;
         }
-        var stdout_path: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
-        var stderr_path: [platform.max_scratch_path_bytes + 1 + 96]u8 = undefined;
-        const stdout_value = try std.fmt.bufPrint(
-            &stdout_path,
-            "{s}/{s}",
-            .{ self.scratch_path, self.stdout_capture.name.slice() },
-        );
-        const stderr_value = try std.fmt.bufPrint(
-            &stderr_path,
-            "{s}/{s}",
-            .{ self.scratch_path, self.stderr_capture.name.slice() },
-        );
-        try writer.print("\nFull stdout: {s}\nFull stderr: {s}\n", .{ stdout_value, stderr_value });
+        try writer.writeByte('\n');
+        if (stdout_omitted) try writer.print("Full stdout: {s}/{s}\n", .{ self.scratch_path, self.stdout_capture.name.slice() });
+        if (stderr_omitted) try writer.print("Full stderr: {s}/{s}\n", .{ self.scratch_path, self.stderr_capture.name.slice() });
     }
 };
 
@@ -1233,13 +1230,16 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     try std.testing.expect(!gone_repeated.made_progress);
     try std.testing.expect(gone_repeated.retired);
 
-    gone.lifecycle.recordSignal(.failed);
+    // Group-signal EPERM after confirmed retirement had no live targets: the
+    // result stays the plain outcome. Empty streams have no sections.
     gone.lifecycle.recordSignal(.group_permission_denied);
-    const result = try gone.outcome(false);
-    const text = result.content[0..result.content_len];
-    try std.testing.expect(std.mem.indexOf(u8, text, "Process-group signaling reported a failure.\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "macOS group signaling returned EPERM") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "original process group was observed absent") != null);
+    const quiet = try gone.outcome(false);
+    // The fixture keeps a writer open, so incomplete capture is genuine.
+    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", quiet.text());
+    // Any other signaling failure stays visible next to it.
+    gone.lifecycle.recordSignal(.failed);
+    const warned = try gone.outcome(false);
+    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\nProcess-group signaling reported a failure.\n", warned.text());
 }
 
 test "cleanup ownership transfers consume their source" {
@@ -1667,6 +1667,31 @@ test "UTF-8 excerpt keeps the newest source and reports replacement expansion" {
     try std.testing.expect(written.len <= excerpt_bytes);
     try std.testing.expect(std.unicode.utf8ValidateSlice(written));
     try std.testing.expectEqual(@as(u8, '!'), written[written.len - 1]);
+}
+
+test "results show only nonempty stream sections and mark truncation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
+    var entries: [16]output_retention.Entry = undefined;
+    var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
+    defer retention.cleanupAll();
+    // Full-output paths for truncated streams are covered natively by the
+    // Bash and owner integrations, where retention names real files.
+    const a = @as([excerpt_bytes]u8, @splat('a'));
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "true", "Bash succeeded. Exit code: 0.\n" },
+        .{ "printf out", "Bash succeeded. Exit code: 0.\nstdout tail:\nout" },
+        .{ "printf err >&2; exit 3", "Bash failed. Exit code: 3.\nstderr tail:\nerr" },
+        .{ "printf o; printf e >&2", "Bash succeeded. Exit code: 0.\nstdout tail:\no\nstderr tail:\ne" },
+        .{ "printf z; head -c 10001 /dev/zero | tr '\\0' a", "Bash succeeded. Exit code: 0.\nstdout tail:\n" ++ a ++ "\n[earlier output omitted]\n\nFull output was not retained.\n" },
+    }, 100..) |case, ordinal| {
+        const result = try launchForTest(root, budget, &retention, ordinal, case[0]);
+        try std.testing.expectEqualStrings(case[1], result.text());
+    }
 }
 
 test "Bash descriptor decoding preserves authorized command bytes" {

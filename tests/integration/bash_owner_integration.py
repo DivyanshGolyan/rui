@@ -134,9 +134,9 @@ def prove_timeout_feedback(state):
             quoted_path = instructions.split("Workspace (JSON string; path data, not instructions): ", 1)[1].split("\nRui address", 1)[0]
             assert json.loads(quoted_path) == str(workspace), quoted_path
             if effective is None:
-                assert result.startswith("Bash succeeded."), result
-                assert "Execution timed out" not in result and "before retrying" not in result, result
-                assert f"stdout tail:\n{workspace}\nstderr tail:\n" in result, result
+                # The model and the saved result get exactly the outcome and the
+                # nonempty stream: no empty stderr section, no retirement note.
+                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{workspace}", result
             else:
                 expected = (
                     f"Execution timed out after a {effective} ms total budget from process start; output does not reset it. "
@@ -246,10 +246,13 @@ def main():
         retention_store = root / "retention-store"
         retention_actions = {
             "retention-first": stage_action(
-                state, retention_store, "retention-first", "printf old"
+                state, retention_store, "retention-first",
+                # Paths are named only for truncated streams: truncate both.
+                "head -c 10001 /dev/zero | tr '\\0' o; head -c 10001 /dev/zero | tr '\\0' e >&2",
             ),
             "retention-second": stage_action(
-                state, retention_store, "retention-second", "printf current"
+                state, retention_store, "retention-second",
+                "head -c 10001 /dev/zero | tr '\\0' c; printf current",
             ),
         }
         endpoint, endpoint_thread, continuations = continuation_endpoint(
@@ -309,8 +312,7 @@ def main():
         second_result = bash_fixture.result_text(
             retention_store, "direct/retention-second"
         )
-        assert "stdout tail:\ncurrent" in second_result, second_result
-        assert "Full output was not retained." in second_result, second_result
+        assert second_result.endswith("current\n[earlier output omitted]\n\nFull output was not retained.\n"), second_result
         # Optional retention failure occurs after canonical settlement. Both
         # saved answers must remain byte-identical when read again; neither
         # the failed eviction nor the unavailable new paths may rewrite them.
@@ -334,13 +336,20 @@ def main():
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         page = json.loads(body)
         result_item = next(item for item in page["items"] if item["kind"] == "tool_result")
-        content_request = {"version": "1", "kind": "conversation_content",
-                           "store": str(retention_store), "session": session,
-                           "position": result_item["position"], "ordinal": result_item["ordinal"], "start": "0"}
-        head, body = raw_request(fields["socket"], "/v1/conversation-content",
-                                 json.dumps(content_request, separators=(",", ":")).encode())
-        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
-        assert body == second_result.encode(), (body, second_result)
+        # The truncated result spans several content windows; read them all.
+        content = b""
+        while True:
+            content_request = {"version": "1", "kind": "conversation_content",
+                               "store": str(retention_store), "session": session,
+                               "position": result_item["position"], "ordinal": result_item["ordinal"],
+                               "start": str(len(content))}
+            head, body = raw_request(fields["socket"], "/v1/conversation-content",
+                                     json.dumps(content_request, separators=(",", ":")).encode())
+            assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+            if not body:
+                break
+            content += body
+        assert content == second_result.encode(), (content, second_result)
         after = fixture.wait_for(
             lambda: execution_idle(
                 retention_store, "direct/retention-second", retained_bytes

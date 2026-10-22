@@ -1176,9 +1176,7 @@ fn Summary(comptime Sink: type) type {
             // Only complete, known informational lines are quiet. Unknown or
             // qualified diagnostics stay visible, even after successful exit.
             // Keep canonical Bash evidence and detailed inspection unchanged.
-            const routine = !self.omitted and
-                (std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.") or
-                    std.mem.eql(u8, line, "Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial."));
+            const routine = !self.omitted and std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.");
             if (heading) {
                 // Output tails matter only to explain a failure.
                 self.section = if (!failing(self.code)) .ended else if (std.mem.eql(u8, line, "stdout tail:")) .stdout else .stderr;
@@ -1211,20 +1209,19 @@ fn Summary(comptime Sink: type) type {
             if (self.length != 0) try self.emit();
             try self.writeHeading("");
             if (failing(self.code) and self.section != .ended) {
-                // Strip the canonical trailer that follows stderr bytes.
-                while (self.stderr.count != 0) {
-                    const line = self.stderr.last(0);
+                // Strip the canonical trailer that follows the last stream.
+                const tail = if (self.stderr.total != 0) &self.stderr else &self.stdout;
+                while (tail.count != 0) {
+                    const line = tail.last(0);
                     if (line.len == 0 or std.mem.eql(u8, line, "Full output was not retained.") or
                         std.mem.startsWith(u8, line, "Full stdout: ") or std.mem.startsWith(u8, line, "Full stderr: "))
                     {
-                        self.stderr.dropLast();
+                        tail.dropLast();
                     } else if (std.mem.eql(u8, line, "[earlier output omitted]")) {
                         self.earlier_omitted = true;
-                        self.stderr.dropLast();
+                        tail.dropLast();
                     } else break;
                 }
-                while (self.stdout.count != 0 and self.stdout.last(0).len == 0) self.stdout.dropLast();
-                const tail = if (self.stderr.total != 0) &self.stderr else &self.stdout;
                 const shown = @min(tail.count, excerpt_lines);
                 var shortened = self.earlier_omitted or tail.total > shown;
                 for (0..shown) |index| {
@@ -1254,32 +1251,34 @@ test "tool summary hides only complete routine metadata and retains warnings" {
             self.length += bytes.len;
         }
     };
-    const retirement = "Process retirement confirmed: the child was reaped and the original process group was observed absent. macOS group signaling returned EPERM, which can mean no live targets or permission denial.";
     const warning = "Process-group signaling reported a failure.";
     const incomplete = "Capture may be incomplete because writers outlived process-group termination.";
     const capture_failure = "Capture failure: read; output may be incomplete.";
     const cases = .{
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ retirement ++ "\nstdout tail:\nhidden", "", "" },
-        .{ .succeeded, retirement, "", "" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ retirement ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning, "" },
-        .{ .failed, "Bash failed. Exit code: 7.\n" ++ retirement ++ "\n" ++ capture_failure, "  " ++ capture_failure, "7" },
-        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ retirement ++ "\n" ++ warning, "  Signal: 15.\n  " ++ warning, "" },
-        .{ .cancelled, "Bash cancelled. Signal: 15.\n" ++ retirement, "  Signal: 15.", "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden", "", "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n", "", "" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning, "" },
+        .{ .failed, "Bash failed. Exit code: 7.\n" ++ capture_failure, "  " ++ capture_failure, "7" },
+        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ warning, "  Signal: 15.\n  " ++ warning, "" },
+        .{ .cancelled, "Bash cancelled. Signal: 15.\n", "  Signal: 15.", "" },
         .{ .indeterminate, "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Unknown process status: 0.\n  " ++ warning, "" },
         .{ .failed, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
         .{ .succeeded, "Bash failed. Exit code: 7.", "  Bash failed. Exit code: 7.", "" },
-        .{ .succeeded, retirement ++ " Additional warning.", "  " ++ retirement ++ " Additional warning.", "" },
+        // Earlier results saved a retirement line; it is no longer routine.
+        .{ .succeeded, "Process retirement confirmed: the child was reaped.\n" ++ warning, "  Process retirement confirmed: the child was reaped.\n  " ++ warning, "" },
         .{ .succeeded, "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning, "" },
         .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
-        .{ .succeeded, retirement ++ @as([256]u8, @splat('x')) ++ "\n" ++ warning, "  " ++ (retirement ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ warning, "" },
+        .{ .succeeded, warning ++ @as([256]u8, @splat('x')) ++ "\n" ++ incomplete, "  " ++ (warning ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ incomplete, "" },
         .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning, "" },
         // Failures show the last stderr lines, else stdout, without the trailer.
-        .{ .failed, "Bash failed. Exit code: 127.\nstdout tail:\n\nstderr tail:\nbash: line 1: rui: command not found\n\nFull stdout: /s/o\nFull stderr: /s/e\n", "  bash: line 1: rui: command not found", "127" },
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\nstderr tail:\n\nFull output was not retained.\n", "  usage: x\n  help", "1" },
-        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\n\nstderr tail:\none\ntwo\nthree\nfour\n\n[earlier output omitted]\n\nFull output was not retained.\n", "  two\n  three\n  four\n  /details for full output.", "2" },
-        .{ .failed, "Bash failed. Exit code: 3.\nstdout tail:\n\nstderr tail:\nonly\n\n[earlier output omitted]\n", "  only\n  /details for full output.", "3" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\n\nstderr tail:\nalso hidden\n", "", "" },
-        .{ .failed, "Bash failed. Exit code: 4.\nstdout tail:\n\nstderr tail:\n\x1b[2Jcontrol\n", "  \\x1b[2Jcontrol", "4" },
+        .{ .failed, "Bash failed. Exit code: 127.\nstderr tail:\nbash: line 1: rui: command not found", "  bash: line 1: rui: command not found", "127" },
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp", "  usage: x\n  help", "1" },
+        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\n[earlier output omitted]\n\nFull stdout: /s/o\n", "  usage: x\n  help\n  /details for full output.", "1" },
+        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\nx\nstderr tail:\none\ntwo\nthree\nfour\n[earlier output omitted]\n\nFull stderr: /s/e\n", "  two\n  three\n  four\n  /details for full output.", "2" },
+        .{ .failed, "Bash failed. Exit code: 3.\nstderr tail:\nonly\n[earlier output omitted]\n\nFull output was not retained.\n", "  only\n  /details for full output.", "3" },
+        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\nstderr tail:\nalso hidden", "", "" },
+        .{ .failed, "Bash failed. Exit code: 4.\nstderr tail:\n\x1b[2Jcontrol", "  \\x1b[2Jcontrol", "4" },
+        .{ .failed, "Bash failed. Exit code: 5.\n", "", "5" },
     };
     inline for (cases) |case| {
         for (0..case[1].len + 1) |split| {

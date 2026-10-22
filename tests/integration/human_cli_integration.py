@@ -1852,8 +1852,6 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     reference = "persistent/permission'$(false) é\n"
     answer = "after explicit denial" if decision == "deny-action" else "after explicit approval"
     description = "Inspect café output"
-    retirement = ("Process retirement confirmed: the child was reaped and the original process group was observed absent. "
-                  "macOS group signaling returned EPERM, which can mean no live targets or permission denial.")
     command = f"printf inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
     if exit_code:
         command = f"printf '%9000s' inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
@@ -2038,8 +2036,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                    if item.get("type") == "function_call_output"]
         assert len(outputs) == 1, outputs
         saved_result = outputs[0]
-        if sys.platform == "darwin" and decision == "allow-action" and not (timed_out or signal_failure):
-            assert retirement in saved_result, ("native retirement evidence missing from saved result", saved_result)
+        # Confirmed retirement (macOS group-signal EPERM included) is not
+        # reported to the model; only uncertainty or failure would be.
+        assert "Process retirement" not in saved_result and "EPERM" not in saved_result, saved_result
+        if decision == "allow-action" and not any((exit_code, signal_failure, timed_out)):
+            assert saved_result == "Bash succeeded. Exit code: 0.\nstdout tail:\ninspection-only-output", saved_result
         assert "Process retirement confirmed" not in settled and "macOS group signaling returned EPERM" not in settled, (
             "routine retirement diagnostics leaked into conversation", settled)
         if timed_out:
@@ -2112,10 +2113,6 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             if decision == "allow-action":
                 assert "inspection-only-output" in details, ("saved tool output unavailable on inspection", details)
                 assert f"Exit code: {exit_code}." in details, ("exact exit code unavailable on inspection", details)
-                if retirement in saved_result:
-                    # Hanging indentation can wrap inside a word. Compare
-                    # visible content here; raw export above checks exact bytes.
-                    assert "".join(retirement.split()) in "".join(details.split()), ("details hid retirement evidence", details)
         return_to_live(master)
         if exit_code:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))

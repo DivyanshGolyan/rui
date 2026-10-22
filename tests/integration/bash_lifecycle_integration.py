@@ -289,12 +289,9 @@ def natural_exit_signaling(root, inherited_ignore=False):
             "natural exit continuation",
         )
         result = bash_fixture.result_text(store, session)
-        assert "Bash succeeded. Exit code: 0." in result, result
-        assert "stdout tail:\nfinished" in result, result
-        assert "Process-group signaling reported a failure." not in result, result
-        if sys.platform == "darwin":
-            assert "macOS group signaling returned EPERM" in result, result
-            assert "original process group was observed absent" in result, result
+        # Confirmed retirement is not news, including macOS group-signal EPERM
+        # after the reap: the result is the outcome and the nonempty stream.
+        assert result == "Bash succeeded. Exit code: 0.\nstdout tail:\nfinished", result
         request = json.loads(endpoint.requests[-1])
         outputs = [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
         assert outputs == [result], outputs

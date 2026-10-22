@@ -419,6 +419,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | [Retention FIFO](ARCHITECTURE.md#retained-output-and-its-queue) | `'retention entry capacity derives from fixed orchestration memory'`, `'already absent retained files release their entries and scratch charge'` | None |
 | Retention failure keeps result | `bash-owner-integration` | Host is not fenced |
 | [10,000-byte tool tail](ARCHITECTURE.md#tool-excerpts-and-full-output) | `'UTF-8 excerpt keeps the newest source and reports replacement expansion'` | No line/total-capture quota or rerun for truncation |
+| [Result sections](ARCHITECTURE.md#tool-excerpts-and-full-output): no empty stream header, full path only for a truncated stream, no confirmed-retirement note | `'results show only nonempty stream sections and mark truncation'`, `'cleanup deadline cuts off'`, `bash_integration.py`, `bash_owner_integration.py`, `bash_lifecycle_integration.py` natural exit, `human_cli_integration.py` permission case | Natural exit asserts the exact saved and model result on both systems, including macOS group-signal `EPERM`; injected signal failure stays visible |
 | [Settings and faults](ARCHITECTURE.md#sqlite-and-representation) | `'production Store applies finite durable SQLite settings'`, `'real SQLite busy saves no answer and fences the connection'`, `'real SQLite full during import publishes no canonical prefix'`, `'measurement Store can force a smaller SQLite cache without changing production defaults'` | None |
 
 ## Evaluator lifecycle and limit replacement

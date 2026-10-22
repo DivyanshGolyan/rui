@@ -1209,7 +1209,8 @@ def main():
         output = outputs[0]["output"]
         assert "Bash succeeded." in output and "stderr-mark" in output, output
         assert "�" in output and "[earlier output omitted]" in output, output
-        assert "Full stdout:" in output and "Full stderr:" in output, output
+        # Only the truncated stream names its full file.
+        assert "Full stdout:" in output and "Full stderr:" not in output, output
         answer_report = fixture.command(
             "session", "inspect",
             "--store",
