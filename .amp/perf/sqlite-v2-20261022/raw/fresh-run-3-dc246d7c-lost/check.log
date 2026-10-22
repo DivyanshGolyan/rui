@@ -1,0 +1,10 @@
+evaluator boundary: compile-only, result, CPU, framing, and cleanup passed on linux
+check
++- run sh
+   +- compile test safe native
+      +- run sh (pinned-transport-x86_64-linux) w
+Building pinned OpenSSL ...
+Building pinned nghttp2 ...
+Building pinned curl ...
+failed command: sh ./src/build_transport.sh /tmp/v2land/zig-pkg/N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM/. /tmp/v2land/zig-pkg/N-V-__8AALJXUwHr71AwttzhEqqYTvFb_jz0EQ5Ou3OWpHBM/. /tmp/v2land/zig-pkg/N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb/. /tmp/v2land/src/curl-post-retry.patch /tmp/v2land/.zig-cache/o/fa9af31ac8fd3145b1b7bf096dd3a49f/pinned-transport-x86_64-linux x86_64-linux /home/user/.local/opt/zig-0.17.0/zig
+

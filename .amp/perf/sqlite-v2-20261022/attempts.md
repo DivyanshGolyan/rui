@@ -161,3 +161,7 @@
 - 2026-10-22T11:38:33Z perf sched/fault runs perf-base, perf-cand, strace-base, strace-cand exit=0 (launch-sched/analysis.md)
 - 2026-10-22T13:21:55Z launch-sched-v2 predeclared (launch-sched-v2/PREDECLARED.md), before any data
 - 2026-10-22T13:29:45Z launch-sched-v2: 12 blocks exit=0 13:21:57Z–13:25Z; perf lost chunks in 8 blocks (recorded); results launch-sched-v2/analysis.md
+- 2026-10-22T14:29:30Z diagnostic Selected checks run 39796079563 (af5ecee8, base bbabd879, 100 ms, workflow_dispatch on wip/sqlite-v2-on-bbabd879) FAILED in the plan job: `tests/ci/auto_land.py --preflight` rejected the ref ("wip/sqlite-v2-on-bbabd879 is not a wip/land-N landing branch"). linux and macos jobs failed only on PLAN_RESULT=failure; no suite ran. Classification: dispatch-ref policy failure by my diagnostic dispatch; it is no test evidence for or against 100 ms. Logs: ci-topology/run-39796079563/.
+- 2026-10-22T15:22:35Z fresh-run-3 on dc246d7c LOST (tmux server killed ~14:50Z, no EXIT, no assertion ran; raw/fresh-run-3-dc246d7c-lost/CLASSIFICATION.md). Bounded rerun as orb service: fresh-run-4-dc246d7c
+- 2026-10-22T15:24:33Z fresh-run-4 stopped during build (service Restart=always would rerun); run-once guard added; fresh-run-5-dc246d7c started as orb service
+- 2026-10-22T15:26:53Z fresh-run-5 stopped by overnight-mode override during build; no gate completed. Lane parked for Sol successor.
