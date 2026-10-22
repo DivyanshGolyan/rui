@@ -1600,9 +1600,13 @@ fn processEvent(
     }
     if (kind.eql("response.completed")) {
         rejection.stage = .response;
-        if (added.active or item_count.* == 0 or (operation == .assistant_response and message_count.* > 1) or
-            (operation == .assistant_response and message_count.* == 0 and call_count.* == 0) or
-            (operation == .compaction and compaction_count.* != 1)) return error.IncompleteProviderOutput;
+        // Each unmet completion requirement keeps its own reason so a saved
+        // rejection says which one failed; all share the malformed code.
+        if (added.active) return error.UnfinishedProviderOutputItem;
+        if (item_count.* == 0) return error.MissingProviderOutputItems;
+        if (operation == .assistant_response and message_count.* > 1) return error.MultipleAssistantMessages;
+        if (operation == .assistant_response and message_count.* == 0 and call_count.* == 0) return error.MissingAssistantAnswer;
+        if (operation == .compaction and compaction_count.* != 1) return error.MissingCompactionItem;
         try validateCompleted(io, file, try fields.required("response"), metadata, item_count.*, evidence);
         try metadata.sealForRead();
         completed.* = true;
@@ -1782,6 +1786,11 @@ fn validateTestingSse(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limi
 }
 
 fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind) !TestingValidation {
+    var rejection: Rejection = .{};
+    return validateTestingRejection(tmp, bytes, metadata_limit, operation, &rejection);
+}
+
+fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadata_limit: u64, operation: output_format.ModelOperationKind, rejection: *Rejection) !TestingValidation {
     const source = try tmp.dir.createFile(std.testing.io, "provider-sse", .{ .read = true });
     errdefer source.close(std.testing.io);
     try source.writeStreamingAll(std.testing.io, bytes);
@@ -1799,8 +1808,7 @@ fn validateTestingOperation(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
         &retained,
     );
     errdefer metadata.deinit();
-    var rejection: Rejection = .{};
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, operation, &rejection, .{});
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, operation, rejection, .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
@@ -1856,7 +1864,7 @@ test "compaction rejects missing double malformed unknown and Action candidates"
         .{ "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":null}", error.ExpectedJsonString },
         .{ "{\"type\":\"compaction_summary\",\"id\":\"c\",\"encrypted_content\":\"x\"}", error.UnsupportedItemType },
         .{ "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\"}", error.UnsupportedProviderOutput },
-        .{ "{\"type\":\"message\",\"id\":\"c\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"not an anchor\"}]}", error.IncompleteProviderOutput },
+        .{ "{\"type\":\"message\",\"id\":\"c\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"not an anchor\"}]}", error.MissingCompactionItem },
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1901,6 +1909,41 @@ test "SSE line framing accepts CRLF, field lines and DONE, and rejects malformed
         .{ error.LateProviderOutput, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\ndata: [DONE]\n\ndata: " ++ done ++ "\n\n" },
     };
     for (rejected) |case| try std.testing.expectError(case[0], validateTestingSse(&tmp, case[1], 4096));
+}
+
+test "completion gate saves which requirement failed at the completed event" {
+    const message = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"a\"}]}";
+    const final = "{\"type\":\"message\",\"id\":\"f\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"b\"}]}";
+    const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"x\",\"summary\":[]}";
+    const call = "{\"type\":\"function_call\",\"id\":\"c\",\"name\":\"bash\",\"call_id\":\"k\",\"arguments\":\"{}\"}";
+    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":";
+    const completed = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}";
+    const cases = [_]struct { anyerror, output_format.ModelOperationKind, []const u8 }{
+        .{ error.UnfinishedProviderOutputItem, .assistant_response, done ++ "0,\"item\":" ++ message ++ "}\n\n" ++
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":" ++ call ++ "}\n\n" },
+        .{ error.MissingProviderOutputItems, .assistant_response, ": keepalive\r\n\r\n" },
+        .{ error.MultipleAssistantMessages, .assistant_response, done ++ "0,\"item\":" ++ message ++ "}\r\n\r\n" ++ done ++ "1,\"item\":" ++ final ++ "}\r\n\r\n" },
+        .{ error.MissingAssistantAnswer, .assistant_response, done ++ "0,\"item\":" ++ reasoning ++ "}\n\n" },
+        .{ error.MissingCompactionItem, .compaction, done ++ "0,\"item\":" ++ final ++ "}\n\n" },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        const sse = try std.testing.allocator.print("{s}data: {s}\n\n", .{ case[2], completed });
+        defer std.testing.allocator.free(sse);
+        var rejection: Rejection = .{};
+        try std.testing.expectError(case[0], validateTestingRejection(&tmp, sse, 4096, case[1], &rejection));
+        try std.testing.expectEqual(.response, rejection.stage);
+        try std.testing.expectEqual(@as(u64, std.mem.indexOf(u8, sse, completed).?), rejection.byte_offset);
+        try std.testing.expectEqual(@as(?u64, null), rejection.output_index);
+        try std.testing.expectEqualStrings("malformed_provider_output", failureCode(case[0]));
+        var buffer: [512]u8 = undefined;
+        var expected: [512]u8 = undefined;
+        try std.testing.expectEqualStrings(
+            try std.fmt.bufPrint(&expected, "{{\"reason\":\"{s}\",\"stage\":\"response\",\"byte_offset\":\"{d}\",\"output_index\":null}}", .{ @errorName(case[0]), rejection.byte_offset }),
+            rejection.format(case[0], &buffer),
+        );
+    }
 }
 
 test "context overflow requires exact valid provider code over HTTP and SSE" {
@@ -2139,7 +2182,7 @@ test "empty terminal output uses complete streamed items but partial terminal ou
 
     var missing_tmp = std.testing.tmpDir(.{});
     defer missing_tmp.cleanup();
-    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&missing_tmp, terminal ++ "[]}}\n\n", 64 * 1024));
+    try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&missing_tmp, terminal ++ "[]}}\n\n", 64 * 1024));
 }
 
 test "function call argument stream events are scratch and completed items remain authority" {
@@ -2215,7 +2258,7 @@ test "metadata notification is not output or completion authority" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, notification, 4096));
-    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, notification ++ terminal, 4096));
+    try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&tmp, notification ++ terminal, 4096));
     try std.testing.expectError(error.LateProviderOutput, validateTestingSse(&tmp, done ++ terminal ++ notification, 4096));
     try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.metadata.future\"}\n\n" ++ done ++ terminal, 4096));
 }
