@@ -11,7 +11,6 @@ const c = @import("curl");
 
 pub const curl_version = "8.22.0";
 pub const openssl_version = "OpenSSL/3.6.3";
-pub const request_scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
 pub const max_endpoint_bytes = 2048;
 
 pub const TransportOptions = struct {
@@ -46,18 +45,6 @@ pub const PreparedRequest = struct {
         self.* = undefined;
     }
 };
-
-fn retainedNamedScratch(
-    io: std.Io,
-    file: std.Io.File,
-    secondary_file: ?std.Io.File,
-    name: []const u8,
-    budget: ScratchBudget,
-    charged: u64,
-    removal: named_scratch.Removal,
-) named_scratch.Owner {
-    return .init(io, file, secondary_file, name, budget, charged, removal);
-}
 
 pub const ProtocolObservation = struct {
     http_version: c_long,
@@ -456,15 +443,15 @@ pub const ResponseCapture = struct {
             .permissions = .fromMode(0o600),
         });
         const readonly = scratch.openFile(io, name, .{}) catch |err| {
-            retained.* = retainedNamedScratch(io, file, null, name, budget, 0, .native);
+            retained.* = .init(io, file, null, name, budget, 0, .native);
             return err;
         };
         if (fail_unlink) {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .injected_failure);
+            retained.* = .init(io, file, readonly, name, budget, 0, .injected_failure);
             return error.InjectedResponseUnlinkFailure;
         }
         scratch.deleteFile(io, name) catch |err| {
-            retained.* = retainedNamedScratch(io, file, readonly, name, budget, 0, .native);
+            retained.* = .init(io, file, readonly, name, budget, 0, .native);
             return err;
         };
         return .{
