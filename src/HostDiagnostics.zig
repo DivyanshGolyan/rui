@@ -140,7 +140,7 @@ fn fileNumber(name: []const u8) ?u64 {
     return id;
 }
 
-fn private(handle: std.posix.fd_t, directory: bool) !void {
+pub fn private(handle: std.posix.fd_t, directory: bool) !void {
     var stat: c.struct_stat = undefined;
     if (c.fstat(handle, &stat) != 0) return error.DiagnosticStatFailed;
     if (stat.st_uid != c.geteuid() or stat.st_mode & 0o077 != 0) return error.InsecureDiagnostics;

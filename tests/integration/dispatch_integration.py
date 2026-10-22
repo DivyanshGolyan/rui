@@ -6,6 +6,7 @@ import pathlib
 import shutil
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,46 @@ from model_fixture import (
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
     wait_for, wait_model_cleanup,
 )
+
+
+def failed_response_records(store):
+    """Read back failed-response records in retention order, checking each
+    private body against its metadata's length and digest."""
+    root = pathlib.Path(store) / "diagnostics" / "failed-responses"
+    if not root.exists():
+        return []
+    assert stat.S_IMODE(root.lstat().st_mode) == 0o700, oct(root.lstat().st_mode)
+    records = []
+    for path in sorted(root.glob("response-*.json"), key=lambda path: int(path.name.split("-")[1])):
+        assert stat.S_IMODE(path.lstat().st_mode) == 0o600, path
+        metadata = json.loads(path.read_bytes())
+        sequence, operation, attempt = path.name.removesuffix(".json").split("-")[1:]
+        assert (metadata["operation"], metadata["attempt"]) == (operation, attempt), (path, metadata)
+        body = None
+        if metadata["body"] is not None:
+            body_path = root / metadata["body"]
+            assert body_path.name == f"response-{sequence}-{operation}-{attempt}.body", metadata
+            assert stat.S_IMODE(body_path.lstat().st_mode) == 0o600, body_path
+            body = body_path.read_bytes()
+            assert str(len(body)) == metadata["retained_bytes"], metadata
+            assert hashlib.sha256(body).hexdigest() == metadata["retained_sha256"], metadata
+        records.append((metadata, body))
+    assert not list(root.glob("*.tmp")), list(root.iterdir())
+    return records
+
+
+def assert_complete_failed_response(store, body, *, operation, code, http_status, request_id, diagnostic=None):
+    """One complete record of exactly the bytes the provider sent."""
+    records = failed_response_records(store)
+    assert len(records) == 1, records
+    metadata, retained = records[0]
+    assert retained == body, (len(retained or b""), len(body))
+    assert metadata["status"] == "complete" and metadata["transfer"] == "complete", metadata
+    assert metadata["truncated"] is False and metadata["captured_bytes"] == str(len(body)), metadata
+    assert (metadata["operation"], metadata["attempt"]) == (operation, "1"), metadata
+    assert (metadata["code"], metadata["http_status"], metadata["request_id"]) == (code, http_status, request_id), metadata
+    assert metadata["diagnostic"] == diagnostic, metadata
+    return metadata
 
 
 def decode_model_evidence(value):
@@ -2020,19 +2061,18 @@ def main(mode="all", correlation_case="all"):
                 "cmd": "true", "timeout_ms": None,
             })) for index in range(2)
         ])
-        invalid_endpoint = SuccessEndpoint(
-            [
-                ResponseSpec(first_sse[:-1], {}),
-                contradictory,
-                changed_terminal,
-                duplicate_identity,
-                late_malformed,
-                incomplete_tool,
-                *encrypted_cases,
-                *unsupported_cases,
-                duplicate_calls,
-            ]
-        )
+        invalid_bodies = [
+            first_sse[:-1],
+            contradictory,
+            changed_terminal,
+            duplicate_identity,
+            late_malformed,
+            incomplete_tool,
+            *encrypted_cases,
+            *unsupported_cases,
+            duplicate_calls,
+        ]
+        invalid_endpoint = SuccessEndpoint([ResponseSpec(invalid_bodies[0], {}), *invalid_bodies[1:]])
         invalid_thread = threading.Thread(target=invalid_endpoint.serve_forever, daemon=True)
         endpoints[invalid_endpoint] = invalid_thread
         invalid_thread.start()
@@ -2112,6 +2152,13 @@ def main(mode="all", correlation_case="all"):
             assert detail["reason"] and detail["stage"], detail
             assert len(resolution["content"]["text"].encode()) <= 512
             assert private_sentinel not in json.dumps(report), report
+            # The same rejected bytes stay privately on disk, bound to the
+            # saved Operation, Attempt, code and typed reason/offset.
+            assert_complete_failed_response(
+                invalid_store, invalid_bodies[index], operation=operation["operation"],
+                code=expected_code, http_status=200, request_id=expected_request_id,
+                diagnostic=resolution["content"]["text"],
+            )
             if index == 13:
                 assert detail["reason"] == "UnsupportedMessagePhase", detail
                 assert detail["stage"] == "item" and detail["output_index"] == 0, detail
@@ -2128,6 +2175,120 @@ def main(mode="all", correlation_case="all"):
             processes.remove(reopened)
         assert len(invalid_endpoint.requests) == 16
         stop_endpoint(invalid_endpoint, endpoints)
+
+        # Concurrent failures keep separate exact captures, a success adds
+        # none, and a retention fault leaves the saved failure unchanged.
+        def unfinished_tool(label, padding):
+            return encode_sse([{
+                "type": "response.output_item.added", "output_index": 0,
+                "item": {"type": "function_call", "id": f"{label}-{'z' * padding}"},
+            }], done=False)
+
+        concurrent_release = threading.Event()
+        # One body crosses the 64 KiB copy window; lengths all differ.
+        concurrent_bodies = {
+            f"concurrent-{index}": unfinished_tool(f"concurrent-{index}", (70_000, 1, 977, 4_096)[index])
+            for index in range(4)
+        }
+        later_bodies = {text: unfinished_tool(text, 3) for text in ("blocked", "after-fault")}
+        metadata_release = threading.Event()
+        metadata_body = sse_answer("metadata-response", "metadata-reasoning", "metadata-message", "private answer")[0]
+        concurrent_endpoint = SuccessEndpoint([], responses_by_input={
+            **{
+                text: (ResponseSpec(body, {"X-Request-Id": text, "OpenAI-Model": "model-a-served"}), concurrent_release)
+                for text, body in concurrent_bodies.items()
+            },
+            **{
+                text: ResponseSpec(body, {"X-Request-Id": text, "OpenAI-Model": "model-a-served"})
+                for text, body in later_bodies.items()
+            },
+            "metadata-blocked": (ResponseSpec(metadata_body, {"X-Request-Id": "metadata-blocked"}), metadata_release),
+            "succeed": sse_answer("concurrent-success", "concurrent-reasoning", "concurrent-message", "fine")[0],
+        })
+        concurrent_thread = threading.Thread(target=concurrent_endpoint.serve_forever, daemon=True)
+        endpoints[concurrent_endpoint] = concurrent_thread
+        concurrent_thread.start()
+        concurrent_store = state / "concurrent-failed-responses"
+        concurrent_host = start_host(
+            # HTTP/1.1 opens one connection per 100 capacity: five in flight at once.
+            concurrent_store, f"http://127.0.0.1:{concurrent_endpoint.server_port}/responses", active_capacity=500,
+        )
+        processes.append(concurrent_host)
+        for text in (*concurrent_bodies, "succeed"):
+            configure(state, concurrent_store, f"{text}-config", f"direct/{text}", "model-a")
+            message(state, concurrent_store, f"{text}-message", f"direct/{text}", text)
+        wait_for(lambda: len(concurrent_endpoint.requests) == 5, "concurrent requests in flight")
+        wait_for(lambda: completed_observation(concurrent_store, "succeed-message"), "concurrent success")
+        assert failed_response_records(concurrent_store) == []
+        concurrent_release.set()
+
+        def failed_result(key):
+            return wait_for(
+                lambda: (value := observe(concurrent_store, key)).get("result", {}).get("code") and value,
+                f"{key} failure",
+            )["result"]["code"]
+
+        def saved_failures(text):
+            operation, = command(
+                "session", "inspect", "--store", concurrent_store,
+                "--session", f"direct/{text}", "--profile", "full",
+            )["full"]["model_operations"][-1:]
+            return operation
+
+        concurrent_codes = {text: failed_result(f"{text}-message") for text in concurrent_bodies}
+        records = failed_response_records(concurrent_store)
+        assert len(records) == 4, records
+        for record, body in records:
+            text = record["request_id"]
+            saved = saved_failures(text)
+            assert body == concurrent_bodies[text], (text, len(body))
+            assert (record["operation"], record["attempt"]) == (saved["operation"], "1"), (record, saved)
+            assert record["code"] == concurrent_codes[text] == saved["resolution"]["code"], (record, saved)
+            assert record["diagnostic"] == saved["resolution"]["content"]["text"], (record, saved)
+            assert record["status"] == "complete", record
+        assert sorted(record["request_id"] for record, _ in records) == sorted(concurrent_bodies)
+
+        # A record-namespace entry that cannot be reclaimed blocks retention.
+        # The Attempt still saves the same failure, and later work recovers.
+        record_root = concurrent_store / "diagnostics" / "failed-responses"
+        blocker = record_root / "response-99-1-1.json.tmp"
+        blocker.mkdir(mode=0o700)
+        before_fault = sorted(path.name for path in record_root.iterdir())
+        message(state, concurrent_store, "blocked-message", "direct/concurrent-0", "blocked")
+        assert failed_result("blocked-message") == concurrent_codes["concurrent-0"]
+        blocked = saved_failures("concurrent-0")
+        assert blocked["resolution"]["code"] == concurrent_codes["concurrent-0"], blocked
+        assert json.loads(blocked["resolution"]["content"]["text"])["reason"], blocked
+        assert sorted(path.name for path in record_root.iterdir()) == before_fault
+        blocker.rmdir()
+        message(state, concurrent_store, "after-fault-message", "direct/concurrent-1", "after-fault")
+        assert failed_result("after-fault-message") == concurrent_codes["concurrent-1"]
+        records = failed_response_records(concurrent_store)
+        assert len(records) == 5, records
+        recovered, recovered_body = records[-1]
+        assert (recovered["request_id"], recovered_body) == ("after-fault", later_bodies["after-fault"]), recovered
+        assert recovered["operation"] == saved_failures("concurrent-1")["operation"], recovered
+
+        # Local metadata acquisition can fail after a complete provider
+        # response; it must not discard that failed request's captured bytes.
+        message(state, concurrent_store, "metadata-blocked-message", "direct/concurrent-1", "metadata-blocked")
+        wait_for(lambda: len(concurrent_endpoint.requests) == 8, "metadata request awaiting response")
+        metadata_operation = saved_failures("concurrent-1")["operation"]
+        metadata_blocker = concurrent_store / "scratch" / f"response-metadata-{metadata_operation}-1.tmp"
+        metadata_blocker.write_bytes(b"fixture-owned metadata acquisition blocker")
+        metadata_release.set()
+        assert failed_result("metadata-blocked-message") == "response_metadata_exhausted"
+        metadata_blocker.unlink()
+        records = failed_response_records(concurrent_store)
+        assert len(records) == 6, records
+        retained_metadata, retained_body = records[-1]
+        assert retained_body == metadata_body
+        assert (retained_metadata["operation"], retained_metadata["attempt"], retained_metadata["request_id"]) == (metadata_operation, "1", "metadata-blocked"), retained_metadata
+        assert (retained_metadata["code"], retained_metadata["http_status"], retained_metadata["diagnostic"], retained_metadata["status"]) == ("response_metadata_exhausted", 200, None, "complete"), retained_metadata
+        assert len(concurrent_endpoint.requests) == 8, concurrent_endpoint.requests
+        stop_host(concurrent_host)
+        processes.remove(concurrent_host)
+        stop_endpoint(concurrent_endpoint, endpoints)
 
         fault_effect = state / "output-fault-must-not-launch"
         fault_calls = classification_population("fault", fault_effect)
@@ -4302,6 +4463,12 @@ def main(mode="all", correlation_case="all"):
         assert stalled["processing"]["attempt"] == "1", stalled
         stop_host(host)
         processes.remove(host)
+        # The interrupted body keeps its one received byte, never called complete.
+        (stalled_record, stalled_body), = failed_response_records(stall_store)
+        assert stalled_body == b"x", stalled_body
+        assert (stalled_record["status"], stalled_record["transfer"], stalled_record["truncated"]) == ("partial", "interrupted", False), stalled_record
+        assert (stalled_record["operation"], stalled_record["attempt"]) == (stalled["processing"]["operation"], "1"), stalled_record
+        assert (stalled_record["code"], stalled_record["http_status"]) == ("provider_transport_failure", None), stalled_record
         with sqlite3.connect(stall_store / "rui.sqlite3") as database:
             retry = database.execute(
                 "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? "
@@ -4345,6 +4512,20 @@ def main(mode="all", correlation_case="all"):
             retry_observed_at_ms = int(time.time() * 1000)
             stop_host(host)
             processes.remove(host)
+            with sqlite3.connect(transient_store / "rui.sqlite3") as database:
+                (operation_id,), = database.execute("SELECT operation_id FROM model_operation").fetchall()
+            if path == "/disconnect":
+                # No response byte arrived, so nothing is retained.
+                assert failed_response_records(transient_store) == []
+            else:
+                status = int(path.rsplit("-", 1)[-1].lstrip("/"))
+                assert_complete_failed_response(
+                    transient_store,
+                    b"x" * (128 * 1024) if path.startswith("/large-") else b'{"error":"deterministic permanent failure"}',
+                    operation=str(operation_id),
+                    code="provider_http_422" if status == 422 else f"provider_temporary_http_{status}",
+                    http_status=status, request_id=None,
+                )
             if path != "/large-422":
                 with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
