@@ -3,15 +3,17 @@
 
 A real Host runs from a nondefault installation with unrelated secrets in its
 environment. Session A's Bash call configures Session B and sends B a Message;
-the Host records A as its sender from the RUI_ADDRESS it gave A's Bash, and B
-reads that sender from the Message's leading part, not from text A wrote. A's
+the Host records A as its sender from the RUI_ADDRESS it gave A's Bash. A also
+includes its own address and explicit report-back instructions in B's task. B
+checks that parent address against the Message's recorded sender. A's
 send returns after admission and A finishes its Turn while B's own Bash call
 is held. B's Bash then replies to the recorded sender, which A receives as a
 peer Message from B. The generated capture recovers the original send with
 its saved sender, outside any Bash, with no login or idle peer process. A
-then inspects that original receipt and reads B's saved report on its first
-read-result call, without guessing Conversation positions. This scripted
-provider proves the workflow and wording, not future model compliance.
+receives the saved incoming report without polling requests, reading results
+or reading B's Conversation. The fixture observer takes one diagnostic request
+snapshot while B is deliberately silent; it never drives A's normal flow.
+This scripted provider proves workflow and wording, not future model compliance.
 """
 import json
 import os
@@ -99,9 +101,10 @@ class PeerModel(TestHTTPServer):
         text = last_user_text(request)
         if address["session"] == SESSION_B:
             if outputs:
-                return answer("b-done", "peer report: 42")
+                return answer("b-done", "plain reply stays local")
             self.b_received.set()
-            reply_to = sender_of(request)
+            reply_to = json.loads(text.splitlines()[1].removeprefix("Parent address (JSON): "))
+            assert reply_to == sender_of(request), request
             # B's execution waits for the test's release file, then replies.
             return bash_call("b-reply", (
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
@@ -110,25 +113,14 @@ class PeerModel(TestHTTPServer):
             ))
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
-            if outputs and outputs[-1].endswith("peer report: 42"):
-                return answer("a-final", "peer said 42")
-            # A retained its delegation receipt before B ran. Inspect only
-            # that request, then issue exactly one read-result after completion.
-            completed = ('import json,sys; '
-                         'sys.exit(json.load(open("a-peer-inspect.json"))["observation"]'
-                         '.get("result", {}).get("status") != "completed")')
-            return bash_call("a-read-report", (
-                "set -e; handle=$(sed -n 's/^request: \\([^ ]*\\) .*/\\1/p' b-send.err); test -n \"$handle\"; "
-                "i=0; while :; do rui request inspect \"$handle\" > a-peer-inspect.json; "
-                f"if python3 -c {shlex.quote(completed)}; then break; fi; "
-                "i=$((i+1)); [ $i -lt 200 ] || exit 124; sleep 0.05; done; "
-                "rui request read-result \"$handle\" > a-peer-report.txt; cat a-peer-report.txt"
-            ))
+            return answer("a-final", "peer said 42")
         if outputs:
             self.a_continued.set()
             return answer("a-wait", "waiting for peer/b")
         store = shlex.quote(address["store"])
-        message = "Please compute 6*7."
+        message = ("Please compute 6*7.\n"
+                   f"Parent address (JSON): {json.dumps(address, ensure_ascii=False, separators=(',', ':'))}\n"
+                   "When done, send findings back to this parent with rui session send.")
         return bash_call("a-ask", (
             "env > a-env.txt; command -v rui > a-which.txt; "
             f"rui session configure --store {store} --session {SESSION_B} --workspace {shlex.quote(str(self.workspace))} "
@@ -210,9 +202,10 @@ def main():
         ask_key = json.loads(ask.stdout)["context"]["key"]
 
         # B's Bash call is held, yet A's Bash send already returned B's
-        # admission receipt and A finished its Turn with it.
+        # admission receipt and A finished its Turn with it. These Session
+        # snapshots synchronize the fixture observer, not A's model or Bash.
         assert endpoint.b_received.wait(20), "B never received the peer Message"
-        wait_for(lambda: run(installed, "request", "inspect", "--store", store, "--key", ask_key, home=home)["observation"].get("result", {}).get("status") == "completed", "A's first Turn while B is held")
+        wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)
         assert b_held["work"]["status"] != "completed", b_held
@@ -231,10 +224,22 @@ def main():
         assert a_requests[0]["instructions"] == fixture.model_instructions(workspace, store=store, session=SESSION_A)
         b_first = next(request for request in endpoint.requests if address_of(request)["session"] == SESSION_B)
         assert address_of(b_first) == {"store": canonical_store, "session": SESSION_B}
-        # The Host recorded A as the sender; A's text names nobody.
+        # The explicit task address is A's own, including quotes and Unicode,
+        # and agrees with the separate Host-recorded sender.
         assert sender_of(b_first) == {"store": canonical_store, "session": SESSION_A}
-        assert last_user_text(b_first) == "Please compute 6*7."
+        task = last_user_text(b_first).splitlines()
+        assert task[0] == "Please compute 6*7."
+        assert task[1].startswith("Parent address (JSON): ")
+        assert json.loads(task[1][len("Parent address (JSON): "):]) == {"store": canonical_store, "session": SESSION_A}
+        assert task[2] == "When done, send findings back to this parent with rui session send."
         assert sender_of(a_requests[0]) is None
+
+        # Exception only: B has deliberately gone silent while A is waiting.
+        # One public diagnostic snapshot, never a polling or report-read path.
+        silent = run(installed, "request", "inspect", handle, home=home)
+        assert silent["key"] == receipt["context"]["key"], silent
+        assert silent["observation"]["target"] == SESSION_B, silent
+        assert silent["observation"].get("result", {}).get("status") != "completed", silent
 
         # Bash got only the controlled environment: this installation first
         # on PATH, the Host's HOME, its own address, and nothing else the Host carried.
@@ -264,22 +269,16 @@ def main():
         a_reply_request = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A][-1]
         assert last_user_text(a_reply_request) == "from peer/b: 42" and a_final
         assert sender_of(a_reply_request) == {"store": canonical_store, "session": SESSION_B}
-        assert (workspace / "a-peer-report.txt").read_bytes() == b"peer report: 42"
-        inspected = json.loads((workspace / "a-peer-inspect.json").read_text())
-        assert inspected["key"] == receipt["context"]["key"], (inspected, receipt)
-        assert inspected["observation"]["target"] == receipt["context"]["session"], (inspected, receipt)
-        assert inspected["observation"]["result"]["status"] == "completed", inspected
-        # The parent consumed the peer's saved report through its original
-        # request handle in one Bash Action, not the peer's latest Conversation.
+        assert [row["message"] for row in a_final["recent_messages"]] == [reply["context"]["key"], ask_key], a_final
+        assert a_final["recent_messages"][0]["outcome"] == "completed", a_final
+        assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
+        # A has only its initial configure/send Action: no request inspection,
+        # read-result, peer Conversation read or resident Bash waiter.
         a_actions = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A,
                         "--profile", "full", home=home)["full"]["actions"]
-        assert len(a_actions) == 2, a_actions
-        assert a_actions[-1]["resolution"] == "succeeded", a_actions
-        assert a_actions[-1]["result"]["text"].endswith("stdout tail:\npeer report: 42"), a_actions
-        assert tool_outputs(a_reply_request)[-1] == a_actions[-1]["result"]["text"], a_reply_request
-        final = subprocess.run([str(installed), "request", "read-result", "--store", store, "--key", reply["context"]["key"]],
-                               capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
-        assert final.returncode == 0 and final.stdout == b"peer said 42", final
+        assert len(a_actions) == 1 and a_actions[0]["resolution"] == "succeeded", a_actions
+        a_requests = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A]
+        assert len(a_requests) == 3, a_requests
         # Recovery replayed the saved admission: B ran exactly one Turn.
         wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)), "B's Turn")
@@ -295,8 +294,9 @@ def main():
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
-              "Host-recorded senders both ways, B explicitly sent its report to its recorded sender, "
-              "A inspected its retained delegation receipt and got B's saved report on its first read-result, "
+              "A included its own parent address and explicit report-back instructions, "
+              "B explicitly sent findings and A received the saved incoming report without request polling, result or peer Conversation reads, "
+              "one silent-peer diagnostic inspection, Host-recorded senders both ways, "
               "original capture recovered its saved sender without duplicate, A finished while B was held, "
               "no idle peer or login, controlled PATH/HOME; scripted provider, not a model-compliance guarantee")
     except BaseException:

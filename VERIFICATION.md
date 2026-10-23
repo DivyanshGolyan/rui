@@ -177,7 +177,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| Model self-address, Bash send to a peer with its Host-recorded sender (`RUI_ADDRESS`, leading sender part and rule, capture recovery of the saved sender), explicit report return and first-read saved-report retrieval through the parent's original request receipt | `peer_integration.py`, `human_cli_integration.py` | Scripted provider proves workflow and wording coverage, not future model compliance. Native Linux x86-64 and macOS arm64. Compaction, replacement Attempt, restart and maximum-length or NUL addresses: none located |
+| Model self-address, explicit parent address and report-back instructions, Bash send with its Host-recorded sender (`RUI_ADDRESS`, leading sender part and rule, capture recovery), parent waits for the saved incoming report without request polling, result or peer Conversation reads; one silent-peer diagnostic inspection | `peer_integration.py`, `human_cli_integration.py` | Scripted provider proves workflow and wording coverage, not future model compliance. Fixture-observer Session snapshots synchronize holds and audit saved outcomes, not agent waiting. Native Linux x86-64 and macOS arm64. Compaction, replacement Attempt, restart and maximum-length or NUL addresses: none located |
 | 5 s reply inactivity | `'renews mutation inactivity'` | Intake independence, held credit, peer burst and native stall: none located |
 | Peer selection progress and Host stop | `'skipped continuation'`, `host-stop-integration` | Peer input: none located. Iterated stops are not group cancellation |
 
