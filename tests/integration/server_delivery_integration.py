@@ -59,7 +59,7 @@ def resources(pid):
     return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
 
 
-def checkpoint_readers(repetitions=12_000):
+def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
     """Slow canonical replies cannot prevent WAL reuse by unrelated commits."""
     with tempfile.TemporaryDirectory(prefix="rui-reader-checkpoint-") as root:
         state = canonical_fixture_root(root)
@@ -71,7 +71,7 @@ def checkpoint_readers(repetitions=12_000):
         endpoint = model.SuccessEndpoint([
             model.sse_tool_calls("checkpoint", [("unknown", "checkpoint-call", arguments)]),
             model.sse_answer("checkpoint-final", "private", "answer", text)[0],
-        ])
+        ], chunk_sizes=chunk_sizes)
         worker = threading.Thread(target=endpoint.serve_forever)
         worker.start()
         host = peer = None
@@ -283,5 +283,7 @@ def main():
 
 if __name__ == "__main__":
     checkpoint_readers()
-    checkpoint_readers(48_000)
+    # Keep tiny-fragment coverage above; the large cohort measures held readers,
+    # not millions of flushed provider writes inside the same setup deadline.
+    checkpoint_readers(48_000, chunk_sizes=(4093, 8191, 16381))
     main()

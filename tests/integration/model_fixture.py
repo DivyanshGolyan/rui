@@ -296,10 +296,11 @@ def classification_population(prefix, forbidden_effect, count=32):
 class SuccessEndpoint(TestHTTPServer):
     allow_reuse_address = True
 
-    def __init__(self, responses, responses_by_input=None):
+    def __init__(self, responses, responses_by_input=None, *, chunk_sizes=None):
         super().__init__(("127.0.0.1", 0), SuccessHandler)
         self.responses = list(responses)
         self.responses_by_input = responses_by_input
+        self.chunk_sizes = (1, 2, 5, 3, 7, 4, 1, 6) if chunk_sizes is None else chunk_sizes
         self.requests = []
         self.request_times = []
         self.lock = threading.Lock()
@@ -363,8 +364,8 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
-        # Split inside SSE field names, JSON punctuation, escapes and UTF-8.
-        offsets = (1, 2, 5, 3, 7, 4, 1, 6)
+        # Default chunks split SSE fields, JSON punctuation, escapes and UTF-8.
+        offsets = self.server.chunk_sizes
         cursor = 0
         index = 0
         while cursor < len(payload):
