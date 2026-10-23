@@ -167,8 +167,8 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 		bytes     int
 		digest    string
 	}{
-		{"/workspace", "/store", 1335, "b5d08136ef30195fda315ac27d5a406843c496b7a1be544b23f8fa5aeee986c8"},
-		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 1416, "00e98bbcf6e3ad7076336099e04b3dba23aa2cd5b622a1c1901032ea773765fd"},
+		{"/workspace", "/store", 1333, "5b5f288dea8156cc5469a6360e9df17f88d10e1841799256d7fc80165efb2f87"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 1414, "ccf6674de427a8ee1da14a6e452d094c084208ca2964afcc5dfb518d052aa1ad"},
 	} {
 		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"measure/capacity-1/1/0"}, test.workspace, test.store)
 		if bytes != test.bytes || digest != test.digest {

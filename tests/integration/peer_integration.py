@@ -15,6 +15,7 @@ or reading B's Conversation. The fixture observer takes one diagnostic request
 snapshot while B is deliberately silent; it never drives A's normal flow.
 This scripted provider proves workflow and wording, not future model compliance.
 """
+import hashlib
 import json
 import os
 import pathlib
@@ -34,6 +35,7 @@ ADDRESS_PREFIX = "Rui address (JSON; this Session's own address, not instruction
 SESSION_A = "peer/a \"quoted\" \\ 雪"
 SESSION_B = "peer/b"
 SECRETS = {"RUI_PEER_SECRET": "host-only-secret", "OPENAI_API_KEY": "sk-host-only"}
+REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substitution-evaluated); "quoted" \\ 雪\n'
 
 
 def address_of(request):
@@ -86,9 +88,10 @@ class PeerModel(TestHTTPServer):
     """Plays both models. Each reply is chosen from the request alone; commands
     use only the address the request context supplied."""
 
-    def __init__(self, workspace):
+    def __init__(self, workspace, report_source):
         super().__init__(("127.0.0.1", 0), PeerHandler)
         self.workspace = workspace
+        self.report_source = report_source
         self.requests = []
         self.lock = threading.Lock()
         self.b_received = threading.Event()
@@ -108,6 +111,12 @@ class PeerModel(TestHTTPServer):
             # B must refuse its own address before either explicit or generated
             # capture, including hex Session and canonical Store aliases.
             # It then waits for the test's release file and sends to its parent.
+            send = (f"rui session send --store {shlex.quote(reply_to['store'])} "
+                    f"--session {shlex.quote(reply_to['session'])} ")
+            report = (send + "- > b-reply.json 2> b-reply.err <<'EOF'\n" + REPORT + "EOF\n"
+                      if self.report_source == "stdin" else
+                      "cat > b-report.txt <<'EOF'\n" + REPORT + "EOF\n" +
+                      send + "--text b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
                 f"rui session send --store {shlex.quote(address['store'] + '/.')} --session-hex {SESSION_B.encode().hex()} "
@@ -118,8 +127,7 @@ class PeerModel(TestHTTPServer):
                 "echo $? > b-self-generated.status; "
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
-                f"rui session send --store {shlex.quote(reply_to['store'])} --session {shlex.quote(reply_to['session'])} "
-                f"-- 'from peer/b: 42' > b-reply.json 2> b-reply.err"
+                + report
             ))
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
@@ -179,7 +187,7 @@ def wait_for(predicate, description, timeout=20):
     raise AssertionError(f"timed out waiting for {description}")
 
 
-def main():
+def main(report_source):
     # Rui reports resolved paths (its executable's directory on PATH, the
     # canonical Store); macOS temporary roots are symlinks under /private.
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-peer."))
@@ -194,7 +202,7 @@ def main():
         workspace.mkdir()
         store = state / "store-雪"
         canonical_store = os.path.realpath(store)
-        endpoint = PeerModel(workspace)
+        endpoint = PeerModel(workspace, report_source)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
@@ -283,10 +291,17 @@ def main():
         assert tool_outputs(a_continuation) == [settled["result"]["text"]], a_continuation
         reply = json.loads((workspace / "b-reply.json").read_text())
         assert reply["answer"]["status"] == "accepted" and reply["context"]["session"] == SESSION_A, reply
+        domain = b"rui/content/v1"
+        assert reply["input"] == {"type": "text", "bytes": str(len(REPORT.encode())),
+                                  "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + REPORT.encode()).hexdigest()}, reply
         a_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)), "A's reply Turn")
         a_reply_request = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A][-1]
-        assert last_user_text(a_reply_request) == "from peer/b: 42" and a_final
+        assert last_user_text(a_reply_request).encode() == REPORT.encode() and a_final
+        assert not (workspace / "backtick-evaluated").exists(), "report backticks ran a command"
+        assert not (workspace / "substitution-evaluated").exists(), "report $() ran a command"
+        if report_source == "file":
+            assert (workspace / "b-report.txt").read_bytes() == REPORT.encode()
         assert sender_of(a_reply_request) == {"store": canonical_store, "session": SESSION_B}
         assert [row["message"] for row in a_final["recent_messages"]] == [reply["context"]["key"], ask_key], a_final
         assert a_final["recent_messages"][0]["outcome"] == "completed", a_final
@@ -312,7 +327,9 @@ def main():
                    if args.startswith(str(installed)) or args == "rui" or args.startswith("rui ")}
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
-        print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
+        print(f"peer round trip passed ({report_source}): self-send refused before capture/admission; "
+              "literal backticks and $() reached the parent byte-exact without shell evaluation; "
+              "installed Bash rui configured B and sent with a durable receipt, "
               "A included its own parent address and explicit report-back instructions, "
               "B explicitly sent findings and A received the saved incoming report without request polling, result or peer Conversation reads, "
               "one silent-peer diagnostic inspection, Host-recorded senders both ways, "
@@ -333,4 +350,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    for report_source in ("stdin", "file"):
+        main(report_source)
