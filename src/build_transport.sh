@@ -4,7 +4,7 @@ set -eu
 openssl_source=$1
 curl_source=$2
 nghttp2_source=$3
-curl_patch=$4
+curl_patch_contents=$4
 prefix=$5
 target=$6
 zig=$7
@@ -107,7 +107,7 @@ printf 'Building pinned nghttp2 ...\n' >&2
 # Patch only the isolated build copy. curl must reject missing H2 ALPN before
 # a POST, avoid ambiguous automatic POST retries, and bound paused-stream credit.
 cp -R "$curl_source" "$curl_patched"
-(cd "$curl_patched" && git apply "$curl_patch") >>"$log" 2>&1
+(cd "$curl_patched" && printf '%s' "$curl_patch_contents" | git apply -) >>"$log" 2>&1
 
 printf 'Building pinned curl ...\n' >&2
 (

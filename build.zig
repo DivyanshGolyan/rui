@@ -931,13 +931,16 @@ fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTra
     const openssl = b.dependency("openssl", .{});
     const curl = b.dependency("curl", .{});
     const nghttp2 = b.dependency("nghttp2", .{});
-    const build_transport = b.addSystemCommand(&.{"sh"});
-    build_transport.addFileArg(b.path("src/build_transport.sh"));
+    // Literal generator inputs survive fresh checkout/cache-extraction inodes.
+    // @embedFile still invalidates the command when either input's bytes change.
+    const build_transport = b.addSystemCommand(&.{
+        "sh", "-c", @embedFile("src/build_transport.sh"), "src/build_transport.sh",
+    });
     // Configure scripts change cwd and embed the installation prefix in Makefiles.
     build_transport.addDirectoryArg2(openssl.path("."), .{ .make_absolute = true });
     build_transport.addDirectoryArg2(curl.path("."), .{ .make_absolute = true });
     build_transport.addDirectoryArg2(nghttp2.path("."), .{ .make_absolute = true });
-    build_transport.addFileArg2(b.path("src/curl-post-retry.patch"), .{ .make_absolute = true });
+    build_transport.addArg(@embedFile("src/curl-post-retry.patch"));
     const target_name = b.fmt("{s}-{s}", .{
         @tagName(target.result.cpu.arch),
         @tagName(target.result.os.tag),
