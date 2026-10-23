@@ -291,7 +291,7 @@ pub const Definition = struct {
         if (parsed.positional != null) for (self.positional_conflicts) |name| if (parsed.has(name)) return error.ConflictingArguments;
         if (parsed.help) return parsed;
         if (parsed.get("instructions")) |source| {
-            if (!std.mem.eql(u8, source, "-")) return error.InvalidArguments;
+            if (!std.mem.eql(u8, source, "-")) return error.InvalidInstructionsSource;
             if (std.mem.eql(u8, parsed.get("output-schema") orelse "", "-")) return error.ConflictingArguments;
         }
         for (self.options) |option| {
@@ -302,7 +302,7 @@ pub const Definition = struct {
         return parsed;
     }
 
-    pub const Error = error{ DuplicateArgument, UnknownArgument, MissingArgumentValue, ConflictingArguments, InvalidArguments, InvalidHexIdentity, OutOfMemory };
+    pub const Error = error{ DuplicateArgument, UnknownArgument, MissingArgumentValue, ConflictingArguments, InvalidArguments, InvalidInstructionsSource, InvalidHexIdentity, OutOfMemory };
 };
 
 fn decodeHex(allocator: std.mem.Allocator, encoded: []const u8, limit: usize) ![]const u8 {
@@ -455,7 +455,7 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_send, &.{ "--to", "a", "-" }, error.InvalidArguments);
     try expectValidation(.session_start, &.{"inline text"}, error.InvalidArguments);
     try expectValidation(.session_start, &.{ "--instructions", "-" }, error.UnknownArgument);
-    try expectValidation(.session_configure, &.{ "--instructions", "file" }, error.InvalidArguments);
+    try expectValidation(.session_configure, &.{ "--instructions", "file" }, error.InvalidInstructionsSource);
     try expectValidation(.session_configure, &.{ "--instructions", "-", "--output-schema", "-" }, error.ConflictingArguments);
     try expectValidation(.session_configure, &.{ "--instructions", "-" }, false);
     try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);

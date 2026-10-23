@@ -722,8 +722,9 @@ def prove_reused_session(state):
                                       inspection_limit=3 * 321 + 601 + 201 + 6)
 
 
-def show_command(*args):
-    print("$ rui " + " ".join(shlex.quote(str(arg)) for arg in args), flush=True)
+def show_command(*args, input=None):
+    prefix = "" if input is None else "printf '%s' " + shlex.quote(input) + " | "
+    print("$ " + prefix + "rui " + " ".join(shlex.quote(str(arg)) for arg in args), flush=True)
 
 
 def show_observation(message):
@@ -824,8 +825,9 @@ def walkthrough():
             "--key",
             message_key,
         )
-        show_command(*message_args)
-        submitted = fixture.command(*message_args, input="make one independently counted file effect")
+        message_text = "make one independently counted file effect"
+        show_command(*message_args, input=message_text)
+        submitted = fixture.command(*message_args, input=message_text)
         assert submitted["answer"]["status"] == "accepted", submitted
         captured_bytes = message_record.read_bytes()
         captured = json.loads(captured_bytes)

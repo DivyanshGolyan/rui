@@ -79,7 +79,11 @@ fn run(init: std.process.Init) !void {
             error.UnknownArgument => "unknown option",
             error.MissingArgumentValue => "an option is missing its value",
             error.ConflictingArguments => "conflicting selectors or input sources",
-            error.InvalidArguments => "unexpected argument (use -- before literal text)",
+            error.InvalidArguments => if (command == .session_send or command == .session_start)
+                "Message text must come from stdin; positional text is not accepted"
+            else
+                "unexpected argument",
+            error.InvalidInstructionsSource => "use --instructions - to read instructions from stdin",
             error.InvalidHexIdentity => "a hex selector is not even-length UTF-8 hex within its bound",
             error.OutOfMemory => "out of memory",
         };

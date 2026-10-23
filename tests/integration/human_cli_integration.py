@@ -178,6 +178,28 @@ def help_case():
             assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
             assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
             assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
+        # Rejected input forms must name a usable correction, without reading
+        # even available stdin or creating a recovery record.
+        for args, correction in (
+                (("session", "send", "--to", "k7m2qx", "literal"), "Message text must come from stdin"),
+                (("session", "send", "--to", "k7m2qx", "--", "literal"), "Message text must come from stdin"),
+                (("session", "start", "literal"), "Message text must come from stdin"),
+                (("session", "start", "--", "literal"), "Message text must come from stdin"),
+                (("session", "configure", "--instructions", "instructions.txt"), "use --instructions - to read instructions from stdin"),
+                (("session", "list", "literal"), "unexpected argument")):
+            input_read, input_write = os.pipe()
+            try:
+                untouched = b"held stdin must not be consumed\n"
+                os.write(input_write, untouched)
+                result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
+                    stdin=input_read, capture_output=True, text=True, timeout=5)
+                assert result.returncode == 1 and result.stdout == "", (args, result)
+                assert correction in result.stderr and "use -- before literal text" not in result.stderr, (args, result.stderr)
+                assert "Nothing was captured or sent." in result.stderr, result.stderr
+                assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
+                assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
+            finally:
+                dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
         # Retired names are refused before any entry path, even with a
         # terminal that could otherwise reach the provider chooser.
         master, slave = pty.openpty()
