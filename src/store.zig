@@ -2646,7 +2646,7 @@ pub const Store = struct {
                 3 => .assistant,
                 4 => .tool_result,
                 else => unreachable,
-            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| try self.peerLocked(sender) else null, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
+            }, .content = .{ .length = metadata.length, .digest = metadata.digest }, .admitted_at = resolved.admitted_at, .sender = if (resolved.sender) |sender| .{ .session = sender } else null, .presentation = if (resolved.tool_operation) |operation| try self.toolPresentationLocked(operation, @intCast(ordinal - 1), @intCast(position)) else null };
             page.count += 1;
         }
         const upper = if (request.before_position == 0) end else @min(end, request.before_position - @intFromBool(request.before_ordinal == 0));
@@ -2991,35 +2991,11 @@ pub const Store = struct {
     }
 
     fn readPeer(self: *Store, statement: *c.sqlite3_stmt, column: c_int) !?protocol.Peer {
+        _ = self;
         if (c.sqlite3_column_type(statement, column) == c.SQLITE_NULL) return null;
         var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, column, &sender);
-        return try self.peerLocked(sender);
-    }
-
-    /// A Session named on a Message, with the shortest prefix of a generated
-    /// reference's ID, of at least six characters, that no other Session
-    /// reference in this Store shares. Its sorted neighbours decide it.
-    fn peerLocked(self: *Store, session: protocol.Bounded(protocol.max_session_bytes)) !protocol.Peer {
-        var peer: protocol.Peer = .{ .session = session };
-        const ref = session.slice();
-        if (!protocol.Peer.generated(ref)) return peer;
-        var shared: usize = 0;
-        inline for (.{ "SELECT session_ref FROM session WHERE session_ref<?1 ORDER BY session_ref DESC LIMIT 1", "SELECT session_ref FROM session WHERE session_ref>?1 ORDER BY session_ref LIMIT 1" }) |sql| {
-            const statement = try prepare(self.database, sql);
-            defer _ = c.sqlite3_finalize(statement);
-            try bindText(statement, 1, ref);
-            const step = c.sqlite3_step(statement);
-            if (step == c.SQLITE_ROW) {
-                var neighbour: protocol.Bounded(protocol.max_session_bytes) = .{};
-                try readText(statement, 0, &neighbour);
-                const length = std.mem.indexOfDiff(u8, ref, neighbour.slice()) orelse @min(ref.len, neighbour.len);
-                shared = @max(shared, length);
-            } else if (step != c.SQLITE_DONE) return error.SessionReadFailed;
-        }
-        const id = protocol.Peer.generated_prefix.len;
-        peer.prefix = @intCast(std.math.clamp(shared + 1 -| id, 6, ref.len - id));
-        return peer;
+        return .{ .session = sender };
     }
 
     const ActivityIdentity = struct { item: protocol.ActivityItem, content_id: ?i64 = null };
@@ -3067,7 +3043,7 @@ pub const Store = struct {
                 const metadata = try self.readPublicContentMetadata(content_id);
                 result.item.value = .{ .sent = .{
                     .admission = @intCast(admission),
-                    .target = try self.peerLocked(target),
+                    .target = .{ .session = target },
                     .content = .{ .length = metadata.length, .digest = metadata.digest },
                     .admitted_at = @intCast(try readNullablePositiveI64(select, 2) orelse return error.CorruptStore),
                 } };
@@ -3084,7 +3060,7 @@ pub const Store = struct {
                 try readText(select, 0, &failed.key);
                 var target: protocol.Bounded(protocol.max_session_bytes) = .{};
                 try readText(select, 1, &target);
-                failed.target = try self.peerLocked(target);
+                failed.target = .{ .session = target };
                 try readText(select, 2, &failed.code);
                 result.item.value = .{ .send_failed = failed };
             },
@@ -12893,7 +12869,7 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const sender = "rui/1a2b3c4d-0000-4000-8000-000000000001";
-    // A neighbour sharing seven ID characters makes the sender's prefix eight.
+    // Shared display prefixes never shorten the identity carried by pages.
     try configureTestSession(&storage, "configure-sender", sender);
     try configureTestSession(&storage, "configure-neighbour", "rui/1a2b3c49-0000-4000-8000-000000000002");
     try configureTestSession(&storage, "configure-receiver", "direct/receiver");
@@ -12951,7 +12927,6 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try std.testing.expectEqual(@as(usize, 1), received.count);
     const peer = received.items[0].value.admission.sender.?;
     try std.testing.expectEqualStrings(sender, peer.session.slice());
-    try std.testing.expectEqual(@as(u8, 8), peer.prefix);
 
     try session.set(sender);
     const own = try storage.activityPage(.{ .session = session });
@@ -12960,7 +12935,6 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     const out = own.items[0].value.sent;
     try std.testing.expectEqual(accepted.accepted.admission_id, out.admission);
     try std.testing.expectEqualStrings("direct/receiver", out.target.session.slice());
-    try std.testing.expectEqual(@as(u8, 0), out.target.prefix);
     const failed = own.items[1].value.send_failed;
     try std.testing.expectEqualStrings("direct/absent", failed.target.session.slice());
     try std.testing.expectEqualStrings("unknown_session", failed.code.slice());

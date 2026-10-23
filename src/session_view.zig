@@ -69,11 +69,11 @@ pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
 pub const peer_ref_columns = 16;
 
 /// A peer reference as its line names it: a generated `rui/` reference by
-/// the shortest prefix of its ID that tells it apart in its Store, any other
+/// the first six characters of its ID, any other
 /// exactly, escaped; past `peer_ref_columns` columns it ends with `…`.
 pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8]u8) []const u8 {
     const session = peer.session.slice();
-    const shown = if (peer.prefix != 0) session[4..][0..peer.prefix] else session;
+    const shown = if (generatedSession(session)) session[4..10] else session;
     var escaped: [4 * protocol.max_session_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&escaped);
     var text: Text = .{ .mode = .line };
@@ -101,12 +101,25 @@ pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8
     return buffer[0 .. cut + "…".len];
 }
 
-test "a peer reference shows a generated ID's distinguishing prefix and caps at 16 columns" {
+fn generatedSession(ref: []const u8) bool {
+    if (ref.len != 40 or !std.mem.startsWith(u8, ref, "rui/")) return false;
+    for (ref[4..], 0..) |byte, index| switch (index) {
+        8, 13, 18, 23 => if (byte != '-') return false,
+        else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
+    };
+    return true;
+}
+
+test "a peer reference abbreviates a generated ID locally and caps at 16 columns" {
     var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
-    var generated: protocol.Peer = .{ .session = .{}, .prefix = 7 };
-    try generated.session.set("rui/1a2b3c4-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
-    try std.testing.expectEqualStrings("1a2b3c4", peerRef(generated, &buffer));
+    var generated: protocol.Peer = .{ .session = .{} };
+    try generated.session.set("rui/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
+    try std.testing.expectEqualStrings("1a2b3c", peerRef(generated, &buffer));
     var exact: protocol.Peer = .{ .session = .{} };
+    try exact.session.set("rui/1A2B3C4D-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
+    try std.testing.expectEqualStrings("rui/1A2B3C4D-5e…", peerRef(exact, &buffer));
+    try exact.session.set("rui/gggggggggggggggggggggggggggggggggggg");
+    try std.testing.expectEqualStrings("rui/ggggggggggg…", peerRef(exact, &buffer));
     try exact.session.set("reviewer");
     try std.testing.expectEqualStrings("reviewer", peerRef(exact, &buffer));
     try exact.session.set("abcdefghijklmnop");
@@ -155,7 +168,7 @@ test "peer Messages render as one dim line each, with time in the margin and `�
     }
     try std.testing.expectEqual(@as(c_int, 0), setenv("TZ", "UTC0", 1));
     tzset();
-    var peer: protocol.Peer = .{ .session = .{}, .prefix = 6 };
+    var peer: protocol.Peer = .{ .session = .{} };
     try peer.session.set("rui/9f8e7d6c-0000-4000-8000-000000000001");
     const S = Mark.summary;
     const N = Mark.sidenote;

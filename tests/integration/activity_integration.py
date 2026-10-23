@@ -244,12 +244,15 @@ def main():
                 wire = copy.deepcopy(valid)
                 wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
-            # A peer prefix exists only for a generated reference, from six characters.
+            # Pages carry full opaque identities, never renderer abbreviations.
             generated = "rui/1a2b3c4d-0000-4000-8000-000000000001"
-            for session, prefix, ok in ((generated, "6", True), (generated, "5", False), ("rui/" + "a" * 36, "6", False), ("reviewer", "0", True), ("reviewer", "6", False)):
+            for session in (generated, "rui/" + "a" * 36, "reviewer"):
                 wire = copy.deepcopy(valid)
-                wire["items"][0]["value"]["admission"]["sender"] = {"session": session, "prefix": prefix}
-                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
+                sender = {"session": session}
+                wire["items"][0]["value"]["admission"]["sender"] = sender
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
+                sender["prefix"] = "6"
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender"):
                 wire = copy.deepcopy(valid)
                 if fault == "order": wire["items"][1]["position"] = "1"

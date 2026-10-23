@@ -362,34 +362,18 @@ pub const max_tool_presentation_json_bytes =
     "{\"description\":".len + maximumJsonStringBytes(max_tool_description_bytes) +
     ",\"code\":\"infrastructure_shutdown\",\"publication_position\":\"".len + 20 + "\"}".len;
 
-/// A peer Session named on a Message, in the same Store. `prefix` is, for a
-/// generated `rui/` reference, how many leading characters of its ID no other
-/// Session in the Store shares (at least six); zero for any other reference.
+/// A peer Session named on a Message, in the same Store.
 pub const Peer = struct {
     session: Bounded(max_session_bytes),
-    prefix: u8 = 0,
-
-    /// `session configure` without a name generates `rui/` and a lowercase
-    /// hyphenated UUID; only such a reference has an ID prefix.
-    pub const generated_prefix = "rui/";
-
-    pub fn generated(ref: []const u8) bool {
-        if (ref.len != generated_prefix.len + 36 or !std.mem.startsWith(u8, ref, generated_prefix)) return false;
-        for (ref[generated_prefix.len..], 0..) |byte, index| switch (index) {
-            8, 13, 18, 23 => if (byte != '-') return false,
-            else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
-        };
-        return true;
-    }
 
     pub fn writeJson(self: Peer, out: *std.Io.Writer) !void {
         try out.writeAll("{\"session\":");
         try std.json.Stringify.value(self.session.slice(), .{}, out);
-        try out.print(",\"prefix\":\"{d}\"}}", .{self.prefix});
+        try out.writeAll("}");
     }
 };
 
-pub const max_peer_json_bytes = "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) + ",\"prefix\":\"255\"}".len;
+pub const max_peer_json_bytes = "{\"session\":".len + maximumJsonStringBytes(max_session_bytes) + "}".len;
 
 pub const ActivityItem = struct {
     position: u64,
