@@ -12,7 +12,6 @@ const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
-const Intake = @import("server.zig").Intake;
 
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
@@ -132,7 +131,7 @@ pub const Host = struct {
     controls_changed: std.atomic.Value(bool) = .init(false),
     control_hint_suppressed: std.atomic.Value(bool) = .init(false),
     request_counter: std.atomic.Value(u64) = .init(0),
-    intake: ?*Intake = null,
+    intake_wake: ?std.posix.fd_t = null,
     intake_capacity: usize = product_defaults.intake_capacity,
     descriptor_soft_limit: ?usize = null,
     scratch_used: std.atomic.Value(u64) = .init(0),
@@ -258,7 +257,8 @@ pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
 }
 
 pub fn wakeListener(host: *Host) void {
-    if (host.intake) |intake| intake.notify();
+    // Coalesced hints: a full nonblocking socket is already readable.
+    if (host.intake_wake) |fd| _ = std.c.write(fd, "x", 1);
 }
 
 pub fn retainDispatchFence(host: *Host, phase: []const u8, err: anyerror) void {

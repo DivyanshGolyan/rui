@@ -47,7 +47,7 @@ const intake_worker_stack_bytes = 1024 * 1024;
 // One socket owner and one ordinary/one control local-work stack replace
 // per-exchange threads. Workers never wait on peers. Complete requests waiting
 // for Store access remain transient exchanges, not another pending authority.
-pub const Intake = struct {
+const Intake = struct {
     host: *Host,
     wake: [2]std.posix.fd_t = undefined,
     exchanges: std.ArrayList(*Exchange) = .empty,
@@ -91,6 +91,7 @@ pub const Intake = struct {
     const Exchange = struct {
         const State = enum { header, body, ready, working, reply, retired, closed };
 
+        owner: *Intake,
         host: *Host,
         fd: std.posix.fd_t,
         accepted_at_ns: u64,
@@ -271,7 +272,7 @@ pub const Intake = struct {
                             var ordinary: usize = 0;
                             var control: usize = 0;
                             var discovery: usize = 0;
-                            for (self.host.intake.?.exchanges.items) |peer| {
+                            for (self.owner.exchanges.items) |peer| {
                                 if (peer.route) |route| {
                                     // A prior reply can finish earlier in this
                                     // same socket pass, before retirement is
@@ -430,7 +431,7 @@ pub const Intake = struct {
         for (self.wake) |fd| _ = std.c.close(fd);
     }
 
-    pub fn notify(self: *Intake) void {
+    fn notify(self: *Intake) void {
         // Coalesced hints: a full nonblocking socket is already readable.
         _ = std.c.write(self.wake[1], "x", 1);
     }
@@ -703,7 +704,7 @@ pub const Intake = struct {
         const exchange = try self.host.allocator.create(Exchange);
         errdefer self.host.allocator.destroy(exchange);
         const accepted_at_ns = nowNs(self.host);
-        exchange.* = .{ .host = self.host, .fd = fd, .accepted_at_ns = accepted_at_ns, .deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s };
+        exchange.* = .{ .owner = self, .host = self.host, .fd = fd, .accepted_at_ns = accepted_at_ns, .deadline = @as(i128, accepted_at_ns) + 10 * std.time.ns_per_s };
         try self.exchanges.append(self.host.allocator, exchange);
     }
 };
@@ -917,7 +918,7 @@ pub fn serve(
     var intake: Intake = undefined;
     try intake.init(&host);
     defer intake.deinit();
-    host.intake = &intake;
+    host.intake_wake = intake.wake[1];
     const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
@@ -2391,7 +2392,7 @@ test "discovery identity exhaustion cannot start a new error delivery budget" {
     var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
     host.request_counter.store(std.math.maxInt(u64), .release);
     const exchange = try host.allocator.create(Intake.Exchange);
-    exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
+    exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
     defer std.debug.assert(exchange.destroy());
     try std.testing.expectError(error.RequestIdentityExhausted, exchange.read());
     exchange.fail(error.RequestIdentityExhausted);
@@ -2897,7 +2898,6 @@ test "retired reserved exchanges cannot block their successors while workers are
         for ([_]Intake.Exchange.State{ .retired, .closed }) |retired_state| {
             var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
             var intake: Intake = .{ .host = &host };
-            host.intake = &intake;
             defer intake.exchanges.deinit(host.allocator);
             defer for (intake.exchanges.items) |exchange| {
                 std.debug.assert(exchange.destroy());
@@ -2965,7 +2965,6 @@ test "disconnected reserved peers release classification while half-closed peers
                 var retention = output_retention.Queue.initialize(host.io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
                 host.retention = &retention;
                 var intake: Intake = .{ .host = &host };
-                host.intake = &intake;
                 defer intake.exchanges.deinit(host.allocator);
                 defer for (intake.exchanges.items) |exchange| std.debug.assert(exchange.destroy());
                 const places: usize = if (std.mem.eql(u8, path, "host-info")) 1 else 2;
@@ -3065,7 +3064,6 @@ test "retired ordinary capture still consumes its intake classification and reso
         try lease.paths.scratch.set(root);
         var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined, .faults = .{}, .intake_capacity = descriptor_capacity.minimum_intake };
         var intake: Intake = .{ .host = &host };
-        host.intake = &intake;
         defer intake.exchanges.deinit(host.allocator);
         defer {
             for (intake.exchanges.items) |exchange| {
@@ -3145,7 +3143,7 @@ test "retired ordinary capture still consumes its intake classification and reso
 
 test "shutdown fences every unhanded route while preserving request and reply custody" {
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = undefined, .faults = .{} };
-    var exchange = Intake.Exchange{ .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
+    var exchange = Intake.Exchange{ .owner = undefined, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
     const State = @TypeOf(exchange.state);
     for (std.enums.values(Route)) |route| {
         for ([_][2]State{
@@ -3219,6 +3217,7 @@ test "shutdown fences every unhanded route while preserving request and reply cu
         defer _ = std.c.close(sockets[0]);
         defer _ = std.c.close(sockets[1]);
         var retry = Intake.Exchange{
+            .owner = &intake,
             .host = &host,
             .fd = sockets[0],
             .accepted_at_ns = nowNs(&host),
@@ -3395,7 +3394,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         var intake: Intake = undefined;
         try intake.init(&host);
         defer intake.deinit();
-        host.intake = &intake;
+        host.intake_wake = intake.wake[1];
         var listener = try address.listen(std.testing.io, .{ .kernel_backlog = 8 });
         const partial_header = try address.connect(std.testing.io);
         defer partial_header.socket.close(std.testing.io);
@@ -3507,7 +3506,7 @@ test "readable ingress cannot cross its header or body deadline" {
                 defer _ = std.c.close(sockets[1]);
                 try setNonblocking(sockets[0]);
                 const exchange = try std.testing.allocator.create(Intake.Exchange);
-                exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
+                exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 10 * std.time.ns_per_s };
                 defer std.debug.assert(exchange.destroy());
                 var body_buffer: [128]u8 = undefined;
                 const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"1\",\"kind\":\"{s}\",\"store\":\"s\"}}", .{@tagName(route)});
@@ -3577,7 +3576,7 @@ test "ingress resumes its peer wait after local capture completion" {
     try writeAll(std.testing.io, sockets[1], header);
     try writeAll(std.testing.io, sockets[1], body);
     const exchange = try std.testing.allocator.create(Intake.Exchange);
-    exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = std.time.ns_per_s, .deadline = 10 * std.time.ns_per_s };
+    exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = std.time.ns_per_s, .deadline = 10 * std.time.ns_per_s };
     defer std.debug.assert(exchange.destroy());
     var intake: Intake = .{ .host = &host };
     defer intake.exchanges.deinit(std.testing.allocator);
@@ -3636,7 +3635,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &sockets));
         defer _ = std.c.close(sockets[1]);
         const exchange = try std.testing.allocator.create(Intake.Exchange);
-        exchange.* = .{ .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
+        exchange.* = .{ .owner = undefined, .host = &host, .fd = sockets[0], .accepted_at_ns = 0, .deadline = 0, .state = .retired };
         const ingress = try std.testing.allocator.create(protocol.Ingress);
         ingress.* = protocol.Ingress.init(std.testing.allocator, .{
             .io = io,
