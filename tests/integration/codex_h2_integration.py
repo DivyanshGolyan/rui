@@ -94,7 +94,7 @@ def run(*, observed=False, intake=100):
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
             "--session", "managed/h2", "--workspace", fixture.ROOT, "--provider", "codex",
-            "--model", "model-a", "--tools", "none",
+            "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
         observations = []

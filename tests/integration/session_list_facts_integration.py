@@ -23,7 +23,7 @@ def main():
         try:
             for index in range(9):
                 configured = invoke("session", "configure", "--store", store, "--session", f"selected/{index}",
-                    "--workspace", root, "--provider", "codex", "--model", "model-a")
+                    "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
                 assert configured.returncode == 0, configured
             def rewrite(response):
                 head, body = response.split(b"\r\n\r\n", 1)

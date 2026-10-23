@@ -111,7 +111,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--session", "managed/session", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "model-a", "--tools", "bash",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
             "--permission-mode", "ask", "--instructions", instruction_file,
         )
         assert configured["answer"]["status"] == "accepted"
@@ -201,7 +201,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "stop-config.json",
             "--key", "stop-config", "--session", "managed/stop", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "model-a", "--tools", "none",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
@@ -227,7 +227,7 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "handoff-config.json",
             "--key", "handoff-config", "--session", "managed/handoff", "--workspace", fixture.ROOT,
-            "--provider", "codex", "--model", "model-a", "--tools", "none",
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
         fixture.message(state, stop_store, "handoff-message", "managed/handoff", "do not launch")
@@ -257,7 +257,7 @@ def run():
                 "session", "configure", "--store", stop_store,
                 "--record", state / f"{feature}-config.json", "--key", f"{feature}-config",
                 "--session", session, "--workspace", fixture.ROOT, "--provider", "codex",
-                "--model", "model-a", "--tools", tools, *extra,
+                "--model", "gpt-6-sol", "--tools", tools, *extra,
             )
             assert configured["answer"]["status"] == "accepted"
             fixture.message(state, stop_store, feature, session, "unsupported managed request")

@@ -95,7 +95,7 @@ def main():
         try:
             process, fields = start_host(store, provider)
             configured = command("session", "configure", "--store", store, "--record", state / "config.json", "--key", "config",
-                "--session", SESSION, "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a",
+                "--session", SESSION, "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol",
                 "--tools", "bash,edit", "--permission-mode", "ask")
             assert configured["answer"]["status"] == "accepted", configured
             configure(state, store, "foreign-config", "direct/foreign")

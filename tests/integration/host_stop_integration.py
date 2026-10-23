@@ -149,7 +149,7 @@ def mixed_effect_drain(provider_first):
             fixture.message(state, store, "message-bash", "bash/session", "bash")
             action = fixture.wait_for(lambda: bash_fixture.action_for(store, "bash/session"), "Bash proposal")
             proposal_cleanup = diagnostics.wait("cleanup_completed")[0]["operation"]
-            fixture.configure(state, store, "configure-provider", "provider/session", "model-a")
+            fixture.configure(state, store, "configure-provider", "provider/session", "gpt-6-sol")
 
             def launch_bash():
                 bash_fixture.allow(state, store, "allow-bash", "bash/session", action["action"])

@@ -184,7 +184,7 @@ def configure(state, store, ordinal):
         "--provider",
         "codex",
         "--model",
-        "model-a",
+        "gpt-6-sol",
     )
     assert result["answer"]["status"] == "accepted", result
     return session

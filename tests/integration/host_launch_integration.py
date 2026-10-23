@@ -310,12 +310,12 @@ def assert_configure_defaults(root, store, env):
     # An addressed first configuration leaves tools and permission to the Store.
     addressed = "defaults/addressed"
     assert configure("--session", addressed, "--workspace", root, "--provider", "codex",
-                     "--model", "model-a") == addressed
-    assert settings(addressed) == ("model-a", *module[1:])
+                     "--model", "gpt-6-sol") == addressed
+    assert settings(addressed) == ("gpt-6-sol", *module[1:])
     # Explicit values save; a later sparse update preserves them, not defaults.
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
     configure("--session", addressed, "--compaction-trigger", "12345")
-    assert settings(addressed) == ("model-a", [], "ask")
+    assert settings(addressed) == ("gpt-6-sol", [], "ask")
 
 
 def managed_descriptor_rejection(store, env, limit):

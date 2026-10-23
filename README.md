@@ -105,6 +105,10 @@ Use `"$RUI" session list` to list this project's Sessions as JSON, or `session l
 
 Bare `rui` always creates a new Session. Existing Sessions keep their saved settings, including approval mode. `/setup` changes defaults for future Sessions, not the current one.
 
+To choose a model, run `"$RUI" session configure --help` for this release's supported IDs. Omit `--model` to use your saved default, or `gpt-6-luna` when no model is pinned. The list is compiled into Rui and needs no Host or credentials. It does not guarantee that your account can use every listed model.
+
+If Host startup warns that a saved model default is unsupported, run `"$RUI" defaults configure --model ID` with a listed ID, or `"$RUI" defaults configure --clear-model` to remove the pin. Rui preserves the old pin until you change it. Existing Sessions keep their saved model.
+
 ## Configure compaction
 
 Rui compacts model context without deleting saved conversation history. Codex with exact model `gpt-6-luna` defaults to an estimated 244,800-token threshold. Other model names have no automatic threshold unless you set one. Provider-reported context overflow can still start compaction.

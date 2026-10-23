@@ -162,14 +162,14 @@ def main():
                 dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 required_fields={"execution": "enabled"},
             )
-            dialect.configure(root, store, "upgrade-configure", "upgrade/session", "model-a")
+            dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
             dialect.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
             observation, answer, _ = dialect.wait_for_result_release(
                 store, "upgrade-message", "upgrade/session", time.monotonic() + 15)
             assert observation["result"]["status"] == "completed" and answer == expected, observation
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
             configuration = {
-                "workspace": str(workspace), "provider": "codex", "model": "model-a",
+                "workspace": str(workspace), "provider": "codex", "model": "gpt-6-sol",
                 "tools": ["bash", "edit"], "permission_mode": "ask",
             }
             before = dialect.inspect_session(store, "upgrade/session")["session"]

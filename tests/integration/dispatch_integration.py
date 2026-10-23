@@ -79,7 +79,7 @@ def empty_response_retention_case(state, processes, endpoints, status):
     host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     processes.append(host)
     session = f"direct/{label}"
-    configure(state, store, label + "-config", session, "model-a")
+    configure(state, store, label + "-config", session, "gpt-6-sol")
 
     def fail(key, code):
         message(state, store, key, session, "input")
@@ -237,7 +237,7 @@ def compaction_cases(state, processes, endpoints, releases):
         session = f"direct/compact-{route}"
         host = start_host(store, url)
         processes.append(host)
-        configure(state, store, f"{route}-config", session, "model-a", instructions="baseline")
+        configure(state, store, f"{route}-config", session, "gpt-6-sol", instructions="baseline")
         settings = command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["compaction_trigger"] is None and settings["output_reservation"] == "0", settings
         message(state, store, f"{route}-first", session, "covered user input")
@@ -253,7 +253,7 @@ def compaction_cases(state, processes, endpoints, releases):
         assert user_texts(compaction) == ["covered user input"], compaction
         # Admission fixes coverage. Later settings and messages cannot enter it.
         patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
-        configure(state, store, f"{route}-instructions", session, "model-a", instructions="arrived during compaction")
+        configure(state, store, f"{route}-instructions", session, "gpt-6-sol", instructions="arrived during compaction")
         message(state, store, f"{route}-late", session, "pending input")
         gate.set()
         wait_for(lambda: completed_observation(store, f"{route}-late"), "compaction successor answer")
@@ -330,7 +330,7 @@ def compaction_cases(state, processes, endpoints, releases):
     store, session = state / 'compaction-auto-雪"q"\\', 'direct/雪 "q" \\ é'
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "auto-config", session, "model-a")
+    configure(state, store, "auto-config", session, "gpt-6-sol")
     message(state, store, "auto-first", session, "first")
     wait_for(lambda: completed_observation(store, "auto-first"), "automatic first answer")
     patch(store, session, "auto-policy", "--compaction-trigger", "1")
@@ -355,7 +355,7 @@ def compaction_cases(state, processes, endpoints, releases):
     store, session = state / "compaction-irreducible", "direct/irreducible"
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "irreducible-config", session, "model-a")
+    configure(state, store, "irreducible-config", session, "gpt-6-sol")
     message(state, store, "irreducible", session, "input cannot fit")
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
     assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
@@ -377,7 +377,7 @@ def compaction_cases(state, processes, endpoints, releases):
     store, session = state / "compaction-invalid", "direct/compact-invalid"
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "invalid-config", session, "model-a")
+    configure(state, store, "invalid-config", session, "gpt-6-sol")
     message(state, store, "invalid-compaction", session, "compact without tools")
     rejected = wait_for(lambda: (value := observe(store, "invalid-compaction")).get("result") and value, "invalid compaction settlement")
     assert rejected["result"]["code"] == "unsupported_provider_output", rejected
@@ -421,7 +421,7 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
         host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", *flags, observations="control")
         processes.append(host)
         diagnostics = HostDiagnostics(host)
-        configure(state, store, identity + "-config", "direct/correlation", "model-a", schema)
+        configure(state, store, identity + "-config", "direct/correlation", "gpt-6-sol", schema)
         message(state, store, identity + "-message", "direct/correlation", "input")
         deadline = time.monotonic() + 15
 
@@ -674,7 +674,7 @@ def main(mode="all", correlation_case="all"):
         proposal_store = state / "proposal-store"
         proposal_host = start_host(proposal_store, proposal_url)
         processes.append(proposal_host)
-        configure(state, proposal_store, "proposal-config", "direct/proposal", "model-a")
+        configure(state, proposal_store, "proposal-config", "direct/proposal", "gpt-6-sol")
         message(state, proposal_store, "proposal-message", "direct/proposal", "propose mixed calls")
         proposal = wait_for(
             lambda: (value := command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full"))["actions"]["unresolved"] and value,
@@ -764,7 +764,7 @@ def main(mode="all", correlation_case="all"):
         for index, order in enumerate(("denial-first", "stop-first")):
             order_calls, first_effect, second_effect = race_calls[index]
             session = f"direct/{order}"
-            configure(state, proposal_store, f"{order}-config", session, "model-a")
+            configure(state, proposal_store, f"{order}-config", session, "gpt-6-sol")
             message(state, proposal_store, f"{order}-message", session, f"race {order}")
             before = wait_for(
                 lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
@@ -910,7 +910,7 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
         )
         processes.append(continuation_host)
-        configure(state, continuation_store, "continuation-config", "direct/continuation", "model-a")
+        configure(state, continuation_store, "continuation-config", "direct/continuation", "gpt-6-sol")
         message(state, continuation_store, "continuation-first", "direct/continuation", "make calls")
         continuation_report = wait_for(
             lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
@@ -1075,7 +1075,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(continuation_host)
 
-        configure(state, continuation_store, "queued-config", "direct/queued-continuation", "model-a")
+        configure(state, continuation_store, "queued-config", "direct/queued-continuation", "gpt-6-sol")
         message(
             state,
             continuation_store,
@@ -1187,7 +1187,7 @@ def main(mode="all", correlation_case="all"):
         success_host = start_host(success_store, success_url)
         processes.append(success_host)
         configure_lost_reply(
-            state, success_store, "success-config", "direct/success", "model-a"
+            state, success_store, "success-config", "direct/success", "gpt-6-sol"
         )
         stop_host(success_host)
         processes.remove(success_host)
@@ -1269,7 +1269,7 @@ def main(mode="all", correlation_case="all"):
             "--session",
             "direct/success",
             "--model",
-            "model-b",
+            "gpt-6.1-sol",
             "--tools",
             "bash",
         )
@@ -1291,7 +1291,7 @@ def main(mode="all", correlation_case="all"):
         after_model_change = command(
             "session", "inspect", "--store", success_store, "--session", "direct/success"
         )["session"]
-        assert after_model_change["model"] == "model-a", after_model_change
+        assert after_model_change["model"] == "gpt-6-sol", after_model_change
         assert after_model_change["revision"] == before_model_change["revision"], (
             before_model_change,
             after_model_change,
@@ -1419,7 +1419,7 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{retry_endpoint.server_port}/responses",
         )
         processes.append(retry_host)
-        configure(state, retry_store, "retry-config", "direct/retry", "model-a")
+        configure(state, retry_store, "retry-config", "direct/retry", "gpt-6-sol")
         message(state, retry_store, "retry-message", "direct/retry", "retry exactly")
         retry_complete = wait_for(
             lambda: completed_observation(retry_store, "retry-message"),
@@ -1463,7 +1463,7 @@ def main(mode="all", correlation_case="all"):
         dated_store = state / "dated-retry-store"
         dated_host = start_host(dated_store, f"http://127.0.0.1:{dated_endpoint.server_port}/responses")
         processes.append(dated_host)
-        configure(state, dated_store, "dated-config", "direct/dated", "model-a")
+        configure(state, dated_store, "dated-config", "direct/dated", "gpt-6-sol")
         message(state, dated_store, "dated-message", "direct/dated", "retry date")
         dated_complete = wait_for(
             lambda: completed_observation(dated_store, "dated-message"),
@@ -1503,7 +1503,7 @@ def main(mode="all", correlation_case="all"):
             )
             processes.append(permanent_host)
             configure(
-                state, permanent_store, f"permanent-config-{index}", "direct/permanent", "model-a"
+                state, permanent_store, f"permanent-config-{index}", "direct/permanent", "gpt-6-sol"
             )
             message(
                 state,
@@ -1581,7 +1581,7 @@ def main(mode="all", correlation_case="all"):
                 disposition_store,
                 f"{name}-config",
                 f"direct/{name}",
-                "model-a",
+                "gpt-6-sol",
             )
             message(
                 state,
@@ -1629,7 +1629,7 @@ def main(mode="all", correlation_case="all"):
             local_read_store,
             "local-read-config",
             "direct/local-read",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -1693,7 +1693,7 @@ def main(mode="all", correlation_case="all"):
                 identity_store,
                 f"{fault}-config",
                 f"direct/{fault}",
-                "model-a",
+                "gpt-6-sol",
             )
             message(
                 state,
@@ -1773,7 +1773,7 @@ def main(mode="all", correlation_case="all"):
             continued_store,
             "continued-config",
             "direct/continued-retry",
-            "model-a",
+            "gpt-6-sol",
             instructions="original instructions",
         )
         message(
@@ -1800,7 +1800,7 @@ def main(mode="all", correlation_case="all"):
             continued_store,
             "continued-new-instructions",
             "direct/continued-retry",
-            "model-a",
+            "gpt-6-sol",
             instructions="new instructions",
         )
         message(
@@ -1892,7 +1892,7 @@ def main(mode="all", correlation_case="all"):
             evidence_store = state / f"evidence-{name}-store"
             evidence_host = start_host(evidence_store, evidence_url)
             processes.append(evidence_host)
-            configure(state, evidence_store, f"evidence-{name}-config", f"direct/evidence-{name}", "model-a")
+            configure(state, evidence_store, f"evidence-{name}-config", f"direct/evidence-{name}", "gpt-6-sol")
             message(
                 state,
                 evidence_store,
@@ -1956,7 +1956,7 @@ def main(mode="all", correlation_case="all"):
             contradictory_store,
             "contradictory-config",
             "direct/contradictory-evidence",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -2052,7 +2052,7 @@ def main(mode="all", correlation_case="all"):
             pending_store, f"http://127.0.0.1:{pending_endpoint.server_port}/responses"
         )
         processes.append(pending_host)
-        configure(state, pending_store, "pending-config", "direct/pending", "model-a")
+        configure(state, pending_store, "pending-config", "direct/pending", "gpt-6-sol")
         command(
             "session", "configure",
             "--store",
@@ -2120,7 +2120,7 @@ def main(mode="all", correlation_case="all"):
                 schema_store,
                 f"schema-config-{index}",
                 "direct/unsupported-schema",
-                "model-a",
+                "gpt-6-sol",
                 {"type": "object"},
             )
             message(
@@ -2332,7 +2332,7 @@ def main(mode="all", correlation_case="all"):
                 invalid_store, f"http://127.0.0.1:{invalid_endpoint.server_port}/responses"
             )
             processes.append(invalid_host)
-            configure(state, invalid_store, f"invalid-config-{index}", f"direct/invalid-{index}", "model-a")
+            configure(state, invalid_store, f"invalid-config-{index}", f"direct/invalid-{index}", "gpt-6-sol")
             message(
                 state,
                 invalid_store,
@@ -2446,7 +2446,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(concurrent_host)
         for text in (*concurrent_bodies, "succeed"):
-            configure(state, concurrent_store, f"{text}-config", f"direct/{text}", "model-a")
+            configure(state, concurrent_store, f"{text}-config", f"direct/{text}", "gpt-6-sol")
             message(state, concurrent_store, f"{text}-message", f"direct/{text}", text)
         wait_for(lambda: len(concurrent_endpoint.requests) == 5, "concurrent requests in flight")
         wait_for(lambda: completed_observation(concurrent_store, "succeed-message"), "concurrent success")
@@ -2553,7 +2553,7 @@ def main(mode="all", correlation_case="all"):
                 fault,
             )
             processes.append(fault_host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
             message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
             rejected = wait_for(
                 lambda key=f"{fault}-message": (
@@ -2579,7 +2579,7 @@ def main(mode="all", correlation_case="all"):
                 fault,
             )
             processes.append(fault_host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
             message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
             wait_for(lambda: fault_host.poll() is not None, f"{fault} fenced shutdown")
             assert fault_host.returncode != 0
@@ -2613,7 +2613,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(scratch_host)
         scratch_diagnostics = HostDiagnostics(scratch_host)
-        configure(state, scratch_store, "scratch-config", "direct/response-scratch", "model-a")
+        configure(state, scratch_store, "scratch-config", "direct/response-scratch", "gpt-6-sol")
         message(state, scratch_store, "scratch-message", "direct/response-scratch", "scratch")
         scratch_deadline = time.monotonic() + 8
         rejected = wait_for(
@@ -2651,8 +2651,8 @@ def main(mode="all", correlation_case="all"):
         processes.append(growth_host)
         growth_diagnostics = HostDiagnostics(growth_host)
         growth_peers = PeerCensus(growth_diagnostics)
-        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-a", "direct/growth-a", "model-a"))
-        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-b", "direct/growth-b", "model-a"))
+        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-a", "direct/growth-a", "gpt-6-sol"))
+        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-b", "direct/growth-b", "gpt-6-sol"))
         growth_peers.call("message", lambda: message(state, growth_store, "growth-count", "direct/growth-a", "count"))
         count_deadline = time.monotonic() + 8
         counted = wait_for(
@@ -2767,11 +2767,11 @@ def main(mode="all", correlation_case="all"):
         projection_url = f"http://127.0.0.1:{projection_endpoint.server_port}/responses"
         host = start_host(projection_store, projection_url)
         processes.append(host)
-        configure(state, projection_store, "projection-config", "direct/projection", "model-a", instructions="caller-first")
+        configure(state, projection_store, "projection-config", "direct/projection", "gpt-6-sol", instructions="caller-first")
         message(state, projection_store, "projection-first", "direct/projection", "first")
         wait_for(lambda: completed_observation(projection_store, "projection-first"), "projected answer")
         assert read_result(projection_store, "projection-first") == projected_answer
-        configure(state, projection_store, "projection-update", "direct/projection", "model-a", instructions=projected_answer.decode())
+        configure(state, projection_store, "projection-update", "direct/projection", "gpt-6-sol", instructions=projected_answer.decode())
         message(state, projection_store, "projection-second", "direct/projection", projected_answer.decode())
         wait_for(lambda: completed_observation(projection_store, "projection-second"), "deduplicated answer")
         assert read_result(projection_store, "projection-second") == b"caller-first"
@@ -2811,10 +2811,10 @@ def main(mode="all", correlation_case="all"):
             "required": ["answer"],
             "additionalProperties": False,
         }
-        frozen_peers.call("configure", lambda: configure(state, store, "config-a", "direct/main", "model-a", output_schema, "A"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-b", "direct/main", "model-a", instructions="B"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a", "direct/main", "model-a", instructions="A"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a-again", "direct/main", "model-a", instructions="A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "config-a", "direct/main", "gpt-6-sol", output_schema, "A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-b", "direct/main", "gpt-6-sol", instructions="B"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a", "direct/main", "gpt-6-sol", instructions="A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a-again", "direct/main", "gpt-6-sol", instructions="A"))
         frozen_peers.call("message", lambda: message(state, store, "message-a", "direct/main", 'first "message"\n'))
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
@@ -2829,7 +2829,7 @@ def main(mode="all", correlation_case="all"):
             "--session",
             "direct/main",
             "--model",
-            "model-b",
+            "gpt-6.1-sol",
             "--tools",
             "none",
             expect=1,
@@ -2839,7 +2839,7 @@ def main(mode="all", correlation_case="all"):
         active_settings = frozen_peers.call("inspect", lambda: command(
             "session", "inspect", "--store", store, "--session", "direct/main"
         ))["session"]
-        assert active_settings["model"] == "model-a", active_settings
+        assert active_settings["model"] == "gpt-6-sol", active_settings
         assert active_settings["tools"] == ["bash", "edit"], active_settings
         frozen_peers.call("message", lambda: message(state, store, "message-b", "direct/main", "later message"))
         assert len(endpoint.requests) == 1
@@ -2888,7 +2888,7 @@ def main(mode="all", correlation_case="all"):
             "--session",
             "direct/main",
             "--model",
-            "model-b",
+            "gpt-6.1-sol",
             "--permission-mode",
             "bypass",
             expect=1,
@@ -2907,7 +2907,7 @@ def main(mode="all", correlation_case="all"):
 
         observed = json.loads(endpoint.requests[0])
         expected = {
-            "model": "model-a",
+            "model": "gpt-6-sol",
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
@@ -2982,7 +2982,7 @@ def main(mode="all", correlation_case="all"):
         ]
         assert successor["input"] == later_input, successor
         assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session="direct/main"), successor
-        assert successor["model"] == "model-a", successor
+        assert successor["model"] == "gpt-6-sol", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
 
@@ -2996,7 +2996,7 @@ def main(mode="all", correlation_case="all"):
             {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
         ], restarted
         assert restarted["instructions"] == successor["instructions"], restarted
-        assert restarted["model"] == "model-a", restarted
+        assert restarted["model"] == "gpt-6-sol", restarted
         assert restarted["tools"] == [], restarted
         assert "text" not in restarted, restarted
         wait_for(lambda: observe(store, "message-c").get("result", {}).get("code") == "provider_http_422", "post-restart successor failure")
@@ -3034,7 +3034,7 @@ def main(mode="all", correlation_case="all"):
             preparation_store,
             "preparation-config",
             "direct/preparation",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -3146,7 +3146,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(prelaunch_host)
         configure(
-            state, prelaunch_store, "prelaunch-config", "direct/prelaunch", "model-a"
+            state, prelaunch_store, "prelaunch-config", "direct/prelaunch", "gpt-6-sol"
         )
         message(
             state,
@@ -3249,7 +3249,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(launched_host)
         configure(
-            state, launched_store, "launched-config", "direct/launched", "model-a"
+            state, launched_store, "launched-config", "direct/launched", "gpt-6-sol"
         )
         message(
             state,
@@ -3295,7 +3295,7 @@ def main(mode="all", correlation_case="all"):
             "5000",
         )
         processes.append(sealed_host)
-        configure(state, sealed_store, "sealed-config", "direct/sealed", "model-a")
+        configure(state, sealed_store, "sealed-config", "direct/sealed", "gpt-6-sol")
         message(
             state,
             sealed_store,
@@ -3346,7 +3346,7 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(committed_host)
         configure(
-            state, committed_store, "committed-config", "direct/committed", "model-a"
+            state, committed_store, "committed-config", "direct/committed", "gpt-6-sol"
         )
         message(
             state,
@@ -3409,14 +3409,14 @@ def main(mode="all", correlation_case="all"):
             durable_wait_store,
             "capacity-wait-config-a",
             "direct/capacity-wait-a",
-            "model-a",
+            "gpt-6-sol",
         ))
         capacity_peers.call("configure", lambda: configure(
             state,
             durable_wait_store,
             "capacity-wait-config-b",
             "direct/capacity-wait-b",
-            "model-a",
+            "gpt-6-sol",
         ))
         capacity_peers.call("message", lambda: message(
             state,
@@ -3520,7 +3520,7 @@ def main(mode="all", correlation_case="all"):
                 stale_store,
                 f"stale-{name}-config",
                 f"direct/stale-{name}",
-                "model-a",
+                "gpt-6-sol",
             )
             message(
                 state,
@@ -3538,7 +3538,7 @@ def main(mode="all", correlation_case="all"):
             stale_store,
             "stale-capacity-config",
             "direct/stale-capacity",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -3591,7 +3591,7 @@ def main(mode="all", correlation_case="all"):
         # An offline Host queues the admission without dispatching it.
         backlog_host = start_host(backlog_store, None)
         processes.append(backlog_host)
-        configure(state, backlog_store, "backlog-config", "direct/backlog", "model-a")
+        configure(state, backlog_store, "backlog-config", "direct/backlog", "gpt-6-sol")
         message(
             state,
             backlog_store,
@@ -3631,7 +3631,7 @@ def main(mode="all", correlation_case="all"):
             backlog_store,
             "backlog-stall-config",
             "direct/backlog-stall",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -3690,7 +3690,7 @@ def main(mode="all", correlation_case="all"):
         recovery_host = start_host(recovery_store, None)
         processes.append(recovery_host)
         for index in range(1, 101):
-            configure(state, recovery_store, f"recovery-history-{index}", f"recovery-{index}", "model-a")
+            configure(state, recovery_store, f"recovery-history-{index}", f"recovery-{index}", "gpt-6-sol")
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
@@ -3722,7 +3722,7 @@ def main(mode="all", correlation_case="all"):
                 recovery_store,
                 f"recovery-{name}-config",
                 f"direct/recovery-{name}",
-                "model-a",
+                "gpt-6-sol",
             )
             message(
                 state,
@@ -3752,7 +3752,7 @@ def main(mode="all", correlation_case="all"):
             recovery_store,
             "recovery-new-config",
             "direct/recovery-new",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -3961,7 +3961,7 @@ def main(mode="all", correlation_case="all"):
             exhaustion_store,
             "exhaustion-config",
             "direct/exhaustion",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -4037,8 +4037,8 @@ def main(mode="all", correlation_case="all"):
             "101",
         )
         processes.append(host)
-        configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "model-a")
-        configure(state, capacity_store, "capacity-config-b", "direct/capacity-b", "model-a")
+        configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "gpt-6-sol")
+        configure(state, capacity_store, "capacity-config-b", "direct/capacity-b", "gpt-6-sol")
         message(state, capacity_store, "capacity-message-a", "direct/capacity-a", "alpha")
         message(state, capacity_store, "capacity-message-b", "direct/capacity-b", "beta")
         wait_for(lambda: len(capacity_endpoint.requests) == 2, "two concurrent reactor requests")
@@ -4071,8 +4071,8 @@ def main(mode="all", correlation_case="all"):
         h1_endpoint = SuccessEndpoint(
             [],
             responses_by_input={
-                "first": (sse_answer("h1-first", "h1-first-r", "model-a", "first answer")[0], h1_release),
-                "second": sse_answer("h1-second", "h1-second-r", "model-a", "second answer")[0],
+                "first": (sse_answer("h1-first", "h1-first-r", "gpt-6-sol", "first answer")[0], h1_release),
+                "second": sse_answer("h1-second", "h1-second-r", "gpt-6-sol", "second answer")[0],
             },
         )
         h1_thread = threading.Thread(target=h1_endpoint.serve_forever, daemon=True)
@@ -4086,8 +4086,8 @@ def main(mode="all", correlation_case="all"):
             "2",
         )
         processes.append(h1_host)
-        configure(state, h1_store, "h1-config-first", "direct/h1-first", "model-a")
-        configure(state, h1_store, "h1-config-second", "direct/h1-second", "model-a")
+        configure(state, h1_store, "h1-config-first", "direct/h1-first", "gpt-6-sol")
+        configure(state, h1_store, "h1-config-second", "direct/h1-second", "gpt-6-sol")
         message(state, h1_store, "h1-message-first", "direct/h1-first", "first")
         wait_for(lambda: len(h1_endpoint.requests) == 1, "first H1 request")
         message(state, h1_store, "h1-message-second", "direct/h1-second", "second")
@@ -4125,8 +4125,8 @@ def main(mode="all", correlation_case="all"):
             active_capacity=2,
         )
         processes.append(slow_host)
-        configure(state, slow_store, "slow-config-first", "direct/slow-first", "model-a")
-        configure(state, slow_store, "slow-config-second", "direct/slow-second", "model-a")
+        configure(state, slow_store, "slow-config-first", "direct/slow-first", "gpt-6-sol")
+        configure(state, slow_store, "slow-config-second", "direct/slow-second", "gpt-6-sol")
         message(state, slow_store, "slow-message-first", "direct/slow-first", "first")
         wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
         message(state, slow_store, "slow-message-second", "direct/slow-second", "second")
@@ -4168,7 +4168,7 @@ def main(mode="all", correlation_case="all"):
         host = start_host(rollback_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
         rollback_diagnostics = HostDiagnostics(host)
-        configure(state, rollback_store, "rollback-config", "direct/rollback", "model-a")
+        configure(state, rollback_store, "rollback-config", "direct/rollback", "gpt-6-sol")
         message(state, rollback_store, "rollback-message", "direct/rollback", "rollback")
         host.wait(timeout=10)
         assert host.returncode != 0, rollback_diagnostics.tail()
@@ -4234,7 +4234,7 @@ def main(mode="all", correlation_case="all"):
         first_store = state / "first-step-store"
         host = start_host(first_store, url, "--fault", "request-first-step")
         processes.append(host)
-        configure(state, first_store, "first-config", "direct/first", "model-a")
+        configure(state, first_store, "first-config", "direct/first", "gpt-6-sol")
         message(state, first_store, "first-message", "direct/first", "first step")
         failed = wait_for(
             lambda: (value := observe(first_store, "first-message"))["status"] == "accepted"
@@ -4297,7 +4297,7 @@ def main(mode="all", correlation_case="all"):
             )
             processes.append(host)
             fault_diagnostics = HostDiagnostics(host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
             message(state, fault_store, f"{fault}-message", f"direct/{fault}", fault)
             fault_deadline = time.monotonic() + 8
             failed = wait_for(
@@ -4345,7 +4345,7 @@ def main(mode="all", correlation_case="all"):
             preparation_stop_store,
             "preparation-stop-config",
             "direct/preparation-stop",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -4415,7 +4415,7 @@ def main(mode="all", correlation_case="all"):
             preparation_shutdown_store,
             "preparation-shutdown-config",
             "direct/preparation-shutdown",
-            "model-a",
+            "gpt-6-sol",
         )
         message(
             state,
@@ -4489,7 +4489,7 @@ def main(mode="all", correlation_case="all"):
         save_store = state / "save-fault-store"
         host = start_host(save_store, url, "--fault", "result-before-commit")
         processes.append(host)
-        configure(state, save_store, "save-config", "direct/save", "model-a")
+        configure(state, save_store, "save-config", "direct/save", "gpt-6-sol")
         message(state, save_store, "save-message", "direct/save", "save fault")
         wait_for(lambda: len(endpoint.requests) == 1, "save-fault endpoint request")
         time.sleep(0.2)
@@ -4523,7 +4523,7 @@ def main(mode="all", correlation_case="all"):
         framing_store = state / "framing-meter-store"
         host = start_host(framing_store, None)
         processes.append(host)
-        configure(state, framing_store, "framing-config", "direct/framing-meter", "model-a")
+        configure(state, framing_store, "framing-config", "direct/framing-meter", "gpt-6-sol")
         for index in range(40):
             message(state, framing_store, f"framing-{index}", "direct/framing-meter", "")
         stop_host(host)
@@ -4550,7 +4550,7 @@ def main(mode="all", correlation_case="all"):
         framing_exact_store = state / "framing-exact-store"
         host = start_host(framing_exact_store, None)
         processes.append(host)
-        configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "model-a")
+        configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "gpt-6-sol")
         for index in range(40):
             message(state, framing_exact_store, f"exact-{index}", "direct/framing-exact", "")
         stop_host(host)
@@ -4600,7 +4600,7 @@ def main(mode="all", correlation_case="all"):
         framing_limit_store = state / "framing-limit-store"
         host = start_host(framing_limit_store, None)
         processes.append(host)
-        configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "model-a")
+        configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "gpt-6-sol")
         for index in range(40):
             message(state, framing_limit_store, f"limit-{index}", "direct/framing-limit", "")
         stop_host(host)
@@ -4660,7 +4660,7 @@ def main(mode="all", correlation_case="all"):
             "1",
         )
         processes.append(host)
-        configure(state, progress_store, "progress-config", "direct/progress", "model-a")
+        configure(state, progress_store, "progress-config", "direct/progress", "gpt-6-sol")
         message(state, progress_store, "progress-message", "direct/progress", "progress")
         progress_failure = wait_for(
             lambda: (value := observe(progress_store, "progress-message")).get("result", {}).get("code")
@@ -4684,7 +4684,7 @@ def main(mode="all", correlation_case="all"):
             accelerated_retries=False,
         )
         processes.append(host)
-        configure(state, stall_store, "stall-config", "direct/stall", "model-a")
+        configure(state, stall_store, "stall-config", "direct/stall", "gpt-6-sol")
         message(state, stall_store, "stall-message", "direct/stall", "stall")
         wait_for(
             lambda: command(
@@ -4732,7 +4732,7 @@ def main(mode="all", correlation_case="all"):
                 accelerated_retries=False,
             )
             processes.append(host)
-            configure(case_state, transient_store, "config", "direct/transient", "model-a")
+            configure(case_state, transient_store, "config", "direct/transient", "gpt-6-sol")
             message(case_state, transient_store, "message", "direct/transient", "input")
             wait_for(lambda: len(endpoint.requests) == 1, "one endpoint request")
             resources = wait_for_execution_release(
@@ -4797,8 +4797,8 @@ def main(mode="all", correlation_case="all"):
         race_store = state / "fence-race-store"
         host = start_host(race_store, url)
         processes.append(host)
-        configure(state, race_store, "race-config", "direct/race", "model-a")
-        configure(state, race_store, "race-other-config", "direct/other", "model-a")
+        configure(state, race_store, "race-config", "direct/race", "gpt-6-sol")
+        configure(state, race_store, "race-other-config", "direct/other", "gpt-6-sol")
         stop_host(host)
         processes.remove(host)
         # The Host holds its Store exclusively, so damage another Session
@@ -4929,7 +4929,7 @@ def main(mode="all", correlation_case="all"):
             owned_store = state / f"{fault}-owned-store"
             owned_host = start_host(owned_store, unlink_url, "--fault", fault)
             processes.append(owned_host)
-            configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "model-a")
+            configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
             message(state, owned_store, f"{fault}-message", f"direct/{fault}", "unlink")
             resources = wait_for(
                 lambda store=owned_store, session=f"direct/{fault}": (
@@ -4993,7 +4993,7 @@ def main(mode="all", correlation_case="all"):
         unlink_store = state / "unlink-store"
         host = start_host(unlink_store, url, "--fault", "request-unlink")
         processes.append(host)
-        configure(state, unlink_store, "unlink-config", "direct/unlink", "model-a")
+        configure(state, unlink_store, "unlink-config", "direct/unlink", "gpt-6-sol")
         message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
         unlink_deadline = time.monotonic() + 20
         resources = wait_for(

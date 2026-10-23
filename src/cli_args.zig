@@ -80,7 +80,7 @@ const compaction_help = compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\An unknown --session needs complete first configuration: --workspace PATH --provider codex --model MODEL.
     \\
-;
+++ product_defaults.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
 
 const Option = struct {
     name: []const u8,

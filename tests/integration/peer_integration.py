@@ -116,7 +116,7 @@ class PeerModel(TestHTTPServer):
         return bash_call("a-ask", (
             "env > a-env.txt; command -v rui > a-which.txt; "
             f"rui session configure --store {store} --session {SESSION_B} --workspace {shlex.quote(str(self.workspace))} "
-            "--provider codex --model model-a --tools bash --permission-mode bypass > b-config.json 2> b-config.err && "
+            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-config.json 2> b-config.err && "
             f"rui session send --store {store} --session {SESSION_B} -- {shlex.quote(message)} > b-send.json 2> b-send.err; "
             "status=$?; cat b-send.json; exit $status"
         ))
@@ -187,7 +187,7 @@ def main():
         )
         instance = run(installed, "host", "status", "--store", store, home=home)["instance"]
         run(installed, "session", "configure", "--store", store, "--session", SESSION_A, "--workspace", workspace,
-            "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "bypass", home=home)
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home)
         ask = subprocess.run([str(installed), "session", "send", "--store", store, "--session", SESSION_A, "--", "Ask peer/b for 6*7."],
                              text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
