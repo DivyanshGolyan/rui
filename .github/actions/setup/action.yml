@@ -77,18 +77,18 @@ runs:
         restore-keys: |
           rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
           rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
-    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      # Consumers reuse the producer's compiled build runner and configuration;
-      # executables still come from the verified artifact.
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # Consumers compile only the build runner and configuration; executables
+      # come from the verified artifact and test runs are never cached.
       if: ${{ inputs.cold != 'true' && inputs.compiled == 'true' }}
       with:
         path: |
           ~/.cache/zig
           .zig-cache
-          zig-pkg
-        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-compiled
+          !.zig-cache/o/ci-compiled
+        key: rui-runner-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
         restore-keys: |
-          rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
+          rui-runner-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-
     - name: Install pinned compiler
       shell: bash
       run: |
