@@ -105,8 +105,18 @@ class PeerModel(TestHTTPServer):
             self.b_received.set()
             reply_to = json.loads(text.splitlines()[1].removeprefix("Parent address (JSON): "))
             assert reply_to == sender_of(request), request
-            # B's execution waits for the test's release file, then replies.
+            # B must refuse its own address before either explicit or generated
+            # capture, including hex Session and canonical Store aliases.
+            # It then waits for the test's release file and sends to its parent.
             return bash_call("b-reply", (
+                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
+                f"rui session send --store {shlex.quote(address['store'] + '/.')} --session-hex {SESSION_B.encode().hex()} "
+                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send -- 'self report' > b-self.out 2> b-self.err; "
+                "echo $? > b-self.status; "
+                f"rui session send --store {shlex.quote(address['store'])} --session {shlex.quote(SESSION_B)} "
+                "--text nonexistent-report > b-self-generated.out 2> b-self-generated.err; "
+                "echo $? > b-self-generated.status; "
+                'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 f"rui session send --store {shlex.quote(reply_to['store'])} --session {shlex.quote(reply_to['session'])} "
                 f"-- 'from peer/b: 42' > b-reply.json 2> b-reply.err"
@@ -205,6 +215,15 @@ def main():
         # admission receipt and A finished its Turn with it. These Session
         # snapshots synchronize the fixture observer, not A's model or Bash.
         assert endpoint.b_received.wait(20), "B never received the peer Message"
+        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send refusal")
+        for name in ("b-self", "b-self-generated"):
+            assert (workspace / f"{name}.status").read_text() == "1\n", name
+            assert (workspace / f"{name}.out").read_bytes() == b"", name
+            assert (workspace / f"{name}.err").read_text() == "recipient is this Session; send to the parent address from your task.\n", name
+        assert not (state / "b-self.json").exists(), "self-send created an explicit capture"
+        assert (workspace / "b-captures-before").read_bytes() == (workspace / "b-captures-after").read_bytes(), "self-send created a generated capture"
+        absent = run(installed, "request", "inspect", "--store", store, "--key", "self-send", home=home)
+        assert absent["observation"]["status"] == "absent", absent
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)

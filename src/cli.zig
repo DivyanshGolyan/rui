@@ -38,7 +38,9 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
-        TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        if (err == error.SelfSend) {
+            @import("stderr.zig").print("recipient is this Session; send to the parent address from your task.\n", .{});
+        } else TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -110,8 +112,9 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
         }
-        // Model rejection already names the ID, supported IDs and repair.
-        if (err == error.UnsupportedModel) return err;
+        // Model rejection already names the ID, supported IDs and repair;
+        // self-send has one boundary diagnostic, with no recovery handle.
+        if (err == error.UnsupportedModel or err == error.SelfSend) return err;
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
