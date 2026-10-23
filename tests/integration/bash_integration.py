@@ -235,7 +235,7 @@ def prove_stdin(state):
         "pathlib.Path('input.bin').write_bytes(sys.stdin.buffer.read())"
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
-    empty_send_error = "Standard input was empty; provide Message text. Nothing was sent.\n"
+    empty_send_error = "\nrui: failure during input_parse; cause follows.\nStandard input was empty; provide Message text. Nothing was sent.\n"
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0, "empty-send": len(empty_send_error), "null-send": len(empty_send_error)}
     cases = [
@@ -258,8 +258,7 @@ def prove_stdin(state):
         for name, input_text in (("empty-send", ""), ("null-send", None)):
             # Trusted Bash peers select the launching Action's Store.
             command = shlex.join([str(fixture.RUI), "session", "send", "--to", recipient,
-                                  "--record", str(state / f"{name}.json"), "--key", name,
-                                  *(["--text", "-"] if name == "null-send" else ["-"])])
+                                  "--record", str(state / f"{name}.json"), "--key", name])
             cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
         descriptors = {}
         for name, arguments, _ in cases:
@@ -814,8 +813,6 @@ def walkthrough():
         assert configured["answer"]["created"] is True, configured
         show_observation("configuration accepted; ask mode requires an exact Action decision")
 
-        text_path = state / "walkthrough-message.txt"
-        text_path.write_text("make one independently counted file effect")
         message_args = (
             "session", "send",
             "--store",
@@ -826,11 +823,9 @@ def walkthrough():
             message_record,
             "--key",
             message_key,
-            "--text",
-            text_path,
         )
         show_command(*message_args)
-        submitted = fixture.command(*message_args)
+        submitted = fixture.command(*message_args, input="make one independently counted file effect")
         assert submitted["answer"]["status"] == "accepted", submitted
         captured_bytes = message_record.read_bytes()
         captured = json.loads(captured_bytes)

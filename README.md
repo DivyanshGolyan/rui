@@ -89,7 +89,7 @@ Type a request at `›`, such as `Investigate the failing test`. In approval mod
 | `/requests` | Lists saved requests for recovery. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, use `rui session send --text FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
+You can edit and paste multiline text at the prompt. There is no input history or completion. For input longer than 64 KiB, redirect it into `rui session send --to ID < FILE`. If a submission is uncertain, Ctrl-R retries that same request rather than creating a new one.
 
 The conversation uses the full terminal screen and leaves your shell's screen as it was when you exit; conversation text does not stay in your terminal's scrollback. Scroll with PgUp/PgDn, the arrow keys or the mouse wheel; keep scrolling up to read older conversation. Esc returns to the latest messages. Normal exit, Ctrl-C and SIGTERM restore the previous screen. SIGKILL and native crashes cannot run cleanup; use your terminal's reset command if needed.
 
@@ -132,27 +132,28 @@ Omitting either flag preserves its current setting. Scripts can use the same fla
 
 ## Use Rui from scripts
 
-Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options without a Host or credentials. Metadata goes to stdout as one JSON value. Recovery handles and diagnostics go to stderr. One-shot commands never start a Host or sign in, so start the Host explicitly:
+Scripts and agents use one-shot commands grouped by resource: `session`, `request`, `action`, `host`, `defaults` and `auth`. `rui RESOURCE --help` and `rui RESOURCE COMMAND --help` describe the installed version's exact options without a Host or credentials. `session start` prints its new six-character ID. Other metadata is JSON on stdout. Recovery handles and diagnostics go to stderr. One-shot commands never start a Host or sign in, so start the Host explicitly:
 
 ```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-SESSION=$("$RUI" session configure --store "$STORE" \
-  --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask \
-  | python3 -c 'import json, sys; print(json.load(sys.stdin)["answer"]["session"])')
+SESSION=$(printf '%s' 'Investigate the failing test' | "$RUI" session start --store "$STORE" \
+  --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask)
 ```
 
-Without `--session`, `session configure` creates a fresh Session and returns its Store-allocated ID, for example `k7m2qx`. IDs contain exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`). Omitted creation settings use the current directory and your saved defaults. Supplied `--session "$SESSION"` updates only that existing Session, keeping omitted settings. Unknown IDs never create Sessions. Then send the Session a message:
+`session start` creates the Session and admits its first Message in one transaction. Its ID is an admission receipt, not a completed answer. IDs contain exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), for example `k7m2qx`. Omitted creation settings use the current directory and your saved defaults. Send later Messages to that ID:
 
 ```sh
-"$RUI" session send --store "$STORE" --to "$SESSION" "Investigate the failing test"
+printf '%s' 'Also check the error path' | "$RUI" session send --store "$STORE" --to "$SESSION"
 "$RUI" request inspect SAVED_HANDLE
 "$RUI" request read-result SAVED_HANDLE
 ```
 
 `--to` takes the bare ID, without JSON or a prefix. An anonymous human or script can select `--store`, or omit it to use saved Store defaults. A peer always sends within its sender's Store, even when HOME points elsewhere, and rejects a conflicting `--store`. An unknown ID fails with `no session k7m2qx in this Store` without creating or starting work. Random IDs are not authorization.
 
-Replace `SAVED_HANDLE` with the handle that `session send` prints on stderr. `session send` returns once the message is admitted, not when the work finishes. `request inspect` reports that message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. To wait, run `request inspect` again later.
+Message text comes only from stdin, preserving exact UTF-8 bytes, NULs and trailing newlines. Use redirection for existing files. There is no `--text`, inline text operand or file-valued instructions option. Set instructions separately with `rui session configure --store "$STORE" --session "$SESSION" --instructions - < instructions.txt`. An empty instruction stream clears instructions; an empty Message stream sends nothing. Without `--session`, `session configure` creates a Session without a Message. With `--session`, it updates only that existing Session and preserves omitted settings.
+
+Replace `SAVED_HANDLE` with the handle that `session start` or `session send` prints on stderr. Both commands return once the Message is admitted, not when the work finishes. `request inspect` reports that Message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. After lost start output, recover its original handle to retrieve the allocated ID; do not start again with a new key. To wait, run `request inspect` again later.
 
 The conversation shows commentary and the final answer as separate assistant messages, in provider stream order around tool calls. `request read-result` returns only the final answer. For responses whose messages have no phase, it returns the last assistant message.
 

@@ -165,6 +165,10 @@ pub const MessageCommand = struct {
     sender: ?Address = null,
     sender_handle: ?Bounded(32) = null,
     text: ContentField = .{},
+    // Non-null means create a fresh Session and admit this first Message in
+    // one transaction. The requested Session must then be empty. Initial
+    // configuration cannot supply instruction or schema content values.
+    configuration: ?Configuration = null,
 
     pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
         try removeContent(&self.text, io);
@@ -182,6 +186,11 @@ pub const MessageCommand = struct {
         hash.update(&.{@intFromBool(self.sender_handle != null)});
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
         hashContent(&hash, &self.text);
+        if (self.configuration) |configuration| {
+            const creation = ConfigureCommand{ .configuration = configuration };
+            hashField(&hash, "initial-configuration");
+            hash.update(&creation.semanticDigest());
+        }
         return hash.finalResult();
     }
 };
@@ -671,8 +680,8 @@ pub const Ingress = struct {
     content_count: usize = 0,
     complete: bool = false,
 
-    // Configure owns the largest scalar population. Allow worst-case escaping
-    // of its identity/settings fields and 128 short grammar tokens (keys,
+    // Initial Message combines configuration scalars and sender identity.
+    // Allow worst-case escaping of both and 128 short grammar tokens (keys,
     // states, tools and literals, each at most 32 bytes), plus punctuation
     // and one preserved whitespace separator at every lexical boundary.
     const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
@@ -995,6 +1004,25 @@ const Parser = struct {
         try self.readSmallString(&request.session);
         try self.expectByte(',');
         try self.expectKey("configuration");
+        request.configuration = try self.parseConfiguration(true);
+        if (try self.consumeIf(',')) {
+            try self.expectKey("require_model");
+            try self.skipWhitespace();
+            const first = try self.source.readByte();
+            const rest: []const u8 = switch (first) {
+                't' => "rue",
+                'f' => "alse",
+                else => return error.InvalidJsonShape,
+            };
+            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+            request.require_model = first == 't';
+        }
+        return request;
+    }
+
+    fn parseConfiguration(self: *Parser, allow_content: bool) !Configuration {
+        var request: ConfigureCommand = .{};
+        errdefer request.removeTemporaryContent(self.options.io) catch unreachable;
         try self.expectByte('{');
         try self.expectKey("workspace");
         try self.readOptionalSmall(max_workspace_bytes, &request.configuration.workspace);
@@ -1006,7 +1034,7 @@ const Parser = struct {
         try self.readOptionalSmall(max_model_bytes, &request.configuration.model);
         try self.expectByte(',');
         try self.expectKey("instructions");
-        try self.readContent(&request.configuration.instructions, false);
+        try self.readContent(&request.configuration.instructions, false, allow_content);
         try self.expectByte(',');
         try self.expectKey("tools");
         try self.readTools(&request.configuration.tools);
@@ -1015,7 +1043,7 @@ const Parser = struct {
         try self.readOptionalSmall(16, &request.configuration.permission_mode);
         try self.expectByte(',');
         try self.expectKey("output_schema");
-        try self.readContent(&request.configuration.output_schema, true);
+        try self.readContent(&request.configuration.output_schema, true, allow_content);
         var trigger_seen = false;
         var reservation_seen = false;
         while (try self.consumeIf(',')) {
@@ -1031,19 +1059,7 @@ const Parser = struct {
             } else return error.UnexpectedField;
         }
         try self.expectByte('}');
-        if (try self.consumeIf(',')) {
-            try self.expectKey("require_model");
-            try self.skipWhitespace();
-            const first = try self.source.readByte();
-            const rest: []const u8 = switch (first) {
-                't' => "rue",
-                'f' => "alse",
-                else => return error.InvalidJsonShape,
-            };
-            for (rest) |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
-            request.require_model = first == 't';
-        }
-        return request;
+        return request.configuration;
     }
 
     fn parseMessage(self: *Parser, store: Bounded(max_store_bytes)) !MessageCommand {
@@ -1083,8 +1099,13 @@ const Parser = struct {
             try self.readSmallString(&request.sender_handle.?);
         }
         try self.expectByte(',');
+        if (request.session.len == 0) {
+            try self.expectKey("configuration");
+            request.configuration = try self.parseConfiguration(false);
+            try self.expectByte(',');
+        }
         try self.expectKey("text");
-        try self.readContent(&request.text, false);
+        try self.readContent(&request.text, false, true);
         if (request.text.state != .value) return error.InvalidMessage;
         return request;
     }
@@ -1389,7 +1410,7 @@ const Parser = struct {
         try self.expectByte('}');
     }
 
-    fn readContent(self: *Parser, field: *ContentField, allow_null: bool) !void {
+    fn readContent(self: *Parser, field: *ContentField, allow_null: bool, allow_value: bool) !void {
         try self.expectByte('{');
         try self.expectKey("state");
         var state: Bounded(16) = .{};
@@ -1399,6 +1420,7 @@ const Parser = struct {
         } else if (allow_null and state.eql("null")) {
             field.state = .explicit_null;
         } else if (state.eql("value")) {
+            if (!allow_value) return error.InvalidFieldState;
             field.state = .value;
             try self.expectByte(',');
             try self.expectKey("value");
@@ -2620,6 +2642,62 @@ test "incremental ingress streams fragmented content and transfers charged custo
     try request.removeTemporaryContent(io);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+test "initial Message ingress retains text custody and rejects extra content before capture" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
+    const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
+    const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
+    const omitted = "{\"state\":\"omitted\"}";
+    const value = "{\"state\":\"value\",\"value\":\"rules\\n\"}";
+    const json = prefix ++ omitted ++ between ++ omitted ++ suffix;
+    const expected = "assignment\x00雪\n\n";
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?named_scratch.Owner = null;
+    const options: ParseOptions = .{
+        .io = io,
+        .fd = -1,
+        .content_length = json.len,
+        .scratch_path = root[0..root_len],
+        .request_number = 43,
+        .retained_scratch = &retained,
+        .scratch_budget = .{ .used = &used, .limit = expected.len },
+        .expected_kind = .message,
+    };
+    var ingress = Ingress.init(std.testing.allocator, options);
+    defer ingress.deinit();
+    for (json) |byte| try ingress.feed(&.{byte});
+    var request = try ingress.finish();
+    defer request.removeTemporaryContent(io) catch unreachable;
+    ingress.deinit();
+    try std.testing.expectEqual(.omitted, request.message.configuration.?.instructions.state);
+    try std.testing.expectEqual(.omitted, request.message.configuration.?.output_schema.state);
+    try std.testing.expectEqual(@as(u64, expected.len), used.load(.acquire));
+    var actual: [64]u8 = undefined;
+    const count = try request.message.text.file.?.readPositionalAll(io, &actual, 0);
+    try std.testing.expectEqualStrings(expected, actual[0..count]);
+    var hash = contentHasher();
+    hash.update(expected);
+    try std.testing.expectEqualSlices(u8, &hash.finalResult(), &request.message.text.digest);
+    try request.removeTemporaryContent(io);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained == null);
+    inline for (.{ prefix ++ value ++ between ++ omitted ++ suffix, prefix ++ omitted ++ between ++ value ++ suffix }) |invalid| {
+        var rejection_options = options;
+        rejection_options.content_length = invalid.len;
+        var rejected = Ingress.init(std.testing.allocator, rejection_options);
+        defer rejected.deinit();
+        try std.testing.expectError(error.InvalidFieldState, rejected.feed(invalid));
+        try std.testing.expectEqual(@as(usize, 0), rejected.content_count);
+        try std.testing.expect(rejected.capture == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
 }
 
 test "incremental ingress preserves grammar and releases both captures after late failure" {

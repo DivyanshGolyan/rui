@@ -5,6 +5,7 @@ const product_defaults = @import("product_defaults.zig");
 
 pub const Resource = enum { session, request, action, host, defaults, auth };
 pub const Command = enum {
+    session_start,
     session_configure,
     session_send,
     session_inspect,
@@ -39,8 +40,9 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
+            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print its new six-character ID, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Capture exact text and admit a Message to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns after admission, before the recipient completes. -- ends options; a dash after -- is literal.", .options = destination ++ capture ++ &[_]Option{ value("to", "ID"), value("text", "FILE|-") }, .positional = "TEXT|-", .positional_conflicts = &.{"text"}, .mutation = true, .requires = &.{ &.{"to"}, &.{ "text", "" } } },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ value("profile", "current|full"), value("failed-response", "body|metadata"), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ "profile", "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List configured Sessions in the current Workspace, or all Workspaces with --all, as one JSON value.", .options = destination ++ &[_]Option{flag("all")} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The address remains reusable by later input; acknowledgment is not physical retirement.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
@@ -122,9 +124,10 @@ const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "FILE|-"), value("tools", "bash|none"),                   value("permission-mode", "bypass|ask"),
-    value("output-schema", "FILE|-"), flag("text-output"),             value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash|none"),                   value("permission-mode", "bypass|ask"),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
 };
+const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7] };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 const endpoint_conflicts = &[_][2][]const u8{
@@ -171,8 +174,8 @@ const serve_test = &[_]Option{
     hiddenValue("test-request-preparation-advance-delay-ms"),
 };
 
-/// The bare `rui [PROMPT]` entry, which has no resource help of its own.
-pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1] }, .positional = "PROMPT" };
+/// The bare `rui` entry, which has no resource help of its own.
+pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1] } };
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
@@ -214,7 +217,7 @@ pub const Definition = struct {
         if (self.mutation and self.optionNamed("record") != null and self.optionNamed("kind") == null)
             try writer.writeAll("Explicit capture uses --record FILE with --key KEY or --key-hex HEX; omit both for a generated handle.\n");
         try writer.writeAll(self.details);
-        try writer.writeAll("--help or -h prints this help without accessing runtime state. Non-interactive metadata is one JSON value on stdout; explicit content reads stream bytes.\n");
+        try writer.writeAll("--help or -h prints this help without accessing runtime state. Metadata is JSON except session start, which prints its new ID; explicit content reads stream bytes.\n");
         if (self.mutation and self.optionNamed("kind") == null) try writer.writeAll("Keep the pre-send recovery identity printed on stderr. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original with rui request inspect; never infer permission to resubmit with a fresh key.\n");
     }
 
@@ -287,6 +290,10 @@ pub const Definition = struct {
         for (self.conflicts) |pair| if (parsed.has(pair[0]) and parsed.has(pair[1])) return error.ConflictingArguments;
         if (parsed.positional != null) for (self.positional_conflicts) |name| if (parsed.has(name)) return error.ConflictingArguments;
         if (parsed.help) return parsed;
+        if (parsed.get("instructions")) |source| {
+            if (!std.mem.eql(u8, source, "-")) return error.InvalidArguments;
+            if (std.mem.eql(u8, parsed.get("output-schema") orelse "", "-")) return error.ConflictingArguments;
+        }
         for (self.options) |option| {
             const named = self.indexOf(option.hex_of orelse continue).?;
             if (hexed & (@as(u64, 1) << @as(u6, @intCast(named))) == 0) continue;
@@ -431,22 +438,26 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
 
 test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
-    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f", "hi" }, error.ConflictingArguments);
+    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f" }, error.UnknownArgument);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
     for ([_][]const u8{ "--session", "--session-hex" }) |old|
         try expectValidation(.session_send, &.{ "--to", "a", old, "value", "hi" }, error.UnknownArgument);
-    try expectValidation(.session_send, &.{ "--store", "path", "--to", "k7m2qx", "hi" }, false);
+    try expectValidation(.session_send, &.{ "--store", "path", "--to", "k7m2qx" }, false);
     try expectValidation(.session_send, &.{"--to"}, error.MissingArgumentValue);
     try expectValidation(.session_configure, &.{ "--output-schema", "f", "--text-output" }, error.ConflictingArguments);
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
     try expectValidation(.request_inspect, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
     try expectValidation(.session_list, &.{"--json"}, error.UnknownArgument);
-    // Values are data: an option value spelling --help does not request help,
-    // and literal text after -- may look like an option or a dash.
-    try expectValidation(.session_send, &.{ "--to", "--help", "--", "--help" }, false);
-    try expectValidation(.session_send, &.{ "--to", "a", "--", "-" }, false);
-    try expectValidation(.session_send, &.{ "--to", "a", "-" }, false);
+    // Values are data, but Message text has no argv spelling.
+    try expectValidation(.session_send, &.{ "--to", "--help" }, false);
+    try expectValidation(.session_send, &.{ "--to", "a", "--", "-" }, error.InvalidArguments);
+    try expectValidation(.session_send, &.{ "--to", "a", "-" }, error.InvalidArguments);
+    try expectValidation(.session_start, &.{"inline text"}, error.InvalidArguments);
+    try expectValidation(.session_start, &.{ "--instructions", "-" }, error.UnknownArgument);
+    try expectValidation(.session_configure, &.{ "--instructions", "file" }, error.InvalidArguments);
+    try expectValidation(.session_configure, &.{ "--instructions", "-", "--output-schema", "-" }, error.ConflictingArguments);
+    try expectValidation(.session_configure, &.{ "--instructions", "-" }, false);
     try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);
     try expectValidation(.session_resume, &.{ "--store", "/s", "REF" }, false);
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
@@ -526,21 +537,16 @@ test "live /configure and /setup share the one-shot grammar" {
     try std.testing.expectError(error.UnknownArgument, testParse(live_configure, &.{ "--session", "other" }, &storage));
     try std.testing.expectError(error.ConflictingArguments, testParse(live_configure, &.{ "--text-output", "--output-schema", "f" }, &storage));
     try std.testing.expectError(error.ConflictingArguments, testParse(live_setup, &.{ "--clear-model", "--model", "m" }, &storage));
-    const fresh = try testParse(fresh_session, &.{ "--model", "m", "--", "--store" }, &storage);
-    try std.testing.expectEqualStrings("--store", fresh.positional.?);
-    try std.testing.expect(fresh.get("store") == null);
+    try std.testing.expectError(error.InvalidArguments, testParse(fresh_session, &.{ "--model", "m", "--", "--store" }, &storage));
     try std.testing.expectError(error.DuplicateArgument, testParse(fresh_session, &.{ "--model", "m", "--model", "n" }, &storage));
 }
 
 test "complete syntax still names the first missing requirement" {
-    try std.testing.expectEqualStrings("to", (try expectMissing(.session_send, &.{"hi"})).?);
-    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--to", "a" })).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--", "--text" }) == null);
-    // Option values are data: --to's value does not supply the text.
-    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--to", "hi" })).?);
-    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--to", "a", "--key", "k", "hi" })).?);
-    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--to", "a", "--record", "r", "hi" })).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--test-drop-reply", "x" }) != null);
+    try std.testing.expectEqualStrings("to", (try expectMissing(.session_send, &.{})).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a" }) == null);
+    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--to", "a", "--key", "k" })).?);
+    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--to", "a", "--record", "r" })).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--test-drop-reply", "x" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s", "--last" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s" }) != null);
     try std.testing.expect(try expectMissing(.request_recover, &.{"HANDLE"}) == null);

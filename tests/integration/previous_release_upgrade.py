@@ -42,6 +42,7 @@ class Dialect:
         self.resource_first = arguments.exists() and ".request_inspect" in arguments.read_text()
         self.address_send = arguments.exists() and 'value("to", "ADDRESS")' in arguments.read_text()
         self.short_ids = "pub const session_id_bytes = 6;" in (checkout / "src/protocol.zig").read_text()
+        self.stdin_message = arguments.exists() and ".session_start" in arguments.read_text()
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
@@ -77,7 +78,8 @@ class Dialect:
             ("--store", store, "--session", session))
         reply = fixture.command(*(("session", "send") if self.resource_first else ("message",)),
             *destination, "--record", state / f"{key}.json", "--key", key,
-            "--text", text_path)
+            *(("--text", text_path) if not self.stdin_message else ()),
+            input=text if self.stdin_message else None)
         assert reply["answer"]["status"] == "accepted", reply
 
     def observe(self, store, key, timeout=15):

@@ -806,11 +806,11 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		seedRows[index] = map[string]any{"session": name, "bytes": len(text), "sha256": hex.EncodeToString(digest[:]), "estimated_tokens_bytes_div_4": len(text) / 4}
 		key := fmt.Sprintf("seed-%03d", index)
 		var answer map[string]any
-		if err := measurement.RunJSON(deadline, &answer, binary, "session", "send", "--store", store, "--to", name, "--record", filepath.Join(records, key+".json"), "--key", key, "--text", path); err != nil {
+		if err := measurement.RunJSONInput(deadline, bytes.NewReader(text), &answer, binary, "session", "send", "--store", store, "--to", name, "--record", filepath.Join(records, key+".json"), "--key", key); err != nil {
 			return result, err
 		}
 	}
-	result["seed"] = map[string]any{"method": "one ordinary `rui session send --text` Message per Session, answered without tools", "token_estimate_method": "bytes/4; no tokenizer was run", "rows": seedRows}
+	result["seed"] = map[string]any{"method": "one ordinary `rui session send` Message on stdin per Session, answered without tools", "token_estimate_method": "bytes/4; no tokenizer was run", "rows": seedRows}
 	if _, err := fixture.tool(deadline, "/control/tool-wait-seeded"); err != nil {
 		return result, err
 	}

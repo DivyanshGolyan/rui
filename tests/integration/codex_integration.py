@@ -106,13 +106,12 @@ def run():
         # Missing and uncertain credentials must never reach model transport.
         credentials(credential_file, state="refresh_pending")
         host = start(store, url)
-        instruction_file = state / "instructions.txt"
-        instruction_file.write_text("Use the approved tool result.")
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
-            "--permission-mode", "ask", "--instructions", instruction_file,
+            "--permission-mode", "ask", "--instructions", "-",
+            input="Use the approved tool result.",
         )
         assert configured["answer"]["status"] == "accepted"
         session = configured["answer"]["session"]

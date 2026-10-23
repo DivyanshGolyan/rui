@@ -155,10 +155,11 @@ def limited_host(limit, *arguments):
     ]
 
 
-def command(state, *arguments):
+def command(state, *arguments, input=None):
     completed = subprocess.run(
         [str(RUI), *map(str, arguments)],
         text=True,
+        input=input,
         capture_output=True,
         timeout=10,
     )
@@ -188,8 +189,6 @@ def configure(state, store, ordinal):
 
 
 def message(state, store, session, ordinal):
-    text = state / f"message-{ordinal}.txt"
-    text.write_text(f"descriptor fill {ordinal}")
     result = command(
         state,
         "session", "send",
@@ -201,8 +200,7 @@ def message(state, store, session, ordinal):
         state / f"message-{ordinal}.json",
         "--key",
         f"message-{ordinal}",
-        "--text",
-        text,
+        input=f"descriptor fill {ordinal}",
     )
     assert result["answer"]["status"] == "accepted", result
 

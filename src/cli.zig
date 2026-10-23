@@ -57,7 +57,7 @@ fn run(init: std.process.Init) !void {
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
-        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a conversation with this text, put -- before it: rui -- TEXT.\n", .{ args[1], replacement, replacement_resource });
+        TerminalText.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
         return error.InvalidArguments;
     }
     const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return newSession(init, args[1..]);
@@ -103,11 +103,6 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
             return err;
         }
-        // Missing sockets and named files share FileNotFound; say both rather
-        // than guess. One-shot commands never start a Host implicitly.
-        // Defaults and auth never contact a Host.
-        if ((err == error.FileNotFound or err == error.ConnectionRefused) and resource != .defaults and resource != .auth)
-            TerminalText.diagnostic("rui: {s} {s}: a named file is missing or no Host is serving the selected Store ({s}). Check rui host status; start a Host only explicitly with rui host start.\n", .{ @tagName(resource), definition.name, @errorName(err) });
         if (err == error.MutationNotAccepted) {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
@@ -132,8 +127,9 @@ fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cl
         if (!protocol.validSessionId(id)) return error.InvalidSession;
     };
     switch (command) {
-        .session_configure => try configure(init, .{ .io = init.io }, parsed, null),
-        .session_send => try message(init, parsed),
+        .session_start => try configure(init, .{ .io = init.io }, parsed, null, true),
+        .session_configure => try configure(init, .{ .io = init.io }, parsed, null, false),
+        .session_send => try message(init, parsed, null),
         .session_inspect => try inspect(init, parsed),
         .session_list => try sessions(init, parsed),
         .session_stop => try stopSession(init, parsed),
@@ -964,7 +960,6 @@ const NewSessionOptions = struct {
     store: ?[]const u8 = null,
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
-    prompt: ?[]const u8 = null,
 
     /// Null when the invocation asks for help.
     fn parse(args: []const []const u8) !?NewSessionOptions {
@@ -972,13 +967,7 @@ const NewSessionOptions = struct {
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
         const parsed = cli_args.fresh_session.parse(args, nothing.allocator()) catch return usage();
         if (parsed.help) return null;
-        const options: NewSessionOptions = .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model"), .prompt = parsed.positional };
-        if (options.prompt) |prompt| {
-            if (prompt.len == 0) return error.EmptyPrompt;
-            if (prompt.len > @import("SessionInput.zig").capacity) return error.StreamTooLong;
-            try TerminalEditor.validateText(prompt);
-        }
-        return options;
+        return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
     }
 };
 
@@ -986,7 +975,7 @@ const NewSessionOptions = struct {
 /// any Host or Session change when that terminal is absent or cannot draw.
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output {s}; to message a Session from a script or agent, use rui session send --to '{{\"session\":\"SESSION\"}}' TEXT. No Host or Session changed.\n", .{purpose});
+        TerminalText.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
@@ -999,7 +988,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     try requireInteractiveTerminal(init, "to create a Session");
     const saved = (try createSession(init, options)) orelse return;
-    runSession(init, saved.store.slice(), saved.session.slice(), options.prompt) catch |err| {
+    runSession(init, saved.store.slice(), saved.session.slice(), null) catch |err| {
         // Configuration acceptance and local entry are independent outcomes.
         var bytes: [256]u8 = undefined;
         var notice = std.Io.Writer.fixed(&bytes);
@@ -1276,7 +1265,7 @@ fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
     return error.UnsupportedModel;
 }
 
-fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress) !void {
+fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !void {
     const io = init.io;
     const interactive = live != null;
     const named = if (live) |address| address.session else parsed.get("session");
@@ -1327,6 +1316,12 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (input.tools == null) input.tools = product_defaults.tools;
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
+    if (start) return message(init, parsed, input);
+    var stage: client.FailureStage = .store;
+    errdefer reportFailureStage(stage);
+    input.stage = &stage;
+    var sender = requester;
+    sender.stage = &stage;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -1340,7 +1335,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (human and !interactive) try announceCapture(io, saved.key.slice());
-        break :blk requester.sendCaptured(&captured, drop_reply, &reply_buffer);
+        break :blk sender.sendCaptured(&captured, drop_reply, &reply_buffer);
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1365,18 +1360,16 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
     TerminalText.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
 }
 
-fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
     const io = init.io;
-    const destination = parsed.get("to").?;
-    if (!protocol.validSessionId(destination)) {
+    var stage: client.FailureStage = .input_parse;
+    errdefer reportFailureStage(stage);
+    const destination = if (configuration != null) "" else parsed.get("to").?;
+    if (configuration == null and !protocol.validSessionId(destination)) {
         TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = parsed.get("text") orelse "" };
-    if (parsed.positional) |value| {
-        // Only an unescaped dash selects stdin; after -- it is literal text.
-        if (!parsed.literal_positional and std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
-    }
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration, .stage = &stage };
     // Never let incomplete or malformed peer context fall back to HOME or
     // become an anonymous send. The Host still authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
@@ -1391,6 +1384,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
     }
+    stage = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (sender_store) |trusted| {
         const sender_paths = try platform.resolveClientPaths(io, trusted);
@@ -1406,7 +1400,22 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureMessage(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
+    if (configuration == null) return sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), &stage);
+    defer captured.close(io);
+    if (target == .generated) try announceCapture(io, captured.identity().key.slice());
+    var reply_buffer: client.ReplyBuffer = .{};
+    const reply = try (client.Requests{ .io = io, .stage = &stage }).sendCaptured(&captured, parsed.get("test-drop-reply"), &reply_buffer);
+    if (!reply.isAccepted()) return writeMutationReply(io, reply, .json);
+    // This is the first Message's admission, never execution/completion.
+    try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
+    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+}
+
+fn reportFailureStage(stage: client.FailureStage) void {
+    if (stage == .presentation) return;
+    TerminalText.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(stage)});
+    if (stage == .upload or stage == .admission_response)
+        TerminalText.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
 /// An explicit --record and --key identity, which the grammar requires
@@ -1639,8 +1648,8 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
         if (parsed.help or parsed.seen == 0) return std.Io.File.stdout().writeStreamingAll(init.io, interactive_configure_usage);
         for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
-            return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
-        configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }) catch |err| {
+            return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
+        configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }, false) catch |err| {
             if (err == error.UnsupportedModel) return; // The pre-capture diagnostic already gives the repair.
             TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
             if (err == error.CanonicalStoreFailure) return err;
@@ -1704,10 +1713,10 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
             else => continue,
         };
         if (!saved.store.eql(canonical.store.slice())) continue;
-        if (saved.isKind(.configure) and saved.session.len == 0) {
+        if ((saved.isKind(.configure) or saved.isKind(.message)) and saved.session.len == 0) {
             var reply: client.ReplyBuffer = .{};
             const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
-            if (observed.status != .accepted or observed.kind != .configure or !observed.target.?.eql(session_ref)) continue;
+            if (observed.status != .accepted or !saved.kind.eql(@tagName(observed.kind.?)) or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
         try writeSafeTextTo(out, handle);
@@ -1756,7 +1765,7 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureSessionStop(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
 }
 
 fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1768,17 +1777,17 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(io: std.Io, captured: *client.CapturedRecord, generated: bool, drop_reply: ?[]const u8) !void {
+fn sendCapturedMutation(io: std.Io, captured: *client.CapturedRecord, generated: bool, drop_reply: ?[]const u8, stage: ?*client.FailureStage) !void {
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
         if (generated) try announceCapture(io, captured.identity().key.slice());
-        break :blk try client.sendCaptured(io, captured, drop_reply, &reply_buffer);
+        break :blk try (client.Requests{ .io = io, .stage = stage }).sendCaptured(captured, drop_reply, &reply_buffer);
     };
     try writeMutationReply(io, reply, .json);
 }
@@ -1797,7 +1806,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
+    try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"), null);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -2540,20 +2549,21 @@ const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--t
 
 const usage_text =
     \\usage:
-    \\  rui [PROMPT] [--store PATH] [--provider codex] [--model MODEL]
+    \\  rui [--store PATH] [--provider codex] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
-    \\    without asking by default. Use -- before a prompt whose first word is a
-    \\    resource or former command name.
+    \\    without asking by default. Enter Message text in the terminal editor.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
     \\    Resources: session, request, action, host, defaults, auth.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\
-    \\For agents and scripts, session configure and session send are separate admission-only
-    \\calls: send returns when the Message is admitted, not when the recipient finishes.
+    \\For agents and scripts, session start creates a Session with its first Message;
+    \\session send addresses an existing ID. Both read exact Message text from stdin
+    \\and return on admission, not completion. Set instructions separately using
+    \\session configure --instructions - with instructions on stdin.
     \\Reads observe once; request read-result streams only the original saved answer.
-    \\Metadata is one JSON value on stdout; diagnostics and recovery notices use stderr.
+    \\session start prints its new ID; other metadata is JSON. Diagnostics use stderr.
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.

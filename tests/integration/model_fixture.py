@@ -383,10 +383,11 @@ class SuccessHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def command(*args, expect=0, timeout=15):
+def command(*args, expect=0, timeout=15, input=None):
     completed = subprocess.run(
         [str(RUI), *map(str, args)],
         text=True,
+        input=input,
         capture_output=True,
         timeout=timeout,
     )
@@ -533,10 +534,8 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         schema_path.write_text(json.dumps(schema, separators=(",", ":")))
         args += ["--output-schema", schema_path]
     if instructions is not None:
-        instructions_path = state / f"{key}-instructions.txt"
-        instructions_path.write_text(instructions)
-        args += ["--instructions", instructions_path]
-    result = command(*args)
+        args += ["--instructions", "-"]
+    result = command(*args, input=instructions)
     assert result["answer"]["status"] == "accepted", result
     identity = result["context"]["session"]
     assert len(identity) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in identity), result
@@ -582,8 +581,6 @@ def configure_lost_reply(
 
 
 def message(state, store, key, session, text):
-    text_path = state / f"{key}.txt"
-    text_path.write_text(text)
     result = command(
         "session", "send",
         "--store",
@@ -594,16 +591,13 @@ def message(state, store, key, session, text):
         state / f"{key}.json",
         "--key",
         key,
-        "--text",
-        text_path,
+        input=text,
     )
     assert result["answer"]["status"] == "accepted", result
     return result
 
 
 def message_lost_reply(state, store, key, session, text):
-    text_path = state / f"{key}.txt"
-    text_path.write_text(text)
     completed = subprocess.run(
         [
             str(RUI),
@@ -616,12 +610,11 @@ def message_lost_reply(state, store, key, session, text):
             str(state / f"{key}.json"),
             "--key",
             key,
-            "--text",
-            str(text_path),
             "--test-drop-reply",
             "after-commit",
         ],
         text=True,
+        input=text,
         capture_output=True,
         timeout=15,
     )

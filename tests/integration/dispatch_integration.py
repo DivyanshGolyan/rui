@@ -210,7 +210,7 @@ def failed_response_export_case(state, processes, endpoints):
     assert observe(store, "export-empty")["result"]["code"] == "malformed_provider_output"
     stop_host(host)
     processes.remove(host)
-    export(operation, "body", error="no Host is serving")
+    export(operation, "body", error="ConnectionRefused")
     stop_endpoint(endpoint, endpoints)
     print(f"failed-response export: EmptyProviderAnswer {len(empty)} bytes and binary {len(binary)} bytes exact; "
           "metadata exact; fd256; read-only; partial/omitted/missing/identity/symlink/corruption errors empty stdout; "
@@ -4675,6 +4675,17 @@ def main(mode="all", correlation_case="all"):
         # Exact emitted request bytes, including the framing around many empty
         # inputs, are the complete reservation. The exact observed limit passes
         # while one byte below it fails before HTTP.
+        def empty_messages(host, store, session, prefix):
+            # Empty CLI stdin sends nothing. Seed these zero-byte framing
+            # cases through the Message protocol without changing their input.
+            from control_integration import raw_request
+            for index in range(40):
+                wire = {"version": "1", "kind": "message", "store": str(store),
+                    "key": f"{prefix}-{index}", "session": session, "sender": None, "sender_handle": None,
+                    "text": {"state": "value", "value": ""}}
+                head, body = raw_request(host.rui_ready_fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
+                assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)
+
         endpoint.requests.clear()
         endpoint.release.clear()
         # Each request carries only its six-byte Session ID, so all three
@@ -4683,8 +4694,7 @@ def main(mode="all", correlation_case="all"):
         host = start_host(framing_store, None)
         processes.append(host)
         framing_meter_session = configure(state, framing_store, "framing-config", None, "gpt-6-sol")
-        for index in range(40):
-            message(state, framing_store, f"framing-{index}", framing_meter_session, "")
+        empty_messages(host, framing_store, framing_meter_session, "framing")
         stop_host(host)
         processes.remove(host)
         host = start_host(framing_store, url)
@@ -4710,8 +4720,7 @@ def main(mode="all", correlation_case="all"):
         host = start_host(framing_exact_store, None)
         processes.append(host)
         framing_exact_session = configure(state, framing_exact_store, "exact-config", None, "gpt-6-sol")
-        for index in range(40):
-            message(state, framing_exact_store, f"exact-{index}", framing_exact_session, "")
+        empty_messages(host, framing_exact_store, framing_exact_session, "exact")
         stop_host(host)
         processes.remove(host)
         host = start_host(
@@ -4760,8 +4769,7 @@ def main(mode="all", correlation_case="all"):
         host = start_host(framing_limit_store, None)
         processes.append(host)
         framing_limit_session = configure(state, framing_limit_store, "limit-config", None, "gpt-6-sol")
-        for index in range(40):
-            message(state, framing_limit_store, f"limit-{index}", framing_limit_session, "")
+        empty_messages(host, framing_limit_store, framing_limit_session, "limit")
         stop_host(host)
         processes.remove(host)
         host = start_host(

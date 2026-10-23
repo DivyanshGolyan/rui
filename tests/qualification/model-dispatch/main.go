@@ -172,10 +172,15 @@ func message(deadline measurement.Deadline, binary, parent, store, key, session 
 	if err := file.Close(); err != nil {
 		return err
 	}
+	input, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
 	var answer map[string]any
-	err = runJSON(deadline, binary, &answer,
+	err = measurement.RunJSONInput(deadline, input, &answer, binary,
 		"session", "send", "--store", store, "--to", session, "--record", filepath.Join(parent, key+".json"),
-		"--key", key, "--text", path)
+		"--key", key)
 	if err != nil {
 		return err
 	}

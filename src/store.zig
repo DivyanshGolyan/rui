@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 33;
+pub const schema_version: u32 = 34;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -185,12 +185,26 @@ pub const MessageRejection = enum {
     invalid_session_reference,
     unknown_session,
     invalid_sender_handle,
+    unsupported_permission_mode,
+    unsupported_provider,
+    invalid_model,
+    model_capability_unavailable,
+    invalid_output_schema,
+    invalid_compaction_trigger,
+    invalid_output_reservation,
+    incomplete_initial_configuration,
+    invalid_workspace,
+    workspace_is_immutable,
+    provider_is_immutable,
+    model_is_immutable,
+    revision_exhausted,
 };
 
 pub const AcceptedMessage = struct {
     replayed: bool,
     admission_id: u64,
     content: ContentReference,
+    session: protocol.Bounded(protocol.max_session_bytes),
 };
 
 pub const RejectedMessage = struct {
@@ -1666,32 +1680,64 @@ pub const Store = struct {
         if (command.require_model and !model_available) {
             return try self.saveConfigurationRejection(command, &digest, .model_capability_unavailable, faults);
         }
+        const applied = switch (try self.applyConfiguration(command, faults)) {
+            .rejected => |code| return self.saveConfigurationRejection(command, &digest, code, faults),
+            .accepted => |value| value,
+        };
+        try self.insertCommand(
+            command.key.slice(),
+            .configure,
+            applied.session.slice(),
+            &digest,
+            applied.instructions_id,
+            applied.output_schema_id,
+            .{ .accepted = true, .revision = applied.revision, .created = creating },
+        );
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try exec(self.database, "COMMIT");
+        return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
+    }
+
+    /// Applies settings within the caller's transaction. Creation and its
+    /// first Message can share this owner without an intermediate commit.
+    fn applyConfiguration(self: *Store, request: *const protocol.ConfigureCommand, faults: Faults) !union(enum) {
+        accepted: struct {
+            session: protocol.Bounded(protocol.max_session_bytes),
+            revision: u64,
+            instructions_id: ?i64,
+            output_schema_id: ?i64,
+        },
+        rejected: ConfigurationRejection,
+    } {
+        var resolved = request.*;
+        const command = &resolved;
+        const creating = request.session.len == 0;
         if (!creating and !protocol.validSessionId(command.session.slice())) {
-            return try self.saveConfigurationRejection(command, &digest, .invalid_session_reference, faults);
+            return .{ .rejected = .invalid_session_reference };
         }
         const configuration = &command.configuration;
         if (configuration.permission_mode.state == .value and
             !configuration.permission_mode.value.eql("ask") and
             !configuration.permission_mode.value.eql("bypass"))
         {
-            return try self.saveConfigurationRejection(command, &digest, .unsupported_permission_mode, faults);
+            return .{ .rejected = .unsupported_permission_mode };
         }
         if (configuration.model.state == .value and configuration.model.value.len == 0) {
-            return try self.saveConfigurationRejection(command, &digest, .invalid_model, faults);
+            return .{ .rejected = .invalid_model };
         }
         if (configuration.output_schema.state == .value and
             !try validateJsonFile(self.io, configuration.output_schema.file orelse return error.MissingContentCustody))
         {
-            return try self.saveConfigurationRejection(command, &digest, .invalid_output_schema, faults);
+            return .{ .rejected = .invalid_output_schema };
         }
 
         const current = try self.readSession(command.session.slice());
         if (!creating and current == null) {
-            return try self.saveConfigurationRejection(command, &digest, .unknown_session, faults);
+            return .{ .rejected = .unknown_session };
         }
         const current_configuration: ?*const CurrentConfiguration = if (current) |*value| value else null;
         if (configurationBeforeWorkspace(current_configuration, configuration)) |rejection| {
-            return try self.saveConfigurationRejection(command, &digest, rejection, faults);
+            return .{ .rejected = rejection };
         }
 
         var canonical_workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
@@ -1702,7 +1748,7 @@ pub const Store = struct {
                     configuration.workspace.value.slice(),
                     &canonical_workspace,
                 ) catch {
-                    return try self.saveConfigurationRejection(command, &digest, .invalid_workspace, faults);
+                    return .{ .rejected = .invalid_workspace };
                 };
                 break :canonical &canonical_workspace;
             } else null;
@@ -1715,12 +1761,7 @@ pub const Store = struct {
             canonical_workspace_ref,
             &next,
         )) {
-            .rejected => |rejection| return try self.saveConfigurationRejection(
-                command,
-                &digest,
-                rejection,
-                faults,
-            ),
+            .rejected => |rejection| return .{ .rejected = rejection },
             .update => |actions| actions,
         };
 
@@ -1763,23 +1804,12 @@ pub const Store = struct {
             &next,
             created or configuration.instructions.state == .value,
         );
-        const answer = StoredAnswer{
-            .accepted = true,
+        return .{ .accepted = .{
+            .session = resolved.session,
             .revision = next.revision,
-            .created = created,
-        };
-        try self.insertCommand(
-            command.key.slice(),
-            .configure,
-            command.session.slice(),
-            &digest,
-            command_instructions_id,
-            command_output_schema_id,
-            answer,
-        );
-        if (faults.before_commit) return error.InjectedCommitFailure;
-        try exec(self.database, "COMMIT");
-        return .{ .accepted = .{ .replayed = false, .revision = next.revision, .created = created, .session = resolved.session } };
+            .instructions_id = command_instructions_id,
+            .output_schema_id = command_output_schema_id,
+        } };
     }
 
     fn saveConfigurationRejection(
@@ -1817,9 +1847,11 @@ pub const Store = struct {
 
     fn submitMessageLocked(
         self: *Store,
-        command: *const protocol.MessageCommand,
+        request: *const protocol.MessageCommand,
         faults: Faults,
     ) !MessageReply {
+        var resolved = request.*;
+        const command = &resolved;
         try exec(self.database, "BEGIN IMMEDIATE");
         const digest = command.semanticDigest();
         const supplied_content = ContentReference{
@@ -1834,13 +1866,14 @@ pub const Store = struct {
                 const metadata = try self.readContentMetadata(content_id);
                 const admission_id = try self.readMessageAdmission(
                     command.key.slice(),
-                    command.session.slice(),
+                    existing.target.slice(),
                     content_id,
                 );
                 return .{ .accepted = .{
                     .replayed = true,
                     .admission_id = admission_id,
                     .content = .{ .length = metadata.length, .digest = metadata.digest },
+                    .session = existing.target,
                 } };
             },
             .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } },
@@ -1849,14 +1882,23 @@ pub const Store = struct {
         // A committed exact replay above needs no still-live launch handle.
         const sender_valid = try self.messageSenderMatchesLocked(command);
         const sender_known = command.sender != null and sender_valid;
-        const code: ?MessageRejection = if (!protocol.validSessionId(command.session.slice()))
+        const creating = command.configuration != null;
+        var code: ?MessageRejection = if (creating and command.session.len != 0 or
+            !creating and !protocol.validSessionId(command.session.slice()))
             .invalid_session_reference
         else if (!sender_valid)
             .invalid_sender_handle
-        else if (try self.readSession(command.session.slice()) == null)
+        else if (!creating and try self.readSession(command.session.slice()) == null)
             .unknown_session
         else
             null;
+        if (code == null) if (command.configuration) |configuration| {
+            const creation = protocol.ConfigureCommand{ .key = command.key, .configuration = configuration };
+            switch (try self.applyConfiguration(&creation, faults)) {
+                .rejected => |rejection| code = std.meta.stringToEnum(MessageRejection, @tagName(rejection)).?,
+                .accepted => |value| resolved.session = value.session,
+            }
+        };
         if (code) |rejection| {
             var answer = StoredAnswer{ .accepted = false };
             try answer.code.set(@tagName(rejection));
@@ -1904,6 +1946,7 @@ pub const Store = struct {
             .replayed = false,
             .admission_id = admission_id,
             .content = .{ .length = metadata.length, .digest = metadata.digest },
+            .session = resolved.session,
         } };
     }
 
@@ -6706,7 +6749,7 @@ pub const Store = struct {
     ) !Replay(Rejection) {
         const existing = try self.readExistingCommand(key) orelse return .fresh;
         try exec(self.database, "ROLLBACK");
-        if (existing.kind != kind or (!(kind == .configure and target.len == 0) and !existing.target.eql(target)) or
+        if (existing.kind != kind or (!((kind == .configure or kind == .message) and target.len == 0) and !existing.target.eql(target)) or
             !std.mem.eql(u8, &existing.digest, digest)) return .conflict;
         if (existing.accepted) return .{ .accepted = existing };
         return .{ .rejected = std.meta.stringToEnum(Rejection, existing.code.slice()) orelse
@@ -13028,6 +13071,64 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSession(created_session_0.slice())).pending_messages);
     try std.testing.expectEqual(@as(u32, 1000), try pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
+}
+
+test "initial Message atomically allocates its Session and replays its original admission" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    const settings = try completeConfiguration("start", "", workspace, "model-a");
+    var message: protocol.MessageCommand = .{ .configuration = settings.configuration };
+    try message.key.set("start");
+    message.text = try testingBytesContent(&tmp, "initial-message", "assignment\x00雪\n\n");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    var first: AcceptedMessage = undefined;
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const reply = storage.submitMessage(&message, .{});
+        try std.testing.expect(reply == .accepted);
+        first = reply.accepted;
+        try std.testing.expect(protocol.validSessionId(first.session.slice()));
+        const observed = try storage.observeCommand("start");
+        try std.testing.expect(observed.target.eql(first.session.slice()));
+        try std.testing.expectEqual(first.admission_id, observed.message.?.queue.?.admission_id);
+        try std.testing.expectError(error.ResultNotReady, storage.commandResult("start"));
+        try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSession(first.session.slice())).pending_messages);
+        var changed = message;
+        changed.configuration.?.model.value = .{};
+        try changed.configuration.?.model.value.set("model-b");
+        try std.testing.expect(storage.submitMessage(&changed, .{}) == .conflict);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
+        var refused = message;
+        try refused.key.set("invalid-initial-settings");
+        refused.configuration.?.workspace.value = .{};
+        const rejected = storage.submitMessage(&refused, .{});
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(MessageRejection.invalid_workspace, rejected.rejected.code);
+        try std.testing.expect(storage.submitMessage(&refused, .{}).rejected.replayed);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
+    }
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        const replay = storage.submitMessage(&message, .{}).accepted;
+        try std.testing.expect(replay.replayed);
+        try std.testing.expectEqual(first.admission_id, replay.admission_id);
+        try std.testing.expectEqualDeep(first.session, replay.session);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM message_admission"));
+        var failed = message;
+        try failed.key.set("failed-start-commit");
+        try std.testing.expect(storage.submitMessage(&failed, .{ .before_commit = true }) == .infrastructure_failure);
+        try storage.close();
+    }
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(.absent, (try storage.observeCommand("failed-start-commit")).status);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM session"));
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM message_admission"));
+    }
 }
 
 test "message rejections replay before current Session checks without retained input" {

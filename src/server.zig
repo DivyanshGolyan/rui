@@ -1778,7 +1778,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
         };
         const accepted: MutationReply = switch (index) {
             0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = command.session } },
-            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content } },
+            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = command.session } },
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
             else => unreachable,
@@ -1851,7 +1851,7 @@ fn renderMessageReply(
     };
     try response.append(if (replayed) "true" else "false");
     try response.append(",\"session\":");
-    try response.appendJsonString(command.session.slice());
+    try response.appendJsonString(if (result == .accepted) result.accepted.session.slice() else command.session.slice());
     switch (result) {
         .rejected => |value| {
             try response.append(",\"code\":");
@@ -1879,6 +1879,39 @@ fn renderMessageReply(
         .conflict, .infrastructure_failure => {},
     }
     try response.append(",\"execution\":{\"status\":\"queued\"}}");
+}
+
+test "initial Message reply binds its allocated Session and original input before exposing acceptance" {
+    const client = @import("client.zig");
+    const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
+    var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try allocated.set("k7m2qx");
+    var response: protocol.ResponseBuffer = .{};
+    try renderMessageReply(&response, &.{ .configuration = .{} }, .{ .accepted = .{
+        .replayed = true,
+        .admission_id = 17,
+        .content = content,
+        .session = allocated,
+    } });
+    const target: client.MutationTarget = .{ .message = .{ .bytes = content.length, .digest = content.digest, .creates_session = true } };
+    const reply = client.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target);
+    try std.testing.expect(reply.isAccepted());
+    try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
+    try expectMutationFieldPresence(response.slice(), 200, "", target);
+    // Ordinary addressed sends cannot adopt a different Session from a reply.
+    try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "111111", target).answer);
+    var changed = target;
+    changed.message.digest[0] ^= 1;
+    try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", changed).answer);
+    response = .{};
+    try allocated.set("BAD-ID");
+    try renderMessageReply(&response, &.{ .configuration = .{} }, .{ .accepted = .{
+        .replayed = true,
+        .admission_id = 17,
+        .content = content,
+        .session = allocated,
+    } });
+    try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", target).answer);
 }
 
 fn renderSessionStopReply(

@@ -266,10 +266,11 @@ class RetryWaitHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def command(*args, expect=0, timeout=15):
+def command(*args, expect=0, timeout=15, input=None):
     completed = subprocess.run(
         [str(RUI), *map(str, args)],
         text=True,
+        input=input,
         capture_output=True,
         timeout=timeout,
     )
@@ -325,8 +326,6 @@ def configure(state, store, key, session=None):
 
 
 def message(state, store, key, session, text):
-    text_path = state / f"{key}.txt"
-    text_path.write_text(text)
     result = command(
         "session", "send",
         "--store",
@@ -337,8 +336,7 @@ def message(state, store, key, session, text):
         state / f"{key}.json",
         "--key",
         key,
-        "--text",
-        text_path,
+        input=text,
     )
     assert result["answer"]["status"] == "accepted", result
 

@@ -82,9 +82,9 @@ def main():
         host_args = [installed, "host", "serve", "--store", store, "--provider-endpoint",
                      f"http://127.0.0.1:{endpoint.server_address[1]}/responses"]
 
-        def run(*args, env=None, accepted=True):
+        def run(*args, env=None, accepted=True, input=None):
             result = subprocess.run([str(installed), *map(str, args)], env=environment if env is None else env,
-                                    text=True, capture_output=True, timeout=15)
+                                    text=True, capture_output=True, timeout=15, input=input)
             assert result.returncode == (0 if accepted else 1), f"unexpected CLI status: {args[:2]}: {result.stderr}"
             return json.loads(result.stdout)
 
@@ -100,13 +100,13 @@ def main():
             if not accepted and (sender is None or not handle):
                 record = state / f"{key}.json"
                 refused = subprocess.run([str(installed), "session", "send", "--to", endpoint.receiver,
-                    "--record", str(record), "--key", key, "--", "report"], env=env,
-                    text=True, capture_output=True, timeout=15)
+                    "--record", str(record), "--key", key], env=env,
+                    text=True, capture_output=True, timeout=15, input="report")
                 assert refused.returncode == 1 and "invalid peer context" in refused.stderr, refused
                 assert refused.stdout == "" and not record.exists(), refused
                 return None
             response = run("session", "send", "--to", endpoint.receiver,
-                           "--record", state / f"{key}.json", "--key", key, "--", "report", env=env, accepted=accepted)
+                           "--record", state / f"{key}.json", "--key", key, env=env, accepted=accepted, input="report")
             assert response["answer"]["status"] == ("accepted" if accepted else "rejected"), "wrong admission status"
             if not accepted:
                 assert response["answer"]["code"] == "invalid_sender_handle", "wrong sender rejection"
@@ -133,7 +133,7 @@ def main():
         handles = []
         for ending in ("exit", "stop", "crash"):
             session = configure("--tools", "bash", "--permission-mode", "bypass")
-            run("session", "send", "--to", session, "--", "hold sender")
+            run("session", "send", "--to", session, input="hold sender")
             handle_path = workspace / f"{session}.handle"
             handle = wait_for(lambda: handle_path.read_text() if handle_path.exists() else None, "issued Action handle")
             assert re.fullmatch("[0-9a-f]{32}", handle) and handle not in handles, "invalid or reused handle"
@@ -159,8 +159,8 @@ def main():
                     key = f"partial-{ending}-{index}-{selection}"
                     record = state / f"{key}.json"
                     refused = subprocess.run([str(installed), "session", "send", *options, "--to", endpoint.receiver,
-                        "--record", str(record), "--key", key, "--", "report"],
-                        env={**environment, **fields}, text=True, capture_output=True, timeout=15)
+                        "--record", str(record), "--key", key],
+                        env={**environment, **fields}, text=True, capture_output=True, timeout=15, input="report")
                     assert refused.returncode == 1 and "invalid peer context" in refused.stderr, refused
                     assert refused.stdout == "" and not record.exists(), refused
                     assert not (state / f".{key}.json.capture.lock").exists(), "invalid context opened a capture"

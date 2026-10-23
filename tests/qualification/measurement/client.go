@@ -141,9 +141,9 @@ func (c Client) Message(key, session, text string) error {
 		return err
 	}
 	var answer map[string]any
-	if err := RunJSON(c.Deadline, &answer, c.Binary,
+	if err := RunJSONInput(c.Deadline, strings.NewReader(text), &answer, c.Binary,
 		"session", "send", "--store", c.Store, "--to", session, "--record", filepath.Join(c.Artifacts, key+".json"),
-		"--key", key, "--text", source); err != nil {
+		"--key", key); err != nil {
 		return err
 	}
 	if nested(answer, "answer", "status") != "accepted" {

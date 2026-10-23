@@ -124,17 +124,17 @@ class PeerModel(TestHTTPServer):
             # using only the allocated ID. Neither probe consumes the literal
             # report on this Bash call's stdin.
             send = f"rui session send --to {reply_to} "
-            report = (send + "- > b-reply.json 2> b-reply.err"
+            report = (send + "> b-reply.json 2> b-reply.err"
                       if self.report_source == "stdin" else
                       "cat > b-report.txt; " +
-                      send + "--text b-report.txt > b-reply.json 2> b-reply.err")
+                      send + "< b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
-                f'rui session send --store "$RUI_STORE/." --to {address} '
-                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send -- 'self report explicit' > b-self.out 2> b-self.err; "
+                f'printf %s "self report explicit" | rui session send --store "$RUI_STORE/." --to {address} '
+                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
-                f"rui session send --to {address} "
-                "-- 'self report generated' > b-self-generated.out 2> b-self-generated.err; "
+                f"printf %s 'self report generated' | rui session send --to {address} "
+                "> b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
@@ -154,16 +154,14 @@ class PeerModel(TestHTTPServer):
             "env | sed '/^RUI_SENDER_HANDLE=/d' > a-env.txt; command -v rui > a-which.txt; "
             f"rui session send --store {shlex.quote(str(self.foreign_store))} --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'conflicting-store.json'))} --key conflicting-store "
-            "--text nonexistent > conflicting-store.out 2> conflicting-store.err; "
+            "> conflicting-store.out 2> conflicting-store.err; "
             "[ $? -eq 1 ] || exit 91; "
-            f"RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
-            f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send -- 'must not arrive' > foreign-send.out 2> foreign-send.err; "
+            f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
+            f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
             "[ $? -eq 1 ] || exit 90; "
-            f"rui session configure --workspace {shlex.quote(str(self.workspace))} "
-            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-config.json 2> b-config.err && "
-            "b=$(python3 -c 'import json; print(json.load(open(\"b-config.json\"))[\"context\"][\"session\"])') && "
-            "rui session send --to \"$b\" - > b-send.json 2> b-send.err; "
-            "status=$?; cat b-send.json; exit $status"
+            f"rui session start --workspace {shlex.quote(str(self.workspace))} "
+            "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-start.id 2> b-send.err; "
+            "status=$?; cat b-start.id; exit $status"
         ), stdin=message)
 
 
@@ -190,9 +188,9 @@ class PeerHandler(fixture.http.server.BaseHTTPRequestHandler):
         pass
 
 
-def run(installed, *args, home, expect=0):
+def run(installed, *args, home, expect=0, input=None):
     completed = subprocess.run([str(installed), *map(str, args)], text=True, capture_output=True, timeout=15,
-                               env={"PATH": os.environ["PATH"], "HOME": str(home)})
+                               env={"PATH": os.environ["PATH"], "HOME": str(home)}, input=input)
     assert completed.returncode == expect, (args, completed)
     return json.loads(completed.stdout)
 
@@ -243,13 +241,13 @@ def main(report_source):
                         '{"session":"peer/nul\\u0000雪"}',
                         '{"session":"x","store":"/bad\\u0000path"}'):
             refused = subprocess.run([str(installed), "session", "send", "--to", address,
-                "--record", str(refused_record), "--key", "invalid", "--text", "nonexistent"],
+                "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 1 and b"six lowercase Crockford" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         for old_flag in ("--session", "--session-hex"):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
-                "--record", str(refused_record), "--key", "invalid", "--text", "nonexistent"],
+                "--record", str(refused_record), "--key", "invalid"],
                 env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
             assert refused.returncode == 1 and b"UnknownArgument" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
@@ -278,7 +276,7 @@ def main(report_source):
         # manufacturing peer identity. Human saved-default sends are exercised
         # separately by A's initial submission below.
         external = run(installed, "session", "send", "--store", foreign_store, "--to", external_session,
-            "genuine external send", home=home)
+            input="genuine external send", home=home)
         assert external["answer"]["status"] == "accepted" and external["context"]["session"] == external_session, external
         assert external["context"]["store"] == str(foreign_store), external
         external_capture = json.loads((home / ".config" / "rui" / "requests" / f'{external["context"]["key"]}.json').read_text())
@@ -300,7 +298,7 @@ def main(report_source):
         # Human admission uses saved HOME defaults; peers must use their own
         # RUI_STORE once the deliberately conflicting preference is restored.
         run(installed, "defaults", "configure", "--store", store, home=home)
-        ask = subprocess.run([str(installed), "session", "send", "--to", session_a, "--", "Ask peer/b for 6*7."],
+        ask = subprocess.run([str(installed), "session", "send", "--to", session_a], input="Ask peer/b for 6*7.",
                              text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
@@ -345,13 +343,14 @@ def main(report_source):
         assert replay["answer"]["code"] == "invalid_sender_handle" and replay["answer"]["replayed"] is True, replay
         undelivered = run(installed, "session", "inspect", "--store", foreign_store, "--session", foreign_session, home=home)
         assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
-        receipt = json.loads((workspace / "b-send.json").read_text())
-        assert receipt["answer"]["status"] == "accepted" and receipt["context"]["session"] == session_b, receipt
-        assert allocated(json.loads((workspace / "b-config.json").read_text())) == session_b
+        assert (workspace / "b-start.id").read_text() == session_b + "\n"
         announcement = (workspace / "b-send.err").read_text()
         handle = re.fullmatch(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n", announcement)
         assert handle, announcement
         handle = handle.group(1)
+        receipt = run(installed, "request", "recover", handle, home=home)
+        assert receipt["answer"]["status"] == "accepted" and receipt["context"]["session"] == session_b, receipt
+        assert receipt["answer"]["replayed"] is True, receipt
 
         a_requests = [request for request in endpoint.requests if address_of(request) == session_a]
         assert all(address_of(request) == session_a for request in a_requests)
@@ -505,8 +504,8 @@ class CohortModel(TestHTTPServer):
             return bash_call(session, (
                 "n=0; while [ ! -e cohort-report-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
                 "[ -e cohort-report-release ] || exit 124; "
-                f"rui session send --to {self.parent} --record {shlex.quote(str(self.workspace.parent / f'{session}-report.json'))} "
-                f"--key report-{session} -- 'report from {session}' > {session}-report.out 2> {session}-report.err"
+                f"printf %s 'report from {session}' | rui session send --to {self.parent} --record {shlex.quote(str(self.workspace.parent / f'{session}-report.json'))} "
+                f"--key report-{session} > {session}-report.out 2> {session}-report.err"
             ))
         for item in request["input"]:
             if item.get("role") == "user" and len(item["content"]) == 2:
@@ -527,15 +526,130 @@ class CohortModel(TestHTTPServer):
             "pids=''; for i in 0 1 2 3 4 5 6 7 8 9; do ( "
             "n=0; while [ ! -e cohort-create ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
             "[ -e cohort-create ] || exit 124; "
-            f"rui session configure --workspace {shlex.quote(str(self.workspace))} "
+            f"printf %s 'Report to parent ID {self.parent}' | rui session start --workspace {shlex.quote(str(self.workspace))} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass "
-            '> "cohort-$i-config.json" 2> "cohort-$i-config.err" && '
-            "id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"context\"][\"session\"])' \"cohort-$i-config.json\") && "
-            f"rui session send --to \"$id\" -- 'Report to parent ID {self.parent}' "
-            '> "cohort-$i-start.json" 2> "cohort-$i-start.err" '
+            f'--record {shlex.quote(str(self.workspace.parent))}/cohort-$i.json --key cohort-$i '
+            '> "cohort-$i-start.id" 2> "cohort-$i-start.err" '
             ') & pids="$pids $!"; done; touch cohort-create; '
             'status=0; for pid in $pids; do wait "$pid" || status=1; done; exit "$status"'
         ))
+
+
+def stdin_start_contract():
+    """Real CLI capture, concurrent replay and cancellation without a provider."""
+    from concurrent.futures import ThreadPoolExecutor
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-stdin-start."))
+    host = None
+    try:
+        home = state / "home"
+        home.mkdir()
+        store = state / "store"
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
+
+        def invoke(*args, input=b"", extra=None, **kwargs):
+            return subprocess.run([str(fixture.RUI), *map(str, args)],
+                env={**environment, **(extra or {})}, capture_output=True, timeout=15,
+                **({"input": input} if "stdin" not in kwargs else {}), **kwargs)
+
+        def failed(result, stage, cause):
+            assert result.returncode == 1 and result.stdout == b"", result
+            assert f"failure during {stage};".encode() in result.stderr and cause in result.stderr, result
+            assert b"no Host serving" not in result.stderr, result
+
+        failed(invoke("session", "start", "--store", state / "absent", input=b"first"), "store", b"FileNotFound")
+        host = fixture.start_host(store, None)
+        # File-valued and literal forms have no compatibility route.
+        for args in (("send", "--to", "k7m2qx", "--text", "input"),
+                     ("send", "--to", "k7m2qx", "literal"),
+                     ("configure", "--instructions", "input"),
+                     ("start", "--instructions", "-")):
+            result = invoke("session", *args, "--store", store)
+            assert result.returncode == 1 and result.stdout == b"" and b"request:" not in result.stderr, result
+        for data, cause in ((b"", b"Nothing was sent"), (b"bad\xff", b"InvalidUtf8")):
+            record = state / "invalid.json"
+            result = invoke("session", "start", "--store", store, "--record", record, "--key", "invalid", input=data)
+            failed(result, "input_parse", cause)
+            assert not record.exists(), result
+        directory = os.open(state, os.O_RDONLY)
+        try:
+            failed(invoke("session", "start", "--store", store, stdin=directory), "stdin_read", b"error:")
+        finally:
+            os.close(directory)
+        failed(invoke("session", "configure", "--store", store,
+            "--output-schema", state / "missing-schema"), "input_file_read", b"FileNotFound")
+        for peer in ({"RUI_ADDRESS": "k7m2qx"}, {"RUI_STORE": str(store)},
+                     {"RUI_ADDRESS": "broken", "RUI_STORE": str(store), "RUI_SENDER_HANDLE": "x"}):
+            rejected = invoke("session", "start", "--store", store, extra=peer, input=b"must not run")
+            assert rejected.returncode == 1 and b"InvalidRuiAddress" in rejected.stderr and b"request:" not in rejected.stderr, rejected
+        assert fixture.command("session", "list", "--store", store, "--all")["sessions"] == []
+
+        text = "initial\x00雪\n`literal` $(data)\r\n\n".encode()
+        record = state / "start.json"
+        lost = invoke("session", "start", "--store", store, "--record", record, "--key", "first",
+            "--workspace", state, "--test-drop-reply", "after-commit", input=text)
+        failed(lost, "admission_response", b"admission outcome is unconfirmed")
+        saved = record.read_bytes()
+        capture = json.loads(saved)
+        assert capture["session"] == "" and capture["kind"] == "message", capture
+        assert capture["text"]["value"].encode() == text and capture["configuration"]["workspace"]["value"] == str(state), capture
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            replays = list(pool.map(lambda _: fixture.command("request", "recover", "--store", store,
+                "--record", record, "--kind", "message"), range(4)))
+        assert all(value == replays[0] for value in replays), replays
+        receipt = replays[0]
+        session = receipt["context"]["session"]
+        assert SESSION_ID.fullmatch(session) and receipt["answer"]["replayed"] is True, receipt
+        assert receipt["answer"]["admission"] == "1", receipt
+        domain = b"rui/content/v1"
+        assert receipt["input"] == {"type": "text", "bytes": str(len(text)),
+            "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + text).hexdigest()}, receipt
+        observed = fixture.observe(store, "first")
+        assert observed["target"] == session and "result" not in observed and observed["queue"]["status"] == "queued", observed
+        listing = fixture.command("session", "list", "--store", store, "--all")["sessions"]
+        assert [row["reference"] for row in listing] == [session], listing
+        snapshot = fixture.command("session", "inspect", "--store", store, "--session", session)
+        assert snapshot["pending_messages"] == "1", snapshot
+        instructions = "rules\x00é\n\n"
+        configured = fixture.command("session", "configure", "--store", store, "--session", session,
+            "--record", state / "instructions.json", "--key", "instructions", "--instructions", "-", input=instructions)
+        assert configured["answer"]["status"] == "accepted", configured
+        assert json.loads((state / "instructions.json").read_bytes())["configuration"]["instructions"]["value"] == instructions
+        stopped = fixture.command("session", "stop", "--store", store, "--session", session)
+        assert stopped["answer"]["status"] == "accepted", stopped
+        assert fixture.observe(store, "first")["result"] == {"status": "cancelled", "code": "session_stopped"}
+        socket = pathlib.Path(host.rui_ready_fields["socket"])
+        fixture.stop_host(host)
+        host = None
+        assert socket.is_socket(), socket
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"ConnectionRefused")
+        socket.unlink()
+        failed(invoke("session", "send", "--store", store, "--to", session, input=b"offline"), "connect", b"FileNotFound")
+        offline_record = state / "offline-start.json"
+        failed(invoke("session", "start", "--store", store, "--record", offline_record, "--key", "offline-start",
+            input=b"admit once after reconnect"), "connect", b"FileNotFound")
+        host = fixture.start_host(store, None)
+        assert fixture.command("request", "recover", "--store", store, "--record", record, "--kind", "message") == receipt
+        assert record.read_bytes() == saved
+        assert fixture.observe(store, "first")["result"]["status"] == "cancelled"
+        assert fixture.command("session", "inspect", "--store", store, "--session", session)["pending_messages"] == "0"
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            first_admissions = list(pool.map(lambda _: fixture.command("request", "recover", "--store", store,
+                "--record", offline_record, "--kind", "message"), range(4)))
+        assert sum(not value["answer"]["replayed"] for value in first_admissions) == 1, first_admissions
+        destinations = {value["context"]["session"] for value in first_admissions}
+        assert len(destinations) == 1 and session not in destinations, first_admissions
+        second = destinations.pop()
+        assert [row["reference"] for row in fixture.command("session", "list", "--store", store, "--all")["sessions"]] == [session, second]
+        assert fixture.command("session", "inspect", "--store", store, "--session", second)["pending_messages"] == "1"
+        print("stdin/start: exact NUL/UTF-8/newline bytes, lost admission, four concurrent original replays, one allocated Session, "
+              "queued-not-completed receipt, cancellation/reopen, stdin-only grammar and precise read/parse/store/connect errors passed")
+    except BaseException:
+        retain_failure_state("stdin/start failure state", state)
+        state = None
+        raise
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    lambda: shutil.rmtree(state) if state is not None else None)
 
 
 def concurrent_peers():
@@ -562,7 +676,7 @@ def concurrent_peers():
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "bypass", home=home))
         endpoint.parent = parent
-        started = run(installed, "session", "send", "--to", parent, "--", "Start ten peers", home=home)
+        started = run(installed, "session", "send", "--to", parent, input="Start ten peers", home=home)
         deadline = time.monotonic() + 20
         # Pending reports may join an active Turn at its next model step.
         # Hold report admission until the original parent result is saved;
@@ -576,11 +690,13 @@ def concurrent_peers():
         fixture.wait_for(lambda: len(endpoint.reports) == 10, "all ten recorded report senders", deadline=deadline)
         peers = []
         for index in range(10):
-            peer = allocated(json.loads((workspace / f"cohort-{index}-config.json").read_text()))
-            assert peer != parent and peer not in peers, peers
+            peer = (workspace / f"cohort-{index}-start.id").read_text().removesuffix("\n")
+            assert SESSION_ID.fullmatch(peer) and peer != parent and peer not in peers, peers
             peers.append(peer)
-            admission = json.loads((workspace / f"cohort-{index}-start.json").read_text())
+            admission = run(installed, "request", "recover", "--store", store,
+                "--record", state / f"cohort-{index}.json", "--kind", "message", home=home)
             assert admission["answer"]["status"] == "accepted" and admission["context"]["session"] == peer, admission
+            assert admission["answer"]["replayed"] is True, admission
             observation, result, _ = fixture.wait_for_result_release(store, admission["context"]["key"], peer, deadline)
             assert result == f"peer original result {peer}".encode(), (observation, result)
             capture = json.loads((state / f"{peer}-report.json").read_text())
@@ -609,10 +725,10 @@ def concurrent_peers():
         missing_before = run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home)
         assert missing_before["session"] is None and missing_before["pending_messages"] == "0", missing_before
         for kind in ("send", "configure"):
-            args = (("session", "send", "--to", unknown, "--", "must not run") if kind == "send" else
+            args = (("session", "send", "--to", unknown) if kind == "send" else
                     ("session", "configure", "--store", store, "--session", unknown,
                      "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"))
-            refused = run(installed, *args, home=home, expect=1)
+            refused = run(installed, *args, home=home, expect=1, input="must not run" if kind == "send" else None)
             assert refused["answer"]["status"] == "rejected" and refused["answer"]["code"] == "unknown_session", refused
             assert run(installed, "session", "inspect", "--store", store, "--session", unknown, home=home) == missing_before
             assert run(installed, "session", "list", "--store", store, "--all", home=home) == listing
@@ -641,6 +757,7 @@ def concurrent_peers():
 
 
 if __name__ == "__main__":
+    stdin_start_contract()
     for report_source in ("stdin", "file"):
         main(report_source)
     concurrent_peers()

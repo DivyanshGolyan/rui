@@ -859,7 +859,7 @@ func waitForReady(file *os.File) error {
 	}
 }
 
-func measureHeldCLI(binary string, arguments []string, host *measurement.Host, directory, label, family string, population *cliMeasurementPopulation) (cliFamilyMeasurement, []byte, error) {
+func measureHeldCLI(binary string, arguments []string, input io.Reader, host *measurement.Host, directory, label, family string, population *cliMeasurementPopulation) (cliFamilyMeasurement, []byte, error) {
 	var result cliFamilyMeasurement
 	if err := population.begin(); err != nil {
 		return result, nil, err
@@ -876,6 +876,7 @@ func measureHeldCLI(binary string, arguments []string, host *measurement.Host, d
 		return result, nil, err
 	}
 	command := exec.Command(binary, arguments...)
+	command.Stdin = input
 	command.Env = append(os.Environ(), "RUI_TEST_POST_COMMAND_RELEASE_FD=3", "RUI_TEST_POST_COMMAND_READY_FD=4")
 	command.ExtraFiles = []*os.File{releaseRead, readyWrite}
 	var stdout, stderr bytes.Buffer
@@ -1000,8 +1001,8 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	measurements := map[string]cliFamilyMeasurement{}
 	physicalUnavailable := false
 	physicalErrors := []string{}
-	measure := func(label, family string, arguments []string, verify func([]byte) error) error {
-		measured, output, measureError := measureHeldCLI(binary, arguments, host, directory, label, family, &qualification.population)
+	measure := func(label, family string, arguments []string, input io.Reader, verify func([]byte) error) error {
+		measured, output, measureError := measureHeldCLI(binary, arguments, input, host, directory, label, family, &qualification.population)
 		if verifyError := verify(output); verifyError != nil {
 			return verifyError
 		}
@@ -1046,7 +1047,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			session, err = measurement.ConfigurationSession(reply)
 			return err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, configured); err != nil {
+		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, nil, configured); err != nil {
 			return result, err
 		}
 	} else {
@@ -1062,7 +1063,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err := os.WriteFile(textPath, []byte("classify raw provider calls"), 0o600); err != nil {
 			return result, err
 		}
-		if err := measure("cli-message", "message", []string{"session", "send", "--store", store, "--to", session, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--text", textPath}, accepted); err != nil {
+		if err := measure("cli-message", "message", []string{"session", "send", "--store", store, "--to", session, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name}, strings.NewReader("classify raw provider calls"), accepted); err != nil {
 			return result, err
 		}
 		deadline = measurement.NewDeadline(2 * time.Minute)
@@ -1173,7 +1174,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		return result, fmt.Errorf("got %d unresolved actions, want %d", len(actions), value.Valid)
 	}
 	if runtime.GOOS == "darwin" && value.Name == "valid-256" {
-		if err := measure("cli-inspection", "inspection", []string{"session", "inspect", "--store", store, "--session", session}, func(output []byte) error {
+		if err := measure("cli-inspection", "inspection", []string{"session", "inspect", "--store", store, "--session", session}, nil, func(output []byte) error {
 			var report map[string]any
 			if err := json.Unmarshal(output, &report); err != nil {
 				return err
@@ -1188,7 +1189,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}
 	}
 	if runtime.GOOS == "darwin" && value.Name == "payload-100000" {
-		if err := measure("cli-action-read", "action_read", []string{"action", "read-arguments", "--store", store, "--session", session, "--action", actions[0]}, func(output []byte) error {
+		if err := measure("cli-action-read", "action_read", []string{"action", "read-arguments", "--store", store, "--session", session, "--action", actions[0]}, nil, func(output []byte) error {
 			if string(output) != calls[0].Arguments {
 				return fmt.Errorf("held Action read changed exact bytes: got=%d want=%d", len(output), len(calls[0].Arguments))
 			}
@@ -1203,7 +1204,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		started := time.Now()
 		var denialError error
 		if runtime.GOOS == "darwin" && value.Name == "mixed-restart" && index == 0 {
-			denialError = measure("cli-denial", "denial", []string{"action", "deny", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, accepted)
+			denialError = measure("cli-denial", "denial", []string{"action", "deny", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, nil, accepted)
 		} else {
 			_, denialError = deny(client, directory, session, action, index)
 		}

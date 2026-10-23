@@ -341,7 +341,16 @@ def whole_stream_shape(length):
             provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
             process, fields = start_host(store, provider)
             session = configure(state, store, "stream-config")
-            message(state, store, "stream-message", session, "" if length == 0 else "input")
+            if length == 0:
+                # Empty CLI stdin intentionally sends nothing. The protocol
+                # still admits empty content for this stream-range contract.
+                wire = {"version": "1", "kind": "message", "store": str(store),
+                    "key": "stream-message", "session": session, "sender": None, "sender_handle": None,
+                    "text": {"state": "value", "value": ""}}
+                head, body = raw_request(fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
+                assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)
+            else:
+                message(state, store, "stream-message", session, "input")
 
             def completed_page():
                 head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", session,

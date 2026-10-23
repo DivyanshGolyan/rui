@@ -323,12 +323,17 @@ func (h *Host) Stop(allowance time.Duration) error {
 }
 
 func Run(deadline Deadline, command string, arguments ...string) ([]byte, error) {
+	return RunInput(deadline, nil, command, arguments...)
+}
+
+func RunInput(deadline Deadline, input io.Reader, command string, arguments ...string) ([]byte, error) {
 	ctx, cancel, err := deadline.Context()
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
 	cmd := exec.CommandContext(ctx, command, arguments...)
+	cmd.Stdin = input
 	output, runError := cmd.Output()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("%s exceeded run-wide deadline: %w", command, ctx.Err())
@@ -349,7 +354,11 @@ func Run(deadline Deadline, command string, arguments ...string) ([]byte, error)
 }
 
 func RunJSON(deadline Deadline, destination any, command string, arguments ...string) error {
-	output, err := Run(deadline, command, arguments...)
+	return RunJSONInput(deadline, nil, destination, command, arguments...)
+}
+
+func RunJSONInput(deadline Deadline, input io.Reader, destination any, command string, arguments ...string) error {
+	output, err := RunInput(deadline, input, command, arguments...)
 	if err != nil {
 		return err
 	}

@@ -46,10 +46,11 @@ def capture(state, binary, label, size, repetition):
     # Keep the historical baseline's original syntax; migrate only the candidate.
     send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
         "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
-        str(state / "offline-store"), "--to", "k7m2qx", "--text", str(source)])
-    process = subprocess.Popen([str(binary), *send],
-        env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        str(state / "offline-store"), "--to", "k7m2qx"])
+    with source.open("rb") as stdin:
+        process = subprocess.Popen([str(binary), *send], stdin=stdin,
+            env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         cli.fixture.wait_for(lambda: pathlib.Path(f"{gate}.ready").exists(), "resource capture publication")
         observation = sample(process.pid)

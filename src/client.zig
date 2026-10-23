@@ -3,6 +3,12 @@ const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
 
+pub const FailureStage = enum { store, capture, stdin_read, input_file_read, input_parse, endpoint, connect, upload, admission_response, presentation };
+
+fn markStage(slot: ?*FailureStage, stage: FailureStage) void {
+    if (slot) |value| value.* = stage;
+}
+
 /// Pin before spawning a borrower; reset or destroy only after return/join.
 /// Stop is local transport intent, never cancellation of admitted Host work.
 pub const Cancellation = struct {
@@ -18,6 +24,7 @@ pub const Cancellation = struct {
 pub const Requests = struct {
     io: std.Io,
     cancellation: ?*const Cancellation = null,
+    stage: ?*FailureStage = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?ReadFailure = null,
 
@@ -43,12 +50,14 @@ pub const Requests = struct {
     pub fn sendCaptured(self: Requests, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
         reply_buffer.len = 0;
         try self.check();
+        markStage(self.stage, .store);
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
         const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
         result.context.store = captured.saved.store;
         result.context.key = captured.saved.key;
         result.context.kind = captured.saved.kind;
+        if (result.answer) |_| markStage(self.stage, .presentation) else |_| {}
         return result;
     }
 
@@ -658,6 +667,7 @@ pub const OptionalFile = struct {
 
 pub const ConfigureInput = struct {
     store: []const u8,
+    stage: ?*FailureStage = null,
     session: union(enum) {
         named: []const u8,
         create,
@@ -676,9 +686,11 @@ pub const ConfigureInput = struct {
 
 pub const MessageInput = struct {
     store: []const u8,
+    stage: ?*FailureStage = null,
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
+    configuration: ?ConfigureInput = null,
     // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
     sender_handle: ?[]const u8 = null,
@@ -1851,7 +1863,7 @@ pub const CommandObservation = struct {
         }
         const kind = self.kind orelse return error.InvalidObservation;
         if (self.target == null or (self.target.?.len == 0 and
-            (self.status != .rejected or kind != .configure))) return error.InvalidObservation;
+            (self.status != .rejected or (kind != .configure and kind != .message)))) return error.InvalidObservation;
         if ((self.status == .rejected) != (self.code != null)) return error.InvalidObservation;
         if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
         const accepted = self.status == .accepted;
@@ -2045,7 +2057,7 @@ pub const MutationKind = enum {
 
 pub const MutationTarget = union(MutationKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8 },
+    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
@@ -2416,6 +2428,9 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         if (target == .configure and session.len == 0 and answer.status.eql("accepted")) {
             if (!protocol.validSessionId(echoed.slice()) or answer.created.value != true) return error.RequestBindingMismatch;
             resolved_session.* = echoed.value;
+        } else if (target == .message and target.message.creates_session and session.len == 0 and answer.status.eql("accepted")) {
+            if (!protocol.validSessionId(echoed.slice())) return error.RequestBindingMismatch;
+            resolved_session.* = echoed.value;
         } else if (!echoed.eql(session)) return error.RequestBindingMismatch;
     }
     if (target == .permission_decision) {
@@ -2741,7 +2756,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         if (fields.session != null) return error.InvalidRequestRecord;
         saved.session = (fields.target orelse return error.InvalidRequestRecord).session.value;
     } else saved.session = (fields.session orelse return error.InvalidRequestRecord).value;
-    if (!(kind == .configure and saved.session.len == 0) and !protocol.validSessionId(saved.session.slice())) return error.InvalidRequestRecord;
+    if (!((kind == .configure or kind == .message and fields.configuration != null) and saved.session.len == 0) and !protocol.validSessionId(saved.session.slice())) return error.InvalidRequestRecord;
     const target: MutationTarget = switch (kind) {
         .configure => blk: {
             if (fields.configuration == null) return error.InvalidRequestRecord;
@@ -2751,7 +2766,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
             if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
-            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest } };
+            if (fields.configuration != null and saved.session.len != 0) return error.InvalidRequestRecord;
+            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
         .session_stop => .session_stop,
         .model_interruption => .{ .model_interruption = .{
@@ -2763,7 +2779,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
             .decision = std.meta.stringToEnum(protocol.PermissionDecision, (fields.decision orelse return error.InvalidRequestRecord).slice()) orelse return error.InvalidRequestRecord,
         } },
     };
-    if ((kind != .configure and (fields.configuration != null or fields.require_model != null)) or
+    if ((kind != .configure and (kind != .message and fields.configuration != null or fields.require_model != null)) or
         (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
@@ -2802,14 +2818,18 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     try identity.key.set(parsed.value.key);
     const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
     const kind = std.meta.stringToEnum(MutationKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
-    if (!(kind == .configure and session.len == 0) and !protocol.validSessionId(session)) return error.InvalidRequestRecord;
+    const creation = session.len == 0 and (kind == .configure or
+        kind == .message and std.mem.startsWith(u8, prefix[kind_marker..], ",\"configuration\":"));
+    if (!creation and !protocol.validSessionId(session)) return error.InvalidRequestRecord;
     try identity.session.set(session);
     try identity.kind.set(parsed.value.kind);
     return identity;
 }
 
 pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget) !CapturedRecord {
+    markStage(input.stage, .store);
     const paths = try platform.resolveClientPaths(io, input.store);
+    markStage(input.stage, .capture);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
@@ -2821,6 +2841,7 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
+    capture.stage = input.stage;
     errdefer capture.abort();
     try capture.writeHeader(.configure);
     try capture.writeJsonString(paths.store.slice());
@@ -2828,30 +2849,16 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     try capture.writeJsonString(location.key);
     try capture.write(",\"session\":");
     try capture.writeJsonString(session);
-    try capture.write(",\"configuration\":{\"workspace\":");
-    try capture.writeOptionalText(input.workspace);
-    try capture.write(",\"provider\":");
-    try capture.writeOptionalText(input.provider);
-    try capture.write(",\"model\":");
-    try capture.writeOptionalText(input.model);
-    try capture.write(",\"instructions\":");
-    try capture.writeOptionalFile(input.instructions, false);
-    try capture.write(",\"tools\":");
-    try capture.writeTools(input.tools);
-    try capture.write(",\"permission_mode\":");
-    try capture.writeOptionalText(input.permission_mode);
-    try capture.write(",\"output_schema\":");
-    try capture.writeOptionalFile(input.output_schema, true);
-    try capture.write(",\"compaction_trigger\":");
-    try capture.writeOptionalPolicy(input.compaction_trigger);
-    try capture.write(",\"output_reservation\":");
-    try capture.writeOptionalPolicy(input.output_reservation);
-    try capture.write(if (input.require_model) "},\"require_model\":true}" else "}}");
+    try capture.write(",\"configuration\":");
+    try capture.writeConfiguration(input);
+    try capture.write(if (input.require_model) ",\"require_model\":true}" else "}");
     return finishCapture(io, &capture, paths.store.slice(), location.key, session, .configure);
 }
 
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !CapturedRecord {
+    markStage(input.stage, .store);
     const paths = try platform.resolveClientPaths(io, input.store);
+    markStage(input.stage, .capture);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     if (input.sender_handle) |handle| if (handle.len > 32) return error.InvalidSenderHandle;
@@ -2864,9 +2871,12 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
         try address.validate();
     }
     const location = try target.resolve(io, &path_buffer, &key_buffer);
-    try validateIdentityInputs(location.key, input.session);
+    if (input.configuration != null) {
+        if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
+    } else try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
+    capture.stage = input.stage;
     errdefer capture.abort();
     try capture.writeHeader(.message);
     try capture.writeJsonString(paths.store.slice());
@@ -2884,6 +2894,12 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     } else try capture.write("null");
     try capture.write(",\"sender_handle\":");
     if (input.sender_handle) |handle| try capture.writeJsonString(handle) else try capture.write("null");
+    if (input.configuration) |configuration| {
+        // Creation intent is visible in the bounded metadata prefix, before
+        // either variable payload. Inspection never scans Message content.
+        try capture.write(",\"configuration\":");
+        try capture.writeConfiguration(configuration);
+    }
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
@@ -2948,6 +2964,7 @@ pub fn capturePermissionDecision(io: std.Io, input: PermissionDecisionInput, tar
 }
 
 fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const u8, session: []const u8, kind: MutationKind) !CapturedRecord {
+    markStage(capture.stage, .capture);
     var saved: CapturedIdentity = .{};
     try saved.store.set(store);
     try saved.key.set(key);
@@ -2968,6 +2985,7 @@ fn finishCapture(io: std.Io, capture: *Capture, store: []const u8, key: []const 
 
 const Capture = struct {
     io: std.Io,
+    stage: ?*FailureStage = null,
     file: std.Io.File,
     lock_file: std.Io.File,
     parent: std.Io.Dir,
@@ -3113,11 +3131,35 @@ const Capture = struct {
         }
     }
 
+    fn writeConfiguration(self: *Capture, input: ConfigureInput) !void {
+        try self.write("{\"workspace\":");
+        try self.writeOptionalText(input.workspace);
+        try self.write(",\"provider\":");
+        try self.writeOptionalText(input.provider);
+        try self.write(",\"model\":");
+        try self.writeOptionalText(input.model);
+        try self.write(",\"instructions\":");
+        try self.writeOptionalFile(input.instructions, false);
+        try self.write(",\"tools\":");
+        try self.writeTools(input.tools);
+        try self.write(",\"permission_mode\":");
+        try self.writeOptionalText(input.permission_mode);
+        try self.write(",\"output_schema\":");
+        try self.writeOptionalFile(input.output_schema, true);
+        try self.write(",\"compaction_trigger\":");
+        try self.writeOptionalPolicy(input.compaction_trigger);
+        try self.write(",\"output_reservation\":");
+        try self.writeOptionalPolicy(input.output_reservation);
+        try self.write("}");
+    }
+
     fn writeJsonFile(self: *Capture, path: []const u8) !void {
         return self.writeJsonFileBounded(path, protocol.max_sqlite_content_bytes, false);
     }
 
     fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64, require_text: bool) !void {
+        const input_stage: FailureStage = if (std.mem.eql(u8, path, "-")) .stdin_read else .input_file_read;
+        markStage(self.stage, input_stage);
         var file = if (std.mem.eql(u8, path, "-"))
             std.Io.File.stdin()
         else
@@ -3128,22 +3170,27 @@ const Capture = struct {
         var validator = Utf8Validator{};
         var decoded_bytes: u64 = 0;
         while (true) {
+            markStage(self.stage, input_stage);
             const count = file.readStreaming(self.io, &.{&buffer}) catch |err| switch (err) {
                 error.EndOfStream => 0,
                 else => return err,
             };
             if (count == 0) break;
+            markStage(self.stage, .input_parse);
             const next = std.math.add(u64, decoded_bytes, count) catch return error.ContentTooLarge;
             if (next > limit) return error.ContentTooLarge;
             decoded_bytes = next;
             try validator.feed(buffer[0..count]);
             // Default encoding copies non-ASCII bytes unchanged, including a UTF-8
             // sequence split across reads; the streaming validator owns validity.
+            markStage(self.stage, .capture);
             std.json.Stringify.encodeJsonStringChars(buffer[0..count], .{}, &self.writer.interface) catch
                 return self.writer.err orelse error.WriteFailed;
         }
+        markStage(self.stage, .input_parse);
         if (!validator.complete()) return error.InvalidUtf8;
         if (require_text and decoded_bytes == 0) return error.EmptyMessageInput;
+        markStage(self.stage, .capture);
         try self.write("\"");
     }
 
@@ -3210,9 +3257,12 @@ fn sendSource(
     until: ?i128,
 ) !CommandReply {
     const io = requests.io;
+    markStage(requests.stage, .endpoint);
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    markStage(requests.stage, .connect);
     const fd = try connectRequest(requests, address, until);
     defer closeSocket(io, fd);
+    markStage(requests.stage, .upload);
     var header_buffer: [512]u8 = undefined;
     var used = (try std.fmt.bufPrint(&header_buffer, "POST {s} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: 1\r\n", .{ route, length })).len;
     if (instance) |id| {
@@ -3235,6 +3285,7 @@ fn sendSource(
             sent += count;
         }
     } else try writeAllRequest(requests, fd, bytes.?, until);
+    markStage(requests.stage, .admission_response);
     return readCommandResponseRequest(requests, fd, reply_buffer, timing, until);
 }
 
@@ -5319,18 +5370,20 @@ test "keyed observation validates all five operation shapes and binding" {
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
         const empty = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ case[0] ++ "\",\"target\":\"\",\"status\":\"";
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "accepted\"" ++ case[1] ++ "}}" }, "k"));
-        if (!std.mem.eql(u8, case[0], "configure"))
+        if (!std.mem.eql(u8, case[0], "configure") and !std.mem.eql(u8, case[0], "message"))
             try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "rejected\",\"code\":\"invalid_session_reference\"" ++ case[2] ++ "}}" }, "k"));
     }
-    const creation = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"configure\",\"status\":\"rejected\",\"code\":\"";
-    inline for (.{ "invalid_workspace", "model_capability_unavailable" }) |code| {
-        const body = creation ++ code ++ "\",\"target\":\"\"}}";
-        const rejected = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
-        try std.testing.expectEqual(.rejected, rejected.status);
-        try std.testing.expectEqualStrings("", rejected.target.?.slice());
-        try std.testing.expectEqualStrings(code, rejected.failureCode().?);
-        inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
-            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ code ++ "\"" ++ target ++ "}}" }, "k"));
+    inline for (.{ "configure", "message" }) |kind| {
+        const creation = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\",\"code\":\"";
+        inline for (.{ "invalid_workspace", "model_capability_unavailable" }) |code| {
+            const body = creation ++ code ++ "\",\"target\":\"\"}}";
+            const rejected = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
+            try std.testing.expectEqual(.rejected, rejected.status);
+            try std.testing.expectEqualStrings("", rejected.target.?.slice());
+            try std.testing.expectEqualStrings(code, rejected.failureCode().?);
+            inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
+                try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ code ++ "\"" ++ target ++ "}}" }, "k"));
+        }
     }
     const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
