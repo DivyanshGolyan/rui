@@ -181,7 +181,9 @@ def main():
             stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.
             stop_process(seed)
             seed = None
-            with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro", uri=True)) as database:
+            # The Host has closed and checkpointed. A normal read-only WAL
+            # connection creates sidecars, contaminating the refusal snapshot.
+            with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
                 assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
             before_hashes = database_hashes(store)
             assert "rui.sqlite3" in before_hashes
