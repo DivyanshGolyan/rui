@@ -189,6 +189,22 @@ If the reply is lost, use the printed retry command. It targets the same Host in
 
 For foreground operation, use `host serve --store PATH --codex`. It uses the same default capacity; add `--active-capacity N` to choose another, for example `host serve --store PATH --active-capacity 8 --codex`. Without `--codex` or a development endpoint, `host serve` makes no model requests. See the [Host reference](ARCHITECTURE.md#platforms-and-server-lifetime) for startup and shutdown guarantees.
 
+### Export a retained failed response
+
+Use `session inspect --profile full` to find the failed model Operation and Attempt. With a compatible Host already serving that Store, export the two stored streams separately:
+
+```sh
+umask 077
+"$RUI" session inspect --store "$STORE" --session SESSION_REF \
+  --operation OPERATION_ID --attempt ATTEMPT_NUMBER --failed-response metadata > response.json
+"$RUI" session inspect --store "$STORE" --session SESSION_REF \
+  --operation OPERATION_ID --attempt ATTEMPT_NUMBER --failed-response body > response.body
+```
+
+Both commands write only the exact stored bytes to stdout, without decoding the body or formatting the metadata. Redirect bodies to files because they can contain binary bytes, terminal controls and private content. Check each command's exit status before using its file. Errors go to stderr with a nonzero exit. A delivery failure can leave a partial destination file.
+
+Metadata reports `complete`, `partial` or `omitted`. A partial body exports only its retained prefix. An omitted body fails explicitly, but its metadata remains exportable. Evicted, never-retained or mismatched Session, Operation and Attempt targets fail without payload. Inspection does not start a Host, contact a provider, change saved work or refresh retention. The two reads are independent, so eviction between them can make the second fail. Nothing is uploaded automatically.
+
 ### Start fresh after a Store format change
 
 This build uses Store format 30. Earlier formats are incompatible and are not migrated or reset automatically.

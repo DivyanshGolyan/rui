@@ -861,7 +861,7 @@ const SessionReportCapture = struct {
         };
     }
 
-    fn append(self: *SessionReportCapture, bytes: []const u8) !void {
+    pub fn append(self: *SessionReportCapture, bytes: []const u8) !void {
         var remaining = bytes;
         while (remaining.len != 0) {
             if (self.buffered == self.buffer.len) try self.flush();
@@ -3277,6 +3277,39 @@ pub const Store = struct {
         const field = identity.metadata.fields[index];
         const raw = self.contentIsRaw(identity.content_ids[index], field.length) catch |err| return self.fence(err);
         return .{ .store = self, .content_id = identity.content_ids[index], .reference = .{ .length = field.length, .digest = field.digest }, .representation = if (raw) .raw else .{ .projection = .{} } };
+    }
+
+    /// Authenticates the Session/Operation/Attempt before reading optional
+    /// diagnostics. Diagnostic faults never fence canonical state.
+    pub fn captureFailedResponse(self: *Store, request: protocol.InspectSession, store_dir: std.Io.Dir, options: SessionListOptions) !SessionReport {
+        const selection = request.failed_response.?;
+        const binding = binding: {
+            const access = try self.enter(.none);
+            defer access.release();
+            break :binding try access.finish(Ordinary.content, self.failedResponseBindingLocked(request.session.slice(), selection));
+        };
+        var capture = try SessionReportCapture.init(self.io, options.scratch_path, options.scratch_budget, options.request_number, options.fail_unlink);
+        errdefer capture.deinit();
+        try @import("failed_responses.zig").exportRecord(self.io, store_dir, binding, selection.part, &capture);
+        return capture.seal();
+    }
+
+    fn failedResponseBindingLocked(self: *Store, session: []const u8, selection: protocol.FailedResponseExport) !AttemptBinding {
+        const statement = try prepare(self.database, "SELECT turn_id FROM model_operation WHERE operation_id=?1 AND session_ref=?2 AND attempt_ordinal>=?3");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, selection.operation);
+        try bindText(statement, 2, session);
+        try bindU64(statement, 3, selection.attempt);
+        switch (c.sqlite3_step(statement)) {
+            c.SQLITE_DONE => return error.ContentNotFound,
+            c.SQLITE_ROW => {},
+            else => return error.OperationReadFailed,
+        }
+        return .{
+            .turn_id = @intCast(try readNullablePositiveI64(statement, 0) orelse return error.CorruptStore),
+            .operation_id = selection.operation,
+            .attempt_ordinal = selection.attempt,
+        };
     }
 
     pub fn captureSessionReport(

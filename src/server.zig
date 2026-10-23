@@ -1312,6 +1312,27 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .read_action_arguments => |command| deliverActionContent(host, fd, command, false),
         .read_action_call_id => |command| deliverActionContent(host, fd, command, true),
         .inspect_session => |request_value| {
+            if (request_value.failed_response != null) {
+                const capture = host.store.captureFailedResponse(request_value, host.lease.store_dir, .{
+                    .scratch_path = host.lease.paths.scratch.slice(),
+                    .scratch_budget = host.retention.sharedBudget(),
+                    .request_number = request_number,
+                    .fail_unlink = host.faults.report_unlink,
+                }) catch |err| {
+                    if (err == error.ReportScratchCleanupFailed) {
+                        fenceDispatch(host, "failed response export scratch cleanup", err);
+                        return respondStatic(host.io, fd, 500, "observation_error", "report_scratch_cleanup_failed");
+                    }
+                    if (host.store.isFenced()) {
+                        fenceDispatch(host, "failed response identity", err);
+                        return respondStatic(host.io, fd, 500, "invocation_error", "canonical_store_failure");
+                    }
+                    return respondStatic(host.io, fd, 409, "failed_response_unavailable", @errorName(err));
+                };
+                try fd.setReport(capture);
+                try fd.prepareHeader(200, "application/octet-stream", capture.length);
+                return;
+            }
             const report = host.store.captureSessionReport(request_value.session.slice(), .{
                 .scratch_path = host.lease.paths.scratch.slice(),
                 .scratch_budget = host.retention.sharedBudget(),

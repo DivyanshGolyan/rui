@@ -227,10 +227,18 @@ pub const ReadResult = struct {
 
 pub const ReportProfile = enum { current, full };
 
+pub const FailedResponsePart = enum { body, metadata };
+pub const FailedResponseExport = struct {
+    operation: u64,
+    attempt: u64,
+    part: FailedResponsePart,
+};
+
 pub const InspectSession = struct {
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     profile: ReportProfile = .current,
+    failed_response: ?FailedResponseExport = null,
 };
 
 // Random per serving lifetime; not a PID, Store identity, or recovery token.
@@ -1144,10 +1152,26 @@ const Parser = struct {
         try self.expectKey("session");
         try self.readSmallString(&request.session);
         if (try self.consumeIf(',')) {
-            try self.expectKey("profile");
-            var profile: Bounded(16) = .{};
-            try self.readSmallString(&profile);
-            request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
+            var key: Bounded(32) = .{};
+            try self.readSmallString(&key);
+            try self.expectByte(':');
+            if (key.eql("profile")) {
+                var profile: Bounded(16) = .{};
+                try self.readSmallString(&profile);
+                request.profile = if (profile.eql("full")) .full else return error.UnknownReportProfile;
+            } else if (key.eql("failed_response")) {
+                var part: Bounded(16) = .{};
+                try self.readSmallString(&part);
+                const selected = std.meta.stringToEnum(FailedResponsePart, part.slice()) orelse return error.InvalidTarget;
+                try self.expectByte(',');
+                try self.expectKey("operation");
+                const operation = try self.readCanonicalU64();
+                try self.expectByte(',');
+                try self.expectKey("attempt");
+                const ordinal = try self.readCanonicalU64();
+                if (operation == 0 or operation > std.math.maxInt(i64) or ordinal == 0 or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
+                request.failed_response = .{ .operation = operation, .attempt = ordinal, .part = selected };
+            } else return error.UnexpectedKey;
         }
         return request;
     }
@@ -1741,7 +1765,7 @@ pub const max_inspect_session_request_bytes =
     "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
     ",\"session\":".len + maximumJsonStringBytes(max_session_bytes) +
-    ",\"profile\":\"full\"}".len;
+    ",\"failed_response\":\"metadata\",\"operation\":\"".len + 19 + "\",\"attempt\":\"".len + 19 + "\"}".len;
 pub const max_list_sessions_request_bytes =
     "{\"version\":\"1\",\"kind\":\"list_sessions\",\"store\":".len +
     maximumJsonStringBytes(max_store_bytes) +
@@ -2400,8 +2424,8 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "Session report profile is closed and omission selects Current" {
-    const cases = [_]struct { json: []const u8, expected: ?ReportProfile }{
+test "Session inspection selects a closed report profile or exact failed response stream" {
+    const cases = [_]struct { json: []const u8, expected: ?ReportProfile, failed_response: ?FailedResponseExport = null }{
         .{
             .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\"}",
             .expected = .current,
@@ -2413,6 +2437,16 @@ test "Session report profile is closed and omission selects Current" {
         .{
             .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"profile\":\"current\"}",
             .expected = null,
+        },
+        .{
+            .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"body\",\"operation\":\"106\",\"attempt\":\"1\"}",
+            .expected = .current,
+            .failed_response = .{ .operation = 106, .attempt = 1, .part = .body },
+        },
+        .{
+            .json = "{\"version\":\"1\",\"kind\":\"inspect_session\",\"store\":\"store\",\"session\":\"session\",\"failed_response\":\"metadata\",\"operation\":\"42\",\"attempt\":\"3\"}",
+            .expected = .current,
+            .failed_response = .{ .operation = 42, .attempt = 3, .part = .metadata },
         },
     };
     for (cases) |case| {
@@ -2431,6 +2465,7 @@ test "Session report profile is closed and omission selects Current" {
         if (case.expected) |expected| {
             const request = try parser.parse();
             try std.testing.expectEqual(expected, request.inspect_session.profile);
+            try std.testing.expectEqualDeep(case.failed_response, request.inspect_session.failed_response);
         } else {
             try std.testing.expectError(error.UnknownReportProfile, parser.parse());
         }

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import pathlib
+import resource
 import shutil
 import signal
 import sqlite3
@@ -63,6 +64,158 @@ def assert_complete_failed_response(store, body, *, operation, code, http_status
     assert (metadata["code"], metadata["http_status"], metadata["request_id"]) == (code, http_status, request_id), metadata
     assert metadata["diagnostic"] == diagnostic, metadata
     return metadata
+
+
+def failed_response_export_case(state, processes, endpoints):
+    """Production EmptyProviderAnswer and binary HTTP failure, public raw reads."""
+    empty, _, _ = sse_answer("empty-export", "reasoning-export", "message-export", "")
+    binary = bytes(range(256)) * 1025 + b"\x00\xfftail\r\n"
+    endpoint = SuccessEndpoint([empty, ResponseSpec(binary, {}, status=400)], chunk_sizes=(65536,))
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints[endpoint] = thread
+    thread.start()
+    store = state / "failed-response-export"
+    session = "direct/failed-response-export"
+    host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+    processes.append(host)
+    configure(state, store, "export-config", session, "gpt-6-sol")
+    configure(state, store, "export-other-config", "wrong-session", "gpt-6-sol")
+    for label, code in (("empty", "malformed_provider_output"), ("binary", "provider_http_400")):
+        message(state, store, f"export-{label}", session, label)
+        result = wait_for(lambda: (value := observe(store, f"export-{label}")).get("result") and value, label)
+        assert result["result"]["code"] == code, result
+    stop_host(host)
+    processes.remove(host)
+    records = failed_response_records(store)
+    assert len(records) == 2 and [body for _, body in records] == [empty, binary], records
+    assert json.loads(records[0][0]["diagnostic"])["reason"] == "EmptyProviderAnswer", records[0]
+    root = store / "diagnostics" / "failed-responses"
+
+    def fd256():
+        resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+
+    def export(operation, part, *, target=session, attempt="1", extra=(), error=None):
+        result = subprocess.run([str(RUI), "session", "inspect", "--store", str(store),
+                                 "--session", target, "--operation", str(operation), "--attempt", attempt,
+                                 "--failed-response", part, *extra], capture_output=True, timeout=15,
+                                preexec_fn=fd256)
+        if error is not None:
+            assert result.returncode != 0 and result.stdout == b"" and error.encode() in result.stderr, result
+        else:
+            assert result.returncode == 0 and result.stderr == b"", result
+        return result.stdout
+
+    def snapshot():
+        # Canonical values, not WAL/checkpoint housekeeping or filesystem atime.
+        # The Host's exclusive SQLite lease must be released for this audit.
+        with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as database:
+            canonical = tuple(database.iterdump())
+        retained = {path.name: (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+                    for path in root.iterdir()}
+        return canonical, retained
+
+    before = snapshot()
+    # Restart with execution unavailable: inspection cannot fetch another body.
+    host = start_host(store, None)
+    processes.append(host)
+    for metadata, expected in records:
+        operation = metadata["operation"]
+        metadata_path = root / metadata["body"].replace(".body", ".json")
+        assert export(operation, "body") == expected, "body bytes changed in public export"
+        assert export(operation, "metadata") == metadata_path.read_bytes(), "metadata bytes changed in public export"
+        export(operation, "body", target="wrong-session", error="ContentNotFound")
+        export(operation, "body", attempt="2", error="ContentNotFound")
+    export("999999", "metadata", error="ContentNotFound")
+    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="conflicting")
+    export(records[0][0]["operation"], "unknown", error="InvalidArguments")
+    export("0", "body", error="InvalidTarget")
+    stop_host(host)
+    processes.remove(host)
+    assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
+    host = start_host(store, None)
+    processes.append(host)
+
+    # Perturb one real retained record, never a file-only replacement Store.
+    # Partial/omitted metadata is exported verbatim; a partial body is its
+    # exact retained prefix, while absent/corrupt/substituted bodies fail empty.
+    metadata, expected = records[1]
+    operation = metadata["operation"]
+    body_path = root / metadata["body"]
+    metadata_path = body_path.with_suffix(".json")
+    original_metadata = metadata_path.read_bytes()
+    prefix = expected[:65539]
+    partial = dict(metadata, status="partial", transfer="interrupted", retained_bytes=str(len(prefix)),
+                   retained_sha256=hashlib.sha256(prefix).hexdigest())
+    body_path.write_bytes(prefix)
+    partial_bytes = json.dumps(partial, indent=2).encode() + b"\n \n"
+    metadata_path.write_bytes(partial_bytes)
+    assert export(operation, "body") == prefix
+    assert export(operation, "metadata") == partial_bytes
+    omitted = dict(metadata, status="omitted", body=None, retained_bytes="0", retained_sha256=None,
+                   omitted_reason="ShortResponseCaptureRead")
+    omitted_bytes = json.dumps(omitted).encode()
+    metadata_path.write_bytes(omitted_bytes)
+    body_path.unlink()
+    assert export(operation, "metadata") == omitted_bytes
+    export(operation, "body", error="FailedResponseBodyOmitted")
+    metadata_path.write_bytes(original_metadata)
+    export(operation, "body", error="FailedResponseNotFound")
+    body_path.symlink_to(state / "must-not-read")
+    export(operation, "body", error="SymLinkLoop")
+    body_path.unlink()
+    body_path.write_bytes(expected)
+    body_path.chmod(0)
+    try:
+        export(operation, "body", error="AccessDenied")
+    finally:
+        body_path.chmod(0o600)
+    body_path.write_bytes(bytes([expected[0] ^ 1]) + expected[1:])
+    export(operation, "body", error="InvalidFailedResponseRecord")
+    body_path.write_bytes(expected)
+    wrong = dict(metadata, turn=str(int(metadata["turn"]) + 1))
+    metadata_path.write_bytes(json.dumps(wrong).encode())
+    export(operation, "metadata", error="InvalidFailedResponseRecord")
+    metadata_path.write_bytes(original_metadata)
+    duplicate = root / f"response-999-{operation}-1.json"
+    duplicate.write_bytes(original_metadata)
+    export(operation, "metadata", error="AmbiguousFailedResponse")
+    duplicate.unlink()
+    metadata_path.unlink()
+    export(operation, "body", error="FailedResponseNotFound")
+    metadata_path.write_bytes(original_metadata)
+    assert export(operation, "body") == expected
+    assert len(endpoint.requests) == 2, "inspection contacted the provider"
+    report = command("session", "inspect", "--store", store, "--session", session)
+    assert report["execution"]["scratch_used_bytes"] == "0", report
+    stop_host(host)
+    processes.remove(host)
+    assert snapshot()[0] == before[0], "diagnostic error paths mutated canonical data"
+    # Export uses the same mandatory report-scratch disposal as inspection.
+    # An unlinked-name failure must stop dispatch, not accumulate uncharged
+    # files behind an ordinary diagnostic-unavailable reply.
+    host = start_host(store, None, "--fault", "report-unlink")
+    processes.append(host)
+    export(records[0][0]["operation"], "body", error="report_scratch_cleanup_failed")
+    wait_for(lambda: host.poll() is not None, "export unlink effect-aware Host shutdown", timeout=5)
+    assert host.returncode != 0, host.returncode
+    stop_host(host)
+    processes.remove(host)
+    leftovers = list((store / "scratch").glob("report-*.tmp"))
+    assert len(leftovers) == 1 and leftovers[0].stat().st_size == 0, leftovers
+    assert snapshot()[0] == before[0], "export disposal changed the original saved failure"
+    host = start_host(store, None)
+    processes.append(host)
+    assert not leftovers[0].exists(), "startup did not reclaim the failed export capture"
+    assert export(records[0][0]["operation"], "body") == empty
+    assert json.loads(export(records[0][0]["operation"], "metadata"))["diagnostic"] == records[0][0]["diagnostic"]
+    assert observe(store, "export-empty")["result"]["code"] == "malformed_provider_output"
+    stop_host(host)
+    processes.remove(host)
+    export(operation, "body", error="no Host is serving")
+    stop_endpoint(endpoint, endpoints)
+    print(f"failed-response export: EmptyProviderAnswer {len(empty)} bytes and binary {len(binary)} bytes exact; "
+          "metadata exact; fd256; read-only; partial/omitted/missing/identity/symlink/corruption errors empty stdout; "
+          "scratch unlink fences and recovers without changing saved failure; no provider calls")
 
 
 def empty_response_retention_case(state, processes, endpoints, status):
@@ -637,6 +790,11 @@ def main(mode="all", correlation_case="all"):
             failure_correlation_cases(state, processes, endpoints, correlation_case)
             completed = True
             return
+        if mode in ("all", "failed-response-export"):
+            failed_response_export_case(state, processes, endpoints)
+            if mode == "failed-response-export":
+                completed = True
+                return
         phased_message_cases(state, processes, endpoints)
         if mode == "phased-messages":
             completed = True
@@ -5069,8 +5227,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

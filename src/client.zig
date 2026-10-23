@@ -94,6 +94,27 @@ pub const Requests = struct {
         return readReportResponse(self, fd, sink, reply_buffer);
     }
 
+    pub fn exportFailedResponse(self: Requests, store_path: []const u8, session: []const u8, selection: protocol.FailedResponseExport, destination: std.Io.File, reply_buffer: *ReplyBuffer) !ReportReply {
+        try self.check();
+        try validateIdentityInputs("", session);
+        if (selection.operation == 0 or selection.operation > std.math.maxInt(i64) or selection.attempt == 0 or selection.attempt > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, null);
+        body.len -= 1;
+        try body.appendFmt(",\"failed_response\":\"{t}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ selection.part, selection.operation, selection.attempt });
+        const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
+        defer closeSocket(self.io, fd);
+        const head = try readResponseHeadUntil(self, fd, .{}, null);
+        if (head.status != 200) {
+            if (head.kind != .command_json) return error.InvalidResponse;
+            return .{ .command = try readCommandBodyUntil(self, fd, head, reply_buffer, .{}, null) };
+        }
+        if (head.kind != .content_bytes) return error.InvalidResponse;
+        try readResponseBody(self, fd, head.content_length, destination, .withhold_final_window);
+        return .{ .report = .{ .bytes = head.content_length } };
+    }
+
     /// Same synchronous sink contract as inspectSession; no complete page copy.
     pub fn listSessions(self: Requests, store_path: []const u8, workspace: ?[]const u8, cursor: SessionListCursor, sink: anytype, reply_buffer: *ReplyBuffer) !ReportReply {
         reply_buffer.len = 0;
@@ -4608,7 +4629,6 @@ test "bounded read requests attain their independent worst-case capacities" {
     const cases = .{
         .{ "observe_command", "key", &escaped_key, null, null, protocol.max_observe_command_request_bytes },
         .{ "read_result", "key", &escaped_key, null, null, protocol.max_read_result_request_bytes },
-        .{ "inspect_session", "session", &escaped_session, null, protocol.ReportProfile.full, protocol.max_inspect_session_request_bytes },
         .{ "read_action_call_id", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_call_id_request_bytes },
         .{ "read_action_arguments", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_arguments_request_bytes },
     };
@@ -4617,6 +4637,14 @@ test "bounded read requests attain their independent worst-case capacities" {
         try renderReadRequest(&body, case[0], &escaped_store, case[1], case[2], case[3], case[4]);
         try std.testing.expectEqual(@as(usize, case[5]), body.len);
     }
+    var inspection: protocol.RequestBuffer = .{};
+    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", &escaped_session, null, .full);
+    try std.testing.expect(inspection.len <= protocol.max_inspect_session_request_bytes);
+    inspection.len = 0;
+    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", &escaped_session, null, null);
+    inspection.len -= 1;
+    try inspection.appendFmt(",\"failed_response\":\"metadata\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ std.math.maxInt(i64), std.math.maxInt(i64) });
+    try std.testing.expectEqual(protocol.max_inspect_session_request_bytes, inspection.len);
     var full: protocol.RequestBuffer = .{};
     full.len = full.bytes.len;
     try std.testing.expectError(error.BufferTooLarge, full.append("x"));

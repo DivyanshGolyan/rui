@@ -10,6 +10,7 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const protocol = @import("protocol.zig");
 
 pub const directory = "diagnostics/failed-responses";
 pub const capture_cap_bytes: u64 = 16 * 1024 * 1024;
@@ -69,6 +70,90 @@ pub fn open(io: std.Io, store_dir: std.Io.Dir) !std.Io.Dir {
     errdefer dir.close(io);
     try HostDiagnostics.private(dir.handle, true);
     return dir;
+}
+
+/// Copies one already-retained stream into the caller's charged report capture.
+/// No retention/open-for-write path is used. Each source window closes before
+/// the next read, so eviction can proceed; a lost record fails the capture.
+pub fn exportRecord(io: std.Io, store_dir: std.Io.Dir, binding: attempt.AttemptBinding, part: protocol.FailedResponsePart, sink: anytype) !void {
+    var diagnostics = store_dir.openDir(io, "diagnostics", .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return error.FailedResponseNotFound,
+        else => return err,
+    };
+    defer diagnostics.close(io);
+    var dir = diagnostics.openDir(io, "failed-responses", .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return error.FailedResponseNotFound,
+        else => return err,
+    };
+    defer dir.close(io);
+    var selected: ?Name = null;
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        const name = parse(entry.name) orelse continue;
+        if (name.part != .metadata or name.binding.operation_id != binding.operation_id or name.binding.attempt_ordinal != binding.attempt_ordinal) continue;
+        if (selected != null) return error.AmbiguousFailedResponse;
+        selected = name;
+    }
+    const record = selected orelse return error.FailedResponseNotFound;
+    var name_buffer: NameBuffer = undefined;
+    const metadata_name = nameFor(&name_buffer, record.sequence, binding, .metadata);
+    var metadata_bytes: [max_metadata_bytes]u8 = undefined;
+    const metadata_length = try readWindow(io, dir, metadata_name, 0, &metadata_bytes, null, max_metadata_bytes);
+    const Header = struct {
+        operation: []const u8,
+        attempt: []const u8,
+        turn: []const u8,
+        status: Status,
+        body: ?[]const u8,
+        retained_bytes: []const u8,
+        retained_sha256: ?[]const u8,
+    };
+    var arena_buffer: [max_metadata_bytes * 4]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&arena_buffer);
+    const metadata = std.json.parseFromSlice(Header, arena.allocator(), metadata_bytes[0..metadata_length], .{ .ignore_unknown_fields = true }) catch return error.InvalidFailedResponseRecord;
+    defer metadata.deinit();
+    const header = metadata.value;
+    if ((std.fmt.parseInt(u64, header.operation, 10) catch return error.InvalidFailedResponseRecord) != binding.operation_id or
+        (std.fmt.parseInt(u64, header.attempt, 10) catch return error.InvalidFailedResponseRecord) != binding.attempt_ordinal or
+        (std.fmt.parseInt(u64, header.turn, 10) catch return error.InvalidFailedResponseRecord) != binding.turn_id) return error.InvalidFailedResponseRecord;
+    if (part == .metadata) return sink.append(metadata_bytes[0..metadata_length]);
+    if (header.status == .omitted) return error.FailedResponseBodyOmitted;
+    const body_name = nameFor(&name_buffer, record.sequence, binding, .body);
+    if (!std.mem.eql(u8, header.body orelse return error.InvalidFailedResponseRecord, body_name)) return error.InvalidFailedResponseRecord;
+    const length = std.fmt.parseInt(u64, header.retained_bytes, 10) catch return error.InvalidFailedResponseRecord;
+    if (length > capture_cap_bytes) return error.InvalidFailedResponseRecord;
+    var expected: [32]u8 = undefined;
+    const hex = header.retained_sha256 orelse return error.InvalidFailedResponseRecord;
+    if (hex.len != 64) return error.InvalidFailedResponseRecord;
+    _ = std.fmt.hexToBytes(&expected, hex) catch return error.InvalidFailedResponseRecord;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var window: [copy_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    // Even an empty retained body must exist and be a regular file.
+    while (true) {
+        const count = try readWindow(io, dir, body_name, offset, &window, length, capture_cap_bytes);
+        hash.update(window[0..count]);
+        try sink.append(window[0..count]);
+        offset += count;
+        if (offset == length) break;
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    if (!std.mem.eql(u8, &expected, &digest)) return error.InvalidFailedResponseRecord;
+}
+
+fn readWindow(io: std.Io, dir: std.Io.Dir, name: []const u8, offset: u64, bytes: []u8, expected_length: ?u64, cap: u64) !usize {
+    const fd = std.posix.openat(dir.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0) catch |err| switch (err) {
+        error.FileNotFound => return error.FailedResponseNotFound,
+        else => return err,
+    };
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.size > cap or (if (expected_length) |length| stat.size != length else false) or offset > stat.size) return error.InvalidFailedResponseRecord;
+    const wanted: usize = @intCast(@min(bytes.len, stat.size - offset));
+    if (try file.readPositionalAll(io, bytes[0..wanted], offset) != wanted) return error.ShortResponseCaptureRead;
+    return wanted;
 }
 
 /// Evicts oldest records first, then writes the new one. A failed body copy

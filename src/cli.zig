@@ -1774,6 +1774,22 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 
 fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
+    if (parsed.get("failed-response")) |part| {
+        const selection: protocol.FailedResponseExport = .{
+            .part = std.meta.stringToEnum(protocol.FailedResponsePart, part) orelse return error.InvalidArguments,
+            .operation = (try parsed.number(u64, "operation")) orelse return error.InvalidArguments,
+            .attempt = (try parsed.number(u64, "attempt")) orelse return error.InvalidArguments,
+        };
+        var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var response: client.ReplyBuffer = .{};
+        const reply = try (client.Requests{ .io = io }).exportFailedResponse(try selectedStore(init, parsed.get("store"), &store_buffer), parsed.get("session").?, selection, std.Io.File.stdout(), &response);
+        if (reply == .command) {
+            try writeCommandReply(io, reply.command, .stderr);
+            return error.HostInvocationFailed;
+        }
+        return;
+    }
+    if (parsed.get("operation") != null or parsed.get("attempt") != null) return error.InvalidArguments;
     const profile: protocol.ReportProfile = if (parsed.get("profile")) |value|
         std.meta.stringToEnum(protocol.ReportProfile, value) orelse return error.UnknownReportProfile
     else
