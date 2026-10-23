@@ -221,6 +221,8 @@ def compiled_model_cases():
                     env=env, capture_output=True, text=True, timeout=10)
                 assert result.returncode != 0 and not result.stdout, result
                 assert listing in result.stderr and "unsupported model" in result.stderr, result.stderr
+                assert "syntax and recovery:" not in result.stderr, result.stderr
+                assert result.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), result.stderr
                 assert model.replace("\x1b", "\\x1b") in result.stderr, result.stderr
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
@@ -228,6 +230,8 @@ def compiled_model_cases():
         rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "retired-model"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
+        assert "syntax and recovery:" not in rejected_default.stderr, rejected_default.stderr
+        assert rejected_default.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), rejected_default.stderr
         defaults(home, "--provider", "codex", "--model", models[0])
         saved = home / ".config/rui/preferences"
         saved.write_bytes(saved.read_bytes().replace(b"model=gpt-6-luna", b"model=retired-model"))
@@ -235,6 +239,8 @@ def compiled_model_cases():
         result = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(root / "absent-store")],
             env=env, capture_output=True, text=True, timeout=10)
         assert result.returncode != 0 and "retired-model" in result.stderr and listing in result.stderr, result
+        assert "syntax and recovery:" not in result.stderr, result.stderr
+        assert result.stderr.endswith("error: UnsupportedModel (exit status 1)\n"), result.stderr
         assert saved.read_bytes() == original and not (home / ".config/rui/requests").exists()
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
             diagnostic = read_terminal(master, "See rui session configure --help.")
