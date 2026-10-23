@@ -8,6 +8,7 @@ import errno
 import mmap
 import os
 import pathlib
+import select
 import socket
 import struct
 import subprocess
@@ -84,10 +85,23 @@ def main():
         "mismatched readiness",
         required_fields={"execution": "enabled"},
     )
-    flood_error, _ = assert_reaped(
-        "sys.stderr.write('x' * (1024 * 1024)); sys.stderr.flush(); time.sleep(10)",
-        "stderr flood",
-    )
+    # Tail retention needs a running writer, not a Python startup-speed test.
+    # Prepare that input before the helper's unchanged readiness clock;
+    # assert_reaped still bounds the whole call, including this preparation.
+    popen = subprocess.Popen
+    def start_flood(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        try:
+            assert select.select([process.stderr], [], [], 2)[0], "stderr flood did not begin"
+        except BaseException:
+            dispose_all(lambda: stop_process(process))
+            raise
+        return process
+    with patch("host_process.subprocess.Popen", side_effect=start_flood):
+        flood_error, _ = assert_reaped(
+            "sys.stderr.write('x' * (1024 * 1024)); sys.stderr.flush(); time.sleep(10)",
+            "stderr flood",
+        )
     assert "stderr_tail=" in str(flood_error)
     assert STDERR_TAIL_LIMIT <= len(str(flood_error))
     error_text_limit = 4 * (READINESS_LIMIT + STDERR_TAIL_LIMIT) + 512
