@@ -210,9 +210,9 @@ Metadata reports `complete`, `partial` or `omitted`. A partial body exports only
 
 ### Start fresh after a Store format change
 
-This build uses Store format 30. Earlier formats are incompatible and are not migrated or reset automatically.
+Rui does not migrate or reset incompatible Stores. A Host startup error names the Store, its format and the format the build supports.
 
-At Host startup, an incompatible build reports the Store path, its format and the format the build supports. Rui does not migrate or reset the Store. A format-30 Store remains usable when updating to SQLite WAL with an exclusive Host lock; that update does not change the Store layout. You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
+You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
 
 Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. Each `install.*` directory has a `revision` file identifying its build. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
 
