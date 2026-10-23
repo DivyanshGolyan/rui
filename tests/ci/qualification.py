@@ -47,9 +47,12 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS):
                 args = ["--growth-only"] if scenario == "growth" else ["--capacity", scenario]
                 rows.append(dict(name=f"{target}-{scenario}", targets=[target],
                                  part="all", resource=True, args=args))
-        elif target == "check-full":
+        elif target in ("check", "check-full"):
+            # Callers and execution fixtures contend for the same four cores;
+            # each part runs every case of its group on its own runner.
+            prefix = "full" if target == "check-full" else "check"
             for part in ("execution", "callers"):
-                rows.append(dict(name=f"full-{part}", targets=[target], part=part, resource=False, args=[]))
+                rows.append(dict(name=f"{prefix}-{part}", targets=[target], part=part, resource=False, args=[]))
         elif target in RESOURCES:
             rows.append(dict(name=target, targets=[target], part="all", resource=True, args=[]))
         else:

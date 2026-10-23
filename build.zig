@@ -497,6 +497,7 @@ pub fn build(b: *std.Build) void {
         "Run bounded model failure correlation through SQLite on the Debug artifact",
     ).dependOn(&dispatch_debug_integration.step);
 
+    const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated check or full-check part (default all)") orelse .all;
     const check_step = b.step(
         "check",
         "Run formatting, native tests, process integrations in parallel, and production builds",
@@ -522,17 +523,19 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
+    fast_integrations.addArg(@tagName(check_part));
     fast_integrations.step.dependOn(&format.step);
     fast_integrations.addFileInput(ci.path(release));
-    fast_integrations.step.dependOn(&run_evaluator_host.step);
-    fast_integrations.step.dependOn(&run_renderer_allocation.step);
+    if (check_part != .callers) {
+        fast_integrations.step.dependOn(&run_evaluator_host.step);
+        fast_integrations.step.dependOn(&run_renderer_allocation.step);
+    }
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
         "check-full",
         "Run routine native tests, sanitizer and process integrations serially (long witnesses are separate)",
     );
-    const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
     const process_integrations = b.addSystemCommand(&.{"sh"});
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
