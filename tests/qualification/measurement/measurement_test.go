@@ -27,12 +27,12 @@ func TestModelInstructionsMatchIndependentRequestOracle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := "peer/quoted{}\"\\雪"
+	session := "k7m2qx"
 	command := exec.Command("python3", "-c", `
 import sys
 sys.path.insert(0, sys.argv[1])
 from model_fixture import model_instructions
-sys.stdout.buffer.write(model_instructions(sys.argv[2], store=sys.argv[3], session=sys.argv[4] + "\0").encode())
+sys.stdout.buffer.write(model_instructions(sys.argv[2] + "\0", store=sys.argv[3], session=sys.argv[4]).encode())
 `, fixtures, workspace, store, session)
 	// Process arguments cannot carry NUL; cover it inside each oracle instead.
 	want, err := command.Output()
@@ -43,8 +43,22 @@ sys.stdout.buffer.write(model_instructions(sys.argv[2], store=sys.argv[3], sessi
 		}
 		t.Fatalf("independent Python request oracle: %v", err)
 	}
-	if got := ModelInstructions(workspace, store, session+"\x00"); got != string(want) {
+	if got := ModelInstructions(workspace+"\x00", session); got != string(want) {
 		t.Fatalf("Go request instructions differ from independent oracle:\ngot: %q\nwant: %q", got, want)
+	}
+}
+
+func TestConfigurationSessionRequiresCanonicalAllocatedID(t *testing.T) {
+	for _, session := range []string{"k7m2qx", "000000", "zzzzzz", "", "peer/name", "K7M2QX", "abcdefg", "abcde", "abcdei", "abcde\x00"} {
+		reply := map[string]any{"answer": map[string]any{"session": session}}
+		got, err := ConfigurationSession(reply)
+		valid := session == "k7m2qx" || session == "000000" || session == "zzzzzz"
+		if (err == nil) != valid || valid && got != session {
+			t.Fatalf("configuration Session %q: %q, %v", session, got, err)
+		}
+	}
+	if _, err := ConfigurationSession(map[string]any{"answer": map[string]any{"status": "accepted"}}); err == nil {
+		t.Fatal("accepted configuration without allocated ID was accepted")
 	}
 }
 

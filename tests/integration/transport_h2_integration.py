@@ -473,15 +473,15 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
         requests = HostRequests(host, ready["socket"], store)
         idle_fds = []
         physical_peaks = []
+        sessions = []
         if observe is not None:
             observe(host.pid, 0)
         for round_number in range(rounds):
             for index in range(capacity):
-                session = f"direct/h2-{capacity}-{index}"
                 if round_number == 0:
                     configured = requests.call(
                         "configure", key=f"config-{capacity}-{index}",
-                        session=session, configuration={
+                        session="", configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
                             "model": {"state": "value", "value": "gpt-6-sol"},
@@ -492,6 +492,8 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured
+                    sessions.append(configured["answer"]["session"])
+                session = sessions[index]
                 submitted = requests.call(
                     "message", key=f"message-{capacity}-{round_number}-{index}",
                     session=session, sender=None, sender_handle=None, text={"state": "value", "value": f"h2-{capacity}-{round_number}-{index}"},
@@ -518,7 +520,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
             drain_deadline = min(result_deadline, time.monotonic() + 20)
             wait_for_drain(
                 lambda remaining: requests.call(
-                    "inspect_session", session=f"direct/h2-{capacity}-0",
+                    "inspect_session", session=sessions[0],
                     timeout=remaining, deadline=drain_deadline,
                 )["execution"],
                 drain_deadline,
@@ -616,13 +618,13 @@ def queued_h1(root):
         socket_path = host.rui_ready_fields["socket"]
         requests = HostRequests(host, socket_path, store)
         idle_fds = []
+        sessions = []
         for round_number in range(2):
             for index in range(capacity):
-                session = f"direct/h1-{index}"
                 if round_number == 0:
                     configured = requests.call(
                         "configure", key=f"h1-config-{index}",
-                        session=session, configuration={
+                        session="", configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
                             "model": {"state": "value", "value": "gpt-6-sol"},
@@ -633,6 +635,8 @@ def queued_h1(root):
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured
+                    sessions.append(configured["answer"]["session"])
+                session = sessions[index]
                 submitted = requests.call(
                     "message", key=f"h1-message-{round_number}-{index}",
                     session=session, sender=None, sender_handle=None, text={"state": "value", "value": f"h1-{round_number}-{index}"},
@@ -662,7 +666,7 @@ def queued_h1(root):
                     assert (pending.get("processing") or {}).get("attempt") == "1", pending
                     assert pending.get("result") is None, pending
                 inspection = requests.call(
-                    "inspect_session", session="direct/h1-1",
+                    "inspect_session", session=sessions[1],
                 )["execution"]
                 assert int(inspection["custody_occupied"]) > 0, inspection
                 endpoint.release_first.set()
@@ -681,7 +685,7 @@ def queued_h1(root):
                 ) == f"answer-h1-{round_number}-{index}".encode()
             wait_for_drain(
                 lambda remaining: requests.call(
-                    "inspect_session", session="direct/h1-0",
+                    "inspect_session", session=sessions[0],
                     timeout=remaining, deadline=result_deadline,
                 )["execution"],
                 result_deadline,
@@ -717,8 +721,8 @@ def queued_h1_inactivity(root):
             active_capacity=2,
         )
         for index in range(2):
-            dispatch.configure(root, store, f"queued-config-{index}", f"direct/queued-{index}", "gpt-6-sol")
-            dispatch.message(root, store, f"queued-message-{index}", f"direct/queued-{index}", f"queued-{index}")
+            session = dispatch.configure(root, store, f"queued-config-{index}", None, "gpt-6-sol")
+            dispatch.message(root, store, f"queued-message-{index}", session, f"queued-{index}")
         assert endpoint.first_ready.wait(15), "first H1 request never arrived"
         time.sleep(1.7)
         with endpoint.lock:
@@ -764,10 +768,11 @@ def stalled_capture(root, endpoint, after_progress=False):
     )
     diagnostics = HostDiagnostics(host)
     released = False
+    sessions = []
     try:
         for index in range(100):
-            session = f"direct/stalled-{index}"
-            dispatch.configure(records, store, f"stalled-config-{index}", session, "gpt-6-sol")
+            session = dispatch.configure(records, store, f"stalled-config-{index}", None, "gpt-6-sol")
+            sessions.append(session)
             dispatch.message(records, store, f"stalled-message-{index}", session, f"stalled-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
         gate_event = diagnostics.wait("capture_write_gate_entered", timeout=30)[0]
@@ -775,14 +780,14 @@ def stalled_capture(root, endpoint, after_progress=False):
         processing = dispatch.observe(store, "stalled-message-0")["processing"]
         reply = dispatch.command(
             "session", "interrupt-model", "--store", store, "--record", records / "stalled-interrupt.json",
-            "--key", "stalled-interrupt", "--session", "direct/stalled-0",
+            "--key", "stalled-interrupt", "--session", sessions[0],
             "--turn", processing["turn"], "--operation", processing["operation"],
         )
         assert reply["answer"]["status"] == "accepted", reply
         diagnostics.wait("effect_stop_requested", control_key="stalled-interrupt", timeout=15,
                          turn=processing["turn"], operation=processing["operation"], attempt=processing["attempt"])
         held = dispatch.command("session", "inspect", "--store", store,
-                                "--session", "direct/stalled-0")["execution"]
+                                "--session", sessions[0])["execution"]
         assert int(held["custody_occupied"]) > 0, held
         assert dispatch.observe(store, "stalled-message-1").get("result") is None
         stalled_rss_kib = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(host.pid)]))
@@ -805,7 +810,7 @@ def stalled_capture(root, endpoint, after_progress=False):
                 assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"stalled-{index}"]
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/stalled-0", timeout=remaining)["execution"],
+                                              "--session", sessions[0], timeout=remaining)["execution"],
             result_deadline,
         )
         assert len(endpoint.connections) == 1, endpoint.connections
@@ -838,10 +843,11 @@ def paused_capture_inactivity(root, endpoint):
     )
     diagnostics = HostDiagnostics(host)
     released = False
+    sessions = []
     try:
         for index in range(20):
-            session = f"direct/paused-{index}"
-            dispatch.configure(root, store, f"paused-config-{index}", session, "gpt-6-sol")
+            session = dispatch.configure(root, store, f"paused-config-{index}", None, "gpt-6-sol")
+            sessions.append(session)
             dispatch.message(root, store, f"paused-message-{index}", session, f"paused-{index}")
         assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
         diagnostics.wait("capture_write_gate_entered", timeout=15)
@@ -864,7 +870,7 @@ def paused_capture_inactivity(root, endpoint):
             assert dispatch.read_result(store, key, deadline=result_deadline) == endpoint.answers[f"paused-{index}"]
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/paused-0", timeout=remaining)["execution"],
+                                              "--session", sessions[0], timeout=remaining)["execution"],
             result_deadline,
         )
     finally:
@@ -896,10 +902,11 @@ def capture_failure_on_resume(root, endpoint):
     diagnostics = HostDiagnostics(host)
     released = False
     outcomes = []
+    sessions = []
     try:
         for index in range(20):
-            session = f"direct/resume-{index}"
-            dispatch.configure(root, store, f"resume-config-{index}", session, "gpt-6-sol")
+            session = dispatch.configure(root, store, f"resume-config-{index}", None, "gpt-6-sol")
+            sessions.append(session)
             dispatch.message(root, store, f"resume-message-{index}", session, f"resume-{index}")
         assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
         diagnostics.wait("capture_write_gate_entered", timeout=15)
@@ -921,8 +928,8 @@ def capture_failure_on_resume(root, endpoint):
         assert outcomes.count("response_write_failed") == 1, outcomes
         assert len(diagnostics.matching("transport_resume_capture_failure")) == 1, diagnostics.records[-12:]
         assert completed == 19, outcomes
-        dispatch.configure(root, store, "resume-after-config", "direct/resume-after", "gpt-6-sol")
-        dispatch.message(root, store, "resume-after-message", "direct/resume-after", "resume-after")
+        later_session = dispatch.configure(root, store, "resume-after-config", None, "gpt-6-sol")
+        dispatch.message(root, store, "resume-after-message", later_session, "resume-after")
         result_deadline = time.monotonic() + 20
         later = dispatch.wait_for(
             lambda: dispatch.observe(
@@ -934,7 +941,7 @@ def capture_failure_on_resume(root, endpoint):
         assert dispatch.read_result(store, "resume-after-message", deadline=result_deadline) == endpoint.answers["resume-after"]
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/resume-0", timeout=remaining)["execution"],
+                                              "--session", sessions[0], timeout=remaining)["execution"],
             min(population_deadline, result_deadline),
         )
         assert len(endpoint.connections) == 1, endpoint.connections
@@ -956,8 +963,8 @@ def refused_stream(root, endpoint, phase):
         "--test-retry-waits-ms", "60000,60000,60000",
     )
     try:
-        dispatch.configure(root, store, f"refused-{phase}-config", "direct/refused", "gpt-6-sol")
-        dispatch.message(root, store, f"refused-{phase}-message", "direct/refused", "refused-request")
+        session = dispatch.configure(root, store, f"refused-{phase}-config", None, "gpt-6-sol")
+        dispatch.message(root, store, f"refused-{phase}-message", session, "refused-request")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
             lambda: dispatch.observe(store, f"refused-{phase}-message", deadline=result_deadline).get("result"),
@@ -992,8 +999,8 @@ def dead_reused_connection(root, endpoint):
     )
     try:
         for text in ("warm", "dead"):
-            dispatch.configure(root, store, f"dead-{text}-config", f"direct/{text}", "gpt-6-sol")
-            dispatch.message(root, store, f"dead-{text}-message", f"direct/{text}", text)
+            session = dispatch.configure(root, store, f"dead-{text}-config", None, "gpt-6-sol")
+            dispatch.message(root, store, f"dead-{text}-message", session, text)
             result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
                 lambda text=text: dispatch.observe(store, f"dead-{text}-message", deadline=result_deadline).get("result"),
@@ -1007,7 +1014,7 @@ def dead_reused_connection(root, endpoint):
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
                 "SELECT attempt_ordinal,allowance_used FROM model_operation "
-                "WHERE session_ref='direct/dead'"
+                "WHERE session_ref=?", (session,)
             ).fetchone() == (2, 2)
         print(json.dumps({
             "case": "dead_reuse", "attempts_for_dead": 2,
@@ -1024,9 +1031,11 @@ def isolated_bad_header(root, endpoint):
         "--provider-ca-file", str(root / "cert.pem"), active_capacity=2,
     )
     try:
+        sessions = []
         for index in range(2):
-            dispatch.configure(root, store, f"sibling-config-{index}", f"direct/sibling-{index}", "gpt-6-sol")
-            dispatch.message(root, store, f"sibling-message-{index}", f"direct/sibling-{index}", f"sibling-{index}")
+            session = dispatch.configure(root, store, f"sibling-config-{index}", None, "gpt-6-sol")
+            sessions.append(session)
+            dispatch.message(root, store, f"sibling-message-{index}", session, f"sibling-{index}")
         codes = []
         result_deadline = time.monotonic() + 20
         for index in range(2):
@@ -1042,7 +1051,7 @@ def isolated_bad_header(root, endpoint):
         assert len(endpoint.connections) == 1
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/sibling-0", timeout=remaining)["execution"],
+                                              "--session", sessions[0], timeout=remaining)["execution"],
             result_deadline,
         )
         print(json.dumps({"case": "sibling_header_failure", "streams": 2, "connections": 1}), flush=True)
@@ -1058,15 +1067,16 @@ def isolated_terminal_stream(root, endpoint, mode):
         "--provider-ca-file", str(root / "cert.pem"), *options, active_capacity=2,
     )
     try:
+        sessions = {}
         for name in ("target", "sibling"):
-            dispatch.configure(root, store, f"{mode}-{name}-config", f"direct/{name}", "gpt-6-sol")
-            dispatch.message(root, store, f"{mode}-{name}-message", f"direct/{name}", f"isolation-{name}")
+            sessions[name] = dispatch.configure(root, store, f"{mode}-{name}-config", None, "gpt-6-sol")
+            dispatch.message(root, store, f"{mode}-{name}-message", sessions[name], f"isolation-{name}")
         assert endpoint.ready.wait(20), f"both {mode} streams did not become live"
         if mode == "cancel":
             processing = dispatch.observe(store, "cancel-target-message")["processing"]
             reply = dispatch.command(
                 "session", "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
-                "--key", "cancel-interrupt", "--session", "direct/target",
+                "--key", "cancel-interrupt", "--session", sessions["target"],
                 "--turn", processing["turn"], "--operation", processing["operation"],
             )
             assert reply["answer"]["status"] == "accepted", reply
@@ -1093,7 +1103,7 @@ def isolated_terminal_stream(root, endpoint, mode):
         assert {text for _, _, text, _ in endpoint.streams} == {"isolation-target", "isolation-sibling"}
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/target", timeout=remaining)["execution"],
+                                              "--session", sessions["target"], timeout=remaining)["execution"],
             result_deadline,
         )
         dispatch.stop_host(host)
@@ -1103,7 +1113,7 @@ def isolated_terminal_stream(root, endpoint, mode):
             ).fetchall() == [(1, 1), (1, 1)]
             if mode == "cancel":
                 assert database.execute(
-                    "SELECT interrupted_by_command_key FROM model_operation WHERE session_ref='direct/target'"
+                    "SELECT interrupted_by_command_key FROM model_operation WHERE session_ref=?", (sessions["target"],)
                 ).fetchone() == ("cancel-interrupt",)
         print(json.dumps({"case": f"sibling_{mode}", "streams": 2, "connections": 1,
                           "target_resets": len(endpoint.resets), "sibling": "completed"}), flush=True)
@@ -1120,11 +1130,13 @@ def connection_failure(root, endpoint):
     )
     diagnostics = None
     observed = {}
+    sessions = []
     try:
         diagnostics = HostDiagnostics(host)
         for index in range(2):
-            dispatch.configure(root, store, f"drop-config-{index}", f"direct/drop-{index}", "gpt-6-sol")
-            dispatch.message(root, store, f"drop-message-{index}", f"direct/drop-{index}", f"drop-{index}")
+            session = dispatch.configure(root, store, f"drop-config-{index}", None, "gpt-6-sol")
+            sessions.append(session)
+            dispatch.message(root, store, f"drop-message-{index}", session, f"drop-{index}")
         result_deadline = time.monotonic() + 20
 
         def settled(index):
@@ -1141,7 +1153,7 @@ def connection_failure(root, endpoint):
         assert sorted(text for _, _, text, _ in endpoint.streams) == ["drop-0", "drop-0", "drop-1", "drop-1"]
         wait_for_drain(
             lambda remaining: dispatch.command("session", "inspect", "--store", store,
-                                              "--session", "direct/drop-0", timeout=remaining)["execution"],
+                                              "--session", sessions[0], timeout=remaining)["execution"],
             result_deadline,
         )
         dispatch.stop_host(host)
@@ -1151,13 +1163,13 @@ def connection_failure(root, endpoint):
             ).fetchall() == [(2, 2), (2, 2)]
         print(json.dumps({"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}), flush=True)
     except BaseException:
-        retain_connection_failure(store, host, diagnostics, endpoint, observed)
+        retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions)
         raise
     finally:
         dispatch.stop_host(host)
 
 
-def retain_connection_failure(store, host, diagnostics, endpoint, observed):
+def retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions):
     """Keep where each Attempt went: peer streams per connection, live Host
     execution facts, durable retry state and Attempt milestones. Fixture
     texts, codes, counts and clocks only; never bodies or the Store itself.
@@ -1166,7 +1178,7 @@ def retain_connection_failure(store, host, diagnostics, endpoint, observed):
     optional stderr are try-only and lossy, so milestones only corroborate.
     Retention is optional: no step of it may replace the original failure."""
     try:
-        _retain_connection_failure(store, host, diagnostics, endpoint, observed)
+        _retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions)
     except Exception as error:
         try:
             print(f"Connection failure diagnostics unavailable: {type(error).__name__}", file=sys.stderr, flush=True)
@@ -1174,13 +1186,13 @@ def retain_connection_failure(store, host, diagnostics, endpoint, observed):
             pass
 
 
-def _retain_connection_failure(store, host, diagnostics, endpoint, observed):
+def _retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions):
     execution = {}
     if host.poll() is None:
-        for index in range(2):  # Live facts first; a fence is visible only here.
+        for index, session in enumerate(sessions):  # Live facts first; a fence is visible only here.
             try:
                 execution[index] = dispatch.command(
-                    "session", "inspect", "--store", store, "--session", f"direct/drop-{index}", timeout=2,
+                    "session", "inspect", "--store", store, "--session", session, timeout=2,
                 )["execution"]
             except Exception as error:
                 execution[index] = type(error).__name__
@@ -1230,8 +1242,8 @@ def unsupported_https(root):
         "--provider-ca-file", str(root / "cert.pem"),
     )
     try:
-        dispatch.configure(root, store, "non-h2-config", "direct/non-h2", "gpt-6-sol")
-        dispatch.message(root, store, "non-h2-message", "direct/non-h2", "non-h2")
+        session = dispatch.configure(root, store, "non-h2-config", None, "gpt-6-sol")
+        dispatch.message(root, store, "non-h2-message", session, "non-h2")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
             lambda: dispatch.observe(store, "non-h2-message", deadline=result_deadline).get("result"),
@@ -1261,8 +1273,8 @@ def negotiated_h2_early_error(root, endpoint):
         "--provider-ca-file", str(root / "cert.pem"), "--test-retry-waits-ms", "1,1,1",
     )
     try:
-        dispatch.configure(root, store, "early-h2-config", "direct/early-h2", "gpt-6-sol")
-        dispatch.message(root, store, "early-h2-message", "direct/early-h2", "early-h2")
+        session = dispatch.configure(root, store, "early-h2-config", None, "gpt-6-sol")
+        dispatch.message(root, store, "early-h2-message", session, "early-h2")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
             lambda: dispatch.observe(store, "early-h2-message", deadline=result_deadline).get("result"),

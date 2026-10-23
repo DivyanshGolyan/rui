@@ -427,7 +427,8 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	}()
 	socket := host.Ready["socket"]
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	if err := client.Configure("headroom", "measure/headroom"); err != nil {
+	session, err := client.Configure("headroom", "")
+	if err != nil {
 		return nil, err
 	}
 	idle, err := sample(host, directory, "idle")
@@ -449,7 +450,7 @@ func headroom(binary, root, url string) (result map[string]any, resultError erro
 	latencies := make([]float64, 0, 50)
 	for index := range 50 {
 		started := time.Now()
-		reply, err := stopSession(client, fmt.Sprintf("headroom-stop-%d", index), "measure/headroom")
+		reply, err := stopSession(client, fmt.Sprintf("headroom-stop-%d", index), session)
 		if err != nil {
 			return nil, err
 		}
@@ -526,9 +527,9 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 	sessions := make([]string, capacity)
 	keys := make([]string, capacity)
 	for index := range capacity {
-		sessions[index] = fmt.Sprintf("measure/active/%d", index)
 		keys[index] = fmt.Sprintf("active-%d", index)
-		if err := client.Submit(keys[index], sessions[index], keys[index]); err != nil {
+		sessions[index], err = client.Submit(keys[index], "", keys[index])
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1081,8 +1082,8 @@ func controlFirst(binary, root string) (result map[string]any, resultError error
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	sessions := make([]string, controlHeadroom)
 	for index := range controlHeadroom {
-		sessions[index] = fmt.Sprintf("contention/%d", index)
-		if err := client.Submit(fmt.Sprintf("contention-%d", index), sessions[index], fmt.Sprintf("contention %d", index)); err != nil {
+		sessions[index], err = client.Submit(fmt.Sprintf("contention-%d", index), "", fmt.Sprintf("contention %d", index))
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1238,8 +1239,8 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	session := "contention/real-settlement"
-	if err := client.Submit("real-settlement-message", session, "large committed output"); err != nil {
+	session, err := client.Submit("real-settlement-message", "", "large committed output")
+	if err != nil {
 		return nil, err
 	}
 	if err := measurement.WaitFor(deadline, 25*time.Millisecond, "large provider request", func() (bool, error) { return endpoint.count() == 1, nil }); err != nil {
@@ -1377,8 +1378,8 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 	if status != "completed" {
 		return nil, fmt.Errorf("large result was %s", status)
 	}
-	blockedSession := "contention/blocked-result-control"
-	if err := client.Configure("blocked-result", blockedSession); err != nil {
+	blockedSession, err := client.Configure("blocked-result", "")
+	if err != nil {
 		return nil, err
 	}
 	blocked, err := openBlockedResults(host.Ready["socket"], store, "real-settlement-message")

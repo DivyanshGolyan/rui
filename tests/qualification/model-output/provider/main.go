@@ -64,6 +64,7 @@ type fixture struct {
 	hold             bool
 	workspace        string
 	store            string
+	sessions         []string
 	round            int
 	facts            *os.File
 	streams          map[string]*stream
@@ -514,13 +515,7 @@ func requestID(body []byte) (string, error) {
 	return result, nil
 }
 
-// RepeatSession is the Session reference the controller configures for one
-// history-aware stream; every round of that stream reuses it.
-func RepeatSession(capacity, index int) string {
-	return fmt.Sprintf("measure/repeat-%d/%d", capacity, index)
-}
-
-func requestHistoryValid(body []byte, current, workspace, store string) bool {
+func requestHistoryValid(body []byte, current, workspace, session string) bool {
 	var capacity, round, index int
 	if _, err := fmt.Sscanf(current, "capacity-%d-round-%d-%d", &capacity, &round, &index); err != nil || capacity < 1 || round < 1 || index < 0 || index >= capacity {
 		return false
@@ -544,7 +539,7 @@ func requestHistoryValid(body []byte, current, workspace, store string) bool {
 	}
 	expected := map[string]any{
 		"model": "gpt-6-luna", "store": false, "stream": true,
-		"include": []any{"reasoning.encrypted_content"}, "instructions": measurement.ModelInstructions(workspace, store, RepeatSession(capacity, index)), "tools": []any{},
+		"include": []any{"reasoning.encrypted_content"}, "instructions": measurement.ModelInstructions(workspace, session), "tools": []any{},
 		"input": expectedInput,
 	}
 	var observed any
@@ -688,8 +683,12 @@ func (f *fixture) serveResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	digest := sha256.Sum256(body)
-	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: !f.historyAware || requestRoundIdentityValid(id, f.expected, f.round) && requestHistoryValid(body, id, f.workspace, f.store)}
 	f.mu.Lock()
+	var capacity, round, index int
+	_, identityError := fmt.Sscanf(id, "capacity-%d-round-%d-%d", &capacity, &round, &index)
+	historyValid := !f.historyAware || identityError == nil && requestRoundIdentityValid(id, f.expected, f.round) &&
+		index < len(f.sessions) && requestHistoryValid(body, id, f.workspace, f.sessions[index])
+	current := &stream{id: id, requestBytes: len(body), requestSHA256: hex.EncodeToString(digest[:]), historyValid: historyValid}
 	if f.started || len(f.streams) >= f.expected || f.streams[id] != nil {
 		f.mu.Unlock()
 		http.Error(w, "unexpected request", http.StatusConflict)
@@ -1158,6 +1157,39 @@ func (s *Server) Reset() error {
 	return nil
 }
 
+// BindSessions takes identities from the controller's configuration replies,
+// before requests arrive; the request under test cannot nominate its own ID.
+func (s *Server) BindSessions(sessions []string) error {
+	f := s.currentFixture()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sessions) != 0 || len(f.streams) != 0 {
+		return errors.New("fixture Session identities already bound or in use")
+	}
+	if err := validateSessions(sessions, f.expected); err != nil {
+		return err
+	}
+	f.sessions = append([]string(nil), sessions...)
+	return nil
+}
+
+func validateSessions(sessions []string, count int) error {
+	if len(sessions) != count {
+		return errors.New("fixture Session count differs from configured population")
+	}
+	seen := make(map[string]bool, count)
+	for _, session := range sessions {
+		if _, err := measurement.ConfigurationSession(map[string]any{"answer": map[string]any{"session": session}}); err != nil {
+			return err
+		}
+		if seen[session] {
+			return errors.New("duplicate fixture Session identity")
+		}
+		seen[session] = true
+	}
+	return nil
+}
+
 func Start(config Config) (*Server, error) {
 	if config.Rounds == 0 {
 		config.Rounds = 1
@@ -1253,6 +1285,14 @@ func Start(config Config) (*Server, error) {
 	mux.HandleFunc("/control/reset", func(writer http.ResponseWriter, _ *http.Request) {
 		resetError := result.Reset()
 		writeSummary(writer, result.Snapshot(), resetError)
+	})
+	mux.HandleFunc("/control/bind-sessions", func(writer http.ResponseWriter, request *http.Request) {
+		var sessions []string
+		err := json.NewDecoder(request.Body).Decode(&sessions)
+		if err == nil {
+			err = result.BindSessions(sessions)
+		}
+		writeSummary(writer, result.Snapshot(), err)
 	})
 	mux.HandleFunc("/control/wait-completion", func(writer http.ResponseWriter, request *http.Request) {
 		summary, waitError := result.WaitCompletion(request.Context())

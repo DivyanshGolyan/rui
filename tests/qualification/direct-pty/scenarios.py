@@ -48,9 +48,14 @@ class Fixture:
             self.host = model.start_host(self.store, f"http://127.0.0.1:{self.endpoint.server_port}/responses")
         (self.output / "ownership.json").write_text(json.dumps({"root": str(self.root), "host_pid": self.host.pid}))
         result = subprocess.run([self.binary, "session", "configure", "--store", str(self.store),
-            "--session", "td4", "--workspace", str(self.root), "--provider", "codex", "--model", "gpt-6-luna"],
+            "--workspace", str(self.root), "--provider", "codex", "--model", "gpt-6-luna"],
             env=self.env, capture_output=True, timeout=20)
         assert result.returncode == 0, ("configuration setup", result.stdout, result.stderr)
+        configuration = json.loads(result.stdout)
+        assert configuration["answer"]["status"] == "accepted", configuration
+        self.session = configuration["context"]["session"]
+        assert len(self.session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in self.session), configuration
+        assert configuration["answer"]["created"] is True, configuration
         codex.credentials(self.home / ".config/rui/codex.json")
         # Public Configure itself captures one request; input refusal must not
         # create another, rather than pretending fixture setup created none.
@@ -64,7 +69,7 @@ class Fixture:
 
     def terminal(self):
         with defer_signals():
-            self.tty = DirectPty([self.binary, "session", "resume", "--store", str(self.store), "--", "td4"],
+            self.tty = DirectPty([self.binary, "session", "resume", "--store", str(self.store), "--", self.session],
                                  env=self.env, cwd=self.root, output=self.output)
         self.tty.draft("", 2)
         return self.tty
@@ -230,7 +235,7 @@ def navigation(fixture, row):
     chunks(tty, row["chunks"])
     tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
     if row.get("status"):
-        tty.marker("Session: td4")
+        tty.marker(f"Session: {fixture.session}")
         tty.marker("Work:")
         tty.marker("Permission:")
     else:

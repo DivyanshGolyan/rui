@@ -32,35 +32,22 @@ pub fn writeShellWord(out: *std.Io.Writer, value: []const u8) !void {
     try out.writeByte('\'');
 }
 
-/// Opaque Sessions may contain NUL, which no shell can transmit in argv.
+/// Canonical Session IDs contain only six lowercase Crockford characters.
 pub fn writeShellSession(out: *std.Io.Writer, value: []const u8, comptime positional: bool) !void {
-    if (std.mem.indexOfScalar(u8, value, 0) != null) {
-        try out.print(" --session-hex {x}", .{value});
-    } else {
-        try out.writeAll(if (positional) " -- " else " --session ");
-        try writeShellWord(out, value);
-    }
+    try out.writeAll(if (positional) " " else " --session ");
+    try out.writeAll(value);
 }
 
-test "opaque Session shell selectors preserve NUL position and maximum length" {
+test "Session shell selectors use the complete bare ID" {
     inline for (.{ true, false }) |positional| {
-        for ([_]struct { value: []const u8, hex: []const u8 }{
-            .{ .value = "\x00", .hex = "00" },
-            .{ .value = "\x00A", .hex = "0041" },
-            .{ .value = "A\x00Z", .hex = "41005a" },
-            .{ .value = "A\x00", .hex = "4100" },
-            .{ .value = &@as([128]u8, @splat(0)), .hex = &@as([256]u8, @bitCast(@as([128][2]u8, @splat("00".*)))) },
-        }) |case| {
-            var storage: [288]u8 = undefined;
+        for ([_][]const u8{ "k7m2qx", "09azvw" }) |id| {
+            var storage: [64]u8 = undefined;
             var out = std.Io.Writer.fixed(&storage);
-            try writeShellSession(&out, case.value, positional);
-            try std.testing.expectEqualStrings(" --session-hex ", out.buffered()[0..15]);
-            try std.testing.expectEqualStrings(case.hex, out.buffered()[15..]);
+            try writeShellSession(&out, id, positional);
+            const prefix = if (positional) " " else " --session ";
+            try std.testing.expectEqualStrings(prefix, out.buffered()[0..prefix.len]);
+            try std.testing.expectEqualStrings(id, out.buffered()[prefix.len..]);
         }
-        var storage: [64]u8 = undefined;
-        var out = std.Io.Writer.fixed(&storage);
-        try writeShellSession(&out, "--last", positional);
-        try std.testing.expectEqualStrings(if (positional) " -- $'--last'" else " --session $'--last'", out.buffered());
     }
 }
 

@@ -157,11 +157,11 @@ def main():
             assert initial == (200, {"version": "1", "type": "session_list", "sessions": [], "next": None}), initial
             baseline = released_resources(process.pid, diagnostics, latest_invocation)
             # A rejected configuration creates a request fact but no Session.
-            def configure(key, reference, workspace, complete=True):
+            def configure(key, reference, workspace, complete=True, model="gpt-6-sol"):
                 config = {
                     "workspace": {"state": "value", "value": workspace} if complete else {"state": "omitted"},
                     "provider": {"state": "value", "value": "codex"},
-                    "model": {"state": "value", "value": "gpt-6-sol"},
+                    "model": {"state": "value", "value": model},
                     "instructions": {"state": "omitted"},
                     "tools": {"state": "omitted"},
                     "permission_mode": {"state": "omitted"},
@@ -169,15 +169,22 @@ def main():
                 }
                 return exchange(address, "configure", {**base("configure"), "key": key, "session": reference, "configuration": config})
 
-            assert configure("rejected", "not-created", str(root), False)[1]["answer"]["status"] == "rejected"
-            names = [f"reverse/{10 - i:02}" for i in range(10)]
-            for i, reference in enumerate(names):
-                assert configure(f"created-{i}", reference, str(other) if i == 3 else str(root))[1]["answer"]["status"] == "accepted"
+            def create(key, workspace, model="gpt-6-sol"):
+                status, result = configure(key, "", workspace, model=model)
+                answer = result["answer"]
+                assert status == 200 and answer["status"] == "accepted" and answer["created"] is True, result
+                reference = answer["session"]
+                assert len(reference) == 6 and all(character in "0123456789abcdefghjkmnpqrstvwxyz" for character in reference), result
+                return reference
+
+            assert configure("rejected", "", str(root), False)[1]["answer"]["status"] == "rejected"
+            # Keep allocation order independently of the random IDs' lexical order.
+            names = [create(f"created-{i}", str(other) if i == 3 else str(root)) for i in range(10)]
             first_status, first = listing(str(root))
             assert first_status == 200 and [item["reference"] for item in first["sessions"]] == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8)], first
             assert all(item["workspace"] == str(root) for item in first["sessions"])
             assert first["next"] and int(first["next"]["ceiling"]) == 10
-            assert configure("created-later", "later", str(root))[1]["answer"]["status"] == "accepted"
+            later = create("created-later", str(root))
             assert listing(str(root), first["next"]) == (200, {"version": "1", "type": "session_list", "sessions": [
                 {"reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"], "permission_mode": "bypass"}
             ], "next": None})
@@ -191,7 +198,7 @@ def main():
             current_list = json.loads(current.stdout)
             assert current_list["version"] == "1" and current_list["type"] == "session_list" and current_list["next"] is None, current_list
             assert [row["reference"] for row in current_list["sessions"]] == [
-                names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later"]
+                names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later]
             all_workspaces = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert all_workspaces.returncode == 0, all_workspaces.stderr
@@ -199,19 +206,20 @@ def main():
             assert all_list["next"] is None and len(all_list["sessions"]) == 11, all_list
             assert "Bash runs without approval" not in all_workspaces.stdout
             assert [row["permission_mode"] for row in all_list["sessions"]] == ["bypass"] * 11, all_list
-            assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + ["later"]), all_list
+            assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + [later]), all_list
             assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
-            long_reference = "x" * 126 + "\x01\x00"
-            assert configure("long-reference", long_reference, str(root))[1]["answer"]["status"] == "accepted"
-            for index in range(88):
-                assert configure(f"dormant-{index}", f"dormant/{index:03}", str(root))[1]["answer"]["status"] == "accepted"
+            # IDs cannot carry controls; retain the escaped-string round trip in
+            # the caller-controlled model, associated with its allocated Session.
+            long_model = "x" * 126 + "\x01\x00"
+            escaped = create("long-model", str(root), model=long_model)
+            dormant = [create(f"dormant-{index}", str(root)) for index in range(88)]
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
             assert len(json.dumps(after_growth[1]).encode()) < 4096
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe
-            assert long_reference in [row["reference"] for row in json.loads(safe.stdout)["sessions"]], safe
+            assert [row["model"] for row in json.loads(safe.stdout)["sessions"] if row["reference"] == escaped] == [long_model], safe
             cursor = after_growth[1]["next"]
             seen = [item["reference"] for item in after_growth[1]["sessions"]]
             while cursor:
@@ -219,13 +227,13 @@ def main():
                 assert status == 200 and len(page["sessions"]) <= 8
                 seen.extend(item["reference"] for item in page["sessions"])
                 cursor = page["next"]
-            assert seen == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + ["later", long_reference] + [f"dormant/{i:03}" for i in range(88)]
+            assert seen == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later, escaped] + dormant
             grown = released_resources(process.pid, diagnostics, latest_invocation)
             if baseline and grown:
                 assert_resources(baseline, grown)
             assert list(home.iterdir()) == [], "Host discovery unexpectedly wrote a local request registry"
             assert list((store / "scratch").iterdir()) == [], "named list capture leaked scratch"
-            print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, long reference, idle resources 0→100: {baseline}→{grown}")
+            print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, escaped model, idle resources 0→100: {baseline}→{grown}")
         finally:
             stop_process(process)
             if original_home is None:

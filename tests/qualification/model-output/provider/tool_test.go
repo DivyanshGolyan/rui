@@ -17,6 +17,52 @@ import (
 	"time"
 )
 
+func TestToolIdentityRequiresConfigurationBinding(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprint(bound), func(t *testing.T) {
+			directory := t.TempDir()
+			server, err := StartTool(ToolConfig{Sessions: 1, Workload: "sleep", DispatchDir: directory, Workspace: "/workspace", Store: "/store", ArtifactDir: directory})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			if bound {
+				ids := []string{"k7m2qx"}
+				if err := server.BindSessions(ids); err != nil {
+					t.Fatal(err)
+				}
+				ids[0] = "123abc"
+				if err := server.BindSessions(ids); err == nil {
+					t.Fatal("tool fixture permitted rebinding")
+				}
+			}
+			pool := x509.NewCertPool()
+			pool.AddCert(server.providerTLS.Certificate())
+			client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}, ForceAttemptHTTP2: true}}
+			for _, session := range []string{"123abc", "k7m2qx"} {
+				body := testRequestEnvelope(session) + `"input":[{"role":"user","content":[{"type":"input_text","text":"seed"}]}]}`
+				response, err := client.Post(server.ProviderURL(), "application/json", strings.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+				want := http.StatusConflict
+				if bound && session == "k7m2qx" {
+					want = http.StatusOK
+				}
+				if response.StatusCode != want {
+					t.Fatalf("bound=%v Session=%s: got %d, want %d", bound, session, response.StatusCode, want)
+				}
+			}
+			if !bound {
+				if err := server.BindSessions([]string{"k7m2qx"}); err == nil {
+					t.Fatal("observed tool request permitted late binding")
+				}
+			}
+		})
+	}
+}
+
 func toolRequest(t *testing.T, client *http.Client, url, session string, input ...any) []map[string]any {
 	t.Helper()
 	encoded, _ := json.Marshal(input)
@@ -54,7 +100,8 @@ func toolRequest(t *testing.T, client *http.Client, url, session string, input .
 // call output must count as failed, never as completed work.
 func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	directory := t.TempDir()
-	config := ToolConfig{Sessions: 3, Workload: "read", ReadFile: "/data/read fixture", DispatchDir: directory + "/dispatch", Workspace: "/workspace", Store: "/store", ArtifactDir: directory}
+	ids := []string{"k7m2qx", "123abc", "456def"}
+	config := ToolConfig{Sessions: 3, SessionIDs: ids, Workload: "read", ReadFile: "/data/read fixture", DispatchDir: directory + "/dispatch", Workspace: "/workspace", Store: "/store", ArtifactDir: directory}
 	server, err := StartTool(config)
 	if err != nil {
 		t.Fatal(err)
@@ -65,19 +112,18 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}, ForceAttemptHTTP2: true}}
 	user := map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "seed"}}}
 	for index := range 3 {
-		if items := toolRequest(t, client, server.ProviderURL(), ToolSession(3, index), user); len(items) != 1 || items[0]["type"] != "message" {
+		if items := toolRequest(t, client, server.ProviderURL(), ids[index], user); len(items) != 1 || items[0]["type"] != "message" {
 			t.Fatalf("seed answer for %d = %v", index, items)
 		}
 	}
-	coordinator := toolRequest(t, client, server.ProviderURL(), ToolSession(3, 0), user)
+	coordinator := toolRequest(t, client, server.ProviderURL(), ids[0], user)
 	if len(coordinator) != 3 {
 		t.Fatalf("coordinator calls = %d, want 2 sends + 1 workload", len(coordinator))
 	}
 	for index, item := range coordinator {
 		var arguments struct{ Cmd string }
 		json.Unmarshal([]byte(item["arguments"].(string)), &arguments)
-		address := fmt.Sprintf(`{"store":"/store","session":%q}`, ToolSession(3, index+1))
-		isSend := strings.Contains(arguments.Cmd, "rui session send --to '"+address+"'")
+		isSend := index < 2 && strings.Contains(arguments.Cmd, "rui session send --store '/store' --to '"+ids[index+1]+"'")
 		if (index < 2) != isSend || index == 2 && !strings.Contains(arguments.Cmd, "cat '/data/read fixture'") {
 			t.Fatalf("call %d = %q", index, arguments.Cmd)
 		}
@@ -90,7 +136,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 		}
 		outputs = append(outputs, item, map[string]any{"type": "function_call_output", "call_id": item["call_id"], "output": text})
 	}
-	toolRequest(t, client, server.ProviderURL(), ToolSession(3, 0), outputs...)
+	toolRequest(t, client, server.ProviderURL(), ids[0], outputs...)
 	summary := server.Snapshot(true)
 	if summary.DispatchCalls != 2 || summary.WorkloadCalls != 1 || summary.SucceededCalls != 2 || summary.FailedCalls != 1 || summary.Done != 1 || len(summary.Errors) != 1 {
 		t.Fatalf("summary = %+v", summary)
@@ -100,7 +146,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 			t.Fatalf("workload markers = %+v", output)
 		}
 	}
-	if items := toolRequest(t, client, server.ProviderURL(), ToolSession(3, 1), user); len(items) != 1 || !strings.Contains(fmt.Sprint(items[0]["arguments"]), "cat ") {
+	if items := toolRequest(t, client, server.ProviderURL(), ids[1], user); len(items) != 1 || !strings.Contains(fmt.Sprint(items[0]["arguments"]), "cat ") {
 		t.Fatalf("worker calls = %v", items)
 	}
 }

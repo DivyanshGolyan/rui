@@ -2268,7 +2268,7 @@ test "cleanup publication follows complete execution retirement" {
     defer retention.cleanupAll();
     host.retention = &retention;
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
-    try session.set("direct/bash");
+    try session.set("k7m2qx");
     var preparation = switch (bash.startPreparation(std.testing.io, std.testing.allocator, reader, arguments.len, session, root, workspace, root, default_bash_path, 1000, budget, 11, 2, .{})) {
         .preparing => |value| value,
         .failed => |initial| {
@@ -2642,20 +2642,20 @@ test "failed admission releases its reservation and fences the Store and dispatc
             const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
             var command: protocol.ConfigureCommand = .{};
             try command.key.set("failed-admission-config");
-            try command.session.set("direct/failed-admission");
             command.configuration.workspace.state = .value;
             try command.configuration.workspace.value.set(workspace);
             command.configuration.provider.state = .value;
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            try std.testing.expect(storage.configure(&command, true, .{}) == .accepted);
+            const configured = storage.configure(&command, true, .{});
+            try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
             try file.writeStreamingAll(std.testing.io, "hello");
             try file.sync(std.testing.io);
             var message: protocol.MessageCommand = .{};
             try message.key.set("failed-admission-key");
-            try message.session.set("direct/failed-admission");
+            message.session = configured.accepted.session;
             message.text = .{
                 .state = .value,
                 .file = file,
@@ -2866,20 +2866,20 @@ test "preparing slots belong to their live preparations" {
     const workspace = workspace_buffer[0..try directory.realPath(std.testing.io, &workspace_buffer)];
     var command: protocol.ConfigureCommand = .{};
     try command.key.set("prep-belong-config");
-    try command.session.set("direct/prep-belong");
     command.configuration.workspace.state = .value;
     try command.configuration.workspace.value.set(workspace);
     command.configuration.provider.state = .value;
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
-    try std.testing.expect(storage.configure(&command, true, .{}) == .accepted);
+    const configured = storage.configure(&command, true, .{});
+    try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "hello");
     try file.sync(std.testing.io);
     var message: protocol.MessageCommand = .{};
     try message.key.set("prep-belong-key");
-    try message.session.set("direct/prep-belong");
+    message.session = configured.accepted.session;
     message.text = .{
         .state = .value,
         .file = file,

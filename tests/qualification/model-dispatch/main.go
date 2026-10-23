@@ -136,22 +136,22 @@ func runJSON(deadline measurement.Deadline, binary string, destination any, argu
 	return measurement.RunJSON(deadline, destination, binary, arguments...)
 }
 
-func configure(deadline measurement.Deadline, binary, parent, store, key, session string) error {
+func configure(deadline measurement.Deadline, binary, parent, store, key string) (string, error) {
 	workspace, err := os.Getwd()
 	if err != nil {
-		return err
+		return "", err
 	}
 	var answer map[string]any
 	err = runJSON(deadline, binary, &answer,
 		"session", "configure", "--store", store, "--record", filepath.Join(parent, key+".json"),
-		"--key", key, "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
+		"--key", key, "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if nested(answer, "answer", "status") != "accepted" {
-		return fmt.Errorf("configuration was not accepted: %v", answer)
+		return "", fmt.Errorf("configuration was not accepted: %v", answer)
 	}
-	return nil
+	return measurement.ConfigurationSession(answer)
 }
 
 func message(deadline measurement.Deadline, binary, parent, store, key, session string, size int) error {
@@ -173,9 +173,8 @@ func message(deadline measurement.Deadline, binary, parent, store, key, session 
 		return err
 	}
 	var answer map[string]any
-	address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(session) + `}`
 	err = runJSON(deadline, binary, &answer,
-		"session", "send", "--to", address, "--record", filepath.Join(parent, key+".json"),
+		"session", "send", "--store", store, "--to", session, "--record", filepath.Join(parent, key+".json"),
 		"--key", key, "--text", path)
 	if err != nil {
 		return err
@@ -292,9 +291,9 @@ func requestGrowth(binary, root string, fixture *endpoint) ([]map[string]any, er
 		if err != nil {
 			return nil, err
 		}
-		session := fmt.Sprintf("measure/payload-%d", size)
 		work := func() error {
-			if err := configure(deadline, binary, directory, directory, fmt.Sprintf("config-%d", size), session); err != nil {
+			session, err := configure(deadline, binary, directory, directory, fmt.Sprintf("config-%d", size))
+			if err != nil {
 				return err
 			}
 			if err := message(deadline, binary, directory, directory, fmt.Sprintf("message-%d", size), session, size); err != nil {
@@ -353,11 +352,13 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 		return nil, err
 	}
 	result, workError := func() (map[string]any, error) {
+		sessions := make([]string, 8)
 		for index := range 8 {
-			session := fmt.Sprintf("measure/overlap-%d", index)
-			if err := configure(deadline, binary, directory, directory, fmt.Sprintf("overlap-config-%d", index), session); err != nil {
+			session, err := configure(deadline, binary, directory, directory, fmt.Sprintf("overlap-config-%d", index))
+			if err != nil {
 				return nil, err
 			}
+			sessions[index] = session
 			if err := message(deadline, binary, directory, directory, fmt.Sprintf("overlap-message-%d", index), session, 64*1024); err != nil {
 				return nil, err
 			}
@@ -365,7 +366,7 @@ func overlap(binary, root string, fixture *endpoint) (map[string]any, error) {
 		if err := measurement.WaitFor(deadline, 25*time.Millisecond, "overlapping transfers", func() (bool, error) { return fixture.count() == 8, nil }); err != nil {
 			return nil, err
 		}
-		exec, err := execution(deadline, binary, directory, "measure/overlap-0")
+		exec, err := execution(deadline, binary, directory, sessions[0])
 		if err != nil {
 			return nil, err
 		}

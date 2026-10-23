@@ -151,16 +151,17 @@ def execute(command, overlay, log, retention, cache):
         done = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            configured = fixture.command("session", "configure", "--store", store, "--session", "model", "--record", root / "configure.json", "--key", "configure", "--provider", "codex", "--model", "gpt-6-sol", "--workspace", workspace)
+            configured = fixture.command("session", "configure", "--store", store, "--record", root / "configure.json", "--key", "configure", "--provider", "codex", "--model", "gpt-6-sol", "--workspace", workspace)
             assert configured["answer"]["status"] == "accepted", configured
+            session = configured["answer"]["session"]
             for key, text in (("driver", "driver"), ("queued", "m" * 59199)):
                 text_path = root / f"{key}.txt"
                 text_path.write_text(text)
-                admitted = fixture.command("session", "send", "--to", json.dumps({"store": str(store), "session": "model"}), "--record", root / f"{key}.json", "--key", key, "--text", text_path)
+                admitted = fixture.command("session", "send", "--store", store, "--to", session, "--record", root / f"{key}.json", "--key", key, "--text", text_path)
                 assert admitted["answer"]["status"] == "accepted", admitted
                 if key == "driver":
                     fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request")
-            environment.update(RUI_TD1_STORE=str(store), RUI_TD1_GATE=str(root))
+            environment.update(RUI_TD1_STORE=str(store), RUI_TD1_SESSION=session, RUI_TD1_GATE=str(root))
             process = subprocess.Popen(command, cwd=overlay, env=environment, stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 600  # Includes first native compilation.
             while not select.select([ready], [], [], 0.1)[0]:
@@ -170,7 +171,7 @@ def execute(command, overlay, log, retention, cache):
                 assert time.monotonic() < deadline, "TD1 first-scan handshake deadline"
             assert os.read(ready, 1) == b"x"
             release.set()
-            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", "model")["work"]["status"] == "completed" and len(endpoint.requests) == 2,
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["status"] == "completed" and len(endpoint.requests) == 2,
                              "queued Message canonical completion", timeout=30)
             os.write(done, b"x")
             outcome["exit"] = process.wait(timeout=60)

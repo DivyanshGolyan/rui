@@ -40,13 +40,13 @@ pub const Command = enum {
     fn definitionValue(self: Command) Definition {
         return switch (self) {
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Capture exact text and admit a Message to --to ADDRESS, a JSON object with session and optional store. An omitted Store uses the sender's Store, then saved defaults for a human sender. Peer sends require the issuing Host; cross-Store peer sends are unsupported. Returns after admission, before the recipient completes. -- ends options; a dash after -- is literal.", .options = capture ++ &[_]Option{ value("to", "ADDRESS"), value("text", "FILE|-") }, .positional = "TEXT|-", .positional_conflicts = &.{"text"}, .mutation = true, .requires = &.{ &.{"to"}, &.{ "text", "" } } },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Capture exact text and admit a Message to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns after admission, before the recipient completes. -- ends options; a dash after -- is literal.", .options = destination ++ capture ++ &[_]Option{ value("to", "ID"), value("text", "FILE|-") }, .positional = "TEXT|-", .positional_conflicts = &.{"text"}, .mutation = true, .requires = &.{ &.{"to"}, &.{ "text", "" } } },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ value("profile", "current|full"), value("failed-response", "body|metadata"), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ "profile", "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List configured Sessions in the current Workspace, or all Workspaces with --all, as one JSON value.", .options = destination ++ &[_]Option{flag("all")} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The address remains reusable by later input; acknowledgment is not physical retirement.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
-            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host. --last selects the newest Session created in this Workspace.", .options = destination ++ session ++ &[_]Option{flag("last")}, .positional = "REF", .conflicts = &.{ .{ "session", "last" }, .{ "session-hex", "last" } }, .positional_conflicts = &.{ "session", "session-hex", "last" }, .requires = &.{&.{ "", "session", "session-hex", "last" }} },
+            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host. --last selects the newest Session created in this Workspace.", .options = destination ++ session ++ &[_]Option{flag("last")}, .positional = "ID", .conflicts = &.{.{ "session", "last" }}, .positional_conflicts = &.{ "session", "last" }, .requires = &.{&.{ "", "session", "last" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), value("kind", "configure|message|session-stop|model-interruption|permission-decision") }, .positional = "HANDLE", .positional_conflicts = &.{ "store", "store-hex", "record", "kind" }, .mutation = true, .requires = &.{&.{ "", "record" }} },
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
@@ -78,7 +78,7 @@ pub const compaction_policy =
 
 const compaction_help = compaction_policy ++
     \\ Inspect settings with rui session inspect.
-    \\An unknown --session needs complete first configuration: --workspace PATH --provider codex --model MODEL.
+    \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
 ++ product_defaults.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
 
@@ -111,12 +111,12 @@ fn hiddenFlag(name: []const u8) Option {
     return .{ .name = name, .hidden = true };
 }
 const destination = &[_]Option{ value("store", "PATH"), hex("store-hex", "store", 492) };
-const session = &[_]Option{ value("session", "REF"), hex("session-hex", "session", 128) };
+const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
 const binding = &[_]Option{ value("provider", "codex"), value("model", "MODEL") };
 const action = &[_]Option{value("action", "ID")};
-const need_session = &[_][]const []const u8{&.{ "session", "session-hex" }};
+const need_session = &[_][]const []const u8{&.{"session"}};
 const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 /// A saved request HANDLE names its own Store and key.
 const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
@@ -434,8 +434,9 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_send, &.{ "--to", "a", "--text", "f", "hi" }, error.ConflictingArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
     try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
-    for ([_][]const u8{ "--store", "--store-hex", "--session", "--session-hex" }) |old|
+    for ([_][]const u8{ "--session", "--session-hex" }) |old|
         try expectValidation(.session_send, &.{ "--to", "a", old, "value", "hi" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{ "--store", "path", "--to", "k7m2qx", "hi" }, false);
     try expectValidation(.session_send, &.{"--to"}, error.MissingArgumentValue);
     try expectValidation(.session_configure, &.{ "--output-schema", "f", "--text-output" }, error.ConflictingArguments);
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
@@ -480,19 +481,19 @@ fn expectCoherent(definition: Definition) !void {
 
 test "a hex spelling fills its named option and conflicts with it" {
     var storage: [1024]u8 = undefined;
-    const plain = try testParse(Command.session_inspect.definition(), &.{ "--session", "a/b" }, &storage);
-    const spelled = try testParse(Command.session_inspect.definition(), &.{ "--session-hex", "612f62" }, &storage);
-    try std.testing.expectEqualStrings(plain.get("session").?, spelled.get("session").?);
-    try std.testing.expect(spelled.has("session-hex") and !spelled.has("session"));
-    try expectValidation(.session_inspect, &.{ "--session", "a", "--session-hex", "61" }, error.ConflictingArguments);
-    try expectValidation(.session_inspect, &.{ "--session-hex", "61", "--session", "a" }, error.ConflictingArguments);
+    const plain = try testParse(Command.session_inspect.definition(), &.{ "--store", "/a/b", "--session", "k7m2qx" }, &storage);
+    const spelled = try testParse(Command.session_inspect.definition(), &.{ "--store-hex", "2f612f62", "--session", "k7m2qx" }, &storage);
+    try std.testing.expectEqualStrings(plain.get("store").?, spelled.get("store").?);
+    try std.testing.expect(spelled.has("store-hex") and !spelled.has("store"));
+    try expectValidation(.session_inspect, &.{ "--store", "a", "--store-hex", "61" }, error.ConflictingArguments);
+    try expectValidation(.session_inspect, &.{ "--store-hex", "61", "--store", "a" }, error.ConflictingArguments);
     // Odd, non-hex, over-bound and non-UTF-8 spellings all fail; help wins.
-    const session_over: [2 * 129]u8 = @splat('6');
     const store_over: [2 * 493]u8 = @splat('6');
-    inline for (.{ "6", "zz", "ff", &session_over }) |bad| try expectValidation(.session_inspect, &.{ "--session-hex", bad }, error.InvalidHexIdentity);
+    inline for (.{ "6", "zz", "ff", &store_over }) |bad| try expectValidation(.session_inspect, &.{ "--store-hex", bad, "--session", "k7m2qx" }, error.InvalidHexIdentity);
     try expectValidation(.session_inspect, &.{ "--store-hex", &store_over, "--session", "a" }, error.InvalidHexIdentity);
     try expectValidation(.session_inspect, &.{ "--store-hex", store_over[2..], "--session", "a" }, false);
-    try expectValidation(.session_inspect, &.{ "--session-hex", "zz", "--help" }, true);
+    try expectValidation(.session_inspect, &.{ "--store-hex", "zz", "--help" }, true);
+    try expectValidation(.session_inspect, &.{ "--session-hex", "6b376d327178" }, error.UnknownArgument);
 }
 
 test "hidden test options belong to their operation and stay out of help" {

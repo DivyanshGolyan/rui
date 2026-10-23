@@ -47,8 +47,7 @@ def start_case(state, name, transition, command, stdin="x"):
         gate_path,
     )
     diagnostics = HostDiagnostics(host)
-    session = f"direct/{name}"
-    bash.configure(state, store, f"{name}-configure", session, permission="bypass")
+    session = bash.configure(state, store, f"{name}-configure", permission="bypass")
     fixture.message(state, store, f"{name}-message", session, "run")
     return store, marker, endpoint, thread, keeper, host, diagnostics, session
 

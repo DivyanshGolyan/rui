@@ -14,9 +14,10 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
     store = state / "store"
     host = fixture.start_host(store, None)
     try:
-        fixture.configure(state, store, "configuration", "s", "gpt-6-sol")
-        original = fixture.command("session", "inspect", "--store", store, "--session", "s")
-        missing = fixture.command("session", "inspect", "--store", store, "--session", "missing")
+        session = fixture.configure(state, store, "configuration", None, "gpt-6-sol")
+        unknown = "000000" if session != "000000" else "zzzzzz"
+        original = fixture.command("session", "inspect", "--store", store, "--session", session)
+        missing = fixture.command("session", "inspect", "--store", store, "--session", unknown)
         assert missing["session"] is None and missing["execution"]["reason"] == "session_not_found", missing
         for change in ("extension", "binding", "profile", "missing-selection", "invalid-tail"):
             produced = []
@@ -28,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
                 if change == "extension":
                     value["extension"] = {"large": "x" * 20000}
                 elif change == "binding":
-                    value["session"]["reference"] = "another-session"
+                    value["session"]["reference"] = unknown
                 elif change == "profile":
                     value["profile"] = "full"
                 elif change == "missing-selection":
@@ -40,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
                 return head + b"\r\n\r\n" + body
             proxy = canonical.ReplyProxy(host, "/v1/inspect-session", rewrite)
             try:
-                result = canonical.invoke(state, "session", "inspect", "--store", store, "--session", "s")
+                result = canonical.invoke(state, "session", "inspect", "--store", store, "--session", session)
                 assert len(proxy.exchanges) == 1, proxy.exchanges
                 if change == "extension":
                     assert result.returncode == 0 and json.loads(result.stdout) == produced[0], result
@@ -48,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
                     assert result.returncode != 0 and "InvalidObservation" in result.stderr and not result.stdout, (change, result)
             finally:
                 proxy.close()
-        full = fixture.command("session", "inspect", "--store", store, "--session", "s", "--profile", "full")
+        full = fixture.command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         assert full["profile"] == "full" and full["full"]["session_revisions"], full
     finally:
         fixture.stop_host(host)

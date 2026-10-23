@@ -19,9 +19,9 @@ import (
 var sessionCounts = []int{0, 100, 1_000, 10_000}
 var peakCounter = regexp.MustCompile(`(?m)^\s*([0-9]+)\s+maximum resident set size\s*$`)
 
-func clientPeak(binary, store string) (uint64, error) {
+func clientPeak(binary, store, session string) (uint64, error) {
 	var stderr bytes.Buffer
-	command := exec.Command("/usr/bin/time", "-l", binary, "session", "inspect", "--store", store, "--session", "measure/00000000")
+	command := exec.Command("/usr/bin/time", "-l", binary, "session", "inspect", "--store", store, "--session", session)
 	command.Stdout = io.Discard
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
@@ -60,7 +60,7 @@ func configuration(store, workspace, identity string) configurationCommand {
 	omitted := optionalField{State: "omitted"}
 	provider := "codex"
 	model := "measurement-model"
-	return configurationCommand{Version: "1", Kind: "configure", Store: store, Key: identity, Session: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	return configurationCommand{Version: "1", Kind: "configure", Store: store, Key: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 }
 
 func run(binary string) (result map[string]any, resultError error) {
@@ -89,19 +89,23 @@ func run(binary string) (result map[string]any, resultError error) {
 	}
 	stages := make([]map[string]any, 0, len(sessionCounts))
 	admitted := 0
+	var firstSession string
 	for _, target := range sessionCounts {
 		for admitted < target {
 			identity := fmt.Sprintf("measure/%08d", admitted)
-			var answer struct {
-				Answer struct {
-					Status string `json:"status"`
-				} `json:"answer"`
-			}
+			var answer map[string]any
 			if err := measurement.ExchangeUnix(deadline, socketPath, "/v1/configure", configuration(canonicalStore, workspace, identity), &answer); err != nil {
 				return nil, err
 			}
-			if answer.Answer.Status != "accepted" {
-				return nil, fmt.Errorf("configuration %s was %s", identity, answer.Answer.Status)
+			if status, _ := measurement.StringField(answer, "answer", "status"); status != "accepted" {
+				return nil, fmt.Errorf("configuration %s was %v", identity, answer)
+			}
+			session, err := measurement.ConfigurationSession(answer)
+			if err != nil {
+				return nil, err
+			}
+			if admitted == 0 {
+				firstSession = session
 			}
 			admitted++
 		}
@@ -117,7 +121,7 @@ func run(binary string) (result map[string]any, resultError error) {
 		stage := map[string]any{"dormant_sessions": admitted, "process": sample, "database": database}
 		stages = append(stages, stage)
 	}
-	peak, err := clientPeak(binary, store)
+	peak, err := clientPeak(binary, store, firstSession)
 	if err != nil {
 		return nil, err
 	}

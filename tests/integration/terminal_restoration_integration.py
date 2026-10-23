@@ -261,17 +261,30 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
         const int lifecycle = !strcmp(fault, "diagnostic-contention-host");
         const char *phase = lifecycle ? "{\"rui_test_phase\":\"lifecycle_boundary\"," :
             "{\"rui_test_phase\":\"inspection_captured\",";
-        const char subject[] = ",\"subject_kind\":\"session\",\"subject\":\"diagnostic/session\"";
+        /* The real Host allocates its identity after launch. Carry that exact
+           ID in the arm file; the synthetic forwarding driver leaves it empty. */
+        char session[8] = {0};
+        if (!strcmp(fault, "diagnostic-contention")) {
+            int arm_fd = open(diagnostic_arm, O_RDONLY);
+            if (arm_fd < 0) _exit(100);
+            ssize_t length = read(arm_fd, session, sizeof(session) - 1);
+            if (close(arm_fd) || (length != 0 && length != 6)) _exit(100);
+        }
+        char subject[128];
+        int subject_length = snprintf(subject, sizeof(subject),
+            ",\"subject_kind\":\"session\",\"subject\":\"%s\"",
+            session[0] ? session : "diagnostic/session");
+        if (subject_length < 0 || (size_t)subject_length >= sizeof(subject)) _exit(100);
         static atomic_int contention_claimed = 0;
         int selected = 0;
         if ((lifecycle || !strcmp(fault, "diagnostic-contention")) && count >= strlen(phase) &&
             !memcmp(bytes, phase, strlen(phase)) && count >= 2 &&
             !memcmp((const char *)bytes + count - 2, "}\n", 2)) {
             selected = lifecycle;
-            for (size_t i = 0; !lifecycle && i + sizeof(subject) - 1 < count; ++i) {
-                if (!memcmp((const char *)bytes + i, subject, sizeof(subject) - 1) &&
-                    (((const char *)bytes)[i + sizeof(subject) - 1] == ',' ||
-                     ((const char *)bytes)[i + sizeof(subject) - 1] == '}')) selected = 1;
+            for (size_t i = 0; !lifecycle && i + (size_t)subject_length < count; ++i) {
+                if (!memcmp((const char *)bytes + i, subject, (size_t)subject_length) &&
+                    (((const char *)bytes)[i + subject_length] == ',' ||
+                     ((const char *)bytes)[i + subject_length] == '}')) selected = 1;
             }
         }
         static atomic_int inspection_dropped = 0;
@@ -889,12 +902,12 @@ def capture_receipt_case(state, library):
             "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
-        fixture.configure(root, store, "capture-config", "diagnostic/session", "gpt-6-sol")
+        session = fixture.configure(root, store, "capture-config", None, "gpt-6-sol")
         # Admission uses the ordinary worker; complete it before that worker
         # holds optional stderr. Only provider capture must progress under hold.
-        fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
+        fixture.message(root, store, "capture-message", session, "hello")
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request", timeout=3)
-        arm.touch()
+        arm.write_text(session)
         # A specific optional write may lose custody or output credit. Seek an
         # actual hold without requiring delivery of any one inspection trace.
         # The first eligible write deliberately fails to exercise that case.
@@ -902,7 +915,7 @@ def capture_receipt_case(state, library):
         while True:
             remaining = acquisition_deadline - time.monotonic()
             assert remaining > 0, "actual optional inspection custody exhausted original deadline"
-            inspector = fixture.start_command("session", "inspect", "--store", store, "--session", "diagnostic/session")
+            inspector = fixture.start_command("session", "inspect", "--store", store, "--session", session)
             fixture.wait_for(lambda: (log.exists() and "diagnostic-held-inspection\n" in log.read_text())
                 or inspector.poll() is not None, "optional inspection hold or completed caller", timeout=remaining)
             assert time.monotonic() < acquisition_deadline, "actual optional inspection custody exceeded original deadline"
@@ -910,10 +923,10 @@ def capture_receipt_case(state, library):
                 break
             out, err = inspector.communicate(timeout=max(0, acquisition_deadline - time.monotonic()))
             assert inspector.returncode == 0, (out, err)
-            assert json.loads(out)["session"]["reference"] == "diagnostic/session", out
+            assert json.loads(out)["session"]["reference"] == session, out
         assert log.read_text().count("diagnostic-dropped-inspection\n") == 1
         held = [json.loads(line) for line in log.read_text().splitlines() if line.startswith("{")]
-        assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == "diagnostic/session", held
+        assert len(held) == 1 and held[0]["process"] == str(host.pid) and held[0]["subject"] == session, held
         provider_release.set()
         event = diagnostics.wait("capture_write_gate_entered", timeout=15)[0]
         assert event["process"] == held[0]["process"] and event["run"] == held[0]["run"], (event, held)
@@ -925,7 +938,7 @@ def capture_receipt_case(state, library):
         gate.release()
         deadline = time.monotonic() + 10
         observation, saved_answer, _ = fixture.wait_for_result_release(
-            store, "capture-message", "diagnostic/session", deadline)
+            store, "capture-message", session, deadline)
         assert observation["result"]["status"] == "completed", observation
         assert saved_answer == answer
         print("native capture receipt: optional inspection drop tolerated within original deadline; writer entry under actual stderr contention; exact answer and simultaneous zero custody/scratch", flush=True)
@@ -965,7 +978,7 @@ def capture_receipt_case(state, library):
                 pass  # Secondary reporting cannot replace the primary failure.
 
 
-def persistent_cases(state, library, home, store, host):
+def persistent_cases(state, library, home, store, host, session):
     """Real synchronous capture custody and actual nonblocking output credit."""
     records = home / ".config/rui/requests"
     records.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -997,7 +1010,7 @@ def persistent_cases(state, library, home, store, host):
                 if case == "sync-handoff":
                     environment["RUI_CAPTURE_SYNC_ERROR"] = "1"
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
-                "--", "terminal/restoration"], env=environment,
+                "--", session], env=environment,
                 stdin=slave, stdout=output_slave, stderr=subprocess.PIPE)
             human.read_terminal(output_master, "› ")
             if fault in ("disable", "both"):
@@ -1068,7 +1081,7 @@ def persistent_cases(state, library, home, store, host):
                 # PTY; an external caller's large content then keeps the
                 # frontend's actual activity reader writing into it.
                 (state / f"persistent-{case}" / "arm").touch()
-                human.run(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "terminal/restoration"}), "z" * 50000)
+                human.run(home, "session", "send", "--store", store, "--to", session, "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
                 if case == "backpressure-command":
                     # Blocked output defers the command; it is no
@@ -1101,12 +1114,12 @@ def persistent_cases(state, library, home, store, host):
                 assert all(json.loads(record.read_bytes())["kind"] == "message"
                     for record in set(records.glob("*.json")) - before), "failed cleanup captured pending configuration"
                 assert fixture.command("session", "inspect", "--store", store,
-                    "--session", "terminal/restoration")["session"]["permission_mode"] == "bypass", "failed cleanup executed pending configuration"
+                    "--session", session)["session"]["permission_mode"] == "bypass", "failed cleanup executed pending configuration"
             if case.startswith("sync-command-"):
                 assert set(records.glob("*.json")) - before == {record}, "interrupt during join captured a pending configuration"
                 assert record.read_bytes() == saved, "interrupt replaced original capture"
                 assert fixture.command("session", "inspect", "--store", store,
-                    "--session", "terminal/restoration")["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
+                    "--session", session)["session"]["permission_mode"] == "bypass", "interrupt during join executed pending configuration"
             if fault not in ("restore", "both"):
                 actual = termios.tcgetattr(slave)
                 if sys.platform == "darwin":
@@ -1125,7 +1138,7 @@ def persistent_cases(state, library, home, store, host):
                 proxy.close()
                 proxy = None
             # Detachment never cancels or restarts the actual owning Host.
-            answer = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "terminal/restoration"}), f"valid after {case}")
+            answer = human.admit(home, "session", "send", "--store", store, "--to", session, f"valid after {case}")
             assert answer["admission"]["answer"]["status"] == "accepted", answer
             print(f"persistent terminal: {case} passed", flush=True)
         finally:
@@ -1182,9 +1195,8 @@ def renderer_backpressure_case(state, library, home, store):
     """A real blocked frame defers a command; it never becomes cancellation."""
     from terminal_screen import ScreenCapture
 
-    session = "terminal/renderer-backpressure"
-    human.run(home, "session", "configure", "--store", store, "--session", session,
-        "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+    session = human.admit(home, "session", "configure", "--store", store,
+        "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
     master, slave = open_pty()
     output_master, output_slave = open_pty()
     original = termios.tcgetattr(slave)
@@ -1369,10 +1381,10 @@ def consent_boundary_cases(state, library):
         release, drain, log = root / "choice.release", root / "drain.release", root / "probe.log"
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            human.run(home, "session", "configure", "--store", store, "--session", "consent/boundary",
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
-                "--", "consent/boundary"], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                "--", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": f"consent-{case}",
@@ -1471,11 +1483,11 @@ def command_interruption_cases(state, library):
     host = caller = proxy = None
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        human.run(home, "session", "configure", "--store", store, "--session", "command/signals",
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
-        message = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "command/signals"}), "saved answer")
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+        message = human.admit(home, "session", "send", "--store", store, "--to", session, "saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved command result")
-        human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "command/signals"}), "propose tool")
+        human.admit(home, "session", "send", "--store", store, "--to", session, "propose tool")
         records = home / ".config/rui/requests"
         for case, command, route, signal_number in (
                 ("requests", "/requests", "", signal.SIGINT),
@@ -1525,7 +1537,7 @@ def command_interruption_cases(state, library):
                     if route is None:
                         environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
-                    "--", "command/signals"], env=environment, stdin=slave, stdout=slave,
+                    "--", session], env=environment, stdin=slave, stdout=slave,
                     stderr=error_slave if stopped else subprocess.PIPE, pass_fds=(ready_write,),
                     preexec_fn=lambda: (signal.signal(signal.SIGINT, signal.SIG_DFL),
                         signal.signal(signal.SIGTERM, signal.SIG_DFL)))
@@ -1604,7 +1616,7 @@ def command_interruption_cases(state, library):
                     key = identity["key"]
                     if case == "configure-inflight":
                         assert transmitted == [saved], "in-flight send changed captured request bytes"
-                    assert identity["store"] == str(store) and identity["session"] == "command/signals"
+                    assert identity["store"] == str(store) and identity["session"] == session
                     if stopped:
                         assert b"rui request" not in errors, errors  # Dropped, not delayed.
                     else:
@@ -1673,10 +1685,11 @@ def fatal_reporting_cases(state):
     host = caller = proxy = None
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        human.run(home, "session", "configure", "--store", store, "--session", "fatal/original",
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
+        missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
-            (["session", "resume", "--store", str(store), "missing/fatal"], b"SessionNotConfigured"),
+            (["session", "resume", "--store", str(store), missing_session], b"SessionNotConfigured"),
             (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
             (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"UnsupportedSelectionProvider"),
         ]
@@ -1726,7 +1739,7 @@ def fatal_reporting_cases(state):
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "fatal/original"],
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             proxy = canonical.ReplyProxy(host, "/v1/message",
@@ -1769,7 +1782,7 @@ def fatal_reporting_cases(state):
         error_flags = fcntl.fcntl(write_error, fcntl.F_GETFL)
         records_before = {path: path.read_bytes() for path in records.glob("*.json")}
         try:
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "fatal/original"],
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
             human.read_terminal(master, "› ", composer=True)
             os.write(master, b"\x1b[")
@@ -1782,7 +1795,7 @@ def fatal_reporting_cases(state):
             assert actual == original
             assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
             assert {path: path.read_bytes() for path in records.glob("*.json")} == records_before
-            assert fixture.command("session", "inspect", "--store", store, "--session", "fatal/original")["session"]
+            assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             print("fatal reporting: acquired terminal disconnected stderr passed", flush=True)
         finally:
             dispose_all(
@@ -1819,9 +1832,8 @@ def decision_reporting_cases(state):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for decision, lost in cases:
             name = f"{decision}-{lost}"
-            session = f"reporting/{name}"
-            human.run(home, "session", "configure", "--store", store, "--session", session,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()
@@ -1924,8 +1936,8 @@ def entry_enable_cases(state, library):
     home.mkdir(mode=0o700)
     host = fixture.start_host(store, None)
     try:
-        human.run(home, "session", "configure", "--store", store, "--session", "entry/enable",
-            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
         for target in (0, 1):
             for mode in ("mutated", "unmutated", "mutated-reset"):
@@ -1938,7 +1950,7 @@ def entry_enable_cases(state, library):
                 log = root / f"{name}.log"
                 caller = None
                 try:
-                    caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "entry/enable"],
+                    caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                         env={**os.environ, "HOME": str(home),
                             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
@@ -1997,9 +2009,8 @@ def detach_reporting_cases(state, library):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for kind, fault in cases:
             name = f"{kind}-{fault}"
-            session = f"detach/{name}"
-            human.run(home, "session", "configure", "--store", store, "--session", session,
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()
             original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
@@ -2109,9 +2120,9 @@ def startup_reporting_cases(state, library):
         arm, log = root / "arm", root / "probe.log"
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            human.run(home, "session", "configure", "--store", store, "--session", "startup/case",
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "startup/case"],
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
                     "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
@@ -2225,14 +2236,14 @@ def visible_stream_handoff_cases(state, library):
         arm, log = root / "arm", root / "probe.log"
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            human.run(home, "session", "configure", "--store", store, "--session", "visible/stream",
-                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")["admission"]["answer"]["session"]
             if phase not in ("activity", "permission", "interrupt", "completion"):
                 for i in range(len(responses)):
-                    admission = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "visible/stream"}), f"saved input {i}")
+                    admission = human.admit(home, "session", "send", "--store", store, "--to", session, f"saved input {i}")
                     fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
             if phase == "opening": arm.touch()
-            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "visible/stream"],
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
                     "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
@@ -2253,7 +2264,7 @@ def visible_stream_handoff_cases(state, library):
                 fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-page output gate")
                 time.sleep(0.5)
                 assert fixture.command("session", "inspect", "--store", store,
-                    "--session", "visible/stream")["session"]["permission_mode"] == "ask"
+                    "--session", session)["session"]["permission_mode"] == "ask"
                 arm.unlink()
                 human.read_terminal(master, "Configured.", composer=True)
                 human.await_screen(master, "› UNREAD suffix", composer=True)
@@ -2262,7 +2273,7 @@ def visible_stream_handoff_cases(state, library):
                 added = [json.loads(value) for path, value in records.items() if path not in before]
                 assert len(added) == 1 and "configuration" in added[0], "completed command captured its suffix"
                 assert fixture.command("session", "inspect", "--store", store,
-                    "--session", "visible/stream")["session"]["permission_mode"] == "bypass"
+                    "--session", session)["session"]["permission_mode"] == "bypass"
                 os.write(master, b"\x03")
                 tail, errors = human.terminal_exit(caller, master)
                 assert caller.returncode == 0, (tail, errors)
@@ -2285,11 +2296,11 @@ def visible_stream_handoff_cases(state, library):
                     # explicit failure that still names exact recovery.
                     assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
-                    assert b"Session: visible/stream" not in tail, "interrupted pending command ran"
+                    assert f"Session: {session}".encode() not in tail, "interrupted pending command ran"
                 else:
                     arm.unlink()
                     # Long pages open at their top; the exact Action's inspection starts there.
-                    expected = "Bash arguments: " if phase == "permission" else "Session: visible/stream"
+                    expected = "Bash arguments: " if phase == "permission" else f"Session: {session}"
                     page = human.read_terminal(master, expected)
                     shown = human.current_screen(master)
                     assert expected in shown or expected in page, (phase, shown)
@@ -2451,8 +2462,8 @@ def host_diagnostic_cases(state, library):
         # the native readiness gate. No live raw Store reads or new hooks.
         seed = fixture.start_host(store, None)
         try:
-            fixture.configure(root, store, "config", "ready/session", "gpt-6-sol")
-            fixture.message(root, store, "queued", "ready/session", "READY-ANSWER")
+            session = fixture.configure(root, store, "config", None, "gpt-6-sol")
+            fixture.message(root, store, "queued", session, "READY-ANSWER")
         finally:
             fixture.stop_host(seed)
         endpoint = fixture.SuccessEndpoint([
@@ -2541,8 +2552,8 @@ def host_diagnostic_cases(state, library):
             else:
                 assert kind == "readiness-alias" and fields["execution"] == "unavailable"
                 assert "readiness-aliased\n" in log.read_text()
-                fixture.configure(root, root / "store", "alias-config", "alias/session", "gpt-6-sol")
-                assert fixture.command("session", "inspect", "--store", root / "store", "--session", "alias/session")["session"]
+                session = fixture.configure(root, root / "store", "alias-config", None, "gpt-6-sol")
+                assert fixture.command("session", "inspect", "--store", root / "store", "--session", session)["session"]
             print(f"Host diagnostics: {kind}: required stdout outcome checked", flush=True)
         finally:
             if host is not None: fixture.stop_host(host)
@@ -2584,7 +2595,6 @@ def host_diagnostic_cases(state, library):
         host = None
         inspectors = []
         contention_complete = False
-        contention_inspections = ["diagnostic/session-extra", "diagnostic/session", "diagnostic/session"]
         env = {**os.environ,
             "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "diagnostic-restore" if credit == "diagnostic-restore-startup" else credit,
@@ -2603,10 +2613,10 @@ def host_diagnostic_cases(state, library):
                 *(["--test-phase-trace"] if fault == "success" or credit in ("diagnostic-contention-host", "diagnostic-partial") else [])), env=env, stderr_pipe=(reader, write_fd),
                 observations="control" if credit == "diagnostic-contention-host" else None,
                 required_fields={"execution": "enabled", "curl": "8.22.0"})
-            session = "diagnostic/session"
-            fixture.configure(root, store, "config", session, "gpt-6-sol")
+            session = fixture.configure(root, store, "config", None, "gpt-6-sol")
             if credit == "diagnostic-contention-host":
-                fixture.configure(root, store, "config-other", "diagnostic/session-extra", "gpt-6-sol")
+                other_session = fixture.configure(root, store, "config-other", None, "gpt-6-sol")
+                contention_inspections = [other_session, session, session]
             status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                 capture_output=True, text=True, timeout=8)
             assert status.returncode == 0, status
@@ -2657,10 +2667,10 @@ def host_diagnostic_cases(state, library):
                 status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                     capture_output=True, text=True, timeout=control_remaining())
                 assert status.returncode == 0, status
-                unrelated = fixture.start_command("session", "inspect", "--store", store, "--session", "diagnostic/session-extra")
+                unrelated = fixture.start_command("session", "inspect", "--store", store, "--session", other_session)
                 inspectors.append(unrelated)
                 out, err = unrelated.communicate(timeout=control_remaining())
-                assert unrelated.returncode == 0 and json.loads(out)["session"]["reference"] == "diagnostic/session-extra", (out, err)
+                assert unrelated.returncode == 0 and json.loads(out)["session"]["reference"] == other_session, (out, err)
                 pending = fixture.start_command("session", "inspect", "--store", store, "--session", session)
                 inspectors.append(pending)
                 native = host.rui_observations
@@ -2902,7 +2912,7 @@ def host_diagnostic_cases(state, library):
 def native_notice_cases(state):
     """Exercise the public notice's libc adapter without a Host or interposer."""
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' -- $'--session'\n"
+    expected = b"\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\' path' k7m2qx\n"
     for transport, full in (("pipe", False), ("pipe", True), ("pty", False)):
         # PTY EAGAIN is not persistent: internal delivery can make space without
         # a reader. A full pipe with no reader owns the backpressure witness.
@@ -3026,15 +3036,15 @@ def main(selected=None):
             completed = True
             return
         host = fixture.start_host(store, None)
-        human.run(home, "session", "configure", "--store", store, "--session", "terminal/restoration",
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         if selected in (None, "renderer-backpressure"):
             renderer_backpressure_case(state, library, home, store)
         if selected == "renderer-backpressure":
             completed = True
             return
         assert selected in (None, "persistent"), selected
-        persistent_cases(state, library, home, store, host)
+        persistent_cases(state, library, home, store, host, session)
         completed = True
     finally:
         if host is not None:

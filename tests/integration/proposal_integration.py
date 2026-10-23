@@ -20,7 +20,7 @@ from host_process import TestHTTPServer, stop_process
 from one_reply import one_reply
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
-SESSION = "direct/proposals"
+SESSION = None
 FIELDS = ("item_id", "name", "call_id", "arguments")
 LARGE = "é中🙂\n\\\"/" * 12000
 CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
@@ -38,7 +38,9 @@ CALLS += [("bash", f"invalid-description-{index}", arguments)
           for index, arguments in enumerate(DESCRIPTION_REJECTIONS)]
 
 
-def caller(store, mode, first, second, session=SESSION, ok=True, timeout=10):
+def caller(store, mode, first, second, session=None, ok=True, timeout=10):
+    if session is None:
+        session = SESSION
     result = subprocess.run([str(CALLER), mode, str(store), session, str(first), str(second)],
                             capture_output=True, timeout=timeout)
     assert (result.returncode == 0) == ok, (mode, result.returncode, result.stderr)
@@ -65,6 +67,7 @@ def mock_reply(socket_path, store, mode, body, advertised=None, extra_headers=b"
 
 
 def main():
+    global SESSION
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         def do_POST(self):
@@ -95,10 +98,11 @@ def main():
         try:
             process, fields = start_host(store, provider)
             configured = command("session", "configure", "--store", store, "--record", state / "config.json", "--key", "config",
-                "--session", SESSION, "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol",
+                "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol",
                 "--tools", "bash", "--permission-mode", "ask")
             assert configured["answer"]["status"] == "accepted", configured
-            configure(state, store, "foreign-config", "direct/foreign")
+            SESSION = configured["answer"]["session"]
+            foreign = configure(state, store, "foreign-config")
             empty = page(store)
             assert empty["items"] == [] and not empty["more"]
             baseline = host_resources(process.pid)
@@ -153,7 +157,7 @@ def main():
                            {"end": str(2**64 - 1), "after": "0"}):
                 head, _ = request(fields["socket"], store, "/v1/proposal-page", "proposal_page", SESSION, **kwargs)
                 assert not head.startswith(b"HTTP/1.1 200 "), head
-            caller(store, "field", items[1]["position"], "arguments", session="direct/foreign", ok=False)
+            caller(store, "field", items[1]["position"], "arguments", session=foreign, ok=False)
             head, _ = request(fields["socket"], store, "/v1/proposal-field", "proposal_field", SESSION,
                               position=str(items[1]["position"]), field="provider_source")
             assert head.startswith(b"HTTP/1.1 400 "), head

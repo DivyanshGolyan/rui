@@ -80,35 +80,36 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
                                              "--test-client-send-buffer-bytes", "1024", observations="control_peers")
             peers = PeerCensus(HostDiagnostics(host))
             sock = ready["socket"]
-            peers.call("configure", lambda: model.configure(state, store, "config", "direct/checkpoint", "gpt-6-sol"))
-            peers.call("message", lambda: model.message(state, store, "message", "direct/checkpoint", user_text))
+            session = peers.call("configure", lambda: model.configure(state, store, "config", None, "gpt-6-sol"))
+            peers.call("message", lambda: model.message(state, store, "message", session, user_text))
             model.wait_for(lambda: peers.call("observe", lambda: model.observe(store, "message"))
                            .get("result", {}).get("status") == "completed", "checkpoint saved answer")
 
             def read(route, kind, **fields):
                 return peers.call(kind, lambda: exchange(sock, store, route, kind, **fields))
 
-            head, body = read("/v1/conversation-page", "conversation_page", session="direct/checkpoint",
+            head, body = read("/v1/conversation-page", "conversation_page", session=session,
                               end="0", before_position="0", before_ordinal="0")
             assert head.startswith(b"HTTP/1.1 200 "), head
             items = json.loads(body)["items"]
             user = next(item["position"] for item in items if item["kind"] == "user")
             assistant = next(item["position"] for item in items if item["kind"] == "assistant")
-            head, body = read("/v1/proposal-page", "proposal_page", session="direct/checkpoint", end=None, after="0")
+            head, body = read("/v1/proposal-page", "proposal_page", session=session, end=None, after="0")
             assert head.startswith(b"HTTP/1.1 200 "), head
             proposal = json.loads(body)["items"][0]["position"]
             routes = [
                 ("/v1/read-result", "read_result", {"key": "message"}, text),
                 *[("/v1/conversation-content", "conversation_content",
-                   {"session": "direct/checkpoint", "position": position, "ordinal": "0", "start": "0", "stream": True}, expected)
+                   {"session": session, "position": position, "ordinal": "0", "start": "0", "stream": True}, expected)
                   for position, expected in ((user, user_text), (assistant, text))],
                 ("/v1/proposal-field", "proposal_field",
-                 {"session": "direct/checkpoint", "position": proposal, "field": "arguments"}, arguments),
+                 {"session": session, "position": proposal, "field": "arguments"}, arguments),
                 *[("/v1/activity-content", "activity_content",
-                   {"session": "direct/checkpoint", "position": position, "ordinal": "0"}, expected)
+                   {"session": session, "position": position, "ordinal": "0"}, expected)
                   for position, expected in ((user, user_text), (assistant, text))],
             ]
             reused = []
+            writer_session = None
             for case, (route, kind, fields, expected) in enumerate(routes):
                 request = peers.expect(kind)
                 peer, length = hold_reply(sock, store, route, kind, **fields)
@@ -116,8 +117,8 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
                 peers.held([request])
                 sizes = [(store / "rui.sqlite3-wal").stat().st_size]
                 for index in range(8):
-                    peers.call("configure", lambda: model.configure(state, store, f"write-{case}-{index}",
-                               "direct/writer", "gpt-6-sol", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
+                    writer_session = peers.call("configure", lambda: model.configure(state, store, f"write-{case}-{index}",
+                                                writer_session, "gpt-6-sol", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
                     sizes.append((store / "rui.sqlite3-wal").stat().st_size)
                 # This is reuse/reset, not a 4-MiB quota: a large transaction
                 # can exceed journal_size_limit before a later WAL reset.
@@ -159,8 +160,8 @@ def main():
             diagnostics = HostDiagnostics(host)
             peers = PeerCensus(diagnostics)
             sock = ready["socket"]
-            peers.call("configure", lambda: control.configure(state, store, "reply-config", "direct/reply"))
-            peers.call("message", lambda: control.message(state, store, "reply-message", "direct/reply", "answer"))
+            session = peers.call("configure", lambda: control.configure(state, store, "reply-config"))
+            peers.call("message", lambda: control.message(state, store, "reply-message", session, "answer"))
             deadline = time.monotonic() + 8
             control.wait_for(lambda: peers.call("observe", lambda: control.observe(store, "reply-message", deadline=deadline),
                                                deadline=deadline).get("result", {}).get("status")
@@ -174,7 +175,7 @@ def main():
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
             head, body = read("/v1/conversation-page", "conversation_page",
-                                  session="direct/reply", end="0", before_position="0", before_ordinal="0")
+                                  session=session, end="0", before_position="0", before_ordinal="0")
             assert head.startswith(b"HTTP/1.1 200 "), head
             item = json.loads(body)["items"][0]
             assert item["kind"] == "assistant", item
@@ -184,10 +185,10 @@ def main():
                                                   "inspect" if index % 2 else "read_result"))
                 if index in (0, 2):
                     peer, length = hold_reply(sock, store, "/v1/conversation-content", "conversation_content",
-                                              session="direct/reply", position=item["position"], ordinal="0", start="0", stream=True)
+                                              session=session, position=item["position"], ordinal="0", start="0", stream=True)
                 elif index % 2:
                     peer, length = hold_reply(sock, store, "/v1/inspect-session", "inspect_session",
-                                              session="direct/reply", profile="full")
+                                              session=session, profile="full")
                 else:
                     peer, length = hold_reply(sock, store, "/v1/read-result", "read_result", key="reply-message")
                 held.append((peer, length))
@@ -203,7 +204,7 @@ def main():
             # A committed idle stop progresses while all ten ordinary writers
             # remain held; it cannot revoke the saved answer.
             assert peers.call("session_stop", lambda: control.stop_session(
-                state, store, "reply-stop", "direct/reply"))["answer"]["status"] == "accepted"
+                state, store, "reply-stop", session))["answer"]["status"] == "accepted"
             # Disconnect releases one exchange, not the committed result.
             deadline = time.monotonic() + 8
             held.pop(0)[0].close()  # Whole-stream Conversation reader.
@@ -211,7 +212,7 @@ def main():
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
             assert int(peers.call("inspect", lambda: control.inspect_execution(
-                store, "direct/reply"))["scratch_used_bytes"]) > 0
+                store, session))["scratch_used_bytes"]) > 0
             deadline = time.monotonic() + 5
             held_requests.append(peers.expect("read_result"))
             held.append(hold_reply(sock, store, "/v1/read-result", "read_result", key="reply-message"))
@@ -266,7 +267,7 @@ def main():
             head, body = read("/v1/read-result", "read_result", key="reply-message")
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected
             assert int(peers.call("inspect", lambda: control.inspect_execution(
-                store, "direct/reply"))["scratch_used_bytes"]) == 0
+                store, session))["scratch_used_bytes"]) == 0
             print(json.dumps({"delivery": "passed", "bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest(),
                               "drain_seconds": elapsed, "baseline": baseline, "held": full,
                               "restart": resources(host.pid)}))

@@ -176,14 +176,14 @@ test "detached notice restores flags and requires one complete nonblocking write
             for ([_]@FieldType(Output, "delivery"){ .failed, .zero, .short, .full }) |delivery| {
                 var output: Output = .{ .enable_failed = enable_failed, .restore_failed = restore_failed, .delivery = delivery };
                 var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .screen = undefined, .active = false };
-                const result = terminal.detachedWithOps("/tmp/a'\\\n", "--s", null, &output);
+                const result = terminal.detachedWithOps("/tmp/a'\\\n", "k7m2qx", null, &output);
                 const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
                 try std.testing.expectEqual(@as(c_int, 2) | (if (restore_failed) nonblock else 0), output.flags);
                 try std.testing.expectEqual(@as(usize, 2), output.sets);
                 try std.testing.expectEqual(@as(usize, if (enable_failed) 0 else 1), output.writes);
                 try std.testing.expect(!output.blocking_write);
                 if (!enable_failed) try std.testing.expectEqualStrings(
-                    "\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\'\\\\\\012' -- $'--s'\n",
+                    "\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/a\\'\\\\\\012' k7m2qx\n",
                     output.bytes[0..output.len],
                 );
                 if (!enable_failed and !restore_failed and delivery == .full) try result else try std.testing.expectError(error.TerminalCleanupFailed, result);
@@ -192,12 +192,12 @@ test "detached notice restores flags and requires one complete nonblocking write
     }
     var output: Output = .{ .enable_failed = false, .restore_failed = false, .delivery = .full };
     var terminal: Self = .{ .original = undefined, .flags = .{ 0, 2 }, .screen = undefined, .active = false };
-    try terminal.detachedWithOps("/tmp/store", "A\x00Z", 913, &output);
-    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/store' --session-hex 41005a\n" ++
+    try terminal.detachedWithOps("/tmp/store", "09azvw", 913, &output);
+    try std.testing.expectEqualStrings("\nDetached. Host work continues.\nResume: rui session resume --store $'/tmp/store' 09azvw\n" ++
         "Pending Action: inspect the complete proposal before deciding.\n" ++
-        "rui action inspect --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
-        "rui action allow --store $'/tmp/store' --session-hex 41005a --action 913\n" ++
-        "rui action deny --store $'/tmp/store' --session-hex 41005a --action 913\n", output.bytes[0..output.len]);
+        "rui action inspect --store $'/tmp/store' --session 09azvw --action 913\n" ++
+        "rui action allow --store $'/tmp/store' --session 09azvw --action 913\n" ++
+        "rui action deny --store $'/tmp/store' --session 09azvw --action 913\n", output.bytes[0..output.len]);
 }
 
 pub const Read = struct { byte: u8, at: i96 };

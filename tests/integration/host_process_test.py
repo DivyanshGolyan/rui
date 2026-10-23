@@ -1319,7 +1319,7 @@ def prove_terminal_capture_budget():
         reached = []
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as patches:
             root = pathlib.Path(directory)
-            held = {"process": "123", "run": "1", "subject": "diagnostic/session"}
+            held = {"process": "123", "run": "1", "subject": "k7m2qx"}
             inspector = MagicMock(returncode=0)
             inspector.communicate.return_value = (b"", b"")
             inspector.poll.return_value = 0
@@ -1359,7 +1359,7 @@ def prove_terminal_capture_budget():
                 patches.enter_context(patch.object(terminal, name, replacement))
             for name, replacement in {
                 "SuccessEndpoint": MagicMock(return_value=MagicMock(requests=[object()])),
-                "configure": MagicMock(), "message": MagicMock(),
+                "configure": MagicMock(return_value="k7m2qx"), "message": MagicMock(),
                 "start_command": start_inspector, "observe": observe, "command": inspect,
             }.items():
                 patches.enter_context(patch.object(terminal.fixture, name, replacement))

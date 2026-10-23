@@ -66,7 +66,7 @@ func TestCaseStatusDistinguishesBehaviorAndMeasurementOutcomes(t *testing.T) {
 }
 
 func TestExecutionAuditRequiresOneSettledOperationAndRequestPerTurn(t *testing.T) {
-	want := expectedOrder(2)
+	want := []string{"k7m2qx", "k7m2qy"}
 	valid := executionFacts{
 		Messages:   []messageExecutionFact{{"e-msg-1", want[0], 1}, {"e-msg-2", want[1], 2}},
 		Turns:      []turnExecutionFact{{1, want[0], 1, "provider_http_422"}, {2, want[1], 2, "provider_http_422"}},
@@ -138,18 +138,18 @@ func TestExecutionAuditQueryRejectsHiddenEntities(t *testing.T) {
 	}{
 		{
 			name: "duplicate Operation behind current pointer",
-			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','queue/eligible/000001',1);
-INSERT INTO turn VALUES(1,'queue/eligible/000001',2,'provider_http_422');
-INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_422');
-INSERT INTO model_operation VALUES(2,1,'queue/eligible/000001','provider_http_422');`,
+			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','k7m2qx',1);
+INSERT INTO turn VALUES(1,'k7m2qx',2,'provider_http_422');
+INSERT INTO model_operation VALUES(1,1,'k7m2qx','provider_http_422');
+INSERT INTO model_operation VALUES(2,1,'k7m2qx','provider_http_422');`,
 			wantTurns: 1, wantOperations: 2,
 		},
 		{
 			name: "extra Turn without Operation",
-			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','queue/eligible/000001',1);
-INSERT INTO turn VALUES(1,'queue/eligible/000001',1,'provider_http_422');
-INSERT INTO turn VALUES(2,'queue/eligible/000002',2,'provider_http_422');
-INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_422');`,
+			fixture: `INSERT INTO message_admission VALUES(1,'e-msg-1','k7m2qx',1);
+INSERT INTO turn VALUES(1,'k7m2qx',1,'provider_http_422');
+INSERT INTO turn VALUES(2,'k7m2qy',2,'provider_http_422');
+INSERT INTO model_operation VALUES(1,1,'k7m2qx','provider_http_422');`,
 			wantTurns: 2, wantOperations: 1,
 		},
 	}
@@ -159,7 +159,9 @@ INSERT INTO model_operation VALUES(1,1,'queue/eligible/000001','provider_http_42
 			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
 			_, err := sql(deadline, sqliteBinary, store, `CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,command_key TEXT,session_ref TEXT,turn_id INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,operation_id INTEGER,outcome_code TEXT);
-CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,resolution_code TEXT);`+test.fixture)
+CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,resolution_code TEXT);
+CREATE TABLE core_command(command_key TEXT,kind INTEGER,target TEXT);
+INSERT INTO core_command VALUES('e-config-1',1,'k7m2qx'),('e-config-2',1,'k7m2qy');`+test.fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +176,7 @@ CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,se
 			if len(facts.Turns) != test.wantTurns || len(facts.Operations) != test.wantOperations {
 				t.Fatalf("query returned %d Turns and %d Operations, want %d and %d", len(facts.Turns), len(facts.Operations), test.wantTurns, test.wantOperations)
 			}
-			if _, err := auditExecutions(facts, expectedOrder(1), 1); err == nil {
+			if _, err := auditExecutions(facts, []string{"k7m2qx"}, 1); err == nil {
 				t.Fatal("invalid Store passed execution audit")
 			}
 		})
@@ -204,8 +206,8 @@ func TestPhysicalFootprintStatusUsesConservativeUpperBound(t *testing.T) {
 
 func TestBehaviorFailureRetainsOrderEvidence(t *testing.T) {
 	result := map[string]any{"status": "passed"}
-	actual := []string{"queue/eligible/000002", "queue/eligible/000001"}
-	expected := []string{"queue/eligible/000001", "queue/eligible/000002"}
+	actual := []string{"k7m2qy", "k7m2qx"}
+	expected := []string{"k7m2qx", "k7m2qy"}
 	recordAdmissionOrder(result, actual, expected, nil)
 	if result["status"] != "behavior_error" || result["behavior_failure"] == nil {
 		t.Fatalf("wrong-order result = %v", result)

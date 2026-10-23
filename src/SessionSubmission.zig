@@ -129,7 +129,7 @@ test "submission bounded gestures consume only the original and do not requeue f
             errdefer std.debug.print("submission gestures: kind={d}, gestures={d}\n", .{ kind, gestures });
             var input: Input = undefined;
             input.init();
-            var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input };
+            var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input };
             // An idle gesture has no authority over a future original.
             try self.requestRecovery(null);
             self.intent = if (kind == 0) .{ .message = input.submitText("B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
@@ -182,7 +182,7 @@ test "submission bounded joined outcomes precede retry and retire original autho
                 errdefer std.debug.print("submission join: kind={d}, outcome={s}, gestures={d}\n", .{ kind, @tagName(outcome), gestures });
                 var input: Input = undefined;
                 input.init();
-                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
+                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 self.reply = .{ .status = 200, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
                     .accepted => .{ .accepted = if (kind == 0) .{ .message = .{ .admission = 37 } } else .permission_decision },
@@ -348,7 +348,7 @@ test "submission reservation failure retains unsent intent ahead of accepted his
     for (0..3) |kind| {
         var input: Input = undefined;
         input.init();
-        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "unused", .directory = "unused", .input = &input, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .accepted = .{ .kind = .message, .key = @splat('A') } };
         const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
         for ("next té!\x1b[D") |byte| _ = input.feed(byte);
         try std.testing.expectError(error.EntropyUnavailable, self.begin(intent));
@@ -381,7 +381,7 @@ test "submission cancelled and failed joins preserve independent publication fac
             for ([_]Task.Run{ Worker.initial, Worker.cancelled, Worker.failed }) |run| {
                 var input: Input = undefined;
                 input.init();
-                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &input, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
+                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 for ("newer té!\x1b[D") |byte| _ = input.feed(byte);
                 try self.task.start(self.io, &self, run);
@@ -426,7 +426,7 @@ test "submission recovery validates reopened originals and pins the saved reader
             input.init();
             var vtable = io.vtable.*;
             vtable.fileSync = Failure.sync;
-            var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "original/session", .directory = root, .input = &input };
+            var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "k7m2qx", .directory = root, .input = &input };
             defer self.close();
             const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
             try self.begin(intent);
@@ -437,7 +437,7 @@ test "submission recovery validates reopened originals and pins the saved reader
             if (variant != .absent) {
                 const target: client.CaptureTarget = .{ .explicit = .{ .record = self.target.explicit.record, .key = if (variant == .key) "wrong-key" else &key } };
                 const store = if (variant == .store) other_store else root;
-                const session = if (variant == .session) "different/session" else "original/session";
+                const session = if (variant == .session) "09azvw" else "k7m2qx";
                 var record = if ((kind == 0) != (variant == .kind))
                     try client.captureMessage(io, .{ .store = store, .session = session, .text_path = "", .text = switch (variant) {
                         .content => "modified café!",
@@ -528,7 +528,7 @@ test "submission settles wire Admission only after join and releases only accept
             const invalid = std.mem.eql(u8, status, "invalid");
             var body_buffer: [1024]u8 = undefined;
             var body = std.Io.Writer.fixed(&body_buffer);
-            try body.print("{{\"version\":\"1\",\"type\":\"{s}_reply\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false,\"session\":\"original/session\"", .{ if (kind == 0) "message" else "permission_decision", status });
+            try body.print("{{\"version\":\"1\",\"type\":\"{s}_reply\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false,\"session\":\"k7m2qx\"", .{ if (kind == 0) "message" else "permission_decision", status });
             if (!accepted) try body.print(",\"code\":\"{s}\"", .{if (conflict) "idempotency_key_conflict" else "not_allowed"});
             if (kind != 0) try body.print(",\"action\":\"19\",\"decision\":\"{s}\"", .{if (kind == 1) "allow_once" else "deny"});
             if (kind == 0 and accepted) try body.writeAll(",\"admission\":\"37\"");
@@ -544,7 +544,7 @@ test "submission settles wire Admission only after join and releases only accept
             const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: 1\r\n\r\n{s}", .{ if (conflict) "409 Conflict" else "200 OK", body.buffered().len, body.buffered() });
             var input: Input = undefined;
             input.init();
-            var self: Self = .{ .io = io, .store = root, .session = "original/session", .directory = root, .input = &input };
+            var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input };
             defer {
                 self.cancel();
                 _ = self.join();

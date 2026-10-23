@@ -111,7 +111,6 @@ def run(model, external_credential=None):
     workspace.mkdir()
     credential = external_credential or private / "codex.json"
     os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
-    session = "qualification/codex"
     command = "printf 'once\\n' >> effect-count; shasum -a 256 effect-count"
     prompt = (
         "Call Bash once with description exactly 'Append and hash effect counter', "
@@ -153,11 +152,12 @@ def run(model, external_credential=None):
         host, first_observations, reader, dependencies = start()
         configured = caller.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
-            "--key", "configure", "--session", session, "--workspace", workspace,
+            "--key", "configure", "--workspace", workspace,
             "--provider", "codex", "--model", model, "--tools", "none",
             "--permission-mode", "ask",
         )
         assert configured["answer"]["status"] == "accepted", "configuration rejected"
+        session = configured["answer"]["session"]
         # The simple Bash proposal may use no reasoning tokens. Establish real
         # private reasoning first, then require the same Session to replay it
         # through Bash continuation and a fresh Host.

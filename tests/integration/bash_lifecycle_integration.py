@@ -87,14 +87,13 @@ def endpoint_for(name, command, stdin=None):
 
 
 def admit(state, store, endpoint_url, name, fault=None, gated=False):
-    session = f"direct/{name}"
     arguments = ["--fault", fault] if fault is not None else []
     if gated:
         arguments += ["--fault", "bash-fault-gated"]
     host = fixture.start_host(store, endpoint_url, *arguments)
     if gated:
         (store / "scratch" / "bash-fault-gate").write_text("blocked")
-    bash_fixture.configure(state, store, f"{name}-config", session)
+    session = bash_fixture.configure(state, store, f"{name}-config")
     fixture.message(state, store, f"{name}-message", session, "execute")
     action = fixture.wait_for(
         lambda: bash_fixture.action_for(store, session), f"{name} Action"
@@ -124,7 +123,7 @@ def competing_host_is_rejected(store):
     assert "StoreAlreadyOwned" in completed.stderr, completed.stderr
 
 
-def hold_incomplete_connection(host, store):
+def hold_incomplete_connection(host, store, session):
     canonical = str(store.resolve())
     socket_path = host.rui_ready_fields["socket"]
     request = {
@@ -132,7 +131,7 @@ def hold_incomplete_connection(host, store):
         "kind": "configure",
         "store": canonical,
         "key": "shutdown-drain",
-        "session": "direct/shutdown-drain",
+        "session": session,
         "configuration": {
             "workspace": {"state": "omitted"},
             "provider": {"state": "omitted"},
@@ -279,8 +278,7 @@ def natural_exit_signaling(root, inherited_ignore=False):
                     "import os,signal,sys; signal.signal(signal.SIGCHLD,signal.SIG_IGN); "
                     "os.execv(sys.argv[1],sys.argv[1:])", *args]
         host, _ = fixture.start_ready_process(args, required_fields={"execution": "enabled"})
-        session = f"direct/{name}"
-        bash_fixture.configure(state, store, f"{name}-config", session)
+        session = bash_fixture.configure(state, store, f"{name}-config")
         fixture.message(state, store, f"{name}-message", session, "execute")
         action = fixture.wait_for(lambda: bash_fixture.action_for(store, session), f"{name} Action")
         bash_fixture.allow(state, store, f"{name}-allow", session, action["action"])
@@ -387,7 +385,7 @@ def main():
             )
             fixture.wait_for(bash_pid_path.exists, "lease witness Bash identity")
             bash_pid = int(bash_pid_path.read_text())
-            draining = hold_incomplete_connection(host, store)
+            draining = hold_incomplete_connection(host, store, session)
             command_release.touch()
             fixture.wait_for(
                 lambda: control_closed_while_host_alive(host, store, session),

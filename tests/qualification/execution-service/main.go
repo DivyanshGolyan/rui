@@ -178,16 +178,21 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	row = map[string]any{"parameters": s, "trace_path": tracePath, "status": "failed"}
 
 	targetInputs := [][]byte{}
-	if err = c.Configure("target-config", "execution/target", "--tools", "none"); err != nil {
+	session, err := c.Configure("target-config", "", "--tools", "none")
+	if err != nil {
+		return row, err
+	}
+	workspace, err := measurement.RepositoryRoot()
+	if err != nil {
 		return row, err
 	}
 	for i := 0; i < s.HistoryTurns; i++ {
 		text := fmt.Sprintf("history-%d:", i) + strings.Repeat("h", s.HistoryBytes/max(1, s.HistoryTurns))
 		targetInputs = append(targetInputs, userItem(text))
 		response, replay := answerSSE(fmt.Sprintf("history-%d", i), "history-ok", 64, 64)
-		ep.add(text, &requestPlan{Expected: wireRequest(targetInputs), Response: response})
+		ep.add(text, &requestPlan{Expected: wireRequest(workspace, session, targetInputs), Response: response})
 		key := fmt.Sprintf("history-%d", i)
-		if err = c.Message(key, "execution/target", text); err != nil {
+		if err = c.Message(key, session, text); err != nil {
 			return row, err
 		}
 		if err = expectAnswer(c, key, "history-ok"); err != nil {
@@ -198,14 +203,14 @@ func runScenario(binary, root string, s scenario) (row map[string]any, err error
 	work := "work-0"
 	input := append(append([][]byte{}, targetInputs...), userItem(work))
 	payload, _ := answerSSE(work, "answer-"+work, 64, 64)
-	ep.add(work, &requestPlan{Expected: wireRequest(input), Response: payload})
-	if err = c.Message(work, "execution/target", work); err != nil {
+	ep.add(work, &requestPlan{Expected: wireRequest(workspace, session, input), Response: payload})
+	if err = c.Message(work, session, work); err != nil {
 		return row, err
 	}
 	if err = expectAnswer(c, work, "answer-"+work); err != nil {
 		return row, err
 	}
-	if err = awaitDrain(c, "execution/target"); err != nil {
+	if err = awaitDrain(c, session); err != nil {
 		return row, err
 	}
 	if err = ep.audit(); err != nil {

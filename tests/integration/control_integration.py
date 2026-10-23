@@ -301,8 +301,8 @@ def start_host(store, endpoint=None, *extra, active_capacity=2, observations=Non
                                observations=observations or ("control" if "--test-phase-trace" in extra else None))
 
 
-def configure(state, store, key, session):
-    result = command(
+def configure(state, store, key, session=None):
+    args = [
         "session", "configure",
         "--store",
         store,
@@ -310,16 +310,18 @@ def configure(state, store, key, session):
         state / f"{key}.json",
         "--key",
         key,
-        "--session",
-        session,
         "--workspace",
         ROOT,
         "--provider",
         "codex",
         "--model",
         "gpt-6-sol",
-    )
+    ]
+    if session is not None:
+        args += ["--session", session]
+    result = command(*args)
     assert result["answer"]["status"] == "accepted", result
+    return result["answer"]["session"]
 
 
 def message(state, store, key, session, text):
@@ -327,8 +329,10 @@ def message(state, store, key, session, text):
     text_path.write_text(text)
     result = command(
         "session", "send",
+        "--store",
+        store,
         "--to",
-        json.dumps({"store": str(store), "session": session}),
+        session,
         "--record",
         state / f"{key}.json",
         "--key",
@@ -818,17 +822,17 @@ def prove_pre_handoff_stop(state):
         )
         milestones = HostDiagnostics(process)
         peers = PeerCensus(milestones)
-        peers.call("configure", lambda: configure(state, store, "pre-handoff-config", "phase/pre-handoff"))
+        session = peers.call("configure", lambda: configure(state, store, "pre-handoff-config"))
         peers.call("message", lambda: message(
             state,
             store,
             "pre-handoff-message",
-            "phase/pre-handoff",
+            session,
             "must never launch",
         ))
         prepared = milestones.wait("prepared_before_handoff")[0]
         stopped = peers.call("session_stop", lambda: stop_session(
-            state, store, "pre-handoff-stop", "phase/pre-handoff"
+            state, store, "pre-handoff-stop", session
         ))
         assert stopped["answer"]["status"] == "accepted", stopped
         milestones.wait(
@@ -873,7 +877,7 @@ def prove_pre_handoff_stop(state):
             remaining = release_deadline - time.monotonic()
             assert remaining > 0, ("superseded custody did not release within 8s", execution, boundary)
             execution = peers.call("inspect", lambda: inspect_execution(
-                store, "phase/pre-handoff", timeout=remaining,
+                store, session, timeout=remaining,
             ), deadline=release_deadline)
             assert execution["dispatch_fenced"] is False, execution
             assert execution["scratch_used_bytes"] == "0", execution
@@ -914,8 +918,8 @@ def prove_sealed_interruption_and_cleanup(state):
             "--test-suppress-first-control-hint",
         )
         milestones = HostDiagnostics(process)
-        configure(state, store, "sealed-config", "phase/sealed")
-        message(state, store, "sealed-message", "phase/sealed", "sealed race")
+        session = configure(state, store, "sealed-config")
+        message(state, store, "sealed-message", session, "sealed race")
         wait_for(lambda: endpoint.count() == 1, "sealed provider request")
         processing = wait_for(
             lambda: observe(store, "sealed-message").get("processing"),
@@ -929,7 +933,7 @@ def prove_sealed_interruption_and_cleanup(state):
             state,
             store,
             "sealed-interrupt",
-            "phase/sealed",
+            session,
             processing,
         )
         assert interrupted["answer"]["status"] == "accepted", interrupted
@@ -937,7 +941,7 @@ def prove_sealed_interruption_and_cleanup(state):
         semantic = observe(store, "sealed-message")
         assert semantic["result"]["status"] == "cancelled", semantic
         milestones.claim_inspection()
-        execution = inspect_execution(store, "phase/sealed")
+        execution = inspect_execution(store, session)
         assert execution["custody_occupied"] == "1", execution
 
         replayed = retry(state, store, "sealed-interrupt", "model-interruption")
@@ -951,7 +955,7 @@ def prove_sealed_interruption_and_cleanup(state):
         )
         milestones.wait_model_cleanup(processing, release_deadline)
         wait_execution_release(
-            milestones, store, "phase/sealed", release_deadline,
+            milestones, store, session, release_deadline,
         )
         assert observe(store, "sealed-message") == semantic
         assert len(
@@ -976,7 +980,7 @@ def prove_sealed_interruption_and_cleanup(state):
         # A reader may resolve the FIFO name just before its sole writer
         # closes. Reproduce that no-writer state without a scheduler race.
         os.mkfifo(settlement_gate.path, mode=0o600)
-        message(state, store, "released-gate-message", "phase/sealed", "after release")
+        message(state, store, "released-gate-message", session, "after release")
         successor_deadline = time.monotonic() + 8
         released = wait_for(
             lambda: (value := observe(store, "released-gate-message", deadline=successor_deadline))
@@ -985,7 +989,7 @@ def prove_sealed_interruption_and_cleanup(state):
             deadline=successor_deadline,
         )
         milestones.wait_model_cleanup(released["processing"], successor_deadline)
-        wait_execution_release(milestones, store, "phase/sealed", successor_deadline)
+        wait_execution_release(milestones, store, session, successor_deadline)
     finally:
         stop_control_case(
             process, milestones, endpoint, endpoint_thread,
@@ -1022,9 +1026,10 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
         resource_samples = {}
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
-        sessions = [f"contention/{index}" for index in range(CONTROL_HEADROOM)]
-        for index, session in enumerate(sessions):
-            peers.call("configure", lambda: configure(state, store, f"contention-config-{index}", session))
+        sessions = []
+        for index in range(CONTROL_HEADROOM):
+            session = peers.call("configure", lambda: configure(state, store, f"contention-config-{index}"))
+            sessions.append(session)
             peers.call("message", lambda: message(
                 state,
                 store,
@@ -1220,8 +1225,7 @@ def prove_real_settlement_contention(
         if sample_host is not None:
             resource_samples["idle"] = sample_host(process.pid, "idle")
 
-        session = "contention/real-settlement"
-        peers.call("configure", lambda: configure(state, store, "real-settlement-config", session))
+        session = peers.call("configure", lambda: configure(state, store, "real-settlement-config"))
         peers.call("message", lambda: message(
             state,
             store,
@@ -1369,12 +1373,10 @@ def prove_real_settlement_contention(
             "committed large result", deadline=deadline,
         )
         assert message_result["status"] == "completed", message_result
-        blocked_session = "contention/blocked-result-control"
-        peers.call("configure", lambda: configure(
+        blocked_session = peers.call("configure", lambda: configure(
             state,
             store,
             "blocked-result-config",
-            blocked_session,
         ))
         try:
             for _ in range(ORDINARY_CLIENTS):
@@ -1496,13 +1498,12 @@ def prove_real_settlement_contention(
 
 def prove_idle_stop_wire_recovery(state):
     store = state / "queued-stop-reuse-store"
-    target_session = "direct/queued-stop-target"
     process = None
     try:
         # Store tests own replay after newer work. This native witness owns the
         # lost-reply record and nullable idle selection across a Host restart.
         process, _ = start_host(store)
-        configure(state, store, "queued-stop-target-config", target_session)
+        target_session = configure(state, store, "queued-stop-target-config")
         message(
             state,
             store,
@@ -1584,7 +1585,6 @@ def prove_retry_wait_control(state, kind):
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoint_thread.start()
     store = state / f"retry-wait-{kind}-store"
-    session = f"direct/retry-wait-{kind}"
     process = None
     milestones = None
     try:
@@ -1600,7 +1600,7 @@ def prove_retry_wait_control(state, kind):
             active_capacity=1,
         )
         milestones = HostDiagnostics(process)
-        configure(state, store, f"retry-wait-{kind}-config", session)
+        session = configure(state, store, f"retry-wait-{kind}-config")
         message(state, store, f"retry-wait-{kind}-message", session, "retry then control")
         wait_for(lambda: endpoint.count() == 1, f"{kind} temporary provider response")
 
@@ -1774,8 +1774,8 @@ def main():
         process, fields = start_host(store, url)
         socket_path = fields["socket"]
 
-        configure(state, store, "exact-config", "direct/exact")
-        message(state, store, "exact-message", "direct/exact", "first")
+        exact_session = configure(state, store, "exact-config")
+        message(state, store, "exact-message", exact_session, "first")
         wait_for(lambda: endpoint.counts()[0] >= 1, "first provider request")
         processing = wait_for(
             lambda: observe(store, "exact-message").get("processing"),
@@ -1793,7 +1793,7 @@ def main():
                 "--key",
                 "exact-interrupt",
                 "--session",
-                "direct/exact",
+                exact_session,
                 "--turn",
                 processing["turn"],
                 "--operation",
@@ -1827,17 +1827,17 @@ def main():
         assert exact["answer"]["replayed"] is True, exact
         assert exact_latency_ms < 1000, exact_latency_ms
 
-        configure(state, store, "stop-config", "direct/stop")
-        message(state, store, "stop-message", "direct/stop", "second")
+        stop_target = configure(state, store, "stop-config")
+        message(state, store, "stop-message", stop_target, "second")
         wait_for(lambda: endpoint.counts()[0] >= 2, "second provider request")
         stop_processing = wait_for(
             lambda: observe(store, "stop-message").get("processing"),
             "stop target",
         )
-        message(state, store, "stop-later-message", "direct/stop", "later queued input")
+        message(state, store, "stop-later-message", stop_target, "later queued input")
         later_queued = observe(store, "stop-later-message")
         assert later_queued["queue"]["status"] == "queued", later_queued
-        active_stop = stop_session(state, store, "active-stop", "direct/stop")
+        active_stop = stop_session(state, store, "active-stop", stop_target)
         assert active_stop["answer"]["status"] == "accepted", active_stop
         assert active_stop["answer"]["selection"]["turn"] == stop_processing["turn"]
         wait_for(lambda: endpoint.counts()[1] >= 2, "stop transport cancellation")
@@ -1851,7 +1851,7 @@ def main():
         }, excluded_later
         assert endpoint.counts()[0] == 2
 
-        configure(state, store, "headroom-config", "direct/headroom")
+        headroom_session = configure(state, store, "headroom-config")
         lost_stop_record = state / "lost-stop.json"
         dropped_stop = subprocess.run(
             [
@@ -1864,7 +1864,7 @@ def main():
                 "--key",
                 "lost-stop",
                 "--session",
-                "direct/headroom",
+                headroom_session,
                 "--test-drop-reply",
                 "after-commit",
             ],
@@ -1903,7 +1903,7 @@ def main():
                 state,
                 store,
                 f"headroom-stop-{index}",
-                "direct/headroom",
+                headroom_session,
             )
             latencies.append((time.monotonic() - started) * 1000)
             assert reply["answer"]["status"] == "accepted", reply
@@ -1977,7 +1977,7 @@ def main():
 
         process, _ = start_host(store, None, "--fault", "content-acquire")
         no_scratch = stop_session(
-            state, store, "no-scratch-stop", "direct/headroom"
+            state, store, "no-scratch-stop", headroom_session
         )
         assert no_scratch["answer"]["status"] == "accepted", no_scratch
         stop_process(process)

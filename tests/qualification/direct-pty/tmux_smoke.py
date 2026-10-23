@@ -64,7 +64,7 @@ except AssertionError as error:
     "restored": after == before and flags_error is None, "flags_error": flags_error}))
 ''')
         rui = shlex.join([sys.executable, str(wrapper), str(fixture.root), fixture.binary,
-                         "session", "resume", "--store", str(fixture.store), "--", "td4"])
+                         "session", "resume", "--store", str(fixture.store), "--", fixture.session])
         launch = fixture.root / "launch"
         shell = f"while [ ! -f {shlex.quote(str(launch))} ]; do sleep 0.01; done; exec {rui}"
         with defer_signals():
@@ -157,7 +157,7 @@ def smoke(fixture, row):
             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
     if row["name"] == "tmux-status":
-        terminal.wait(lambda text: "Browsing" in text and "Session: td4" in text
+        terminal.wait(lambda text: "Browsing" in text and f"Session: {fixture.session}" in text
                       and "Permission:" in text and "Work:" in text, "status page")
         terminal.call("send-keys", "-t", "td4:0.0", "Escape")
         terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")

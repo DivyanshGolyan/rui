@@ -22,7 +22,7 @@ import (
 // Share context prose; envelope fields and history expectations stay independent.
 func testRequestEnvelope(session string) string {
 	return `{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` +
-		measurement.JSONString(measurement.ModelInstructions("/workspace", "/store", session)) + `,"tools":[],`
+		measurement.JSONString(measurement.ModelInstructions("/workspace", session)) + `,"tools":[],`
 }
 
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
@@ -33,18 +33,75 @@ func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
 	}
 }
 
+func TestHistoryIdentityRequiresIndependentConfigurationBinding(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		bound    []string
+		observed string
+		valid    bool
+	}{
+		{"unbound", nil, "k7m2qx", false},
+		{"configured", []string{"k7m2qx", "123abc"}, "k7m2qx", true},
+		{"other stream", []string{"k7m2qx", "123abc"}, "123abc", false},
+		{"unconfigured", []string{"k7m2qx", "123abc"}, "456def", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, err := newFixture(2, time.Second, 3, true, "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.workspace, f.round = "/workspace", 1
+			s := &Server{fixture: f}
+			if test.bound != nil {
+				if err := s.BindSessions(test.bound); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.BindSessions(test.bound); err == nil {
+					t.Fatal("fixture permitted rebinding")
+				}
+			}
+			close(f.cancelCh)
+			body := testRequestEnvelope(test.observed) + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]}]}`
+			f.serveResponse(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body)))
+			if got := f.streams["capacity-2-round-1-0"].historyValid; got != test.valid {
+				t.Fatalf("history validity = %v, want %v", got, test.valid)
+			}
+			if err := s.BindSessions([]string{"k7m2qx", "123abc"}); err == nil {
+				t.Fatal("observed requests permitted late identity binding")
+			}
+		})
+	}
+}
+
+func TestFixtureSessionBindingsRequireExactCanonicalPopulation(t *testing.T) {
+	for _, ids := range [][]string{nil, {"k7m2qx"}, {"k7m2qx", "k7m2qx"}, {"k7m2qx", "measure/old"}, {"k7m2qx", "ABCDEF"}} {
+		if err := validateSessions(ids, 2); err == nil {
+			t.Fatalf("invalid fixture bindings accepted: %v", ids)
+		}
+	}
+	ids := []string{"k7m2qx", "123abc"}
+	s := &Server{fixture: &fixture{expected: 2}}
+	if err := s.BindSessions(ids); err != nil {
+		t.Fatal(err)
+	}
+	ids[0] = "456def"
+	if s.fixture.sessions[0] != "k7m2qx" {
+		t.Fatal("caller changed bound fixture expectations")
+	}
+}
+
 func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *testing.T) {
-	valid := []byte(testRequestEnvelope("measure/repeat-2/0") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "/store") {
+	valid := []byte(testRequestEnvelope("k7m2qx") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-0"}]},{"type":"message","id":"capacity-response-capacity-2-round-1-0-message","role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-0","annotations":[]}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if !requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 		t.Fatal("valid asymmetric stream-zero history was rejected")
 	}
-	if requestHistoryValid(valid, "capacity-2-round-2-0", "/other-workspace", "/store") {
+	if requestHistoryValid(valid, "capacity-2-round-2-0", "/other-workspace", "k7m2qx") {
 		t.Fatal("wrong Workspace was accepted")
 	}
-	if requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "/other-store") {
-		t.Fatal("wrong Store address was accepted")
+	if requestHistoryValid(valid, "capacity-2-round-2-0", "/workspace", "k7m2qy") {
+		t.Fatal("wrong allocated Session was accepted")
 	}
-	if requestHistoryValid([]byte(strings.Replace(string(valid), "measure/repeat-2/0", "measure/repeat-2/1", 1)), "capacity-2-round-2-0", "/workspace", "/store") {
+	if requestHistoryValid([]byte(strings.Replace(string(valid), "k7m2qx", "k7m2qy", 1)), "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 		t.Fatal("wrong Session address was accepted")
 	}
 	for name, mutate := range map[string]func(map[string]any){
@@ -74,7 +131,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
+			if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 				t.Fatal("corrupt history was accepted")
 			}
 		})
@@ -89,7 +146,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 			t.Fatalf("invalid %s accepted", field)
 		}
 		delete(mutated, field)
@@ -97,16 +154,16 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		if err != nil {
 			t.Fatal(err)
 		}
-		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "/store") {
+		if requestHistoryValid(body, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 			t.Fatalf("missing %s accepted", field)
 		}
 	}
-	missingPrior := []byte(testRequestEnvelope("measure/repeat-2/0") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace", "/store") {
+	missingPrior := []byte(testRequestEnvelope("k7m2qx") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(missingPrior, "capacity-2-round-2-0", "/workspace", "k7m2qx") {
 		t.Fatal("request without its prior user and assistant turn was accepted")
 	}
-	wrongCurrent := []byte(testRequestEnvelope("measure/repeat-2/1") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
-	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace", "/store") {
+	wrongCurrent := []byte(testRequestEnvelope("k7m2qy") + `"input":[{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-1-1"}]},{"role":"assistant","content":[{"type":"output_text","text":"capacity answer capacity-2-round-1-1"}]},{"role":"user","content":[{"type":"input_text","text":"capacity-2-round-2-0"}]}]}`)
+	if requestHistoryValid(wrongCurrent, "capacity-2-round-2-1", "/workspace", "k7m2qy") {
 		t.Fatal("stream-one expectation accepted stream-zero current input")
 	}
 }
@@ -780,9 +837,12 @@ func TestResetRunsSecondRoundOnSameListener(t *testing.T) {
 	defer server.Close()
 	providerURL := server.ProviderURL()
 	runRound := func(input string) {
+		if err := server.BindSessions([]string{"k7m2qx"}); err != nil {
+			t.Fatal(err)
+		}
 		finished := make(chan error, 1)
 		go func() {
-			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(testRequestEnvelope("measure/repeat-1/0")+`"input":`+input+`}`)))
+			response, err := http.Post(providerURL, "application/json", bytes.NewReader([]byte(testRequestEnvelope("k7m2qx")+`"input":`+input+`}`)))
 			if err == nil {
 				_, err = io.Copy(io.Discard, response.Body)
 				response.Body.Close()

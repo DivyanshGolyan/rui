@@ -136,7 +136,7 @@ class ShapedWorkTests(unittest.TestCase):
                 self.assertEqual(fields.get("deadline"), 45.0,
                                  "exact result read must retain the original result deadline")
             return {
-                "configure": {"answer": {"status": "accepted"}},
+                "configure": {"answer": {"status": "accepted", "session": "abc123"}},
                 "message": {"answer": {"status": "accepted"}},
                 "observe_command": {"observation": {"result": {"status": "completed"}}},
                 "read_result": b"answer",
@@ -222,7 +222,7 @@ class ManagedDescriptorTests(unittest.TestCase):
 
                     def command(resource, operation, *args, **kwargs):
                         if (resource, operation) == ("session", "configure"):
-                            return {"answer": {"status": "accepted"}}
+                            return {"answer": {"status": "accepted", "session": "abc123"}}
                         if (resource, operation) == ("request", "inspect"):
                             # Observation has its own 15-second command cap;
                             # leave the cumulative crossing to read or release.
@@ -455,6 +455,7 @@ class QueuedH1CleanupTests(unittest.TestCase):
 
         def request(socket_path, store, kind, **fields):
             if kind == "message":
+                self.assertEqual(fields["session"], "abc123")
                 message(None, store, fields["key"], fields["session"], fields["text"]["value"])
             if kind == "observe_command":
                 value = {"observation": observe(store, fields["key"],
@@ -462,12 +463,15 @@ class QueuedH1CleanupTests(unittest.TestCase):
             elif kind == "read_result":
                 value = read(store, fields["key"], deadline=fields["deadline"])
             elif kind == "inspect_session":
+                self.assertEqual(fields["session"], "abc123")
                 value = {"execution": {"dispatch_fenced": False, "scratch_used_bytes": "0",
                          "custody_occupied": "0" if released[0] else "1"}}
                 if released[0]:
                     endpoint.active = 0
             else:
-                value = {"answer": {"status": "accepted"}}
+                if kind == "configure":
+                    self.assertEqual(fields["session"], "", "wire creation must not request a caller-chosen Session")
+                value = {"answer": {"status": "accepted", "session": "abc123"}}
             if not eof_oracle:
                 return value
             # Body and EOF are separate recv events, including the final
@@ -512,7 +516,7 @@ class QueuedH1CleanupTests(unittest.TestCase):
                     (transport, "HostDiagnostics", lambda _: SimpleNamespace(
                         observations=SimpleNamespace(plan="transport"), borrower_census=census)),
                     (transport.dispatch, "start_host", start),
-                    (transport.dispatch, "configure", lambda *a: None),
+                    (transport.dispatch, "configure", lambda *a: "abc123"),
                     (transport.dispatch, "message", message),
                     (transport.dispatch, "observe", observe),
                     (transport.dispatch, "wait_for", lambda predicate, *a, **k: predicate()),
@@ -627,7 +631,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 if late == "release":
                                     clock[0] = start + budget + boundary
                                 return {"execution": clean}
-                            return {"answer": {"status": "accepted"}}
+                            return {"answer": {"status": "accepted", "session": "abc123"}}
 
                         def request(socket_path, store, kind, **fields):
                             if kind == "observe_command":
@@ -658,7 +662,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                                  SimpleNamespace(pid=1, rui_ready_fields={"socket": "socket"})),
                                 (transport.dispatch, "start_ready_process", lambda *a, **k: (SimpleNamespace(pid=1), {"socket": "socket"})),
                                 (transport.dispatch, "stop_host", lambda *a: None),
-                                (transport.dispatch, "configure", lambda *a: None), (transport.dispatch, "message", lambda *a: None),
+                                (transport.dispatch, "configure", lambda *a: "abc123"), (transport.dispatch, "message", lambda *a: None),
                                 (transport.dispatch, "observe", observe), (transport.dispatch, "read_result", read),
                                 (transport.dispatch, "command", command), (transport, "closed_host_request", request),
                                 (transport, "wait_for_drain", drain), (transport, "HostDiagnostics", lambda *a: diagnostics),
@@ -707,12 +711,12 @@ class ObservationDeadlineTests(unittest.TestCase):
                         patch.object(transport.dispatch, "command", side_effect=command), \
                         patch.object(transport.dispatch.subprocess, "run", side_effect=read):
                     if accepted:
-                        result = transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "session", 1)
+                        result = transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "abc123", 1)
                         self.assertEqual(result, (observation, b"exact answer" if status == "completed" else None, clean))
                         self.assertAlmostEqual(clock[0], sum(durations))
                     else:
                         with self.assertRaises(AssertionError):
-                            transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "session", 1)
+                            transport.dispatch.wait_for_result_release(pathlib.Path("/fixture"), "key", "abc123", 1)
 
     def test_native_final_population_cannot_arrive_after_original_deadline(self):
         # Host diagnostics uses this same wait after result/read/release. A

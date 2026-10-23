@@ -122,6 +122,15 @@ fn run(init: std.process.Init) !void {
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
+    if (parsed.get("session")) |id| {
+        if (!protocol.validSessionId(id)) {
+            TerminalText.diagnostic("rui: Session ID must be exactly six lowercase Crockford characters, for example k7m2qx. Nothing was captured or sent.\n", .{});
+            return error.InvalidSession;
+        }
+    }
+    if (command == .session_resume) if (parsed.positional) |id| {
+        if (!protocol.validSessionId(id)) return error.InvalidSession;
+    };
     switch (command) {
         .session_configure => try configure(init, .{ .io = init.io }, parsed, null),
         .session_send => try message(init, parsed),
@@ -381,6 +390,14 @@ fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![
         if (path.len == 0) return error.InvalidStore;
         return path;
     }
+    if (init.environ_map.get("RUI_STORE")) |path| {
+        const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
+        const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
+        if (path.len == 0 or handle.len == 0 or !protocol.validSessionId(address)) return error.InvalidRuiAddress;
+        _ = try platform.resolveClientPaths(init.io, path);
+        return path;
+    }
+    if (init.environ_map.get("RUI_ADDRESS") != null or init.environ_map.get("RUI_SENDER_HANDLE") != null) return error.InvalidRuiAddress;
     const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
     const defaults = preferences.load(home) catch |err| {
         TerminalText.diagnostic("rui: cannot read private setup defaults ({s}); use rui defaults inspect to inspect them. No Store selected.\n", .{@errorName(err)});
@@ -1065,7 +1082,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var captured = try client.captureConfigure(init.io, .{
         .store = destination,
-        .session = .from_capture_key,
+        .session = .create,
         .require_model = true,
         .workspace = .{ .present = true, .value = workspace },
         .provider = .{ .present = true, .value = selected.provider.slice() },
@@ -1087,7 +1104,9 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         try writeMutationReply(init.io, reply, .human);
         return error.SessionConfigurationRejected;
     }
-    return saved;
+    var configured = saved;
+    configured.session = reply.context.session;
+    return configured;
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
@@ -1263,7 +1282,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const named = if (live) |address| address.session else parsed.get("session");
     var input = client.ConfigureInput{
         .store = "",
-        .session = if (named) |reference| .{ .named = reference } else .from_capture_key,
+        .session = if (named) |reference| .{ .named = reference } else .create,
     };
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
@@ -1283,9 +1302,8 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
     // the same prospective selection as a new interactive Session. Addressed
-    // input remains sparse for the canonical create-or-update owner, without a
-    // probe; an unknown address needs its complete first configuration.
-    if (input.session == .from_capture_key) {
+    // input remains sparse for updates. Unknown IDs never create Sessions.
+    if (input.session == .create) {
         const intent: new_session_selection.Intent = .{
             .provider = if (input.provider.present) input.provider.value else null,
             .model = if (input.model.present) input.model.value else null,
@@ -1349,28 +1367,42 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var address_buffer: [client.Address.storage_bytes]u8 = undefined;
-    const destination = client.Address.parse(parsed.get("to").?, &address_buffer) catch |err| {
-        TerminalText.diagnostic("rui: --to needs a Rui address: {{\"store\":\"PATH\",\"session\":\"REF\"}}; Store may be omitted. Nothing was sent.\n", .{});
-        return err;
-    };
-    var input = client.MessageInput{ .store = "", .session = destination.session, .text_path = parsed.get("text") orelse "" };
+    const destination = parsed.get("to").?;
+    if (!protocol.validSessionId(destination)) {
+        TerminalText.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
+        return error.InvalidSession;
+    }
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = parsed.get("text") orelse "" };
     if (parsed.positional) |value| {
         // Only an unescaped dash selects stdin; after -- it is literal text.
         if (!parsed.literal_positional and std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
     }
-    // An agent's tool process names its own Session; the Host records it.
-    var sender_buffer: [client.Address.storage_bytes]u8 = undefined;
-    if (init.environ_map.get("RUI_ADDRESS")) |address| {
-        input.sender = client.Address.parse(address, &sender_buffer) catch |err| {
-            TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was sent.\n", .{});
-            return err;
-        };
-        if (input.sender.?.store == null) return error.InvalidRuiAddress;
+    // Never let incomplete or malformed peer context fall back to HOME or
+    // become an anonymous send. The Host still authenticates the live handle.
+    const address = init.environ_map.get("RUI_ADDRESS");
+    const sender_store = init.environ_map.get("RUI_STORE");
+    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    if (address != null or sender_store != null or input.sender_handle != null) {
+        if (address == null or sender_store == null or input.sender_handle == null or
+            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
+        {
+            TerminalText.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
+            return error.InvalidRuiAddress;
+        }
+        input.sender = .{ .store = sender_store.?, .session = address.? };
     }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, destination.store orelse if (input.sender) |sender| sender.store else null, &selected_buffer);
-    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    if (sender_store) |trusted| {
+        const sender_paths = try platform.resolveClientPaths(io, trusted);
+        if (parsed.get("store")) |override| {
+            const override_paths = try platform.resolveClientPaths(io, override);
+            if (!override_paths.store.eql(sender_paths.store.slice())) {
+                TerminalText.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
+                return error.CrossStorePeerSend;
+            }
+        }
+        input.store = trusted;
+    } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureMessage(io, input, target);
@@ -1671,7 +1703,12 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
             error.Canceled => return err,
             else => continue,
         };
-        if (!saved.store.eql(canonical.store.slice()) or !saved.session.eql(session_ref)) continue;
+        if (!saved.store.eql(canonical.store.slice())) continue;
+        if (saved.isKind(.configure) and saved.session.len == 0) {
+            var reply: client.ReplyBuffer = .{};
+            const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
+            if (observed.status != .accepted or observed.kind != .configure or !observed.target.?.eql(session_ref)) continue;
+        } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
         try writeSafeTextTo(out, handle);
         try out.writeAll(" (");
@@ -2004,6 +2041,10 @@ const MutationPresentation = enum {
 };
 
 fn writeMutationReply(io: std.Io, reply: client.MutationReply, presentation: MutationPresentation) !void {
+    if (reply.answer) |answer| {
+        if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
+            TerminalText.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
+    } else |_| {}
     if (presentation == .json) {
         var output: JsonOutput = undefined;
         presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
@@ -2151,12 +2192,12 @@ test "mutation presentation renders owned diagnostics and context with bounded w
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
-    const accepted_wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"original/µ\\\"\\n\\u001b\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
+    const accepted_wire = "{\"version\":\"1\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"},\"wire_only\":true}";
     const failed_wire = "{\"version\":\"1\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\",\"wire_only\":true}";
-    const context = "{\"store\":\"/store\",\"session\":\"original/µ\\\"\\n\\u001b\",\"key\":\"key\\\"\\n\",\"kind\":\"configure\"}";
-    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"original/µ\\\"\\n\\u001b\",\"revision\":\"7\",\"created\":true}}";
+    const context = "{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"key/µ\\\"\\n\\u001b\",\"kind\":\"configure\"}";
+    const accepted_json = "{\"context\":" ++ context ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"7\",\"created\":true}}";
     const failed_json = "{\"context\":" ++ context ++ ",\"error\":{\"status\":\"503\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"busy\",\"code\":\"capacity\\n\\u001b\"}}";
-    const human_context = "Store: /store\nSession: original/µ\\\"\\n\\x1b\nkey: key\\\"\\n\n";
+    const human_context = "Store: /store\nSession: k7m2qx\nkey: key/µ\\\"\\n\\x1b\n";
     const failed_human = human_context ++ "invocation: HostInvocationFailed (HTTP 503); outcome unconfirmed\ntype: busy\ncode: capacity\\n\\x1b\n";
     const modes = [_]MutationPresentation{ .json, .human, .interactive_configuration };
     const accepted_expected = [_][]const u8{
@@ -2170,9 +2211,9 @@ test "mutation presentation complete modes preserve escaped original context" {
         failed_human,
     };
     for ([_]bool{ false, true }) |failed| {
-        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "original/µ\"\n\x1b", .configure);
+        var reply = client.decodeMutationReply(.{ .status = if (failed) 503 else 200, .body = if (failed) failed_wire else accepted_wire }, "k7m2qx", .configure);
         try reply.context.store.set("/store");
-        try reply.context.key.set("key\"\n");
+        try reply.context.key.set("key/µ\"\n\x1b");
         try reply.context.kind.set("configure");
         for (modes, 0..) |mode, index| {
             var buffer: [2048]u8 = undefined;

@@ -137,20 +137,20 @@ Scripts and agents use one-shot commands grouped by resource: `session`, `reques
 ```sh
 STORE="$HOME/.local/share/rui/store"
 "$RUI" host start --store "$STORE"
-"$RUI" session configure --store "$STORE" --session my/project \
-  --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask
+SESSION=$("$RUI" session configure --store "$STORE" \
+  --workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["answer"]["session"])')
 ```
 
-A new named Session needs its Workspace, provider and model; later changes to it keep any settings you omit. Without `--session`, `session configure` instead creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference to use below. Then send the Session a message:
+Without `--session`, `session configure` creates a fresh Session and returns its Store-allocated ID, for example `k7m2qx`. IDs contain exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`). Omitted creation settings use the current directory and your saved defaults. Supplied `--session "$SESSION"` updates only that existing Session, keeping omitted settings. Unknown IDs never create Sessions. Then send the Session a message:
 
 ```sh
-TO=$(python3 -c 'import json, sys; print(json.dumps({"store": sys.argv[1], "session": "my/project"}))' "$STORE")
-"$RUI" session send --to "$TO" "Investigate the failing test"
+"$RUI" session send --store "$STORE" --to "$SESSION" "Investigate the failing test"
 "$RUI" request inspect SAVED_HANDLE
 "$RUI" request read-result SAVED_HANDLE
 ```
 
-`--to` takes one JSON address, with an exact `session` and optional `store`. For example, `--to '{"session":"my/project"}'` uses the sending agent's Store, or your saved Store default outside an agent. Peer sends require the same Host; cross-Store peer sends fail at the receiving Host.
+`--to` takes the bare ID, without JSON or a prefix. An anonymous human or script can select `--store`, or omit it to use saved Store defaults. A peer always sends within its sender's Store, even when HOME points elsewhere, and rejects a conflicting `--store`. An unknown ID fails with `no session k7m2qx in this Store` without creating or starting work. Random IDs are not authorization.
 
 Replace `SAVED_HANDLE` with the handle that `session send` prints on stderr. `session send` returns once the message is admitted, not when the work finishes. `request inspect` reports that message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. To wait, run `request inspect` again later.
 
@@ -159,18 +159,18 @@ The conversation shows commentary and the final answer as separate assistant mes
 If approval is needed, inspect the reported Action ID before allowing it:
 
 ```sh
-"$RUI" action inspect --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action inspect --store "$STORE" --session "$SESSION" --action ACTION_ID
 ```
 
 After reviewing the command, approve it once:
 
 ```sh
-"$RUI" action allow --store "$STORE" --session my/project --action ACTION_ID
+"$RUI" action allow --store "$STORE" --session "$SESSION" --action ACTION_ID
 ```
 
 Use `action deny` to reject it instead. If a command loses its reply or exits nonzero, its work may still have been accepted. Use `request inspect HANDLE` to check, and `request recover HANDLE` to resend the same saved request. `request list` lists saved handles. Do not submit a new message to guess whether the first arrived.
 
-Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host, with the Host's `HOME` but none of its other environment, such as credentials. Each model request tells the agent its own Store and Session address. To get an answer from another Session, an agent includes that address in its message, and the other Session replies with an ordinary `session send` to it.
+Agents use the same commands from their Bash tool. Bash runs the `rui` installation that runs the Host, with the Host's `HOME` but none of its other environment, such as credentials. Each model request tells the agent its own bare ID. Bash receives that ID as `RUI_ADDRESS`, its Store as `RUI_STORE`, and private sender authority. To get an answer from another Session, an agent includes its ID in the message, and the other Session replies with an ordinary `session send --to ID`.
 
 ## Manage the background process
 

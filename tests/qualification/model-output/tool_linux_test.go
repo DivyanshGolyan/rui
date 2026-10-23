@@ -109,7 +109,7 @@ func TestToolOriginalFailureRequiresCompletedExactAnswer(t *testing.T) {
 	}
 	completed := map[string]any{"result": map[string]any{"status": "completed"}}
 	failed := map[string]any{"result": map[string]any{"status": "failed"}}
-	answer := []byte("tool turn complete " + provider.ToolSession(10, 2))
+	answer := []byte("tool turn complete k7m2qx")
 	for _, test := range []struct {
 		name        string
 		key         string
@@ -121,16 +121,16 @@ func TestToolOriginalFailureRequiresCompletedExactAnswer(t *testing.T) {
 		{"completed exact", "dispatch-002", inspection("dispatch-002", "completed"), completed, answer, true},
 		{"failed final result", "dispatch-002", inspection("dispatch-002", "failed"), failed, nil, false},
 		{"completed Message but failed request", "dispatch-002", inspection("dispatch-002", "completed"), failed, answer, false},
-		{"wrong answer", "dispatch-002", inspection("dispatch-002", "completed"), completed, []byte("tool turn complete " + provider.ToolSession(10, 3)), false},
+		{"wrong answer", "dispatch-002", inspection("dispatch-002", "completed"), completed, []byte("tool turn complete k7m2qy"), false},
 		{"not the dispatch key", "other", inspection("other", "completed"), completed, answer, false},
 		{"extra Message", "dispatch-002", map[string]any{"recent_messages": append(inspection("dispatch-002", "completed")["recent_messages"].([]any), map[string]any{"message": "x", "outcome": "completed"})}, completed, answer, false},
 	} {
-		if err := toolOriginalFailure(10, 2, test.key, test.inspection, test.observation, test.text, nil); (err == nil) != test.ok {
+		if err := toolOriginalFailure("k7m2qx", 2, test.key, test.inspection, test.observation, test.text, nil); (err == nil) != test.ok {
 			t.Errorf("%s: %v", test.name, err)
 		}
 	}
 	coordinator := map[string]any{"recent_messages": []any{map[string]any{"message": "tui-key", "outcome": "completed"}, map[string]any{"message": "seed-000", "outcome": "completed"}}}
-	if key := toolCoordinatorKey(coordinator); key != "tui-key" || toolOriginalFailure(10, 0, key, coordinator, completed, []byte("tool turn complete "+provider.ToolSession(10, 0)), nil) != nil {
+	if key := toolCoordinatorKey(coordinator); key != "tui-key" || toolOriginalFailure("123abc", 0, key, coordinator, completed, []byte("tool turn complete 123abc"), nil) != nil {
 		t.Fatalf("coordinator key %q", key)
 	}
 }

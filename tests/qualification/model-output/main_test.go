@@ -167,10 +167,10 @@ func TestExpectedCapacityRequestDigest(t *testing.T) {
 		bytes     int
 		digest    string
 	}{
-		{"/workspace", "/store", 638, "11f79f37fb0906b8705332e209c2d2178eba5585ef676f3933db2211dc64f270"},
-		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 719, "8159432edb509add3535405087d9d266bb5f4088b0917d008d7484f632a7f70b"},
+		{"/workspace", "/store", 572, "b4fc386179f36fa382bccea0a1d39ac8382cde1d327426ba1c30067f7a125f03"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 603, "95dd472ec04e3c688d7488434a3d91b10394206927bd07fa6d082758a6520d99"},
 	} {
-		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"measure/capacity-1/1/0"}, test.workspace, test.store)
+		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, test.workspace, test.store)
 		if bytes != test.bytes || digest != test.digest {
 			t.Fatalf("unexpected independent request oracle for %q %q: %d %s", test.workspace, test.store, bytes, digest)
 		}
@@ -322,40 +322,40 @@ func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
 	i64 := func(value int64) *int64 { return &value }
 	text := func(value string) *string { return &value }
 	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
-		return sqliteDiagnostic{Subject: "measure/spill", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
+		return sqliteDiagnostic{Subject: "k7m2qx", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSizeSettingScope: "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages", CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
 	}
 	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
-	if !spillDiagnosticsValid(valid, true, true) {
+	if !spillDiagnosticsValid(valid, "k7m2qx", true, true) {
 		t.Fatal("valid spill-on diagnostics were rejected")
 	}
 	invalid := append([]sqliteDiagnostic(nil), valid...)
 	invalid[1].Synchronous = i64(3)
-	if spillDiagnosticsValid(invalid, true, true) {
+	if spillDiagnosticsValid(invalid, "k7m2qx", true, true) {
 		t.Fatal("mismatched synchronous setting was accepted")
 	}
-	if spillDiagnosticsValid(nil, true, true) {
+	if spillDiagnosticsValid(nil, "k7m2qx", true, true) {
 		t.Fatal("missing diagnostics were accepted")
 	}
-	if spillDiagnosticsValid(valid[:1], true, true) || spillDiagnosticsValid(append(valid, valid[1]), true, true) {
+	if spillDiagnosticsValid(valid[:1], "k7m2qx", true, true) || spillDiagnosticsValid(append(valid, valid[1]), "k7m2qx", true, true) {
 		t.Fatal("wrong diagnostic population was accepted")
 	}
 	zero := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(0, 991)}
-	if spillDiagnosticsValid(zero, true, true) {
+	if spillDiagnosticsValid(zero, "k7m2qx", true, true) {
 		t.Fatal("zero spill-on counter was accepted")
 	}
 	decreasing := []sqliteDiagnostic{diagnostic(2, 991), diagnostic(1, 991)}
-	if spillDiagnosticsValid(decreasing, true, true) {
+	if spillDiagnosticsValid(decreasing, "k7m2qx", true, true) {
 		t.Fatal("decreasing spill-on counter was accepted")
 	}
 	spillOff := []sqliteDiagnostic{diagnostic(0, 0), diagnostic(0, 0)}
-	if !spillDiagnosticsValid(spillOff, false, true) {
+	if !spillDiagnosticsValid(spillOff, "k7m2qx", false, true) {
 		t.Fatal("valid spill-off diagnostics were rejected")
 	}
 	spillOff[1].CacheSpills = u64(1)
-	if spillDiagnosticsValid(spillOff, false, true) {
+	if spillDiagnosticsValid(spillOff, "k7m2qx", false, true) {
 		t.Fatal("nonzero spill-off counter was accepted")
 	}
-	if !spillDiagnosticsValid([]sqliteDiagnostic{diagnostic(0, 0)}, false, false) {
+	if !spillDiagnosticsValid([]sqliteDiagnostic{diagnostic(0, 0)}, "k7m2qx", false, false) {
 		t.Fatal("expected-exit initial diagnostic was rejected")
 	}
 }
@@ -433,7 +433,7 @@ func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
 func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
 	decode := func(value string) sqliteDiagnostic {
 		t.Helper()
-		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":2,"journal_mode":"wal","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
+		encoded := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"k7m2qx","process_memory_scope":"SQLite process-global allocator; one Store per Host","cache_used_scope":"connection-current approximate pager bytes","cache_spills_scope":"connection cumulative mid-transaction spills","hard_heap_limit_bytes":16777216,"cache_spills":0,"cache_size_setting":` + value + `,"cache_size_setting_scope":"raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages","cache_spill_threshold":991,"synchronous":2,"journal_mode":"wal","process":"42","run":"100","clock":"awake_ns","sequence":"5","trace_lost":false}`)
 		records, err := sqliteDiagnosticRecords(encoded)
 		if err != nil || len(records) != 1 {
 			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
@@ -447,7 +447,7 @@ func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) 
 		}
 	}
 	missing := decode("null")
-	if spillDiagnosticsValid([]sqliteDiagnostic{missing}, true, false) {
+	if spillDiagnosticsValid([]sqliteDiagnostic{missing}, "k7m2qx", true, false) {
 		t.Fatal("missing cache_size_setting qualified")
 	}
 }
@@ -457,7 +457,7 @@ func TestSpillDiagnosticDecoderRejectsMalformedAndDuplicateFields(t *testing.T) 
 	if _, err := sqliteDiagnosticRecords(malformed); err == nil {
 		t.Fatal("malformed diagnostic was accepted")
 	}
-	duplicate := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"measure/spill","cache_spills":0,"cache_spills":1}`)
+	duplicate := []byte(`{"rui_test_phase":"sqlite_diagnostic","subject":"k7m2qx","cache_spills":0,"cache_spills":1}`)
 	if _, err := sqliteDiagnosticRecords(duplicate); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("duplicate diagnostic error = %v", err)
 	}
@@ -621,7 +621,7 @@ func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
 
 func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
 	key := "capacity-1-round-1-0"
-	session := "measure/capacity-1/1/0"
+	session := "k7m2qx"
 	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, AllowanceUsed: 1, ResolutionCode: "answer", ResponseID: "capacity-response-" + key, ModelEvidence: "010e006d6f64656c2d612d7365727665640e006d6f64656c2d612d7365727665640000", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
 	if !capacityAuditRowsValid([]capacityAuditRow{row}, []string{key}, []string{session}) {
 		t.Fatal("valid capacity audit row was rejected")
@@ -681,8 +681,8 @@ func TestModelEvidencePreservesSourceOrderAbsenceAndByteLengths(t *testing.T) {
 
 func TestOfflineCapacityAuditsRunOnlyAfterHostStopAndCoverBothRounds(t *testing.T) {
 	requests := []capacityAuditRequest{
-		{keys: []string{"round-1"}, sessions: []string{"session-1"}},
-		{keys: []string{"round-2"}, sessions: []string{"session-2"}},
+		{keys: []string{"round-1"}, sessions: []string{"k7m2qx"}},
+		{keys: []string{"round-2"}, sessions: []string{"k7m2qy"}},
 	}
 	events := []string{}
 	results, err := offlineCapacityAudits(
@@ -707,14 +707,18 @@ func TestOfflineCapacityAuditsRunOnlyAfterHostStopAndCoverBothRounds(t *testing.
 	if len(results) != 2 || !results[0].complete || !results[1].complete {
 		t.Fatalf("offline audit results = %+v", results)
 	}
-	first := capacityAuditIdentity(2, 1, false)
-	second := capacityAuditIdentity(2, 2, false)
+	first := capacityAuditIdentity([]string{"k7m2qx", "k7m2qy"}, 1)
+	second := capacityAuditIdentity([]string{"123abc", "456def"}, 2)
 	if strings.Join(first.keys, ",") != "capacity-2-round-1-0,capacity-2-round-1-1" || strings.Join(second.keys, ",") != "capacity-2-round-2-0,capacity-2-round-2-1" {
 		t.Fatalf("round-specific audit identities first=%v second=%v", first.keys, second.keys)
 	}
-	repeated := capacityAuditIdentity(2, 2, true)
-	if strings.Join(repeated.sessions, ",") != "measure/repeat-2/0,measure/repeat-2/1" {
+	repeated := capacityAuditIdentity(first.sessions, 2)
+	if strings.Join(repeated.sessions, ",") != "k7m2qx,k7m2qy" {
 		t.Fatalf("repeat-work sessions are not stable: %v", repeated.sessions)
+	}
+	first.sessions[0] = "000000"
+	if repeated.sessions[0] != "k7m2qx" {
+		t.Fatal("later population changed an earlier audit identity")
 	}
 }
 
@@ -736,7 +740,7 @@ func TestQualificationExitCodeRejectsNonPassingJSONStatuses(t *testing.T) {
 }
 
 func TestOfflineCapacityAuditsRejectStopAuditAndMissingEvidenceFailures(t *testing.T) {
-	requests := []capacityAuditRequest{{keys: []string{"round-1"}, sessions: []string{"session-1"}}}
+	requests := []capacityAuditRequest{{keys: []string{"round-1"}, sessions: []string{"k7m2qx"}}}
 	audits := 0
 	if _, err := offlineCapacityAudits(
 		func() error { return errors.New("stop failed") }, requests,
@@ -770,7 +774,7 @@ func TestOfflineCapacityAuditsRejectStopAuditAndMissingEvidenceFailures(t *testi
 }
 
 func TestOfflineCapacityAuditsPreserveIndependentRoundsAfterFailure(t *testing.T) {
-	requests := []capacityAuditRequest{capacityAuditIdentity(1, 1, false), capacityAuditIdentity(1, 2, false), capacityAuditIdentity(1, 3, false)}
+	requests := []capacityAuditRequest{capacityAuditIdentity([]string{"k7m2qx"}, 1), capacityAuditIdentity([]string{"k7m2qy"}, 2), capacityAuditIdentity([]string{"123abc"}, 3)}
 	cause := errors.New("round 2 audit failed")
 	results, err := offlineCapacityAudits(func() error { return nil }, requests,
 		func(_ measurement.Deadline, _ string, keys, _ []string) ([]capacityAuditRow, bool, error) {

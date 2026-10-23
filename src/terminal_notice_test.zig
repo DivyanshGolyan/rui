@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
         .screen = undefined,
         .active = false,
     };
-    try terminal.detached("/tmp/a' path", "--session", null);
+    try terminal.detached("/tmp/a' path", "k7m2qx", null);
 }
 
 fn replay(io: std.Io, terminal: *Terminal) !void {

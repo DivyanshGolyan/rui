@@ -22,13 +22,15 @@ from proposal_integration import digest
 from one_reply import one_reply
 
 CALLER = pathlib.Path(sys.argv[2]).resolve()
-SESSION = "direct/activity"
+SESSION = None
 TEXT = "é中🙂\n\\\"/" * 12000
 CALLS = [("bash", "exact-call", '{"cmd":"exit 0","timeout_ms":null,"description":"Exit with success"}')]
 CALLS += [("unknown", f"rejected-{i}", TEXT if i == 1 else "{}") for i in range(1, 18)]
 
 
-def caller(store, mode, *args, session=SESSION, ok=True, timeout=10):
+def caller(store, mode, *args, session=None, ok=True, timeout=10):
+    if session is None:
+        session = SESSION
     argv = [str(CALLER), mode, str(store), session, *map(str, args)]
     measured = os.environ.get("RUI_ACTIVITY_MEASURE") == "1" and ok
     if measured: argv = ["/usr/bin/time", "-f", "native maxrss_kib=%M", *argv]
@@ -70,6 +72,7 @@ def mock_reply(path, store, mode, body, advertised=None, ok=False):
 
 
 def main():
+    global SESSION
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         def do_POST(self):
@@ -98,9 +101,11 @@ def main():
         provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
         try:
             process, fields = start_host(store, provider)
-            command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
+            configured = command("session", "configure", "--store", store, "--record", state / "config", "--key", "config",
                 "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
-            configure(state, store, "foreign-config", "direct/foreign")
+            assert configured["answer"]["status"] == "accepted", configured
+            SESSION = configured["answer"]["session"]
+            foreign = configure(state, store, "foreign-config")
             empty_end, empty = history(store)
             assert empty == []
             baseline = host_resources(process.pid)
@@ -129,7 +134,7 @@ def main():
                     assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
                     assert caller(store, "field", row["position"], field) == data
             caller(store, "content", calls[0]["position"], 0, ok=False)
-            caller(store, "content", pending[0]["position"], 0, session="direct/foreign", ok=False)
+            caller(store, "content", pending[0]["position"], 0, session=foreign, ok=False)
             for row in pending[:2]: assert caller(store, "content", row["position"], 0) == TEXT.encode()
             message(state, store, "second", SESSION, TEXT)
             queued_end, queued = history(store)
@@ -244,14 +249,17 @@ def main():
                 wire = copy.deepcopy(valid)
                 wire["items"] = [{"position": "1", "ordinal": "0", "value": {"stop": {"key": "stop", "turn": turn, "cutoff": "0", "completion": completion}}}]
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=ok)
-            # Pages carry full opaque identities, never renderer abbreviations.
-            generated = "rui/1a2b3c4d-0000-4000-8000-000000000001"
-            for session in (generated, "rui/" + "a" * 36, "reviewer"):
+            # Pages carry complete canonical IDs, never renderer abbreviations.
+            for session in (SESSION, foreign, "k7m2qx"):
                 wire = copy.deepcopy(valid)
                 sender = {"session": session}
                 wire["items"][0]["value"]["admission"]["sender"] = sender
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode(), ok=True)
                 sender["prefix"] = "6"
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
+            for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
+                wire = copy.deepcopy(valid)
+                wire["items"][0]["value"]["admission"]["sender"] = {"session": session}
                 mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender"):
                 wire = copy.deepcopy(valid)
@@ -286,6 +294,7 @@ def main():
 
 def performance_case(item_bytes):
     """Opt-in real admission witness; stream both copies of the provider item."""
+    global SESSION
     from model_fixture import read_result
     root = tempfile.mkdtemp(prefix="rui-activity-performance-")
     completed = False
@@ -350,9 +359,11 @@ def performance_case(item_bytes):
         worker = threading.Thread(target=endpoint.serve_forever)
         worker.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
+        configured = command("session", "configure", "--store", store, "--record", state / "config", "--key", "config",
             "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
-        configure(state, store, "second-config", "direct/independent")
+        assert configured["answer"]["status"] == "accepted", configured
+        SESSION = configured["answer"]["session"]
+        independent = configure(state, store, "second-config")
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
         # Observing the Host's unlinked response capture avoids sending a
@@ -413,7 +424,7 @@ def performance_case(item_bytes):
         polling.start()
         second_start = time.monotonic()
         try:
-            message(state, store, "independent", "direct/independent", "independent question")
+            message(state, store, "independent", independent, "independent question")
             second_admitted = time.monotonic()
             deadline = second_start + 15
             result = wait_for(lambda: observe(store, "independent").get("result", {}).get("status") == "completed",

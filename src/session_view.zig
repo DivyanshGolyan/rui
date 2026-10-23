@@ -7,7 +7,6 @@ const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const unicode = @import("terminal_unicode");
-const gwidth = @import("terminal_width");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -65,84 +64,18 @@ pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
     try sink.feed(Mark.reset);
 }
 
-/// The most columns a peer reference takes on its line, `…` included.
-pub const peer_ref_columns = 16;
-
-/// A peer reference as its line names it: a generated `rui/` reference by
-/// the first six characters of its ID, any other
-/// exactly, escaped; past `peer_ref_columns` columns it ends with `…`.
+/// A peer label is its complete routing identity, never a second abbreviation.
 pub fn peerRef(peer: protocol.Peer, buffer: *[4 * protocol.max_session_bytes + 8]u8) []const u8 {
-    const session = peer.session.slice();
-    const shown = if (generatedSession(session)) session[4..10] else session;
-    var escaped: [4 * protocol.max_session_bytes]u8 = undefined;
-    var out = std.Io.Writer.fixed(&escaped);
-    var text: Text = .{ .mode = .line };
-    text.feed(&out, shown) catch unreachable;
-    text.finish(&out) catch unreachable;
-    const bytes = out.buffered();
-    // Columns, not clusters. The terminal's width method is not known here,
-    // so each cluster counts its widest under any method: the cap holds in
-    // every mode. The cut keeps whole clusters and leaves one column for `…`.
-    var clusters = unicode.graphemeIterator(bytes);
-    var columns: usize = 0;
-    var cut: usize = 0;
-    while (clusters.next()) |cluster| {
-        var width: u16 = 0;
-        inline for (comptime std.enums.values(gwidth.Method)) |method| width = @max(width, gwidth.gwidth(cluster.bytes(bytes), method));
-        if (columns + width < peer_ref_columns) cut = cluster.start + cluster.len;
-        columns += width;
-    }
-    if (columns <= peer_ref_columns) {
-        @memcpy(buffer[0..bytes.len], bytes);
-        return buffer[0..bytes.len];
-    }
-    @memcpy(buffer[0..cut], bytes[0..cut]);
-    @memcpy(buffer[cut..][0.."…".len], "…");
-    return buffer[0 .. cut + "…".len];
+    const session = peer.session;
+    @memcpy(buffer[0..session.len], session.slice());
+    return buffer[0..session.len];
 }
 
-fn generatedSession(ref: []const u8) bool {
-    if (ref.len != 40 or !std.mem.startsWith(u8, ref, "rui/")) return false;
-    for (ref[4..], 0..) |byte, index| switch (index) {
-        8, 13, 18, 23 => if (byte != '-') return false,
-        else => if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false,
-    };
-    return true;
-}
-
-test "a peer reference abbreviates a generated ID locally and caps at 16 columns" {
+test "a peer reference is the complete six character routing ID" {
     var buffer: [4 * protocol.max_session_bytes + 8]u8 = undefined;
-    var generated: protocol.Peer = .{ .session = .{} };
-    try generated.session.set("rui/1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
-    try std.testing.expectEqualStrings("1a2b3c", peerRef(generated, &buffer));
     var exact: protocol.Peer = .{ .session = .{} };
-    try exact.session.set("rui/1A2B3C4D-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
-    try std.testing.expectEqualStrings("rui/1A2B3C4D-5e…", peerRef(exact, &buffer));
-    try exact.session.set("rui/gggggggggggggggggggggggggggggggggggg");
-    try std.testing.expectEqualStrings("rui/ggggggggggg…", peerRef(exact, &buffer));
-    try exact.session.set("reviewer");
-    try std.testing.expectEqualStrings("reviewer", peerRef(exact, &buffer));
-    try exact.session.set("abcdefghijklmnop");
-    try std.testing.expectEqualStrings("abcdefghijklmnop", peerRef(exact, &buffer));
-    try exact.session.set("abcdefghijklmnopq");
-    try std.testing.expectEqualStrings("abcdefghijklmno…", peerRef(exact, &buffer));
-    // Controls stay visible as escapes, and count where they show.
-    try exact.session.set("a\nb");
-    try std.testing.expectEqualStrings("a\\nb", peerRef(exact, &buffer));
-    // Wide characters count two columns: eight fit, nine do not.
-    try exact.session.set("雪雪雪雪雪雪雪雪");
-    try std.testing.expectEqualStrings("雪雪雪雪雪雪雪雪", peerRef(exact, &buffer));
-    try exact.session.set("雪雪雪雪雪雪雪雪雪");
-    try std.testing.expectEqualStrings("雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
-    try exact.session.set("a雪雪雪雪雪雪雪雪");
-    try std.testing.expectEqualStrings("a雪雪雪雪雪雪雪…", peerRef(exact, &buffer));
-    // A ZWJ family is two columns by Unicode but eight by wcwidth; the cap
-    // counts the wider, so three never pass whole.
-    const family = "👨‍👩‍👧‍👦";
-    try exact.session.set(family ++ family ++ family);
-    try std.testing.expectEqualStrings(family ++ "…", peerRef(exact, &buffer));
-    try exact.session.set(family ++ family);
-    try std.testing.expectEqualStrings(family ++ family, peerRef(exact, &buffer));
+    try exact.session.set("k7m2qx");
+    try std.testing.expectEqualStrings("k7m2qx", peerRef(exact, &buffer));
 }
 
 test "peer Messages render as one dim line each, with time in the margin and `…` when they continue" {
@@ -169,7 +102,7 @@ test "peer Messages render as one dim line each, with time in the margin and `�
     try std.testing.expectEqual(@as(c_int, 0), setenv("TZ", "UTC0", 1));
     tzset();
     var peer: protocol.Peer = .{ .session = .{} };
-    try peer.session.set("rui/9f8e7d6c-0000-4000-8000-000000000001");
+    try peer.session.set("9f8e7d");
     const S = Mark.summary;
     const N = Mark.sidenote;
     const R = Mark.reset;

@@ -79,12 +79,11 @@ var modelContextParts = func() []string {
 }()
 
 // ModelInstructions independently encodes known inputs, never the observed request.
-// store must already be canonical (see CanonicalStore); session is the exact
-// configured Session reference.
-func ModelInstructions(workspace, store, session string) string {
-	workspace, store, session = JSONString(workspace), JSONString(store), JSONString(session)
+// session is the exact Store-allocated Session ID. Store paths are not model facts.
+func ModelInstructions(workspace, session string) string {
+	workspace = JSONString(workspace)
 	return modelContextParts[0] + workspace[1:len(workspace)-1] + modelContextParts[1] +
-		store[1:len(store)-1] + modelContextParts[2] + session[1:len(session)-1] + modelContextParts[3]
+		session + modelContextParts[2]
 }
 
 func nested(value map[string]any, names ...string) any {
@@ -99,24 +98,41 @@ func nested(value map[string]any, names ...string) any {
 	return current
 }
 
-func (c Client) Configure(key, session string, extra ...string) error {
+// Configure creates when session is empty, otherwise updates that exact ID.
+func (c Client) Configure(key, session string, extra ...string) (string, error) {
 	workspace, err := RepositoryRoot()
 	if err != nil {
-		return err
+		return "", err
 	}
 	arguments := []string{
 		"session", "configure", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+"-configure.json"),
-		"--key", key + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna",
+		"--key", key + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna",
+	}
+	if session != "" {
+		arguments = append(arguments, "--session", session)
 	}
 	arguments = append(arguments, extra...)
 	var answer map[string]any
 	if err := RunJSON(c.Deadline, &answer, c.Binary, arguments...); err != nil {
-		return err
+		return "", err
 	}
 	if nested(answer, "answer", "status") != "accepted" {
-		return fmt.Errorf("configuration was not accepted: %v", answer)
+		return "", fmt.Errorf("configuration was not accepted: %v", answer)
 	}
-	return nil
+	allocated, err := ConfigurationSession(answer)
+	if err == nil && session != "" && allocated != session {
+		err = fmt.Errorf("configuration changed Session: %q != %q", allocated, session)
+	}
+	return allocated, err
+}
+
+// ConfigurationSession validates the identity returned at the allocation boundary.
+func ConfigurationSession(reply map[string]any) (string, error) {
+	session, ok := StringField(reply, "answer", "session")
+	if !ok || len(session) != 6 || strings.Trim(session, "0123456789abcdefghjkmnpqrstvwxyz") != "" {
+		return "", fmt.Errorf("configuration omitted canonical Session ID: %v", reply)
+	}
+	return session, nil
 }
 
 func (c Client) Message(key, session, text string) error {
@@ -125,9 +141,8 @@ func (c Client) Message(key, session, text string) error {
 		return err
 	}
 	var answer map[string]any
-	address := `{"store":` + JSONString(c.Store) + `,"session":` + JSONString(session) + `}`
 	if err := RunJSON(c.Deadline, &answer, c.Binary,
-		"session", "send", "--to", address, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"session", "send", "--store", c.Store, "--to", session, "--record", filepath.Join(c.Artifacts, key+".json"),
 		"--key", key, "--text", source); err != nil {
 		return err
 	}
@@ -243,11 +258,12 @@ func IntStringField(value map[string]any, names ...string) (uint64, bool) {
 	return number, err == nil
 }
 
-func (c Client) Submit(key, session, text string) error {
-	if err := c.Configure(key, session, "--tools", "none"); err != nil {
-		return err
+func (c Client) Submit(key, session, text string) (string, error) {
+	session, err := c.Configure(key, session, "--tools", "none")
+	if err != nil {
+		return "", err
 	}
-	return c.Message(key, session, text)
+	return session, c.Message(key, session, text)
 }
 
 func (c Client) RecordJSON(name string, value any) error {

@@ -139,10 +139,12 @@ def main():
         host = dispatch.start_host(store, f"https://localhost:{endpoint.server_address[1]}/responses",
                                    "--provider-ca-file", str(root / "cert.pem"), active_capacity=100)
         try:
+            sessions = []
             for index in range(100):
                 text = f"compare-{index}"
-                dispatch.configure(root, store, f"config-{index}", f"direct/{text}", "gpt-6-luna")
-                dispatch.message(root, store, f"message-{index}", f"direct/{text}", text)
+                session = dispatch.configure(root, store, f"config-{index}", None, "gpt-6-luna")
+                sessions.append(session)
+                dispatch.message(root, store, f"message-{index}", session, text)
             assert endpoint.ready.wait(45), "100 requests not simultaneously live"
             requests = endpoint.requests if topology == "h1" else {
                 text: body for _, _, text, body in endpoint.streams
@@ -166,11 +168,11 @@ def main():
             assert endpoint.payload_hashes == expected_payload_hashes, "server response bytes differ"
             (out / "response-hashes.json").write_text(json.dumps(endpoint.payload_hashes, sort_keys=True, indent=2) + "\n")
             execution = dispatch.command("session", "inspect", "--store", store,
-                                         "--session", "direct/compare-0")["execution"]
+                                         "--session", sessions[0])["execution"]
             assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
             time.sleep(.25)
             execution = dispatch.command("session", "inspect", "--store", store,
-                                         "--session", "direct/compare-0")["execution"]
+                                         "--session", sessions[0])["execution"]
             assert execution["custody_occupied"] == "0", execution
             idle = sample(host.pid, out, "serviced-idle")
             connections = len(endpoint.connections)

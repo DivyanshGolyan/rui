@@ -110,12 +110,13 @@ def run():
         instruction_file.write_text("Use the approved tool result.")
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
-            "--key", "configure", "--session", "managed/session", "--workspace", fixture.ROOT,
+            "--key", "configure", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash",
             "--permission-mode", "ask", "--instructions", instruction_file,
         )
         assert configured["answer"]["status"] == "accepted"
-        fixture.message(state, store, "pending-message", "managed/session", "run the proof")
+        session = configured["answer"]["session"]
+        fixture.message(state, store, "pending-message", session, "run the proof")
         pending = fixture.wait_for(lambda: fixture.observe(store, "pending-message").get("result"), "authentication failure")
         assert pending["code"] == "provider_authentication_failed", pending
         assert not endpoint.requests, "pending refresh reached transport"
@@ -126,7 +127,7 @@ def run():
         # credential is refused before any request to the fixture endpoint.
         credentials(credential_file, access="e30.eyJleHAiOjQxMDI0NDQ4MDB9.b3RoZXI")
         host = start(store, url)
-        fixture.message(state, store, "other-credential", "managed/session", "reject another credential")
+        fixture.message(state, store, "other-credential", session, "reject another credential")
         fixture.wait_for(lambda: fixture.observe(store, "other-credential").get("result"), "synthetic-only fixture rejection")
         assert not endpoint.requests, "a non-canary credential reached the test endpoint"
         fixture.stop_host(host)
@@ -135,19 +136,19 @@ def run():
         credentials(credential_file)
         host = start(store, url)
         diagnostics = HostDiagnostics(host)
-        fixture.message(state, store, "message", "managed/session", "run the proof")
-        action = fixture.wait_for(lambda: bash.action_for(store, "managed/session"), "managed Bash proposal")
-        assert fixture.read_action(store, "managed/session", action["action"], "call-id") == b"managed-call"
-        assert json.loads(fixture.read_action(store, "managed/session", action["action"], "arguments"))["cmd"] == command
-        bash.allow(state, store, "allow", "managed/session", action["action"])
+        fixture.message(state, store, "message", session, "run the proof")
+        action = fixture.wait_for(lambda: bash.action_for(store, session), "managed Bash proposal")
+        assert fixture.read_action(store, session, action["action"], "call-id") == b"managed-call"
+        assert json.loads(fixture.read_action(store, session, action["action"], "arguments"))["cmd"] == command
+        bash.allow(state, store, "allow", session, action["action"])
         fixture.wait_for(lambda: fixture.completed_observation(store, "message"), "managed answer")
         # The 12-byte tool stdout is optionally retained; custody, not the
         # retained full output, must be released before the crash cut.
-        fixture.wait_for(lambda: bash.execution_custody_idle(store, "managed/session"), "owned cleanup")
+        fixture.wait_for(lambda: bash.execution_custody_idle(store, session), "owned cleanup")
         assert fixture.read_result(store, "message") == b"managed answer"
         assert proof.read_text() == "once\n"
         public_report = json.dumps(fixture.command(
-            "session", "inspect", "--store", store, "--session", "managed/session", "--profile", "full",
+            "session", "inspect", "--store", store, "--session", session, "--profile", "full",
         ))
         assert "synthetic-private-reasoning" not in public_report
         assert ACCESS not in public_report
@@ -156,7 +157,7 @@ def run():
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])
-        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session="managed/session")
+        assert continuation["instructions"] == fixture.model_instructions(fixture.ROOT, "Use the approved tool result.", store=store, session=session)
 
         fixture.stop_host(host)
         # The Host holds its Store exclusively; inspect private rows between Hosts.
@@ -166,7 +167,7 @@ def run():
         assert fixture.retry_message(state, store, "message")["answer"]["replayed"] is True
         assert fixture.read_result(store, "message") == b"managed answer"
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
-        fixture.message(state, store, "later", "managed/session", "new message")
+        fixture.message(state, store, "later", session, "new message")
         fixture.wait_for(lambda: fixture.completed_observation(store, "later"), "post-restart answer")
         assert fixture.read_result(store, "later") == b"later answer"
         assert len(endpoint.requests) == 3 and proof.read_text() == "once\n"
@@ -174,7 +175,7 @@ def run():
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
         with endpoint.lock:
             endpoint.responses.append(fixture.ResponseSpec(b"authentication rejected", {}, 401))
-        fixture.message(state, store, "rejected", "managed/session", "no hidden resend")
+        fixture.message(state, store, "rejected", session, "no hidden resend")
         failure = fixture.wait_for(
             lambda: (value := fixture.observe(store, "rejected")).get("result", {}).get("code") and value,
             "managed authentication rejection",
@@ -200,21 +201,22 @@ def run():
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "stop-config.json",
-            "--key", "stop-config", "--session", "managed/stop", "--workspace", fixture.ROOT,
+            "--key", "stop-config", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
+        stopped_session = configured["answer"]["session"]
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            fixture.message(state, stop_store, "stop-message", "managed/stop", "do not launch")
+            fixture.message(state, stop_store, "stop-message", stopped_session, "do not launch")
             diagnostics.wait("preparation_completed", timeout=10)
             stopped = fixture.command(
                 "session", "stop", "--store", stop_store, "--record", state / "stop.json",
-                "--key", "stop", "--session", "managed/stop",
+                "--key", "stop", "--session", stopped_session,
             )
             assert stopped["answer"]["status"] == "accepted"
             assert len(endpoint.requests) == 4
-        fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, "managed/stop"),
+        fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, stopped_session),
                          "cancelled authentication custody", timeout=10)
         assert len(endpoint.requests) == 4, "stopped authentication launched a model request"
         fixture.stop_host(host)
@@ -226,11 +228,12 @@ def run():
         diagnostics = HostDiagnostics(host)
         configured = fixture.command(
             "session", "configure", "--store", stop_store, "--record", state / "handoff-config.json",
-            "--key", "handoff-config", "--session", "managed/handoff", "--workspace", fixture.ROOT,
+            "--key", "handoff-config", "--workspace", fixture.ROOT,
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configured["answer"]["status"] == "accepted"
-        fixture.message(state, stop_store, "handoff-message", "managed/handoff", "do not launch")
+        handoff_session = configured["answer"]["session"]
+        fixture.message(state, stop_store, "handoff-message", handoff_session, "do not launch")
         diagnostics.wait("prepared_before_handoff", timeout=10)
         # Header construction borrows the worker's lease; its stable lock
         # must remain owned through the final launch decision, even if a stop
@@ -239,10 +242,10 @@ def run():
             assert not lock_available(lock), "authenticated handoff released its credential lease early"
         stopped = fixture.command(
             "session", "stop", "--store", stop_store, "--record", state / "handoff-stop.json",
-            "--key", "handoff-stop", "--session", "managed/handoff",
+            "--key", "handoff-stop", "--session", handoff_session,
         )
         assert stopped["answer"]["status"] == "accepted"
-        fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, "managed/handoff"),
+        fixture.wait_for(lambda: bash.execution_custody_idle(stop_store, handoff_session),
                          "stopped authenticated handoff custody", timeout=10)
         assert len(endpoint.requests) == 4, "stopped authenticated handoff launched a model request"
         with open(credential_dir / ".codex.json.lock", "r+b") as lock:
@@ -253,11 +256,12 @@ def run():
         configured = fixture.command(
             "session", "configure", "--store", stop_store,
             "--record", state / "schema-config.json", "--key", "schema-config",
-            "--session", "managed/schema", "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--provider", "codex",
             "--model", "gpt-6-sol", "--tools", "none", "--output-schema", schema,
         )
         assert configured["answer"]["status"] == "accepted"
-        fixture.message(state, stop_store, "schema", "managed/schema", "unsupported managed request")
+        schema_session = configured["answer"]["session"]
+        fixture.message(state, stop_store, "schema", schema_session, "unsupported managed request")
         rejected = fixture.wait_for(
             lambda: (value := fixture.observe(stop_store, "schema")).get("result", {}).get("code") and value,
             "schema rejected before managed dispatch",

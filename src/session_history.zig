@@ -116,8 +116,8 @@ pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, positi
     var buffer: [64]u8 = undefined;
     try sink.feed("Raw export: rui session read-conversation --store-hex ");
     try writeHex(sink, store);
-    try sink.feed(" --session-hex ");
-    try writeHex(sink, session);
+    try sink.feed(" --session ");
+    try sink.feed(session);
     try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ position, ordinal }));
 }
 
@@ -189,7 +189,7 @@ fn writeHex(sink: anytype, bytes: []const u8) !void {
     if (used != 0) try sink.feed(buffer[0..used]);
 }
 
-test "historical export preserves opaque identities without terminal or shell interpretation" {
+test "historical export preserves hex Store escaping and canonical Session IDs" {
     const Sink = struct {
         bytes: [2048]u8 = undefined,
         length: usize = 0,
@@ -210,21 +210,21 @@ test "historical export preserves opaque identities without terminal or shell in
     // notice.
     var prepared: Prepared = .{ .page = .{ .end = 4, .count = 3, .more = false } };
     var sender: protocol.Peer = .{ .session = .{} };
-    try sender.session.set("reviewer");
+    try sender.session.set("k7m2qx");
     prepared.page.items[0] = .{ .position = 4, .ordinal = 0, .kind = .user, .content = .{ .bytes = 8200, .digest = @splat(0) }, .admitted_at = 1_800_000_000, .sender = sender };
     prepared.page.items[1] = .{ .position = 3, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 8193, .digest = @splat(0) } };
     prepared.page.items[2] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 9000, .digest = @splat(0) }, .admitted_at = 1_800_000_000 };
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)", "team\x1b[2J\n\x00é\u{202e}", &sink, .details, false);
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false);
     try std.testing.expectEqualSlices(u64, &.{ 2, 4 }, sink.positions[0..sink.notes]);
-    // Independent UTF-8 byte-to-hex oracle, including NUL and directional text.
-    const identity = " --store-hex 2f746d702f6127242866616c736529 --session-hex 7465616d1b5b324a0a00c3a9e280ae";
+    // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
+    const identity = " --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw";
     var time: [5]u8 = undefined;
     var expected: [1024]u8 = undefined;
     const clock = View.clock(1_800_000_000, &time).?;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
         "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n" ++
-        "\n\x1b[2;8m← reviewer · …\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
+        "\n\x1b[2;8m← k7m2qx · …\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
 }
 
 test "history body limit preserves contextual tool outcomes" {
@@ -260,7 +260,7 @@ test "history body limit preserves contextual tool outcomes" {
             if (size == 8192) try scratch.writePositionalAll(io, body, 0);
             prepared.offsets[0] = if (size == 8192) 0 else std.math.maxInt(u64);
             var sink: Sink = .{};
-            try prepared.render(io, scratch, "store", "session", &sink, .details, false);
+            try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false);
             const output = sink.bytes[0..sink.length];
             try std.testing.expect(std.mem.startsWith(u8, output, case.heading));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, case.heading));
@@ -268,7 +268,7 @@ test "history body limit preserves contextual tool outcomes" {
                 try std.testing.expect(std.mem.endsWith(u8, output, body ++ "\n"));
                 try std.testing.expect(std.mem.indexOf(u8, output, "Historical item omitted") == null);
             } else {
-                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 73746f7265 --session-hex 73657373696f6e --position 7 --ordinal 2\n", output[case.heading.len..]);
+                try std.testing.expectEqualStrings("Rui: Historical item omitted: position 7, ordinal 2, 8193 raw bytes.\nRaw export: rui session read-conversation --store-hex 73746f7265 --session 09azvw --position 7 --ordinal 2\n", output[case.heading.len..]);
             }
         }
     }
@@ -296,7 +296,7 @@ test "reopened transcript keeps useful stdout when stderr is blank" {
     prepared.page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = result.len, .digest = @splat(0) }, .presentation = .{ .description = description, .code = .failed, .publication_position = 7 } };
     prepared.offsets[0] = 0;
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "session", &sink, .transcript, false);
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false);
     try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n  useful diagnostic B\n", sink.bytes[0..sink.length]);
 }
 
@@ -439,7 +439,7 @@ test "history preparation binds wire and staged bytes before exposure" {
                 (if (case.large) "c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb" else "2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b")
             else if (case.empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972");
         }
-        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "history/session", .{ .end = 2 }, scratch);
+        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "09azvw", .{ .end = 2 }, scratch);
         // Release any request never reached after an earlier protocol failure.
         for (Peer.clients[Peer.connected..exchanges]) |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };

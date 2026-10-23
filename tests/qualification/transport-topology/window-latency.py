@@ -112,8 +112,8 @@ def run(binary, update_delay, iteration):
                                    active_capacity=1)
         diagnostics = HostDiagnostics(host)
         try:
-            dispatch.configure(root, store, "config", "direct/latency", "gpt-6-luna")
-            dispatch.message(root, store, "message", "direct/latency", "latency")
+            session = dispatch.configure(root, store, "config", None, "gpt-6-luna")
+            dispatch.message(root, store, "message", session, "latency")
             assert endpoint.ready.wait(30), "H2 request not ready"
             started = time.monotonic_ns()
             endpoint.release.set()
@@ -123,7 +123,7 @@ def run(binary, update_delay, iteration):
             assert result["status"] == "completed", result
             assert dispatch.read_result(store, "message") == ANSWER.encode()
             execution = dispatch.command("session", "inspect", "--store", store,
-                                         "--session", "direct/latency")["execution"]
+                                         "--session", session)["execution"]
             assert execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0", execution
             assert endpoint.streams == 1 and endpoint.updates > 0 and endpoint.request_sha256 is not None
             return {"iteration": iteration, "update_delay_ms": update_delay * 1000,

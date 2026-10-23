@@ -91,16 +91,17 @@ def main():
         thread.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_address[1]}/responses")
         socket_path = fields["socket"]
-        configure(state, store, "page-config", "direct/page")
+        page_session = configure(state, store, "page-config")
+        foreign_session = configure(state, store, "foreign-config")
         # Raw wire identities are exact, even when an alias selects this Store
         # through the production Client. Keep this deliberate alias unnormalized.
         alias = state / "store-alias"
         alias.symlink_to(store, target_is_directory=True)
-        head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, body = request(socket_path, alias, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 409 "), (head, body)
         assert json.loads(body) == {"version": "1", "type": "invocation_error", "code": "wrong_store_identity"}, body
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         assert json.loads(body)["items"] == []
@@ -108,9 +109,9 @@ def main():
         baseline = host_resources(process.pid)
         payload = "é中" + "x" * 10000
         admitted_after = int(time.time())
-        message(state, store, "page-message", "direct/page", payload)
+        message(state, store, "page-message", page_session, payload)
         wait_for(lambda: endpoint.counts()[0] == 1, "held provider request")
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 "), (head, body)
         page = json.loads(body)
@@ -125,17 +126,17 @@ def main():
         for field in ("end", "before_position", "before_ordinal"):
             cursor = {"end": page["end"], "before_position": item["position"], "before_ordinal": "0"}
             cursor[field] = str(2**64 - 1)
-            head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page", **cursor)
+            head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session, **cursor)
             assert head.startswith(b"HTTP/1.1 400 "), head
-        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end=page["end"], before_position=item["position"], before_ordinal="1")
         assert head.startswith(b"HTTP/1.1 409 "), head
         for field in ("position", "ordinal"):
             identity = {"position": item["position"], "ordinal": "0", "start": "0"}
             identity[field] = str(2**64 - 1)
-            head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page", **identity)
+            head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session, **identity)
             assert head.startswith(b"HTTP/1.1 400 "), head
-        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, _ = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end="0", before_position="0", before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 "), head
         domain = b"rui/content/v1"
@@ -148,7 +149,7 @@ def main():
         chunks = []
         start = 0
         while start < len(payload.encode()):
-            head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+            head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
                 position=item["position"], ordinal="0", start=str(start))
             assert head.startswith(b"HTTP/1.1 200 "), (head, data)
             assert b"X-Rui-Content-Bytes: 10005\r\n" in head, head
@@ -157,22 +158,22 @@ def main():
             chunks.append(data)
             start = next_offset
         assert b"".join(chunks) == payload.encode() and len(chunks) == 3
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
             position=item["position"], ordinal="0", start="0", stream=True)
         assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode(), (head, len(data))
         assert b"Content-Length: 10005\r\n" in head and b"X-Rui-Next-Offset: 10005\r\n" in head, head
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
             position=item["position"], ordinal="0", start=str(len(payload.encode())))
         assert head.startswith(b"HTTP/1.1 200 ") and data == b"", (head, data)
         assert b"X-Rui-Next-Offset: 10005\r\n" in head, head
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
             position=item["position"], ordinal="0", start="1")
         assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode()[1:4097]
         for session, position, ordinal, start in (
-            ("direct/foreign", item["position"], "0", "0"),
-            ("direct/page", page["end"], "0", "0"),
-            ("direct/page", item["position"], "1", "0"),
-            ("direct/page", item["position"], "0", "10006"),
+            (foreign_session, item["position"], "0", "0"),
+            (page_session, page["end"], "0", "0"),
+            (page_session, item["position"], "1", "0"),
+            (page_session, item["position"], "0", "10006"),
         ):
             head, _ = request(socket_path, store, "/v1/conversation-content", "conversation_content", session,
                 position=position, ordinal=ordinal, start=start)
@@ -180,15 +181,15 @@ def main():
         # Keep the provider held. These large admissions remain unapplied and
         # cannot inflate the public page or add per-message resident buffers.
         for index in range(8):
-            message(state, store, f"queued-{index}", "direct/page", "q" * (256 * 1024))
+            message(state, store, f"queued-{index}", page_session, "q" * (256 * 1024))
         after = host_resources(process.pid)
-        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", "direct/page",
+        head, body = request(socket_path, store, "/v1/conversation-page", "conversation_page", page_session,
             end=page["end"], before_position=item["position"], before_ordinal="0")
         assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["items"] == [], (head, body)
-        assert stop_session(state, store, "page-stop", "direct/page")["answer"]["status"] == "accepted"
+        assert stop_session(state, store, "page-stop", page_session)["answer"]["status"] == "accepted"
         endpoint.release.set()
-        wait_for(lambda: inspect_execution(store, "direct/page")["custody_occupied"] == "0", "physical cleanup")
-        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", "direct/page",
+        wait_for(lambda: inspect_execution(store, page_session)["custody_occupied"] == "0", "physical cleanup")
+        head, data = request(socket_path, store, "/v1/conversation-content", "conversation_content", page_session,
             position=item["position"], ordinal="0", start="10000")
         assert head.startswith(b"HTTP/1.1 200 ") and data == payload.encode()[10000:]
         drained = host_resources(process.pid)
@@ -233,11 +234,11 @@ def projected_ranges():
         thread.start()
         provider = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
         process, fields = start_host(store, provider)
-        configure(state, store, "projection-config", "direct/projection")
-        message(state, store, "projection-key", "direct/projection", "input")
+        session = configure(state, store, "projection-config")
+        message(state, store, "projection-key", session, "input")
 
         def completed_page():
-            head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", "direct/projection",
+            head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", session,
                 end="0", before_position="0", before_ordinal="0")
             assert head.startswith(b"HTTP/1.1 200 "), (head, body)
             page = json.loads(body)
@@ -248,13 +249,13 @@ def projected_ranges():
         domain = b"rui/content/v1"
         assert item["content"]["sha256"] == hashlib.sha256(len(domain).to_bytes(8, "big") + domain + expected).hexdigest(), item
         for start in (0, 4095, 4096, len(expected) - 1, len(expected), len(expected), 1):
-            head, data = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/projection",
+            head, data = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
                 position=item["position"], ordinal="0", start=str(start))
             assert head.startswith(b"HTTP/1.1 200 "), (head, data)
             assert data == expected[start:start + 4096], (start, len(data))
             assert f"X-Rui-Content-Bytes: {len(expected)}\r\n".encode() in head, head
             assert f"X-Rui-Next-Offset: {start + len(data)}\r\n".encode() in head, head
-        wait_for(lambda: inspect_execution(store, "direct/projection")["custody_occupied"] == "0", "projected result cleanup")
+        wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "projected result cleanup")
         # Production preserves empty text records at the tail. Add a nonempty
         # part beyond those rows and an ordinal gap, leaving prefix/digest intact.
         stop_process(process)
@@ -273,7 +274,7 @@ def projected_ranges():
         # Store and may not substitute for the second offset's EOF-tail witness.
         for offset in (len(expected) - 1, len(expected)):
             process, fields = start_host(store, provider)
-            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/projection",
+            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
                 position=item["position"], ordinal="0", start=str(offset))
             assert head.startswith(b"HTTP/1.1 500 "), (offset, head, body)
             assert json.loads(body)["code"] == "canonical_store_failure", body
@@ -289,7 +290,7 @@ def projected_ranges():
         process, fields = start_host(store, provider)
         # Complete projected identity must fail before publishing the final
         # range or successful EOF. This is not earlier-range authentication.
-        head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/projection",
+        head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session,
             position=item["position"], ordinal="0", start=str(len(expected) - 1))
         assert head.startswith(b"HTTP/1.1 500 "), (head, body)
         assert json.loads(body)["code"] == "canonical_store_failure", body
@@ -339,11 +340,11 @@ def whole_stream_shape(length):
             worker.start()
             provider = f"http://127.0.0.1:{endpoint.server_port}/responses"
             process, fields = start_host(store, provider)
-            configure(state, store, "stream-config", "direct/stream")
-            message(state, store, "stream-message", "direct/stream", "" if length == 0 else "input")
+            session = configure(state, store, "stream-config")
+            message(state, store, "stream-message", session, "" if length == 0 else "input")
 
             def completed_page():
-                head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", "direct/stream",
+                head, body = request(fields["socket"], store, "/v1/conversation-page", "conversation_page", session,
                     end="0", before_position="0", before_ordinal="0")
                 assert head.startswith(b"HTTP/1.1 200 "), (head, body)
                 items = json.loads(body)["items"]
@@ -351,16 +352,16 @@ def whole_stream_shape(length):
 
             item = wait_for(completed_page, "stream public identity")
             identity = dict(position=item["position"], ordinal="0", start="0", stream=True)
-            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **identity)
+            head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
             assert head.startswith(b"HTTP/1.1 200 ") and body == expected, (head, len(body), length)
             for name in ("Content-Length", "X-Rui-Content-Bytes", "X-Rui-Next-Offset"):
                 assert f"{name}: {length}\r\n".encode() in head + b"\r\n", head
             # Public identity/provenance/range checks remain the same in stream
             # mode. Invalid caller requests must not fence healthy content.
             for changes, status in (({"start": "1"}, 400), ({"ordinal": "1"}, 409), ({"position": str(2**64 - 1)}, 400)):
-                head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **(identity | changes))
+                head, _ = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **(identity | changes))
                 assert head.startswith(f"HTTP/1.1 {status} ".encode()), head
-            wait_for(lambda: inspect_execution(store, "direct/stream")["custody_occupied"] == "0", "stream producer cleanup")
+            wait_for(lambda: inspect_execution(store, session)["custody_occupied"] == "0", "stream producer cleanup")
             stop_process(process)
             process = None
             # Alter only a stopped Store. Digest and hidden-tail faults are
@@ -381,7 +382,7 @@ def whole_stream_shape(length):
                     database.execute("UPDATE content SET payload=NULL,digest=? WHERE content_id=?", (b"\xff" * 32, answer))
             for fault in ("digest", "tail"):
                 process, fields = start_host(store, provider)
-                head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", "direct/stream", **identity)
+                head, body = request(fields["socket"], store, "/v1/conversation-content", "conversation_content", session, **identity)
                 if length <= 4096:
                     assert head.startswith(b"HTTP/1.1 500 "), (fault, length, head, len(body))
                     assert json.loads(body)["code"] == "canonical_store_failure", body
@@ -415,7 +416,6 @@ def missing_assistant_entries():
     import model_fixture as f
     from host_process import HostDiagnostics
 
-    session = "direct/message-certificates"
     items = [{"type": "message", "id": f"message-{index}", "role": "assistant", "phase": phase,
               "content": [{"type": "output_text", "text": text}]}
              for index, (phase, text) in enumerate((("commentary", "Shared commentary"),
@@ -437,7 +437,7 @@ def missing_assistant_entries():
                 try:
                     worker.start()
                     process = f.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-                    f.configure(state, store, "configure", session, "gpt-6-luna")
+                    session = f.configure(state, store, "configure", None, "gpt-6-luna")
                     for key in ("first", "second"):
                         f.message(state, store, key, session, "Synthetic certificate input")
                         f.wait_for(lambda: (value := f.observe(store, key)).get("result") and value, key + " completion")

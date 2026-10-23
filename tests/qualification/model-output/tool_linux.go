@@ -784,10 +784,13 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 	client := measurement.Client{Binary: binary, Store: store, Artifacts: records, Deadline: deadline}
 	names := make([]string, sessions)
 	for index := range sessions {
-		names[index] = provider.ToolSession(sessions, index)
-		if err := client.Configure(fmt.Sprintf("configure-%03d", index), names[index], "--tools", "bash", "--permission-mode", "bypass"); err != nil {
+		names[index], err = client.Configure(fmt.Sprintf("configure-%03d", index), "", "--tools", "bash", "--permission-mode", "bypass")
+		if err != nil {
 			return result, err
 		}
+	}
+	if err := fixture.BindSessions(deadline, names); err != nil {
+		return result, err
 	}
 	points = append(points, toolPoint("configured", store, hostPID, 0))
 	sampler.setPhase("seed")
@@ -803,8 +806,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		seedRows[index] = map[string]any{"session": name, "bytes": len(text), "sha256": hex.EncodeToString(digest[:]), "estimated_tokens_bytes_div_4": len(text) / 4}
 		key := fmt.Sprintf("seed-%03d", index)
 		var answer map[string]any
-		address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(name) + `}`
-		if err := measurement.RunJSON(deadline, &answer, binary, "session", "send", "--to", address, "--record", filepath.Join(records, key+".json"), "--key", key, "--text", path); err != nil {
+		if err := measurement.RunJSON(deadline, &answer, binary, "session", "send", "--store", store, "--to", name, "--record", filepath.Join(records, key+".json"), "--key", key, "--text", path); err != nil {
 			return result, err
 		}
 	}
@@ -926,7 +928,7 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		if index == 0 {
 			result["coordinator_inspection"] = inspection
 		}
-		if failure := toolOriginalFailure(sessions, index, key, inspection, observation, text, readError); failure != nil {
+		if failure := toolOriginalFailure(names[index], index, key, inspection, observation, text, readError); failure != nil {
 			row["failure"], row["observation"], row["inspection"] = failure.Error(), observation, inspection
 			originalFailures = append(originalFailures, failure.Error())
 		}
@@ -1165,8 +1167,7 @@ func toolCoordinatorKey(inspection map[string]any) string {
 // and its original request, both completed, the worker request is the
 // coordinator's dispatch key, and the saved result is exactly the fixture's
 // final answer for that Session.
-func toolOriginalFailure(sessions, index int, key string, inspection, observation map[string]any, text []byte, readError error) error {
-	name := provider.ToolSession(sessions, index)
+func toolOriginalFailure(name string, index int, key string, inspection, observation map[string]any, text []byte, readError error) error {
 	messages, _ := inspection["recent_messages"].([]any)
 	outcomes := map[string]any{}
 	for _, raw := range messages {

@@ -1028,17 +1028,32 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}
 		return nil
 	}
-	session := "qualification/" + value.Name
+	var session string
 	if runtime.GOOS == "darwin" && value.Name == "mixed-restart" {
 		workspace, err := measurement.RepositoryRoot()
 		if err != nil {
 			return result, err
 		}
-		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--session", session, "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, accepted); err != nil {
+		configured := func(output []byte) error {
+			if err := accepted(output); err != nil {
+				return err
+			}
+			var reply map[string]any
+			if err := json.Unmarshal(output, &reply); err != nil {
+				return err
+			}
+			var err error
+			session, err = measurement.ConfigurationSession(reply)
+			return err
+		}
+		if err := measure("cli-configuration", "configuration", []string{"session", "configure", "--store", store, "--record", filepath.Join(directory, value.Name+"-configure.json"), "--key", value.Name + "-configure", "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-luna", "--tools", "bash", "--permission-mode", "ask"}, configured); err != nil {
 			return result, err
 		}
-	} else if err := client.Configure(value.Name, session, "--tools", "bash", "--permission-mode", "ask"); err != nil {
-		return result, err
+	} else {
+		session, err = client.Configure(value.Name, "", "--tools", "bash", "--permission-mode", "ask")
+		if err != nil {
+			return result, err
+		}
 	}
 	recordPortableSample(result, "retained_idle_before", host)
 	admissionStarted := time.Now()
@@ -1047,8 +1062,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err := os.WriteFile(textPath, []byte("classify raw provider calls"), 0o600); err != nil {
 			return result, err
 		}
-		address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(session) + `}`
-		if err := measure("cli-message", "message", []string{"session", "send", "--to", address, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--text", textPath}, accepted); err != nil {
+		if err := measure("cli-message", "message", []string{"session", "send", "--store", store, "--to", session, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--text", textPath}, accepted); err != nil {
 			return result, err
 		}
 		deadline = measurement.NewDeadline(2 * time.Minute)
@@ -1063,7 +1077,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		}); err != nil {
 			return result, err
 		}
-		if err := client.Configure(value.Name+"-remove-tools", "qualification/"+value.Name, "--tools", "none"); err != nil {
+		if _, err := client.Configure(value.Name+"-remove-tools", session, "--tools", "none"); err != nil {
 			return result, err
 		}
 		endpoint.Release()
@@ -1071,7 +1085,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	var inspection map[string]any
 	var classifiedAt time.Time
 	err = measurement.WaitFor(deadline, 10*time.Millisecond, "complete call classification", func() (bool, error) {
-		candidate, inspectError := client.Inspect("qualification/" + value.Name)
+		candidate, inspectError := client.Inspect(session)
 		if inspectError != nil {
 			return false, inspectError
 		}
@@ -1104,7 +1118,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		result["response_end_to_classification_ms"] = float64(classifiedAt.Sub(responseEnd).Microseconds()) / 1000
 	}
 	inspectStarted := time.Now()
-	inspection, err = client.Inspect("qualification/" + value.Name)
+	inspection, err = client.Inspect(session)
 	if err != nil {
 		return result, err
 	}
@@ -1118,7 +1132,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		occupied, wantRequests = "1", 2
 	}
 	err = measurement.WaitFor(deadline, 10*time.Millisecond, "classified Attempt custody release", func() (bool, error) {
-		candidate, inspectError := client.Inspect("qualification/" + value.Name)
+		candidate, inspectError := client.Inspect(session)
 		if inspectError != nil {
 			return false, inspectError
 		}
@@ -1141,7 +1155,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	} else {
 		return result, populationError
 	}
-	contentEvidence, err := verifyActionContent(client, "qualification/"+value.Name, inspection, calls[:value.Valid])
+	contentEvidence, err := verifyActionContent(client, session, inspection, calls[:value.Valid])
 	result["public_action_content"] = contentEvidence
 	if err != nil {
 		return result, err
@@ -1191,14 +1205,14 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if runtime.GOOS == "darwin" && value.Name == "mixed-restart" && index == 0 {
 			denialError = measure("cli-denial", "denial", []string{"action", "deny", "--store", store, "--record", filepath.Join(directory, "deny-0.json"), "--key", "deny-0", "--session", session, "--action", action}, accepted)
 		} else {
-			_, denialError = deny(client, directory, "qualification/"+value.Name, action, index)
+			_, denialError = deny(client, directory, session, action, index)
 		}
 		if denialError != nil {
 			return result, denialError
 		}
 		denialLatencies = append(denialLatencies, float64(time.Since(started).Microseconds())/1000)
 		if value.ReplayDenial {
-			afterDenial, inspectError := client.Inspect("qualification/" + value.Name)
+			afterDenial, inspectError := client.Inspect(session)
 			if inspectError != nil {
 				return result, inspectError
 			}
@@ -1214,7 +1228,7 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 	}
 	result["denial_latency"] = latencySummary(denialLatencies)
 	err = measurement.WaitFor(client.Deadline, 10*time.Millisecond, "completed work and physical cleanup", func() (bool, error) {
-		candidate, inspectError := client.Inspect("qualification/" + value.Name)
+		candidate, inspectError := client.Inspect(session)
 		if inspectError != nil {
 			return false, inspectError
 		}
@@ -1293,15 +1307,15 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 			return result, fmt.Errorf("denial replay mismatch: %v", replay)
 		}
 		result["denial_replay"] = replay
-		recovered, inspectError := client.Inspect("qualification/" + value.Name)
+		recovered, inspectError := client.Inspect(session)
 		if inspectError != nil {
 			return result, inspectError
 		}
-		if contentError := verifyActionBytes(client, "qualification/"+value.Name, actions, calls[:value.Valid]); contentError != nil {
+		if contentError := verifyActionBytes(client, session, actions, calls[:value.Valid]); contentError != nil {
 			return result, fmt.Errorf("restart changed denied Action content: %w", contentError)
 		}
 		var recoveredFull map[string]any
-		if err := measurement.RunJSON(postMeasurementDeadline, &recoveredFull, binary, "session", "inspect", "--store", store, "--session", "qualification/"+value.Name, "--profile", "full"); err != nil {
+		if err := measurement.RunJSON(postMeasurementDeadline, &recoveredFull, binary, "session", "inspect", "--store", store, "--session", session, "--profile", "full"); err != nil {
 			return result, err
 		}
 		historyEvidence, historyError := verifyFullCallHistory(recoveredFull, calls, value.Valid, actions)

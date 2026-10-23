@@ -46,7 +46,9 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, captured.saved.store.slice());
         const reply = try sendSource(self, &paths, captured.target.route(), ResponseTiming.mutation, captured.length, &captured.file, null, drop_reply, null, reply_buffer, null);
         var result = decodeMutationReply(reply, captured.saved.session.slice(), captured.target);
-        result.context = captured.saved;
+        result.context.store = captured.saved.store;
+        result.context.key = captured.saved.key;
+        result.context.kind = captured.saved.kind;
         return result;
     }
 
@@ -84,8 +86,7 @@ pub const Requests = struct {
     pub fn inspectSession(self: Requests, store_path: []const u8, session: []const u8, profile: protocol.ReportProfile, sink: anytype, reply_buffer: *ReplyBuffer) !ReportReply {
         reply_buffer.len = 0;
         try self.check();
-        if (session.len == 0 or session.len > protocol.max_session_bytes or
-            !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
+        try validateIdentityInputs("", session);
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try renderReadRequest(&body, "inspect_session", paths.store.slice(), "session", session, null, profile);
@@ -659,7 +660,7 @@ pub const ConfigureInput = struct {
     store: []const u8,
     session: union(enum) {
         named: []const u8,
-        from_capture_key,
+        create,
     },
     require_model: bool = false,
     workspace: OptionalText = .{},
@@ -683,53 +684,21 @@ pub const MessageInput = struct {
     sender_handle: ?[]const u8 = null,
 };
 
-/// A Session's address: its canonical Store selector and exact reference.
+/// Internal sender binding. Public addresses are bare Session IDs; the
+/// trusted tool environment supplies the Store separately.
 pub const Address = struct {
     store: ?[]const u8,
     session: []const u8,
-    pub const storage_bytes = protocol.content_window_bytes;
-
-    /// Decodes one address into caller-owned storage. Only a destination may
-    /// omit its Store; the CLI resolves it from the sender before HOME defaults.
-    pub fn parse(text: []const u8, storage: *[storage_bytes]u8) !Address {
-        var fixed = std.heap.FixedBufferAllocator.init(storage);
-        const value = std.json.parseFromSliceLeaky(std.json.Value, fixed.allocator(), text, .{ .max_value_len = protocol.max_store_bytes }) catch return error.InvalidRuiAddress;
-        if (value != .object) return error.InvalidRuiAddress;
-        const session = value.object.get("session") orelse return error.InvalidRuiAddress;
-        if (session != .string or session.string.len == 0 or session.string.len > protocol.max_session_bytes) return error.InvalidRuiAddress;
-        const store = if (value.object.get("store")) |field| blk: {
-            if (field != .string or field.string.len == 0 or field.string.len > protocol.max_store_bytes) return error.InvalidRuiAddress;
-            for (field.string) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
-            break :blk field.string;
-        } else null;
-        if (value.object.count() != @as(usize, if (store != null) 2 else 1)) return error.InvalidRuiAddress;
-        return .{ .store = store, .session = session.string };
-    }
 };
 
-test "address JSON preserves exact references and distinguishes an omitted Store from invalid fields" {
-    var storage: [Address.storage_bytes]u8 = undefined;
-    const omitted = try Address.parse("{\"session\":\"peer/\\u0000雪\\\"\\\\\"}", &storage);
-    try std.testing.expect(omitted.store == null);
-    try std.testing.expectEqualStrings("peer/\x00雪\"\\", omitted.session);
+test "Session addresses are exactly six lowercase Crockford characters" {
+    try std.testing.expect(protocol.validSessionId("k7m2qx"));
+    try std.testing.expect(protocol.validSessionId("09azvw"));
     for ([_][]const u8{
-        "{\"session\":\"\"}",
-        "{\"session\":null}",
-        "{\"session\":\"p\",\"store\":null}",
-        "{\"session\":\"p\",\"store\":\"\"}",
-        "{\"session\":\"p\",\"store\":\"/a\\u0000b\"}",
-        "{\"session\":\"p\",\"session\":\"q\"}",
-        "{\"session\":\"p\",\"session_hex\":\"70\"}",
-        "{\"session_hex\":\"70\"}",
-    }) |invalid| try std.testing.expectError(error.InvalidRuiAddress, Address.parse(invalid, &storage));
-    const store: [protocol.max_store_bytes]u8 = @splat('s');
-    const session: [protocol.max_session_bytes]u8 = @splat('p');
-    var text: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
-    const maximum = try Address.parse(try std.fmt.bufPrint(&text, "{{\"store\":\"{s}\",\"session\":\"{s}\"}}", .{ store, session }), &storage);
-    try std.testing.expectEqualStrings(&store, maximum.store.?);
-    try std.testing.expectEqualStrings(&session, maximum.session);
-    try std.testing.expectError(error.InvalidRuiAddress, Address.parse(try std.fmt.bufPrint(&text, "{{\"session\":\"{s}p\"}}", .{session}), &storage));
-    try std.testing.expectError(error.InvalidRuiAddress, Address.parse(try std.fmt.bufPrint(&text, "{{\"store\":\"{s}s\",\"session\":\"p\"}}", .{store}), &storage));
+        "",           "k7m2q",                    "k7m2qxx", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu",
+        "rui/k7m2qx", "{\"session\":\"k7m2qx\"}",
+        "k7\x00雪",
+    }) |invalid| try std.testing.expect(!protocol.validSessionId(invalid));
 }
 
 pub const SessionStopInput = struct {
@@ -1297,7 +1266,7 @@ pub const Current = struct {
                 wire.rejected_calls.value != null or wire.actionable_permissions.value != null) return error.InvalidObservation;
             return .unconfigured;
         };
-        if (!settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
+        if (!protocol.validSessionId(settings.reference.slice()) or !settings.reference.eql(session) or !std.fs.path.isAbsolute(settings.workspace.slice()) or settings.model.slice().len == 0 or
             settings.instructions.type.value != null or (if (settings.output_schema) |schema| schema.type.value != null else false) or
             execution.status.value != .partial or execution.reason.value != null or execution.dispatch_fenced.value == null or
             execution.custody_occupied.value == null or execution.scratch_used_bytes.value == null or execution.unavailable.value == null) return error.InvalidObservation;
@@ -1502,7 +1471,7 @@ pub const SessionListPage = struct {
                 permission_mode: JsonEnum(@FieldType(Row, "permission_mode")),
             };
             const wire = try std.json.innerParse(Wire, allocator, source, options);
-            if (wire.reference.value.len == 0 or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
+            if (!protocol.validSessionId(wire.reference.slice()) or wire.workspace.value.len == 0 or wire.model.value.len == 0) return error.InvalidCharacter;
             return .{
                 .reference = wire.reference.value,
                 .workspace = wire.workspace.value,
@@ -1665,7 +1634,9 @@ pub fn retry(
     if (!binding.saved.store.eql(paths.store.slice()) or binding.target != selected) return error.RequestBindingMismatch;
     const reply = try sendSource(.{ .io = io }, &paths, selected.route(), ResponseTiming.mutation, try file.length(io), &file, null, null, null, reply_buffer, null);
     var result = decodeMutationReply(reply, binding.saved.session.slice(), binding.target);
-    result.context = binding.saved;
+    result.context.store = binding.saved.store;
+    result.context.key = binding.saved.key;
+    result.context.kind = binding.saved.kind;
     return result;
 }
 
@@ -1883,6 +1854,7 @@ pub const CommandObservation = struct {
         if ((self.status == .rejected) != (self.code != null)) return error.InvalidObservation;
         if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
         const accepted = self.status == .accepted;
+        if (accepted and !protocol.validSessionId(self.target.?.slice())) return error.InvalidObservation;
         if ((self.revision != null) != (accepted and kind == .configure) or (self.created != null) != (accepted and kind == .configure)) return error.InvalidObservation;
         if ((self.selection != null) != (accepted and kind == .session_stop) or (self.completion != null) != (accepted and kind == .session_stop)) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
@@ -2020,7 +1992,7 @@ fn readActionContent(
     const io = requests.io;
     reply_buffer.len = 0;
     try requests.check();
-    if (session.len == 0 or session.len > protocol.max_session_bytes or action_id == 0) return error.InvalidTarget;
+    if (!protocol.validSessionId(session) or action_id == 0) return error.InvalidTarget;
     const paths = try platform.resolveClientPaths(io, store_path);
     var body: protocol.RequestBuffer = .{};
     try renderReadRequest(&body, kind, paths.store.slice(), "session", session, action_id, null);
@@ -2031,8 +2003,7 @@ fn readActionContent(
 
 fn validateIdentityInputs(key: []const u8, session: []const u8) !void {
     if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
-    if (session.len == 0 or session.len > protocol.max_session_bytes or
-        !std.unicode.utf8ValidateSlice(session)) return error.InvalidSession;
+    if (!protocol.validSessionId(session)) return error.InvalidSession;
 }
 
 /// The five durable mutations. Tag names are the captured-record and
@@ -2159,11 +2130,12 @@ const JsonAddress = struct {
     }
 };
 
-/// Pages carry exact peer identity; abbreviation belongs to presentation.
+/// Pages expose only canonical Session IDs as peer labels.
 const JsonPeer = struct {
     session: JsonString(protocol.max_session_bytes),
 
     fn peer(self: *const JsonPeer) !protocol.Peer {
+        if (!protocol.validSessionId(self.session.slice())) return error.InvalidResponse;
         return .{ .session = self.session.value };
     }
 };
@@ -2376,11 +2348,13 @@ fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
 pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: MutationTarget) MutationReply {
     var result: MutationReply = .{ .status = reply.status, .target = target, .answer = error.InvalidResponse };
     result.context.session.set(session) catch return result;
-    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic);
+    var resolved = result.context.session;
+    result.answer = decodeMutationAnswer(reply, session, target, &result.diagnostic, &resolved);
+    if (result.answer) |_| result.context.session = resolved else |_| {}
     return result;
 }
 
-fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic) @FieldType(MutationReply, "answer") {
+fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic, resolved_session: *protocol.Bounded(protocol.max_session_bytes)) @FieldType(MutationReply, "answer") {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
     const Wire = struct {
         version: JsonString(8),
@@ -2436,7 +2410,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         if (answer.session.value != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
             try mutationId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
     } else {
-        if (answer.target.value != null or !(answer.session.value orelse return error.InvalidResponse).eql(session)) return error.RequestBindingMismatch;
+        const echoed = answer.session.value orelse return error.InvalidResponse;
+        if (answer.target.value != null) return error.RequestBindingMismatch;
+        if (target == .configure and session.len == 0 and answer.status.eql("accepted")) {
+            if (!protocol.validSessionId(echoed.slice()) or answer.created.value != true) return error.RequestBindingMismatch;
+            resolved_session.* = echoed.value;
+        } else if (!echoed.eql(session)) return error.RequestBindingMismatch;
     }
     if (target == .permission_decision) {
         if (try mutationId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
@@ -2446,6 +2425,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const conflict = answer.status.eql("conflict");
     if ((!accepted and !conflict and !answer.status.eql("rejected")) or (reply.status == 409) != conflict) return error.InvalidResponse;
     if (accepted) {
+        if (!protocol.validSessionId(resolved_session.slice())) return error.InvalidResponse;
         if (answer.code.value != null) return error.InvalidResponse;
     } else {
         const code = answer.code.value orelse return error.InvalidResponse;
@@ -2507,38 +2487,38 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
 test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     const digest = protocol.contentDigest("a\nµ");
     const target: MutationTarget = .{ .message = .{ .bytes = 4, .digest = digest } };
-    const prefix = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/\\u00e9\",\"admission\":\"7\"}";
+    const prefix = "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2q\\u0078\",\"admission\":\"7\"}";
     var suffix_storage: [256]u8 = undefined;
     const suffix = try std.fmt.bufPrint(&suffix_storage, ",\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
     var body: [protocol.max_response_bytes + 1]u8 = undefined;
     const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
     const reply: CommandReply = .{ .status = 200, .body = valid };
-    try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "a/é", target).answer).result.accepted.message.admission);
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "b/é", target).answer);
+    try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "k7m2qx", target).answer).result.accepted.message.admission);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "09azvw", target).answer);
     var changed = target;
     changed.message.bytes = 5;
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "a/é", changed).answer);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "k7m2qx", changed).answer);
     changed = target;
     changed.message.digest[3] ^= 1;
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "a/é", changed).answer);
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 409, .body = valid }, "a/é", target).answer);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "k7m2qx", changed).answer);
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 409, .body = valid }, "k7m2qx", target).answer);
     @memset(body[valid.len..protocol.max_response_bytes], ' ');
-    _ = try decodeMutationReply(.{ .status = 200, .body = body[0..protocol.max_response_bytes] }, "a/é", target).answer;
+    _ = try decodeMutationReply(.{ .status = 200, .body = body[0..protocol.max_response_bytes] }, "k7m2qx", target).answer;
     body[protocol.max_response_bytes] = ' ';
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = &body }, "a/é", target).answer);
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = &body }, "k7m2qx", target).answer);
     for ([_][]const u8{
-        "{\"version\":1,\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"7\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"7\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"a/é\",\"admission\":\"07\"}",
-        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"a/é\",\"code\":\"unknown_session\"}",
+        "{\"version\":1,\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"07\"}",
+        "{\"version\":\"1\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"}",
     }) |invalid_prefix| {
         const invalid = try std.fmt.bufPrint(&body, "{s}{s}", .{ invalid_prefix, suffix });
-        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "a/é", target).answer);
+        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "k7m2qx", target).answer);
     }
     const conflicting_queue = try std.fmt.bufPrint(&body, "{s},\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"8\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ prefix, std.fmt.bytesToHex(digest, .lower) });
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = conflicting_queue }, "a/é", target).answer);
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = conflicting_queue }, "k7m2qx", target).answer);
     const malformed = try std.fmt.bufPrint(&body, "{s}{s} trailing", .{ prefix, suffix });
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = malformed }, "a/é", target).answer);
+    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = malformed }, "k7m2qx", target).answer);
 }
 
 test "mutation decoder preserves invalid-target domain rejection not false fatal certainty" {
@@ -2680,9 +2660,7 @@ pub fn inspectCaptured(io: std.Io, directory: []const u8, handle: []const u8) !C
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var file = try std.Io.Dir.cwd().openFile(io, try requestPath(directory, handle, &path_buffer), .{});
     defer file.close(io);
-    const saved = try readCapturedIdentity(io, &file, handle);
-    _ = std.meta.stringToEnum(MutationKind, saved.kind.slice()) orelse return error.InvalidRequestRecord;
-    return saved;
+    return readCapturedIdentity(io, &file, handle);
 }
 
 pub fn sendCaptured(io: std.Io, captured: *CapturedRecord, drop_reply: ?[]const u8, reply_buffer: *ReplyBuffer) !MutationReply {
@@ -2762,6 +2740,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         if (fields.session != null) return error.InvalidRequestRecord;
         saved.session = (fields.target orelse return error.InvalidRequestRecord).session.value;
     } else saved.session = (fields.session orelse return error.InvalidRequestRecord).value;
+    if (!(kind == .configure and saved.session.len == 0) and !protocol.validSessionId(saved.session.slice())) return error.InvalidRequestRecord;
     const target: MutationTarget = switch (kind) {
         .configure => blk: {
             if (fields.configuration == null) return error.InvalidRequestRecord;
@@ -2821,6 +2800,8 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !Cap
     try identity.store.set(parsed.value.store);
     try identity.key.set(parsed.value.key);
     const session = parsed.value.session orelse if (parsed.value.target) |target| target.session else return error.InvalidRequestRecord;
+    const kind = std.meta.stringToEnum(MutationKind, parsed.value.kind) orelse return error.InvalidRequestRecord;
+    if (!(kind == .configure and session.len == 0) and !protocol.validSessionId(session)) return error.InvalidRequestRecord;
     try identity.session.set(session);
     try identity.kind.set(parsed.value.kind);
     return identity;
@@ -2831,12 +2812,12 @@ pub fn captureConfigure(io: std.Io, input: ConfigureInput, target: CaptureTarget
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
-    var session_buffer: ["rui/".len + protocol.max_key_bytes]u8 = undefined;
     const session = switch (input.session) {
         .named => |name| name,
-        .from_capture_key => try std.fmt.bufPrint(&session_buffer, "rui/{s}", .{location.key}),
+        .create => "",
     };
-    try validateIdentityInputs(location.key, session);
+    if (location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidKey;
+    if (input.session == .named and !protocol.validSessionId(session)) return error.InvalidSession;
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
@@ -3974,7 +3955,119 @@ test "response framing rejects ambiguous or malformed fields before interpreting
     try std.testing.expectEqual(@as(u16, 200), (try readResponseHead(sockets[0])).status);
 }
 
-test "capture configure derives Session from captured key and retains model admission" {
+test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
+    for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"1\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.appendJsonString(session);
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"work\":{\"status\":\"idle\",\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        if (index < 2) {
+            const page = try ActivityPage.parse(body.slice(), .{});
+            @memset(body.bytes[0..body.len], 'x');
+            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.session.slice());
+            try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.send_failed.key.slice());
+        } else try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(body.slice(), .{}));
+    }
+}
+
+test "client read boundaries reject noncanonical Sessions before path or socket access" {
+    const requests: Requests = .{ .io = std.testing.io };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "destination", .{ .read = true });
+    defer file.close(std.testing.io);
+    var reply: ReplyBuffer = .{};
+    for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }) |session| {
+        try std.testing.expectError(error.InvalidSession, MessageAddress.init("/never-open", session, "key\x00雪"));
+        try std.testing.expectError(error.InvalidSession, requests.inspectSession("/never-open", session, .current, file, &reply));
+        try std.testing.expectError(error.InvalidSession, requests.exportFailedResponse("/never-open", session, .{ .operation = 1, .attempt = 1, .part = .metadata }, file, &reply));
+        try std.testing.expectError(error.InvalidTarget, requests.readActionArguments("/never-open", session, 1, file, &reply));
+        try std.testing.expectError(error.InvalidTarget, requests.readActionCallId("/never-open", session, 1, file, &reply));
+        try std.testing.expectError(error.InvalidSession, requests.conversationPage("/never-open", session, .{ .end = 0 }));
+        try std.testing.expectError(error.InvalidSession, requests.readConversationContent("/never-open", session, 1, 0, null, file));
+        try std.testing.expectError(error.InvalidSession, requests.proposalPage("/never-open", session, .{}));
+        try std.testing.expectError(error.InvalidSession, requests.readProposalField("/never-open", session, 1, .name, null, file));
+        try std.testing.expectError(error.InvalidSession, requests.activityPage("/never-open", session, .{}));
+        try std.testing.expectError(error.InvalidSession, requests.readActivityContent("/never-open", session, 1, 0, null, file));
+    }
+    try std.testing.expectEqual(@as(u64, 0), try file.length(std.testing.io));
+}
+
+test "client capture rejects noncanonical Session references before publication" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/invalid-record", .{root});
+    const target: CaptureTarget = .{ .explicit = .{ .record = path, .key = "key\x00雪" } };
+    for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }) |session| {
+        inline for (comptime std.meta.tags(MutationKind)) |kind| {
+            const result: anyerror!CapturedRecord = switch (kind) {
+                .configure => captureConfigure(io, .{ .store = root, .session = .{ .named = session } }, target),
+                .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target),
+                .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
+                .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
+                .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
+            };
+            if (result) |record| {
+                var unexpected = record;
+                unexpected.close(io);
+                std.debug.print("accepted noncanonical {s} capture\n", .{@tagName(kind)});
+                return error.AcceptedInvalidSession;
+            } else |err| try std.testing.expectEqual(error.InvalidSession, err);
+            try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "invalid-record", .{}));
+        }
+    }
+}
+
+test "client recovery rejects noncanonical Session references without retransmission" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "01234567-89ab-4cde-8012-3456789abcde";
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try requestPath(root, handle, &path_buffer);
+    for ([_][]const u8{ "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", handle }) |session| {
+        inline for (comptime std.meta.tags(MutationKind)) |kind| {
+            // Empty Configure is creation intent, not an invalid reference.
+            if (kind != .configure or session.len != 0) {
+                var body: protocol.RequestBuffer = .{};
+                try body.appendFmt("{{\"version\":\"1\",\"kind\":\"{s}\",\"store\":", .{@tagName(kind)});
+                try body.appendJsonString(root);
+                try body.append(",\"key\":\"" ++ handle ++ "\",");
+                try body.append(if (kind == .model_interruption) "\"target\":{\"session\":" else "\"session\":");
+                try body.appendJsonString(session);
+                try body.append(switch (kind) {
+                    .configure => ",\"configuration\":{}}",
+                    .message => ",\"text\":{\"state\":\"value\",\"value\":\"input\\u0000雪\"}}",
+                    .session_stop => "}",
+                    .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
+                    .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
+                });
+                const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+                try file.writeStreamingAll(io, body.slice());
+                file.close(io);
+                if (openCaptured(io, root, handle)) |record| {
+                    var unexpected = record;
+                    unexpected.close(io);
+                    std.debug.print("accepted noncanonical {s} recovery\n", .{@tagName(kind)});
+                    return error.AcceptedInvalidSession;
+                } else |err| try std.testing.expectEqual(error.InvalidRequestRecord, err);
+                try std.testing.expectError(error.InvalidRequestRecord, inspectCaptured(io, root, handle));
+                var reply: ReplyBuffer = .{};
+                try std.testing.expectError(error.InvalidRequestRecord, retry(io, root, path, comptime MutationKind.retryName(kind), &reply));
+            }
+        }
+    }
+}
+
+test "capture configure requests a Store allocated Session and retains model admission" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -3984,7 +4077,7 @@ test "capture configure derives Session from captured key and retains model admi
     for ([_]?[]const u8{ "100000", null }) |trigger| {
         var captured = try captureConfigure(io, .{
             .store = root,
-            .session = .from_capture_key,
+            .session = .create,
             .require_model = true,
             .compaction_trigger = .{ .present = true, .value = trigger },
             .output_reservation = .{ .present = true, .value = if (trigger != null) "16384" else null },
@@ -3996,13 +4089,13 @@ test "capture configure derives Session from captured key and retains model admi
             break :blk try captured.file.readPositionalAll(io, &bytes, 0);
         };
         try std.testing.expect(validRequestHandle(saved.key.slice()));
-        var expected_buffer: ["rui/".len + 36]u8 = undefined;
-        const expected = try std.fmt.bufPrint(&expected_buffer, "rui/{s}", .{saved.key.slice()});
-        try std.testing.expectEqualStrings(expected, saved.session.slice());
+        // Creation has no caller-selected identity. Recovery retransmits this
+        // same intent; the Store returns the one ID saved with the command.
+        try std.testing.expectEqualStrings("", saved.session.slice());
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
         defer parsed.deinit();
         try std.testing.expectEqualStrings(saved.key.slice(), parsed.value.object.get("key").?.string);
-        try std.testing.expectEqualStrings(expected, parsed.value.object.get("session").?.string);
+        try std.testing.expectEqualStrings("", parsed.value.object.get("session").?.string);
         try std.testing.expect(parsed.value.object.get("require_model").?.bool);
         const settings = parsed.value.object.get("configuration").?.object;
         if (trigger != null) {
@@ -4014,7 +4107,7 @@ test "capture configure derives Session from captured key and retains model admi
         }
         var recovered = try openCaptured(io, root, saved.key.slice());
         defer recovered.close(io);
-        try std.testing.expectEqualStrings(expected, recovered.identity().session.slice());
+        try std.testing.expectEqualStrings("", recovered.identity().session.slice());
         var recovered_bytes: [2048]u8 = undefined;
         const recovered_count = try recovered.file.readPositionalAll(io, &recovered_bytes, 0);
         try std.testing.expectEqualSlices(u8, bytes[0..count], recovered_bytes[0..recovered_count]);
@@ -4031,7 +4124,7 @@ test "capture mutation binding streams complete escaped input and rejects late a
     var text: [3 * protocol.content_window_bytes + 7]u8 = undefined;
     @memset(&text, 'x');
     @memcpy(text[4093..][0..7], "\x00\n€µ");
-    var captured = try captureMessage(io, .{ .store = root, .session = "s/µ", .text = &text, .text_path = "" }, .{ .generated = root });
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text = &text, .text_path = "" }, .{ .generated = root });
     const saved = captured.saved;
     const expected = protocol.contentDigest(&text);
     try std.testing.expectEqual(@as(u64, text.len), captured.target.message.bytes);
@@ -4046,7 +4139,7 @@ test "capture mutation binding streams complete escaped input and rejects late a
     var file = try std.Io.Dir.cwd().openFile(io, try requestPath(root, saved.key.slice(), &path), .{ .mode = .read_write });
     defer file.close(io);
     try file.writePositionalAll(io, " trailing", try file.length(io));
-    try std.testing.expectEqualStrings("s/µ", (try inspectCaptured(io, root, saved.key.slice())).session.slice());
+    try std.testing.expectEqualStrings("k7m2qx", (try inspectCaptured(io, root, saved.key.slice())).session.slice());
     try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, root, saved.key.slice()));
 }
 
@@ -4062,12 +4155,12 @@ test "retry and generated recovery select captured mutations by kind" {
     var stop_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const stop_record = try requestPath(root, stop_key, &stop_path);
     _ = paths;
-    var stop = try captureSessionStop(io, .{ .store = root, .session = "s" }, .{ .explicit = .{ .record = stop_record, .key = stop_key } });
+    var stop = try captureSessionStop(io, .{ .store = root, .session = "k7m2qx" }, .{ .explicit = .{ .record = stop_record, .key = stop_key } });
     stop.close(io);
-    var interruption = try captureModelInterruption(io, .{ .store = root, .session = "i/µ", .turn_id = 3, .operation_id = 5 }, .{ .generated = root });
+    var interruption = try captureModelInterruption(io, .{ .store = root, .session = "09azvw", .turn_id = 3, .operation_id = 5 }, .{ .generated = root });
     const interruption_key = interruption.saved.key;
     interruption.close(io);
-    var message = try captureMessage(io, .{ .store = root, .session = "s", .text = "m", .text_path = "" }, .{ .generated = root });
+    var message = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text = "m", .text_path = "" }, .{ .generated = root });
     const message_key = message.saved.key;
     message.close(io);
     var message_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -4080,11 +4173,11 @@ test "retry and generated recovery select captured mutations by kind" {
     stop_recovered.close(io);
     const stop_saved = try inspectCaptured(io, root, stop_key);
     try std.testing.expect(stop_saved.isKind(.session_stop));
-    try std.testing.expectEqualStrings("s", stop_saved.session.slice());
+    try std.testing.expectEqualStrings("k7m2qx", stop_saved.session.slice());
     var interruption_recovered = try openCaptured(io, root, interruption_key.slice());
     try std.testing.expectEqual(@as(u64, 5), interruption_recovered.target.model_interruption.operation);
     interruption_recovered.close(io);
-    try std.testing.expectEqualStrings("i/µ", (try inspectCaptured(io, root, interruption_key.slice())).session.slice());
+    try std.testing.expectEqualStrings("09azvw", (try inspectCaptured(io, root, interruption_key.slice())).session.slice());
     var recovered = try openCaptured(io, root, message_key.slice());
     recovered.close(io);
     try std.testing.expect((try inspectCaptured(io, root, message_key.slice())).isKind(.message));
@@ -4106,20 +4199,15 @@ test "a peer capture preserves the full sender including self and leaves foreign
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var storage: [Address.storage_bytes]u8 = undefined;
-    for ([_][]const u8{ "", "{}", "{\"store\":\"s\"}", "{\"store\":\"\",\"session\":\"p\"}", "{\"store\":\"s\",\"session\":\"p\",\"extra\":1}", "[]" }) |invalid|
-        try std.testing.expectError(error.InvalidRuiAddress, Address.parse(invalid, &storage));
-    var address_text: [1024]u8 = undefined;
-    const own = try Address.parse(try std.fmt.bufPrint(&address_text, "{{\"store\":\"{s}\",\"session\":\"peer/\\\"a\\\"\"}}", .{root}), &storage);
-    try std.testing.expectEqualStrings("peer/\"a\"", own.session);
+    const own: Address = .{ .store = root, .session = "k7m2qx" };
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/record.json", .{root});
-    const other: Address = .{ .store = "/elsewhere", .session = "peer" };
+    const other: Address = .{ .store = "/elsewhere", .session = "09azvw" };
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
     var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own, .sender_handle = "0123456789abcdef0123456789abcdef" }, .{ .explicit = .{ .record = path, .key = "k" } });
     defer captured.close(io);
     var expected_buffer: [1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"peer/\\\"a\\\"\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"k7m2qx\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
     var bytes: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
     const remote_path = try std.fmt.bufPrint(&path_buffer, "{s}/remote.json", .{root});
@@ -4139,7 +4227,7 @@ test "capture returns original identity before send and preserves empty explicit
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    const input: MessageInput = .{ .store = root, .session = "original/é", .text_path = "", .text = "original\ntext" };
+    const input: MessageInput = .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original\ntext" };
     var generated = try captureMessage(io, input, .{ .generated = root });
     const saved = generated.identity().*;
     const target = generated.target;
@@ -4152,7 +4240,7 @@ test "capture returns original identity before send and preserves empty explicit
         try std.testing.expectEqual(@as(u8, '4'), saved.key.slice()[14]);
         try std.testing.expect(std.mem.indexOfScalar(u8, "89ab", saved.key.slice()[19]) != null);
         try std.testing.expectEqualStrings(root, saved.store.slice());
-        try std.testing.expectEqualStrings("original/é", saved.session.slice());
+        try std.testing.expectEqualStrings("k7m2qx", saved.session.slice());
         try std.testing.expectEqualStrings("message", saved.kind.slice());
         var reply: ReplyBuffer = .{};
         try std.testing.expectError(error.FileNotFound, sendCaptured(io, &generated, null, &reply));
@@ -4177,6 +4265,16 @@ test "capture returns original identity before send and preserves empty explicit
     try std.testing.expectEqualStrings("", explicit.identity().key.slice());
     try std.testing.expectError(error.RecordAlreadyExists, captureMessage(io, input, .{ .explicit = .{ .record = path, .key = "different" } }));
     try std.testing.expectError(error.InvalidRequestHandle, openCaptured(io, root, ""));
+
+    const escaped_path = try std.fmt.bufPrint(&path_buffer, "{s}/escaped-key", .{root});
+    var escaped = try captureMessage(io, input, .{ .explicit = .{ .record = escaped_path, .key = "exact\x00雪" } });
+    defer escaped.close(io);
+    const binding = try readCapturedBinding(io, &escaped.file);
+    try std.testing.expectEqualStrings("exact\x00雪", binding.saved.key.slice());
+    try std.testing.expectEqualStrings(input.session, binding.saved.session.slice());
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(input.text.?), &binding.target.message.digest);
+    const escaped_count = try escaped.file.readPositionalAll(io, &record, 0);
+    try std.testing.expect(std.mem.indexOf(u8, record[0..escaped_count], "\"key\":\"exact\\u0000雪\"") != null);
 }
 
 test "capture retransmits complete original bytes after a lost reply" {
@@ -4237,10 +4335,10 @@ test "capture retransmits complete original bytes after a lost reply" {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/explicit", .{root});
     const text = @as([2 * protocol.content_window_bytes + 3]u8, @splat('q'));
-    var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
@@ -4288,10 +4386,10 @@ test "capture publication transfers original inode across pathname replacement" 
     var vtable = io.vtable.*;
     vtable.dirRenamePreserve = Replacement.rename;
     const replaced_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    var captured = try captureMessage(replaced_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
+    var captured = try captureMessage(replaced_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
     defer captured.close(io);
     var expected_buffer: [2048]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
     var bytes: [2048]u8 = undefined;
     const count = try captured.file.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings(expected, bytes[0..count]);
@@ -4335,7 +4433,7 @@ test "capture closes pinned reader when publication or handoff fails" {
         if (published) vtable.fileLength = Failure.length else vtable.fileSync = Failure.sync;
         const failing_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
         Failure.closed = 0;
-        try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }));
+        try std.testing.expectError(if (published) error.AccessDenied else error.NoSpaceLeft, captureMessage(failing_io, .{ .store = root, .session = "k7m2qx", .text_path = "", .text = "original" }, .{ .explicit = .{ .record = path, .key = "original-key" } }));
         try std.testing.expectEqual(@as(usize, 1), Failure.closed);
         try std.testing.expect(std.c.fcntl(Failure.reader, std.c.F.GETFD) < 0);
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, ".record.capture.tmp", .{}));
@@ -4376,12 +4474,12 @@ test "capture recovery closes rejected records and retains only its reader lifet
     for ([_][]const u8{
         "not json",
         // Control records are recoverable, but never with another kind's payload.
-        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
-        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"original\",\"turn\":\"x\",\"operation\":\"2\"}}",
-        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"original\",\"text\":{}}",
-        "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{}}",
-        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
-        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"original\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
+        "{\"version\":\"1\",\"kind\":\"session_stop\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"model_interruption\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"x\",\"operation\":\"2\"}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"other\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"unknown\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":\"a\",\"val\\u0075e\":\"b\"}}",
+        "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"unused\",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"text\":{\"state\":\"value\",\"value\":[97]}}",
     }) |bytes| {
         const file = try tmp.dir.createFile(io, filename, .{});
         try file.writeStreamingAll(io, bytes);
@@ -4392,7 +4490,7 @@ test "capture recovery closes rejected records and retains only its reader lifet
     try tmp.dir.deleteFile(io, filename);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try requestPath(root, handle, &path_buffer);
-    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "original" } }, .{ .explicit = .{ .record = path, .key = handle } });
+    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" } }, .{ .explicit = .{ .record = path, .key = handle } });
     captured.close(io);
     var recovered = try openCaptured(observed_io, root, handle);
     const descriptor = recovered.file.handle;
@@ -4625,15 +4723,16 @@ test "command reply borrows the caller buffer" {
     try std.testing.expectEqual(@intFromPtr(buffer.bytes[0..].ptr), @intFromPtr(reply.body.ptr));
 }
 
-test "bounded read requests attain their independent worst-case capacities" {
+test "bounded read requests retain escaped key capacities and canonical Session bounds" {
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
-    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
+    const session = "k7m2qx";
+    const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     const cases = .{
         .{ "observe_command", "key", &escaped_key, null, null, protocol.max_observe_command_request_bytes },
         .{ "read_result", "key", &escaped_key, null, null, protocol.max_read_result_request_bytes },
-        .{ "read_action_call_id", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_call_id_request_bytes },
-        .{ "read_action_arguments", "session", &escaped_session, std.math.maxInt(u64), null, protocol.max_read_action_arguments_request_bytes },
+        .{ "read_action_call_id", "session", session, std.math.maxInt(u64), null, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
+        .{ "read_action_arguments", "session", session, std.math.maxInt(u64), null, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
     };
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
@@ -4641,13 +4740,13 @@ test "bounded read requests attain their independent worst-case capacities" {
         try std.testing.expectEqual(@as(usize, case[5]), body.len);
     }
     var inspection: protocol.RequestBuffer = .{};
-    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", &escaped_session, null, .full);
+    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", session, null, .full);
     try std.testing.expect(inspection.len <= protocol.max_inspect_session_request_bytes);
     inspection.len = 0;
-    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", &escaped_session, null, null);
+    try renderReadRequest(&inspection, "inspect_session", &escaped_store, "session", session, null, null);
     inspection.len -= 1;
     try inspection.appendFmt(",\"failed_response\":\"metadata\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ std.math.maxInt(i64), std.math.maxInt(i64) });
-    try std.testing.expectEqual(protocol.max_inspect_session_request_bytes, inspection.len);
+    try std.testing.expectEqual(protocol.max_inspect_session_request_bytes - session_encoding_slack, inspection.len);
     var full: protocol.RequestBuffer = .{};
     full.len = full.bytes.len;
     try std.testing.expectError(error.BufferTooLarge, full.append("x"));
@@ -4677,18 +4776,18 @@ test "Session list facts own complete rows and render semantic output after scra
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\\u002fµ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"extra\":[null,{\"discard\":true}]}],\"next\":null,\"extra\":1}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2q\\u0078\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"extra\":[null,{\"discard\":true}]}],\"next\":null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
     const page = &decoded.page;
     try file.writePositionalAll(io, &@as([wire.len]u8, @splat('x')), 0);
     try std.testing.expectEqual(@as(usize, 1), page.count);
-    try std.testing.expectEqualStrings("s/µ", page.rows[0].reference.slice());
+    try std.testing.expectEqualStrings("k7m2qx", page.rows[0].reference.slice());
     try std.testing.expectEqualStrings("/w\nµ", page.rows[0].workspace.slice());
     var output: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s/µ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"}],\"next\":null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"}],\"next\":null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -4784,7 +4883,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const row = "{\"reference\":\"s\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}";
+    const row = "{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}";
     inline for (.{
         "{\"version\":\"2\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}",
         "{\"version\":\"1\",\"type\":\"session_list\",\"type\":\"session_list\",\"sessions\":[],\"next\":null}",
@@ -4798,7 +4897,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         try file.writePositionalAll(io, wire, 0);
         try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, wire.len, null, .{}));
     }
-    const prefix = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
+    const prefix = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/other\",\"provider\":\"codex\",\"model\":\"m\",";
     inline for (.{
         "\"tools\":[\"bash\",\"bash\"],\"permission_mode\":\"ask\"",
         "\"tools\":null,\"permission_mode\":\"ask\"",
@@ -4806,7 +4905,7 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         "\"tools\":[],\"permission_mode\":0",
         "\"tools\":[],\"permission_mode\":\"invented\"",
         "\"tools\":[]",
-        "\"tools\":[],\"permission_mode\":\"ask\",\"reference\":\"s\"",
+        "\"tools\":[],\"permission_mode\":\"ask\",\"reference\":\"k7m2qx\"",
     }, 0..) |suffix, index| {
         const file = try tmp.dir.createFile(io, std.fmt.comptimePrint("row-{d}", .{index}), .{ .read = true });
         defer file.close(io);
@@ -4822,7 +4921,7 @@ test "Session list terminal cursor accepts only empty rows without rejecting ini
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "terminal", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}],\"next\":null}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"}],\"next\":null}";
     try file.writePositionalAll(io, wire, 0);
     inline for (.{ SessionListCursor{}, SessionListCursor{ .after = 7, .ceiling = 8 } }) |cursor| {
         const reply = try SessionListReply.decode(io, file, null, cursor, .{ .report = .{ .bytes = wire.len } });
@@ -4852,8 +4951,8 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[");
     for (0..8) |index| {
         if (index != 0) try writer.writeAll(",");
-        var reference = @as([protocol.max_session_bytes]u8, @splat(1));
-        reference[0] = @intCast(index + 16);
+        var reference = "000000".*;
+        reference[0] = @intCast('0' + index);
         try writer.writeAll("{\"reference\":");
         try std.json.Stringify.value(&reference, .{}, writer);
         try writer.writeAll(",\"workspace\":");
@@ -4871,8 +4970,8 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectEqual(@as(u64, 19), page.next.?.after);
     try std.testing.expectEqual(@as(u64, 23), page.next.?.ceiling);
     for (page.rows[0..8], 0..) |*row, index| {
-        try std.testing.expectEqual(@as(u8, @intCast(index + 16)), row.reference.bytes[0]);
-        try std.testing.expectEqual(protocol.max_session_bytes, row.reference.len);
+        try std.testing.expectEqual(@as(u8, @intCast('0' + index)), row.reference.bytes[0]);
+        try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
         try std.testing.expectEqualStrings(&model, row.model.slice());
         try std.testing.expect(row.tools.bash and row.permission_mode == .bypass);
@@ -4894,7 +4993,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try (SessionListCursor{ .after = 23, .ceiling = 23 }).validate();
 }
 
-test "control captures attain their exact worst-case request bounds" {
+test "control captures attain escaped key and canonical Session request bounds" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -4906,7 +5005,8 @@ test "control captures attain their exact worst-case request bounds" {
 
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
-    const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
+    const session = "k7m2qx";
+    const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     var paths: platform.Paths = .{};
     try paths.store.set(&escaped_store);
 
@@ -4918,13 +5018,13 @@ test "control captures attain their exact worst-case request bounds" {
     );
     var stop_capture = try writeSessionStopCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .session = &escaped_session,
+        .session = session,
     }, .{ .record = stop_path, .key = &escaped_key });
     defer stop_capture.close(std.testing.io);
     const stop_file = try std.Io.Dir.cwd().openFile(std.testing.io, stop_path, .{});
     defer stop_file.close(std.testing.io);
     try std.testing.expectEqual(
-        @as(u64, protocol.max_session_stop_request_bytes),
+        @as(u64, protocol.max_session_stop_request_bytes - session_encoding_slack),
         try stop_file.length(std.testing.io),
     );
 
@@ -4936,7 +5036,7 @@ test "control captures attain their exact worst-case request bounds" {
     );
     var interruption_capture = try writeModelInterruptionCapture(std.testing.io, &paths, .{
         .store = "unused",
-        .session = &escaped_session,
+        .session = session,
         .turn_id = std.math.maxInt(u64),
         .operation_id = std.math.maxInt(u64),
     }, .{ .record = interruption_path, .key = &escaped_key });
@@ -4944,7 +5044,7 @@ test "control captures attain their exact worst-case request bounds" {
     const interruption_file = try std.Io.Dir.cwd().openFile(std.testing.io, interruption_path, .{});
     defer interruption_file.close(std.testing.io);
     try std.testing.expectEqual(
-        @as(u64, protocol.max_model_interruption_request_bytes),
+        @as(u64, protocol.max_model_interruption_request_bytes - session_encoding_slack),
         try interruption_file.length(std.testing.io),
     );
 
@@ -4959,7 +5059,7 @@ test "control captures attain their exact worst-case request bounds" {
     defer permission_capture.abort();
     try permission_capture.writePermissionDecision(paths.store.slice(), &escaped_key, .{
         .store = "unused",
-        .session = &escaped_session,
+        .session = session,
         .action_id = std.math.maxInt(u64),
         .decision = .allow_once,
     });
@@ -4967,7 +5067,7 @@ test "control captures attain their exact worst-case request bounds" {
     const permission_file = try std.Io.Dir.cwd().openFile(std.testing.io, permission_path, .{});
     defer permission_file.close(std.testing.io);
     try std.testing.expectEqual(
-        @as(u64, protocol.max_permission_decision_request_bytes),
+        @as(u64, protocol.max_permission_decision_request_bytes - session_encoding_slack),
         try permission_file.length(std.testing.io),
     );
 }
@@ -5156,8 +5256,8 @@ test "result body publishes nothing unless EOF follows the advertised bytes" {
 }
 
 test "keyed observation retains request acceptance independently of later work" {
-    const address = try MessageAddress.init("/store", "s", "k");
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+    const address = try MessageAddress.init("/store", "k7m2qx", "k");
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     inline for (.{
         .{ "}}", CommandObservation.State.processing },
         .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("cd".*)))) ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
@@ -5182,7 +5282,7 @@ test "keyed observation retains request acceptance independently of later work" 
 }
 
 test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"s\",\"code\":\"unknown_session\",";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",\"code\":\"unknown_session\",";
     inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
     const absent = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"";
@@ -5191,12 +5291,12 @@ test "keyed observation distinguishes named statuses and omitted fields from num
 }
 
 test "keyed observation validates all five operation shapes and binding" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"s\",";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
         .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
-        .{ "model_interruption", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"0\"}" },
+        .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
     }) |case| {
         const accepted = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"" ++ case[1] ++ "}}";
@@ -5206,27 +5306,27 @@ test "keyed observation validates all five operation shapes and binding" {
         var output: [protocol.max_response_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
         try observed.writeJson(&writer);
-        try std.testing.expectEqualStrings("{\"status\":\"accepted\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"s\"" ++ case[1] ++ "}", writer.buffered());
+        try std.testing.expectEqualStrings("{\"status\":\"accepted\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\"" ++ case[1] ++ "}", writer.buffered());
         try std.testing.expectError(error.RequestBindingMismatch, CommandObservation.parse(.{ .status = 200, .body = accepted }, "other"));
         const rejected = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"rejected\",\"code\":\"unknown_session\"" ++ case[2] ++ "}}" }, "k");
         try std.testing.expectEqual(.rejected, rejected.status);
         try std.testing.expectEqualStrings("unknown_session", rejected.failureCode().?);
         writer = std.Io.Writer.fixed(&output);
         try rejected.writeJson(&writer);
-        try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
+        try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
         // Missing operation-specific metadata must not turn into confirmation.
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
     }
     const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
-    const address = try MessageAddress.init("/store", "s", "k");
+    const address = try MessageAddress.init("/store", "k7m2qx", "k");
     try std.testing.expectError(error.RequestNotAdmitted, absent.forMessage(&address));
     const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
-    const other = try MessageAddress.init("/store", "other", "k");
+    const other = try MessageAddress.init("/store", "09azvw", "k");
     try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
 }
 
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
-    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"s\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const prefix = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
     inline for (.{
         ",\"processing\":null}}",                              ",\"processing\":{}}}",                                      ",\"processing\":{\"turn\":7}}}",
         ",\"result\":{\"status\":\"processing\"}}}",           ",\"result\":{\"status\":\"completed\"}}}",                  ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
@@ -5301,10 +5401,10 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
+    const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
     const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"status\":\"idle\",\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
-    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = report.len } });
+    const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
     try std.testing.expectEqualStrings("16384", reply.current.settings.output_reservation.slice());
     var buffer: [2048]u8 = undefined;
@@ -5334,14 +5434,14 @@ test "Current settings preserve decimal token heuristics in projections" {
         const settings_json = try std.fmt.bufPrint(&settings_buffer, "{s}{s}{s}{s}", .{ report[0..session_start], prefix, case.suffix, report[session_start + wire.len ..] });
         try file.writePositionalAll(io, settings_json, 0);
         if (case.valid) {
-            const parsed = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = settings_json.len } });
+            const parsed = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = settings_json.len } });
             var projection_buffer: [4096]u8 = undefined;
             var projection = std.Io.Writer.fixed(&projection_buffer);
             try parsed.current.writeJson(io, file, &projection);
             if (parsed.current.settings.compaction_trigger == null)
                 try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), "\"compaction_trigger\":null") != null);
         } else {
-            try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = settings_json.len } }));
+            try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = settings_json.len } }));
         }
     }
 }
@@ -5356,7 +5456,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -5364,7 +5464,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try writer.writeAll("],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"3\",\"scratch_used_bytes\":\"123\",\"unavailable\":[\"structured_output\"]}}");
     try output.flush();
     const bytes = try file.length(io);
-    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } });
+    const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes } });
     const facts = &reply.current;
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
@@ -5375,7 +5475,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqual(@as(u64, 91), facts.work.operation.value.?.value);
     try std.testing.expectEqual(@as(usize, 10), facts.recent_count);
     for (facts.recent[0..10], 0..) |row, i| try std.testing.expectEqual(@as(u64, 30 - i), row.turn.value);
-    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "other", .{ .report = .{ .bytes = bytes } }));
+    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "09azvw", .{ .report = .{ .bytes = bytes } }));
     var rendered: [4096]u8 = undefined;
     var json = std.Io.Writer.fixed(&rendered);
     try facts.writeJson(io, file, &json);
@@ -5398,7 +5498,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
@@ -5426,7 +5526,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try writer.writeAll("\"}");
     try output.flush();
     const bytes = try file.length(io);
-    const reply = try CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } });
+    const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes } });
     const facts = &reply.current;
     try std.testing.expectEqual(@as(u64, 257), facts.actionable_count);
     try std.testing.expectEqual(@as(u64, 257), facts.indeterminate_count);
@@ -5474,7 +5574,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var json = rendered.writerStreaming(io, &buffer);
     try reply.writeJson(io, file, &json.interface);
     try json.flush();
-    const roundtrip = try CurrentReply.decode(io, rendered, "s", .{ .report = .{ .bytes = try rendered.length(io) } });
+    const roundtrip = try CurrentReply.decode(io, rendered, "k7m2qx", .{ .report = .{ .bytes = try rendered.length(io) } });
     var again: Sink = .{};
     try roundtrip.current.traverse(io, rendered, &again);
     try std.testing.expectEqual(sink.counts, again.counts);
@@ -5484,7 +5584,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
         }
     };
     try std.testing.expectError(error.SinkFailed, facts.traverse(io, file, Failing{}));
-    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes + 1 } }));
+    try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes + 1 } }));
     var prefix: [2048]u8 = undefined;
     try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
     inline for (.{
@@ -5498,7 +5598,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     }) |case| {
         const offset = std.mem.indexOf(u8, &prefix, case[0]).?;
         try file.writePositionalAll(io, case[1], offset);
-        try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "s", .{ .report = .{ .bytes = bytes } }));
+        try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = bytes } }));
         try file.writePositionalAll(io, case[0], offset);
     }
     try std.testing.expectEqual(bytes, try file.length(io));
@@ -5515,7 +5615,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     try std.testing.expectError(error.Cancelled, requests.sendCaptured(&captured, null, &buffer));
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), captured.file.handle);
     const file = captured.file;
-    const address = try MessageAddress.init("/never-open", "s", "k");
+    const address = try MessageAddress.init("/never-open", "k7m2qx", "k");
     try std.testing.expectError(error.Cancelled, requests.observeCommand("/never-open", "k", &buffer));
     try std.testing.expectError(error.Cancelled, requests.observeMessage(&address));
     try std.testing.expectError(error.Cancelled, requests.readResult("/never-open", "k", file, &buffer));
@@ -5551,7 +5651,7 @@ test "transport cancellation returns before silent peer release and retains pinn
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "s" } }, .{ .explicit = .{ .record = try std.fmt.bufPrint(&record_buffer, "{s}/record", .{root}), .key = "original" } });
+    var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" } }, .{ .explicit = .{ .record = try std.fmt.bufPrint(&record_buffer, "{s}/record", .{root}), .key = "original" } });
     defer captured.close(io);
     var lease = try platform.StoreLease.acquire(io, root);
     defer lease.release();
@@ -5681,7 +5781,7 @@ test "transport cancellation retains synchronous sink loans and respects deliver
             switch (self.kind) {
                 .inspect, .list => {
                     const reply = if (self.kind == .inspect)
-                        try self.requests.inspectSession(self.root, "s", .current, &self.sink, &buffer)
+                        try self.requests.inspectSession(self.root, "k7m2qx", .current, &self.sink, &buffer)
                     else
                         try self.requests.listSessions(self.root, null, .{}, &self.sink, &buffer);
                     self.bytes = switch (reply) {

@@ -13,8 +13,41 @@ state=$(PYTHONPATH="$root/tests/integration" python3 -c 'import sys; from host_p
 store="$state/store"
 records="$state/records"
 mkdir -m 700 "$records"
-address() {
-    python3 -c 'import json, sys; print(json.dumps({"store": sys.argv[1], "session": sys.argv[2]}))' "$store" "$1"
+session_id() {
+    python3 -c 'import json, sys; reply=json.load(sys.stdin); identity=reply["answer"]["session"]; assert reply["answer"]["status"] == "accepted", reply; assert len(identity) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in identity), reply; assert reply["context"]["session"] == identity, reply; print(identity)'
+}
+session_refs() {
+    "$rui" session list --store "$store" --all | python3 -c 'import json, sys; print(json.dumps(sorted(row["reference"] for row in json.load(sys.stdin)["sessions"])))'
+}
+
+# Fresh CLI configuration fills required defaults and rejects unsupported
+# providers before capture. Exercise the Host's saved rejection boundary with
+# explicit wire records instead, then recover those same records through CLI.
+wire_configure() {
+    python3 - "$rui" "$store" "$ready" "$@" <<'PYWIRE'
+import json, pathlib, socket, subprocess, sys
+binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
+values = json.loads(encoded)
+fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
+configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
+body = json.dumps({'version': '1', 'kind': 'configure', 'store': store,
+                   'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
+with pathlib.Path(record).open('xb') as captured:
+    captured.write(body)
+pathlib.Path(record).chmod(0o600)
+if not drop:
+    sys.exit(subprocess.run([binary, 'request', 'recover', '--store', store,
+        '--record', record, '--kind', 'configure'], timeout=15).returncode)
+assert drop == ['after-commit'], drop
+socket_path = dict(part.split('=', 1) for part in pathlib.Path(ready).read_text().split()[1:])['socket']
+with socket.socket(socket.AF_UNIX) as client:
+    client.settimeout(15)
+    client.connect(socket_path)
+    client.sendall(('POST /v1/configure HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n'
+        f'Content-Length: {len(body)}\r\nX-Rui-Wire-Version: 1\r\n'
+        'X-Rui-Test-Drop-Reply: after-commit\r\n\r\n').encode() + body)
+    assert not client.recv(16384), 'lost rejection unexpectedly delivered a reply'
+PYWIRE
 }
 ready="$state/ready"
 server_log="$state/server.log"
@@ -126,12 +159,12 @@ require_test() {
 start_host
 
 # SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
-python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
+capture_session=$(python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
 import json, pathlib, subprocess, sys, time
 binary, store, records, workspace = sys.argv[1:]
 record = pathlib.Path(records) / 'capture-recovery.json'
 args = [binary, 'session', 'configure', '--store', store, '--record', str(record),
-        '--key', 'capture-recovery', '--session', 'direct/capture-recovery',
+        '--key', 'capture-recovery',
         '--workspace', workspace, '--provider', 'codex', '--model', 'gpt-6-sol', '--instructions', '-']
 writer = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 try:
@@ -160,7 +193,13 @@ duplicate = subprocess.run(args, input=b'replacement', capture_output=True, time
 assert duplicate.returncode != 0 and b'RecordAlreadyExists' in duplicate.stderr
 assert record.read_bytes() == saved
 assert record.with_name('.' + record.name + '.capture.lock').exists()
+reply = json.loads(recovered.stdout)
+identity = reply['answer']['session']
+assert len(identity) == 6 and all(c in '0123456789abcdefghjkmnpqrstvwxyz' for c in identity), reply
+assert reply['context']['session'] == identity, reply
+print(identity)
 PYCAPTURE
+)
 
 # The OS-held lock rejects a competing owner without relying on PID/socket state.
 if "$rui" host serve --store "$store" >"$state/competing.out" 2>"$state/competing.err"; then
@@ -173,7 +212,7 @@ contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
 # second copy of the complete ReleaseSafe fault matrix. Keep `full` opt-in.
 if [ "$mode" = artifact-smoke ]; then
     printf 'original message\n' >"$state/message.txt"
-    if "$rui" session send --to "$(address direct/capture-recovery)" --record "$records/smoke-message.json" --key smoke-message --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+    if "$rui" session send --store "$store" --to "$capture_session" --record "$records/smoke-message.json" --key smoke-message --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
         echo "lost message reply unexpectedly completed" >&2
         exit 1
     fi
@@ -183,6 +222,7 @@ if [ "$mode" = artifact-smoke ]; then
     replayed=$($rui request recover --store "$store" --record "$records/capture-recovery.json" --kind configure)
     contains "$replayed" '"status":"accepted"'
     contains "$replayed" '"replayed":true'
+    require_test 'creation replay retains allocated ID' "$(printf '%s' "$replayed" | session_id)" = "$capture_session"
     replayed=$($rui request recover --store "$store" --record "$records/smoke-message.json" --kind message)
     python3 - "$replayed" <<'PYSMOKE'
 import hashlib, json, sys
@@ -197,7 +237,7 @@ digest = hashlib.sha256(len(domain).to_bytes(8, 'big') + domain + payload).hexdi
 assert reply['input']['bytes'] == str(len(payload)), reply
 assert reply['input']['sha256'] == digest, reply
 PYSMOKE
-    inspected=$($rui session inspect --store "$store" --session direct/capture-recovery)
+    inspected=$($rui session inspect --store "$store" --session "$capture_session")
     contains "$inspected" '"pending_messages":"1"'
     stop_host
     echo 'admission artifact smoke passed: capture errors, Store lease, lost reply and restart replay'
@@ -235,7 +275,7 @@ body = json.dumps({
     "kind": "configure",
     "store": os.path.realpath(store),
     "key": "draining-request",
-    "session": "direct/draining",
+    "session": "",
     "configuration": {
         "workspace": {"state": "value", "value": workspace},
         "provider": {"state": "value", "value": "codex"},
@@ -362,14 +402,22 @@ contains "$partial" '"status":"absent"'
 
 # Messages to unknown Sessions are saved rejections and create no Session.
 printf 'hello' >"$state/message.txt"
-if "$rui" session send --to "$(address direct/unknown)" --record "$records/unknown-message.json" --key msg-unknown --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+known_refs=$(session_refs)
+unknown_id=$(python3 -c 'import json, sys; known=json.loads(sys.argv[1]); print(next(f"{i:06d}" for i in range(len(known)+1) if f"{i:06d}" not in known))' "$known_refs")
+if "$rui" session send --store "$store" --to "$unknown_id" --record "$records/unknown-message.json" --key msg-unknown --text "$state/message.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost unknown-Session rejection unexpectedly produced a complete reply" >&2
     exit 1
 fi
-unknown_session=$($rui session inspect --store "$store" --session direct/unknown)
+unknown_session=$($rui session inspect --store "$store" --session "$unknown_id")
 contains "$unknown_session" '"session":null'
-unknown_created=$($rui session configure --store "$store" --record "$records/unknown-created.json" --key unknown-created --session direct/unknown --workspace "$root" --provider codex --model gpt-6-sol)
+require_test 'unknown Message creates no Session' "$(session_refs)" = "$known_refs"
+# Supplying even a complete configuration cannot create a chosen canonical ID.
+unknown_configure=$(not_accepted "$rui" session configure --store "$store" --record "$records/unknown-configure.json" --key unknown-configure --session "$unknown_id" --workspace "$root" --provider codex --model gpt-6-sol)
+contains "$unknown_configure" '"code":"unknown_session"'
+require_test 'unknown Configure creates no Session' "$(session_refs)" = "$known_refs"
+unknown_created=$($rui session configure --store "$store" --record "$records/unknown-created.json" --key unknown-created --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$unknown_created" '"status":"accepted"'
+other_session=$(printf '%s' "$unknown_created" | session_id)
 stop_host
 start_host
 unknown=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-message.json" --kind message)
@@ -377,17 +425,20 @@ contains "$unknown" '"status":"rejected"'
 contains "$unknown" '"replayed":true'
 contains "$unknown" '"code":"unknown_session"'
 contains "$unknown" '"bytes":"5"'
-unknown_after_creation=$($rui session inspect --store "$store" --session direct/unknown)
+unknown_after_creation=$($rui session inspect --store "$store" --session "$other_session")
 contains "$unknown_after_creation" '"pending_messages":"0"'
+unknown_configure_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-configure.json" --kind configure)
+contains "$unknown_configure_replay" '"code":"unknown_session"'
+contains "$unknown_configure_replay" '"replayed":true'
 
-# A lost rejection remains the original answer even after another key creates the Session.
-if "$rui" session configure --store "$store" --record "$records/incomplete.json" --key incomplete-key --session direct/rejected --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
-    echo "lost rejection unexpectedly produced a complete reply" >&2
-    exit 1
-fi
-created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --session direct/rejected --workspace "$root" --provider codex --model gpt-6-sol)
+# A lost creation rejection remains original after another key creates a Session.
+before_incomplete=$(session_refs)
+wire_configure incomplete-key "$records/incomplete.json" '{}' after-commit >"$state/drop.out" 2>"$state/drop.err"
+require_test 'incomplete creation creates no Session' "$(session_refs)" = "$before_incomplete"
+created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$created" '"status":"accepted"'
-defaults=$($rui session inspect --store "$store" --session direct/rejected)
+rejected_session=$(printf '%s' "$created" | session_id)
+defaults=$($rui session inspect --store "$store" --session "$rejected_session")
 contains "$defaults" '"tools":["bash"]'
 contains "$defaults" '"permission_mode":"bypass"'
 contains "$defaults" '"instructions":{"bytes":"0"'
@@ -399,26 +450,35 @@ contains "$rejected" '"code":"incomplete_initial_configuration"'
 
 # Store tests own all eight initial-field combinations. Keep a partially filled
 # wire request and closed-provider rejection with real request-scratch cleanup.
-missing_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/missing-provider.json" --key missing-provider --session direct/missing-provider --workspace "$root" --model gpt-6-sol)
+before_provider=$(session_refs)
+missing_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "model": "gpt-6-sol"}))' "$root")
+missing_provider=$(not_accepted wire_configure missing-provider "$records/missing-provider.json" "$missing_configuration")
 contains "$missing_provider" '"code":"incomplete_initial_configuration"'
 printf 'rejected instructions' >"$state/rejected-instructions.txt"
 printf '{"type":"object"}' >"$state/rejected-schema.json"
-unknown_provider=$(not_accepted "$rui" session configure --store "$store" --record "$records/unknown-provider.json" --key unknown-provider --session direct/unknown-provider --workspace "$root" --provider anthropic --model gpt-6-sol --instructions "$state/rejected-instructions.txt" --output-schema "$state/rejected-schema.json" --tools none)
+unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'
+import json, pathlib, sys
+print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'gpt-6-sol',
+    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': pathlib.Path(sys.argv[3]).read_text(), 'tools': []}))
+PY
+)
+unknown_provider=$(not_accepted wire_configure unknown-provider "$records/unknown-provider.json" "$unknown_configuration")
 contains "$unknown_provider" '"code":"unsupported_provider"'
-contains "$($rui session inspect --store "$store" --session direct/unknown-provider)" '"session":null'
+require_test 'rejected providers create no Session' "$(session_refs)" = "$before_provider"
 require_test 'rejected provider releases all request scratch' -z "$(find "$store/scratch" -name 'request-*.tmp' -print)"
 
 # Equal and omitted binding fields preserve the initial binding. An unequal
 # model rejects the entire mixed update before work and across Host restart.
-binding=$($rui session configure --store "$store" --record "$records/binding.json" --key binding --session direct/binding --workspace "$root" --provider codex --model gpt-6-sol)
+binding=$($rui session configure --store "$store" --record "$records/binding.json" --key binding --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$binding" '"revision":"1"'
-equal_binding=$($rui session configure --store "$store" --record "$records/equal-binding.json" --key equal-binding --session direct/binding --provider codex --model gpt-6-sol --tools none)
+binding_session=$(printf '%s' "$binding" | session_id)
+equal_binding=$($rui session configure --store "$store" --record "$records/equal-binding.json" --key equal-binding --session "$binding_session" --provider codex --model gpt-6-sol --tools none)
 contains "$equal_binding" '"revision":"2"'
-omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session direct/binding --permission-mode bypass)
+omitted_binding=$($rui session configure --store "$store" --record "$records/omitted-binding.json" --key omitted-binding --session "$binding_session" --permission-mode bypass)
 contains "$omitted_binding" '"revision":"3"'
-mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session direct/binding --model gpt-6.1-sol --tools bash --permission-mode ask)
+mixed_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/mixed-model.json" --key mixed-model --session "$binding_session" --model gpt-6.1-sol --tools bash --permission-mode ask)
 contains "$mixed_model" '"code":"model_is_immutable"'
-binding_current=$($rui session inspect --store "$store" --session direct/binding --profile current)
+binding_current=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
 contains "$binding_current" '"provider":"codex"'
 contains "$binding_current" '"model":"gpt-6-sol"'
 contains "$binding_current" '"revision":"3"'
@@ -429,27 +489,30 @@ start_host
 unknown_replay=$(not_accepted "$rui" request recover --store "$store" --record "$records/unknown-provider.json" --kind configure)
 contains "$unknown_replay" '"code":"unsupported_provider"'
 contains "$unknown_replay" '"replayed":true'
-binding_full=$($rui session inspect --store "$store" --session direct/binding --profile full)
+binding_full=$($rui session inspect --store "$store" --session "$binding_session" --profile full)
 contains "$binding_full" '"provider":"codex"'
 contains "$binding_full" '"model":"gpt-6-sol"'
 contains "$binding_full" '"revision":"3"'
 printf '%s' "$binding_full" | python3 -c 'import json,sys; rows=json.load(sys.stdin)["full"]["session_revisions"]; assert len(rows)==3; assert all(r["provider"]=="codex" and r["model"]=="gpt-6-sol" for r in rows)'
-restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session direct/binding --model gpt-6.1-sol --tools bash)
+restarted_model=$(not_accepted "$rui" session configure --store "$store" --record "$records/restarted-model.json" --key restarted-model --session "$binding_session" --model gpt-6.1-sol --tools bash)
 contains "$restarted_model" '"code":"model_is_immutable"'
-binding_rechecked=$($rui session inspect --store "$store" --session direct/binding --profile current)
+binding_rechecked=$($rui session inspect --store "$store" --session "$binding_session" --profile current)
 contains "$binding_rechecked" '"revision":"3"'
 contains "$binding_rechecked" '"tools":[]'
 
 # Lose an accepted reply, change current settings, and kill both processes.
 printf 'initial instructions\n' >"$state/instructions.txt"
 printf '{"type":"object"}\n' >"$state/schema.json"
-if "$rui" session configure --store "$store" --record "$records/first.json" --key first-key --session direct/main --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/instructions.txt" --output-schema "$state/schema.json" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session configure --store "$store" --record "$records/first.json" --key first-key --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/instructions.txt" --output-schema "$state/schema.json" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost acceptance unexpectedly produced a complete reply" >&2
     exit 1
 fi
-updated=$($rui session configure --store "$store" --record "$records/update.json" --key update-key --session direct/main --tools none --permission-mode bypass)
+first_recovery=$($rui request recover --store "$store" --record "$records/first.json" --kind configure)
+contains "$first_recovery" '"replayed":true'
+main_session=$(printf '%s' "$first_recovery" | session_id)
+updated=$($rui session configure --store "$store" --record "$records/update.json" --key update-key --session "$main_session" --tools none --permission-mode bypass)
 contains "$updated" '"revision":"2"'
-preserved=$($rui session inspect --store "$store" --session direct/main)
+preserved=$($rui session inspect --store "$store" --session "$main_session")
 contains "$preserved" '"bytes":"21"'
 case "$preserved" in
     *'"output_schema":{"bytes":'*) ;;
@@ -459,7 +522,7 @@ esac
 # change the request that is replayed.
 printf 'mutated after durable capture\n' >"$state/instructions.txt"
 : >"$state/empty.txt"
-cleared=$($rui session configure --store "$store" --record "$records/clear.json" --key clear-key --session direct/main --instructions "$state/empty.txt" --text-output)
+cleared=$($rui session configure --store "$store" --record "$records/clear.json" --key clear-key --session "$main_session" --instructions "$state/empty.txt" --text-output)
 contains "$cleared" '"revision":"3"'
 stop_host
 start_host
@@ -468,7 +531,8 @@ replayed=$($rui request recover --store "$store" --record "$records/first.json" 
 contains "$replayed" '"status":"accepted"'
 contains "$replayed" '"replayed":true'
 contains "$replayed" '"revision":"1"'
-current=$($rui session inspect --store "$store" --session direct/main)
+require_test 'lost creation replay retains allocated ID' "$(printf '%s' "$replayed" | session_id)" = "$main_session"
+current=$($rui session inspect --store "$store" --session "$main_session")
 contains "$current" '"provider":"codex"'
 contains "$current" '"model":"gpt-6-sol"'
 contains "$current" '"revision":"3"'
@@ -478,16 +542,16 @@ contains "$current" '"instructions":{"bytes":"0"'
 contains "$current" '"output_schema":null'
 
 # The same Store-wide key conflicts across changed inputs, targets, and kinds.
-changed=$(not_accepted "$rui" session configure --store "$store" --record "$records/changed.json" --key first-key --session direct/main --model gpt-6-astra)
+changed=$(not_accepted "$rui" session configure --store "$store" --record "$records/changed.json" --key first-key --workspace "$root" --provider codex --model gpt-6-astra)
 contains "$changed" '"status":"conflict"'
-retargeted=$(not_accepted "$rui" session configure --store "$store" --record "$records/retargeted.json" --key first-key --session direct/other --workspace "$root" --provider codex --model gpt-6-sol)
+retargeted=$(not_accepted "$rui" session configure --store "$store" --record "$records/retargeted.json" --key first-key --session "$rejected_session" --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$retargeted" '"status":"conflict"'
-changed_kind=$(not_accepted "$rui" session send --to "$(address direct/main)" --record "$records/changed-kind.json" --key first-key --text "$state/message.txt")
+changed_kind=$(not_accepted "$rui" session send --store "$store" --to "$main_session" --record "$records/changed-kind.json" --key first-key --text "$state/message.txt")
 contains "$changed_kind" '"status":"conflict"'
 
 # Sealed-but-unadmitted input has no saved answer; its captured record can be
 # retried by a fresh client after Host restart and then admits once.
-if "$rui" session configure --store "$store" --record "$records/before.json" --key before-key --session direct/before --workspace "$root" --provider codex --model gpt-6-sol --test-drop-reply before-admission >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session configure --store "$store" --record "$records/before.json" --key before-key --workspace "$root" --provider codex --model gpt-6-sol --test-drop-reply before-admission >"$state/drop.out" 2>"$state/drop.err"; then
     echo "pre-admission disconnect unexpectedly produced a complete reply" >&2
     exit 1
 fi
@@ -498,19 +562,20 @@ start_host
 before_retry=$($rui request recover --store "$store" --record "$records/before.json" --kind configure)
 contains "$before_retry" '"status":"accepted"'
 contains "$before_retry" '"replayed":false'
+before_session=$(printf '%s' "$before_retry" | session_id)
 
 # An incomplete message envelope with a usable key never publishes content,
 # a command answer or a queue row.
 socket=$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' "$ready")
-python3 - "$socket" "$store" <<'PY'
+python3 - "$socket" "$store" "$main_session" <<'PY'
 import json, socket, sys
-socket_path, store = sys.argv[1:]
+socket_path, store, session = sys.argv[1:]
 body = json.dumps({
     "version": "1",
     "kind": "message",
     "store": store,
     "key": "partial-message-key",
-    "session": "direct/main",
+    "session": session,
     "sender": None,
     "sender_handle": None,
     "text": {"state": "value", "value": "unterminated"},
@@ -531,17 +596,17 @@ stop_host
 start_host
 partial_message=$($rui request inspect --store "$store" --key partial-message-key)
 contains "$partial_message" '"status":"absent"'
-partial_session=$($rui session inspect --store "$store" --session direct/main)
+partial_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$partial_session" '"pending_messages":"0"'
 
 # Invalid schemas are definite saved rejections. A known-Session message keeps
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session direct/main --output-schema "$state/invalid-schema.json")
+invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json")
 contains "$invalid_schema" '"code":"invalid_output_schema"'
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
-if "$rui" session send --to "$(address direct/main)" --record "$records/known-message.json" --key msg-known --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session send --store "$store" --to "$main_session" --record "$records/known-message.json" --key msg-known --text "$state/message-source.txt" --test-drop-reply after-commit >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost message acceptance unexpectedly produced a complete reply" >&2
     exit 1
 fi
@@ -558,13 +623,13 @@ known_observation=$($rui request inspect --store "$store" --key msg-known)
 contains "$known_observation" '"kind":"message"'
 contains "$known_observation" '"status":"queued"'
 contains "$known_observation" '"type":"text"'
-known_session=$($rui session inspect --store "$store" --session direct/main)
+known_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$known_session" '"pending_messages":"1"'
 
 # Complete stdin is captured into the durable caller record before transport;
 # the multi-window pipe then disappears, and a restart retry retains its exact
 # independently calculated length/digest and second position.
-stdin_message=$(python3 -c 'import sys; sys.stdout.write("stdin🙂line\n" * 1000)' | "$rui" session send --to "$(address direct/main)" --record "$records/stdin-message.json" --key msg-stdin --text -)
+stdin_message=$(python3 -c 'import sys; sys.stdout.write("stdin🙂line\n" * 1000)' | "$rui" session send --store "$store" --to "$main_session" --record "$records/stdin-message.json" --key msg-stdin --text -)
 contains "$stdin_message" '"status":"accepted"'
 contains "$stdin_message" '"admission":"2"'
 stop_host
@@ -583,18 +648,18 @@ if answer["input"]["bytes"] != str(len(payload)):
 if answer["input"]["sha256"] != digest:
     raise SystemExit("stdin capture digest differs from independent oracle")
 PY
-ordered_session=$($rui session inspect --store "$store" --session direct/main)
+ordered_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$ordered_session" '"pending_messages":"2"'
 
 # The accepted message binding conflicts across target, canonical input and
 # kind without replacing or duplicating the original admission.
-retargeted_message=$(not_accepted "$rui" session send --to "$(address direct/rejected)" --record "$records/message-retargeted.json" --key msg-known --text "$state/message.txt")
+retargeted_message=$(not_accepted "$rui" session send --store "$store" --to "$rejected_session" --record "$records/message-retargeted.json" --key msg-known --text "$state/message.txt")
 contains "$retargeted_message" '"status":"conflict"'
-changed_message=$(not_accepted "$rui" session send --to "$(address direct/main)" --record "$records/message-changed.json" --key msg-known --text "$state/message.txt")
+changed_message=$(not_accepted "$rui" session send --store "$store" --to "$main_session" --record "$records/message-changed.json" --key msg-known --text "$state/message.txt")
 contains "$changed_message" '"status":"conflict"'
-message_changed_kind=$(not_accepted "$rui" session configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session direct/main --model gpt-6-sol)
+message_changed_kind=$(not_accepted "$rui" session configure --store "$store" --record "$records/message-changed-kind.json" --key msg-known --session "$main_session" --model gpt-6-sol)
 contains "$message_changed_kind" '"status":"conflict"'
-still_two=$($rui session inspect --store "$store" --session direct/main)
+still_two=$($rui session inspect --store "$store" --session "$main_session")
 contains "$still_two" '"pending_messages":"2"'
 
 # Closing the connection after complete ingress and sealing cannot revoke an
@@ -604,7 +669,7 @@ python3 - "$state/during-admission-message.txt" <<'PY'
 import pathlib, sys
 pathlib.Path(sys.argv[1]).write_bytes(b"d" * (512 * 1024))
 PY
-if "$rui" session send --to "$(address direct/main)" --record "$records/during-admission-message.json" --key msg-disconnected-during-admission --text "$state/during-admission-message.txt" --test-drop-reply during-admission >"$state/drop.out" 2>"$state/drop.err"; then
+if "$rui" session send --store "$store" --to "$main_session" --record "$records/during-admission-message.json" --key msg-disconnected-during-admission --text "$state/during-admission-message.txt" --test-drop-reply during-admission >"$state/drop.out" 2>"$state/drop.err"; then
     echo "during-admission disconnect unexpectedly produced a complete reply" >&2
     exit 1
 fi
@@ -631,7 +696,7 @@ for fault in content-acquire content-write content-seal; do
     record="$records/$key.json"
     stop_host
     start_host --fault "$fault"
-    if "$rui" session send --to "$(address direct/main)" --record "$record" --key "$key" --text "$state/message.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+    if "$rui" session send --store "$store" --to "$main_session" --record "$record" --key "$key" --text "$state/message.txt" >"$state/fault.out" 2>"$state/fault.err"; then
         echo "injected $fault unexpectedly admitted a message" >&2
         exit 1
     fi
@@ -653,7 +718,7 @@ for fault in content-read content-import before-commit; do
     printf '%s unique canonical import bytes\n' "$key" >"$state/$key.txt"
     stop_host
     start_host --fault "$fault"
-    if "$rui" session send --to "$(address direct/main)" --record "$record" --key "$key" --text "$state/$key.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+    if "$rui" session send --store "$store" --to "$main_session" --record "$record" --key "$key" --text "$state/$key.txt" >"$state/fault.out" 2>"$state/fault.err"; then
         echo "injected $fault unexpectedly admitted a message" >&2
         exit 1
     fi
@@ -670,7 +735,7 @@ done
 # A failed commit is not a saved rejection or acceptance and fences the Host.
 stop_host
 start_host --fault before-commit
-if "$rui" session configure --store "$store" --record "$records/commit-fault.json" --key commit-fault --session direct/commit-fault --workspace "$root" --provider codex --model gpt-6-sol >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/commit-fault.json" --key commit-fault --workspace "$root" --provider codex --model gpt-6-sol >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected commit failure returned success" >&2
     exit 1
 fi
@@ -680,12 +745,13 @@ start_host
 commit_retry=$($rui request recover --store "$store" --record "$records/commit-fault.json" --kind configure)
 contains "$commit_retry" '"status":"accepted"'
 contains "$commit_retry" '"replayed":false'
+commit_session=$(printf '%s' "$commit_retry" | session_id)
 
 # Source-read failure rolls back content and command together.
 stop_host
 start_host --fault content-read
 printf 'faulted content' >"$state/fault-content.txt"
-if "$rui" session configure --store "$store" --record "$records/read-fault.json" --key read-fault --session direct/read-fault --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/read-fault.json" --key read-fault --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected content read failure returned success" >&2
     exit 1
 fi
@@ -694,11 +760,12 @@ start_host
 read_retry=$($rui request recover --store "$store" --record "$records/read-fault.json" --kind configure)
 contains "$read_retry" '"status":"accepted"'
 contains "$read_retry" '"replayed":false'
+read_session=$(printf '%s' "$read_retry" | session_id)
 
 # Receive-side content-write failure never reaches admission.
 stop_host
 start_host --fault content-write
-if "$rui" session configure --store "$store" --record "$records/write-fault.json" --key write-fault --session direct/write-fault --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
+if "$rui" session configure --store "$store" --record "$records/write-fault.json" --key write-fault --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt" >"$state/fault.out" 2>"$state/fault.err"; then
     echo "injected ingress write failure returned success" >&2
     exit 1
 fi
@@ -708,6 +775,7 @@ stop_host
 start_host
 write_retry=$($rui request recover --store "$store" --record "$records/write-fault.json" --kind configure)
 contains "$write_retry" '"status":"accepted"'
+write_session=$(printf '%s' "$write_retry" | session_id)
 
 # Crash the first request while its streamed instructions still have a name.
 stop_host
@@ -716,7 +784,7 @@ python3 - "$ready" "$store" "$host_pid" <<'PYCRASH'
 import json, os, signal, socket, sys, time
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
-request = {"version":"1", "kind":"configure", "store":store, "key":"crashed-first", "session":"direct/crash", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
+request = {"version":"1", "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
 prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
 with socket.socket(socket.AF_UNIX) as connection:
     connection.connect(fields["socket"])
@@ -749,8 +817,9 @@ require_test 'restart preserves noncanonical request lookalike' -f "$store/scrat
 require_test 'restart preserves diagnostic file' -f "$store/scratch/diagnostic.log"
 require_test 'restart preserves unrelated file' -f "$store/scratch/unrelated.data"
 require_test 'restart preserves canonical Store' -f "$store/rui.sqlite3"
-recovered=$($rui session configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --session direct/first-recovered --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt")
+recovered=$($rui session configure --store "$store" --record "$records/first-recovered.json" --key first-recovered --workspace "$root" --provider codex --model gpt-6-sol --instructions "$state/fault-content.txt")
 contains "$recovered" '"status":"accepted"'
+recovered_session=$(printf '%s' "$recovered" | session_id)
 
 # A canonical owned name with the wrong filesystem type is neither deleted nor
 # ignored. Startup refuses while holding the lease, then a later clean startup
@@ -770,33 +839,44 @@ require_test 'restart after wrong-type repair preserves diagnostic file' -f "$st
 require_test 'restart after wrong-type repair preserves unrelated file' -f "$store/scratch/unrelated.data"
 require_test 'restart after wrong-type repair preserves canonical Store' -f "$store/rui.sqlite3"
 
-# Exact public identity bounds are independent and count decoded UTF-8 bytes.
+# Core keys retain their decoded UTF-8 byte bound; Session IDs are allocated.
 key128=$(python3 -c 'print("k" * 128)')
-session128=$(python3 -c 'print("s" * 128)')
-bounded=$($rui session configure --store "$store" --record "$records/bounded.json" --key "$key128" --session "$session128" --workspace "$root" --provider codex --model gpt-6-sol)
+bounded=$($rui session configure --store "$store" --record "$records/bounded.json" --key "$key128" --workspace "$root" --provider codex --model gpt-6-sol)
 contains "$bounded" '"status":"accepted"'
+bounded_session=$(printf '%s' "$bounded" | session_id)
 key129=$(python3 -c 'print("k" * 129)')
-if "$rui" session configure --store "$store" --record "$records/too-long.json" --key "$key129" --session direct/too-long --workspace "$root" --provider codex --model gpt-6-sol >"$state/bounds.out" 2>"$state/bounds.err"; then
+if "$rui" session configure --store "$store" --record "$records/too-long.json" --key "$key129" --workspace "$root" --provider codex --model gpt-6-sol >"$state/bounds.out" 2>"$state/bounds.err"; then
     echo "129-byte key was admitted" >&2
     exit 1
 fi
 require_test 'oversized Configure key creates no request record' ! -e "$records/too-long.json"
 
-# Message identities use the same exact decoded-byte limits while preserving
+# Caller-named creation is rejected before publishing a capture, not aliased.
+session128=$(python3 -c 'print("s" * 128)')
+for invalid_session in "$session128" direct/obsolete ABCDEF abcde abcdefg abcdei; do
+    if "$rui" session configure --store "$store" --record "$records/invalid-session.json" --key invalid-session --session "$invalid_session" --workspace "$root" --provider codex --model gpt-6-sol >"$state/bounds.out" 2>"$state/bounds.err"; then
+        echo "noncanonical Session was admitted: $invalid_session" >&2
+        exit 1
+    fi
+    contains "$(cat "$state/bounds.err")" 'InvalidSession'
+    require_test 'invalid Session creates no request record' ! -e "$records/invalid-session.json"
+done
+
+# Message keys use the same exact decoded-byte limits while preserving
 # Unicode and transport escaping without normalization.
 message_key128=$(python3 -c 'print("é" * 64, end="")')
 printf 'bounded message with controls\t"quote"\\slash\n' >"$state/bounded-message.txt"
-bounded_message=$($rui session send --to "$(address "$session128")" --record "$records/bounded-message.json" --key "$message_key128" --text "$state/bounded-message.txt")
+bounded_message=$($rui session send --store "$store" --to "$bounded_session" --record "$records/bounded-message.json" --key "$message_key128" --text "$state/bounded-message.txt")
 contains "$bounded_message" '"status":"accepted"'
 message_key129=$(python3 -c 'print("é" * 64 + "x", end="")')
-if "$rui" session send --to "$(address "$session128")" --record "$records/message-too-long.json" --key "$message_key129" --text "$state/message.txt" >"$state/bounds.out" 2>"$state/bounds.err"; then
+if "$rui" session send --store "$store" --to "$bounded_session" --record "$records/message-too-long.json" --key "$message_key129" --text "$state/message.txt" >"$state/bounds.out" 2>"$state/bounds.err"; then
     echo "129-byte message key was admitted" >&2
     exit 1
 fi
 require_test 'oversized Message key creates no request record' ! -e "$records/message-too-long.json"
 
 escaped_key=$(python3 -c 'print("".join(map(chr, (34, 92, 10, 9))) * 32, end="")')
-escaped_message=$($rui session send --to "$(address "$session128")" --record "$records/escaped-message.json" --key "$escaped_key" --text "$state/message.txt")
+escaped_message=$($rui session send --store "$store" --to "$bounded_session" --record "$records/escaped-message.json" --key "$escaped_key" --text "$state/message.txt")
 contains "$escaped_message" '"status":"accepted"'
 escaped_observation=$($rui request inspect --store "$store" --key "$escaped_key")
 python3 - "$escaped_key" "$escaped_observation" <<'PY'
@@ -811,26 +891,26 @@ PY
 
 nfc_key=$(python3 -c 'print("é", end="")')
 nfd_key=$(python3 -c 'print("e\u0301", end="")')
-nfc_message=$($rui session send --to "$(address "$session128")" --record "$records/nfc-message.json" --key "$nfc_key" --text "$state/message.txt")
-nfd_message=$($rui session send --to "$(address "$session128")" --record "$records/nfd-message.json" --key "$nfd_key" --text "$state/message.txt")
+nfc_message=$($rui session send --store "$store" --to "$bounded_session" --record "$records/nfc-message.json" --key "$nfc_key" --text "$state/message.txt")
+nfd_message=$($rui session send --store "$store" --to "$bounded_session" --record "$records/nfd-message.json" --key "$nfd_key" --text "$state/message.txt")
 contains "$nfc_message" '"status":"accepted"'
 contains "$nfd_message" '"status":"accepted"'
 
 # A detected canonical read failure fences later admission in the same Host.
 # This fixture corrupts storage only while the production owner is stopped.
 stop_host
-python3 - "$store/rui.sqlite3" <<'PY'
+python3 - "$store/rui.sqlite3" "$main_session" <<'PY'
 import sqlite3, sys
 database = sqlite3.connect(sys.argv[1])
 database.execute(
     "UPDATE session SET instructions_content_id=9223372036854775807 "
-    "WHERE session_ref='direct/main'"
+    "WHERE session_ref=?", (sys.argv[2],)
 )
 database.commit()
 database.close()
 PY
 start_host
-if "$rui" session inspect --store "$store" --session direct/main >"$state/corrupt-read.out" 2>"$state/corrupt-read.err"; then
+if "$rui" session inspect --store "$store" --session "$main_session" >"$state/corrupt-read.out" 2>"$state/corrupt-read.err"; then
     echo "canonical corruption produced a successful observation" >&2
     exit 1
 fi

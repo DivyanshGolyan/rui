@@ -167,7 +167,6 @@ def command(state, *arguments):
 
 
 def configure(state, store, ordinal):
-    session = f"direct/descriptors-{ordinal}"
     result = command(
         state,
         "session", "configure",
@@ -177,8 +176,6 @@ def configure(state, store, ordinal):
         state / f"configure-{ordinal}.json",
         "--key",
         f"configure-{ordinal}",
-        "--session",
-        session,
         "--workspace",
         ROOT,
         "--provider",
@@ -187,7 +184,7 @@ def configure(state, store, ordinal):
         "gpt-6-sol",
     )
     assert result["answer"]["status"] == "accepted", result
-    return session
+    return result["answer"]["session"]
 
 
 def message(state, store, session, ordinal):
@@ -196,8 +193,10 @@ def message(state, store, session, ordinal):
     result = command(
         state,
         "session", "send",
+        "--store",
+        store,
         "--to",
-        json.dumps({"store": str(store), "session": session}),
+        session,
         "--record",
         state / f"message-{ordinal}.json",
         "--key",
@@ -373,10 +372,11 @@ def prove_bash_spawn_with_full_client_population(state, required):
             observations="status",
         )
         diagnostics = HostDiagnostics(host)
-        sessions = [f"direct/descriptor-bash-{ordinal}" for ordinal in range(2)]
-        for ordinal, session in enumerate(sessions):
+        sessions = []
+        for ordinal in range(2):
             expected_routes.append("configure")
-            bash.configure(state, store, f"bash-configure-{ordinal}", session, permission="bypass")
+            session = bash.configure(state, store, f"bash-configure-{ordinal}", permission="bypass")
+            sessions.append(session)
             expected_routes.append("message")
             fixture.message(state, store, f"bash-message-{ordinal}", session, f"run bash {ordinal}")
             admitted_at_gate(diagnostics, ordinal)
@@ -725,8 +725,7 @@ os.execv('/bin/bash', ['/bin/bash', *sys.argv[1:]])
             "--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-path", str(wrapper),
             "--test-transition", "prepared-before-handoff", "--test-transition-gate-path", str(gate)], env=env)
         diagnostics = HostDiagnostics(host)
-        session = "direct/accept-inheritance"
-        bash.configure(root, store, "configure", session, permission="bypass")
+        session = bash.configure(root, store, "configure", permission="bypass")
         fixture.message(root, store, "message", session, "check inheritance")
         diagnostics.wait("prepared_before_handoff", timeout=10)
         hold.touch()

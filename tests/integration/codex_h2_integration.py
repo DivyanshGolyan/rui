@@ -93,10 +93,11 @@ def run(*, observed=False, intake=100):
         diagnostics = HostDiagnostics(host)
         configuration = fixture.command(
             "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
-            "--session", "managed/h2", "--workspace", fixture.ROOT, "--provider", "codex",
+            "--workspace", fixture.ROOT, "--provider", "codex",
             "--model", "gpt-6-sol", "--tools", "none",
         )
         assert configuration["answer"]["status"] == "accepted"
+        session = configuration["answer"]["session"]
         observations = []
         for index in range(3):
             if index == 2:
@@ -104,10 +105,10 @@ def run(*, observed=False, intake=100):
                 codex.credentials(path, fedramp=True)
             key = "federal" if index == 2 else f"message-{index}"
             text = "managed-federal" if index == 2 else f"managed-{index}"
-            fixture.message(root, store, key, "managed/h2", text)
+            fixture.message(root, store, key, session, text)
             deadline = time.monotonic() + 20
             observation, answer, _ = fixture.wait_for_result_release(
-                store, key, "managed/h2", deadline,
+                store, key, session, deadline,
             )
             if observed:
                 processing = observation["processing"]

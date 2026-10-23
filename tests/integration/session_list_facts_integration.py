@@ -21,10 +21,12 @@ def main():
             return subprocess.run([fixture.RUI, *map(str, args)], cwd=root,
                 env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=10)
         try:
+            allocated = []
             for index in range(9):
-                configured = invoke("session", "configure", "--store", store, "--session", f"selected/{index}",
+                configured = invoke("session", "configure", "--store", store,
                     "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
                 assert configured.returncode == 0, configured
+                allocated.append(json.loads(configured.stdout)["answer"]["session"])
             def rewrite(response):
                 head, body = response.split(b"\r\n\r\n", 1)
                 page = json.loads(body)
@@ -64,7 +66,7 @@ def main():
                     listed = json.loads(result.stdout)
                     assert listed["type"] == "session_list" and listed["next"] is None, result
                     references = [row["reference"] for row in listed["sessions"]]
-                    assert references == [f"selected/{i}" for i in range(9)], result
+                    assert references == allocated, result
                 elif mode == "failure":
                     assert result.returncode != 0 and "HostInvocationFailed" in result.stderr and result.stdout == "", result
                     assert json.loads(result.stderr.splitlines()[0]) == {"status": 503, "type": "busy", "code": "ordinary_capacity_exhausted"}, result

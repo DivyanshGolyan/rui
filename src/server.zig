@@ -1669,7 +1669,7 @@ fn renderConfigureReply(
     try response.append("\",\"replayed\":");
     try response.append(if (replayed) "true" else "false");
     try response.append(",\"session\":");
-    try response.appendJsonString(command.session.slice());
+    try response.appendJsonString(if (result == .accepted) result.accepted.session.slice() else command.session.slice());
     switch (result) {
         .rejected => |value| {
             try response.append(",\"code\":");
@@ -1756,7 +1756,7 @@ fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u
 
 test "mutation decoder validates all five actual producers and preserved domain answers" {
     const client = @import("client.zig");
-    const session = "original/é\n";
+    const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }, 0..) |render, index| {
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
@@ -1777,7 +1777,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
             else => unreachable,
         };
         const accepted: MutationReply = switch (index) {
-            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false } },
+            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = command.session } },
             1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content } },
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
@@ -1808,7 +1808,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
                 const answer = try decoded.answer;
                 try std.testing.expectEqualStrings(@tagName(result), @tagName(answer.result));
                 try std.testing.expectEqual(result != .conflict and replayed, answer.replayed);
-                try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = status, .body = response.slice() }, "other/session", target).answer);
+                try std.testing.expectError(error.RequestBindingMismatch, client.decodeMutationReply(.{ .status = status, .body = response.slice() }, "p9q8rs", target).answer);
                 if (result == .accepted) switch (answer.result.accepted) {
                     .configure => |value| try std.testing.expectEqual(@as(u64, 13), value.revision),
                     .message => |value| try std.testing.expectEqual(@as(u64, 17), value.admission),
@@ -3398,7 +3398,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message_template = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -3420,14 +3420,17 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         defer storage.close() catch unreachable;
         var configure: protocol.ConfigureCommand = .{};
         try configure.key.set("config");
-        try configure.session.set("peer");
         configure.configuration.workspace.state = .value;
         try configure.configuration.workspace.value.set(root);
         configure.configuration.provider.state = .value;
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
-        try std.testing.expect(storage.configure(&configure, true, .{}) == .accepted);
+        const configured = storage.configure(&configure, true, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session.slice();
+        const message = try std.mem.replaceOwned(u8, std.testing.allocator, message_template, "peer", session);
+        defer std.testing.allocator.free(message);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .instance = @splat(0), .faults = .{} };
         var retention = output_retention.Queue.initialize(io, root, .{ .used = &host.scratch_used, .limit = 9000 }, &.{});
         host.retention = &retention;
@@ -3488,7 +3491,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         }) |control| {
             const peer = try address.connect(std.testing.io);
             defer peer.socket.close(std.testing.io);
-            try Probe.send(peer.socket.handle, control.route, control.body, false);
+            const body = try std.mem.replaceOwned(u8, std.testing.allocator, control.body, "peer", session);
+            defer std.testing.allocator.free(body);
+            try Probe.send(peer.socket.handle, control.route, body, false);
             try Probe.response(peer.socket.handle);
             const saved = try storage.observeCommand(control.key);
             try std.testing.expectEqual(control.kind, saved.kind);

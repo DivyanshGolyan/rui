@@ -40,16 +40,13 @@ pub fn environment(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) 
 pub const empty_environment: std.process.Environ.Map = .{ .array_hash_map = .empty, .allocator = std.heap.page_allocator };
 
 /// One tool process's environment: the shared Host map, unchanged, plus
-/// RUI_ADDRESS naming the Session whose Action runs it, as compact JSON
-/// `{"store":…,"session":…}` and its Host-issued RUI_SENDER_HANDLE.
+/// the bare RUI_ADDRESS, canonical RUI_STORE and Host-issued RUI_SENDER_HANDLE.
 /// The caller deinitializes the owned map.
 pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.Environ.Map, store_selector: []const u8, session: []const u8, sender_handle: []const u8) !std.process.Environ.Map {
     var result = try shared.clone(allocator);
     errdefer result.deinit();
-    var address: std.Io.Writer.Allocating = .init(allocator);
-    defer address.deinit();
-    try std.json.Stringify.value(.{ .store = store_selector, .session = session }, .{}, &address.writer);
-    try result.put("RUI_ADDRESS", address.written());
+    try result.put("RUI_ADDRESS", session);
+    try result.put("RUI_STORE", store_selector);
     if (sender_handle.len != 0) try result.put("RUI_SENDER_HANDLE", sender_handle);
     return result;
 }
@@ -1861,10 +1858,11 @@ test "Bash environment carries only this executable's PATH and an absolute HOME"
     defer relative_home.deinit();
     try std.testing.expectEqual(@as(usize, 1), relative_home.count());
     // Each tool process adds its own Session's address; the shared map stays as it was.
-    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "peer/\x00a", "test-action-handle");
+    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "k7m2qx", "test-action-handle");
     defer tool.deinit();
-    try std.testing.expectEqual(@as(usize, 4), tool.count());
-    try std.testing.expectEqualStrings("{\"store\":\"/store \\\"q\\\"\",\"session\":\"peer/\\u0000a\"}", tool.get("RUI_ADDRESS").?);
+    try std.testing.expectEqual(@as(usize, 5), tool.count());
+    try std.testing.expectEqualStrings("k7m2qx", tool.get("RUI_ADDRESS").?);
+    try std.testing.expectEqualStrings("/store \"q\"", tool.get("RUI_STORE").?);
     try std.testing.expectEqualStrings("test-action-handle", tool.get("RUI_SENDER_HANDLE").?);
     try std.testing.expectEqualStrings("/home/peer", tool.get("HOME").?);
     try std.testing.expectEqual(@as(usize, 2), with_home.count());

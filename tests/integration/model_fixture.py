@@ -20,10 +20,10 @@ ROOT = pathlib.Path.cwd()
 def model_instructions(workspace, baseline="", *, store, session):
     """Shared prose with independently encoded, caller-supplied fixture facts."""
     parts = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
-    workspace, store, session = (json.dumps(value, ensure_ascii=False)[1:-1]
-                                 for value in (str(workspace), os.path.realpath(store), session))
-    prefix, address, selector, suffix = parts
-    return prefix + workspace + address + store + selector + session + suffix + baseline
+    workspace = json.dumps(str(workspace), ensure_ascii=False)[1:-1]
+    assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), session
+    prefix, address, suffix = parts
+    return prefix + workspace + address + session + suffix + baseline
 
 
 class FailureEndpoint(TestHTTPServer):
@@ -515,8 +515,6 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         record,
         "--key",
         key,
-        "--session",
-        session,
         "--workspace",
         ROOT,
         "--provider",
@@ -528,6 +526,8 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         "--permission-mode",
         "ask",
     ]
+    if session is not None:
+        args += ["--session", session]
     if schema is not None:
         schema_path = state / f"{key}-schema.json"
         schema_path.write_text(json.dumps(schema, separators=(",", ":")))
@@ -538,6 +538,12 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         args += ["--instructions", instructions_path]
     result = command(*args)
     assert result["answer"]["status"] == "accepted", result
+    identity = result["context"]["session"]
+    assert len(identity) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in identity), result
+    assert result["answer"]["created"] == (session is None), result
+    if session is not None:
+        assert identity == session, result
+    return identity
 
 
 def configure_lost_reply(
@@ -552,8 +558,6 @@ def configure_lost_reply(
         str(state / f"{key}.json"),
         "--key",
         key,
-        "--session",
-        session,
         "--workspace",
         str(workspace),
         "--provider",
@@ -561,6 +565,8 @@ def configure_lost_reply(
         "--model",
         model,
     ]
+    if session is not None:
+        arguments += ["--session", session]
     if tools is not None:
         arguments += ["--tools", tools]
     if permission is not None:
@@ -580,8 +586,10 @@ def message(state, store, key, session, text):
     text_path.write_text(text)
     result = command(
         "session", "send",
+        "--store",
+        store,
         "--to",
-        json.dumps({"store": str(store), "session": session}),
+        session,
         "--record",
         state / f"{key}.json",
         "--key",
@@ -600,8 +608,10 @@ def message_lost_reply(state, store, key, session, text):
         [
             str(RUI),
             "session", "send",
+            "--store",
+            str(store),
             "--to",
-            json.dumps({"store": str(store), "session": session}),
+            session,
             "--record",
             str(state / f"{key}.json"),
             "--key",

@@ -166,14 +166,18 @@ func startChildFixture(deadline measurement.Deadline, streams, eventsPerSecond i
 
 func (f *childFixture) ProviderURL() string { return f.providerURL }
 
-func (f *childFixture) request(deadline measurement.Deadline, route string) (provider.Summary, error) {
+func (f *childFixture) request(deadline measurement.Deadline, route string, body ...[]byte) (provider.Summary, error) {
 	remaining, err := deadline.Remaining()
 	if err != nil {
 		return provider.Summary{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), remaining)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.controlURL+route, nil)
+	var input io.Reader
+	if len(body) != 0 {
+		input = bytes.NewReader(body[0])
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, f.controlURL+route, input)
 	if err != nil {
 		return provider.Summary{}, err
 	}
@@ -211,6 +215,15 @@ func (f *childFixture) WaitCompletion(deadline measurement.Deadline) (provider.S
 }
 func (f *childFixture) Reset(deadline measurement.Deadline) error {
 	_, err := f.request(deadline, "/control/reset")
+	return err
+}
+
+func (f *childFixture) BindSessions(deadline measurement.Deadline, sessions []string) error {
+	body, err := json.Marshal(sessions)
+	if err != nil {
+		return err
+	}
+	_, err = f.request(deadline, "/control/bind-sessions", body)
 	return err
 }
 
@@ -591,7 +604,7 @@ func sqliteDiagnosticsStatus(records []sqliteDiagnostic, cacheSize int64, spillE
 	return status
 }
 
-func spillDiagnosticsValid(records []sqliteDiagnostic, enabled, completed bool) bool {
+func spillDiagnosticsValid(records []sqliteDiagnostic, session string, enabled, completed bool) bool {
 	expectedRecords := 1
 	if completed {
 		expectedRecords = 2
@@ -600,7 +613,7 @@ func spillDiagnosticsValid(records []sqliteDiagnostic, enabled, completed bool) 
 		return false
 	}
 	for _, record := range records {
-		if record.Subject != "measure/spill" || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" {
+		if record.Subject != session || record.CacheSizeSettingScope != "raw PRAGMA cache_size; negative magnitude is suggested KiB, positive value is suggested pages" {
 			return false
 		}
 	}
@@ -693,7 +706,8 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 		return nil, err
 	}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	if err := client.Submit(name, "measure/"+name, "measure"); err != nil {
+	session, err := client.Submit(name, "", "measure")
+	if err != nil {
 		return nil, err
 	}
 	observation, err := client.WaitResult(name)
@@ -709,7 +723,7 @@ func measureCase(binary, root string, endpoint *payloadEndpoint, name string, re
 	if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != expectedDigest {
 		return nil, errors.New("saved result differs from response")
 	}
-	inspection, err := client.Inspect("measure/" + name)
+	inspection, err := client.Inspect(session)
 	if err != nil {
 		return nil, err
 	}
@@ -773,10 +787,11 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		}
 	}()
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
-	if err := client.Configure("spill", "measure/spill", "--tools", "none"); err != nil {
+	session, err := client.Configure("spill", "", "--tools", "none")
+	if err != nil {
 		return nil, err
 	}
-	initialInspection, err := client.Inspect("measure/spill")
+	initialInspection, err := client.Inspect(session)
 	if err != nil {
 		return nil, err
 	}
@@ -785,7 +800,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		return nil, err
 	}
 	started := time.Now()
-	if err := client.Message("spill", "measure/spill", "spill comparison"); err != nil {
+	if err := client.Message("spill", session, "spill comparison"); err != nil {
 		return nil, err
 	}
 	outcome := "timeout"
@@ -824,7 +839,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 		if delivery["destination_bytes"] != int64(len(answer)) || delivery["destination_sha256"] != hex.EncodeToString(digest[:]) {
 			return nil, errors.New("spill result differed")
 		}
-		inspection, err = client.Inspect("measure/spill")
+		inspection, err = client.Inspect(session)
 		if err != nil {
 			return nil, err
 		}
@@ -865,7 +880,7 @@ func measureSpillCase(binary, root string, endpoint *payloadEndpoint, enabled bo
 	providerRequests := endpoint.count() - requestBefore
 	naturalHostFailure := outcome == "host_exit" && hostExit.Exited && hostExit.Code != 0
 	status, cleanRollback, expectedMemoryFailure := spillVerdict(enabled, completed, naturalHostFailure, providerRequests, initialWhole, finalWhole, execution, offline, string(stderr), writeStatus)
-	diagnosticsValid := spillDiagnosticsValid(diagnostics, enabled, completed)
+	diagnosticsValid := spillDiagnosticsValid(diagnostics, session, enabled, completed)
 	if !diagnosticsValid {
 		status = "failed"
 	}
@@ -901,7 +916,7 @@ func expectedCapacityRequests(keys, sessions []string, workspace, store string) 
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
 	for index, key := range keys {
-		body := []byte(`{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, store, sessions[index])) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
+		body := []byte(`{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, sessions[index])) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)
@@ -1222,18 +1237,12 @@ func sampleCPU(target *process.Process) (bracketedCPUSample, error) {
 	return result, nil
 }
 
-func capacityAuditIdentity(capacity, round int, sameSessions bool) capacityAuditRequest {
-	keys := make([]string, capacity)
-	sessions := make([]string, capacity)
-	for index := range capacity {
-		keys[index] = fmt.Sprintf("capacity-%d-round-%d-%d", capacity, round, index)
-		if sameSessions {
-			sessions[index] = provider.RepeatSession(capacity, index)
-		} else {
-			sessions[index] = fmt.Sprintf("measure/capacity-%d/%d/%d", capacity, round, index)
-		}
+func capacityAuditIdentity(sessions []string, round int) capacityAuditRequest {
+	keys := make([]string, len(sessions))
+	for index := range sessions {
+		keys[index] = fmt.Sprintf("capacity-%d-round-%d-%d", len(sessions), round, index)
 	}
-	return capacityAuditRequest{keys: keys, sessions: sessions}
+	return capacityAuditRequest{keys: keys, sessions: append([]string(nil), sessions...)}
 }
 
 func capacityCPUWindowValid(offerStart time.Time, duration time.Duration, first, second bracketedCPUSample, earliestFinalCompletion time.Time) bool {
@@ -1259,7 +1268,7 @@ func sustainedCPUQualificationStatus(offerQualified, windowValid bool, averageCo
 	return "passed"
 }
 
-func measureCapacityRound(binary, directory, store, canonicalStore, workspace string, round, capacity, eventsPerSecond int, duration time.Duration, sameSessions bool, deadline measurement.Deadline, host *measurement.Host, fixture *childFixture, facts *measurement.FactLog) (map[string]any, error) {
+func measureCapacityRound(binary, directory, store, canonicalStore, workspace string, round, capacity, eventsPerSecond int, duration time.Duration, sameSessions bool, deadline measurement.Deadline, host *measurement.Host, fixture *childFixture, facts *measurement.FactLog, identity *capacityAuditRequest) (map[string]any, error) {
 	roundDirectory := filepath.Join(directory, fmt.Sprintf("round-%d", round))
 	if err := os.Mkdir(roundDirectory, 0o700); err != nil {
 		return nil, err
@@ -1282,15 +1291,18 @@ func measureCapacityRound(binary, directory, store, canonicalStore, workspace st
 		return nil, err
 	}
 	client := measurement.Client{Binary: binary, Artifacts: roundDirectory, Store: store, Deadline: deadline}
-	identity := capacityAuditIdentity(capacity, round, sameSessions)
 	keys := identity.keys
 	sessions := identity.sessions
 	for index := range capacity {
 		if !sameSessions || round == 1 {
-			if err := client.Configure(keys[index], sessions[index], "--tools", "none"); err != nil {
+			sessions[index], err = client.Configure(keys[index], "", "--tools", "none")
+			if err != nil {
 				return nil, err
 			}
 		}
+	}
+	if err := fixture.BindSessions(deadline, sessions); err != nil {
+		return nil, err
 	}
 	cpuAdmissionStart, err := measurement.CPUSeconds(host.Process)
 	if err != nil {
@@ -1655,13 +1667,25 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 	if os.Getpid() == fixture.cmd.Process.Pid || host.Cmd.Process.Pid == fixture.cmd.Process.Pid || os.Getpid() == host.Cmd.Process.Pid {
 		return nil, errors.New("controller, provider fixture and Host must have distinct process identities")
 	}
+	var sessions []string
+	var auditRequests []capacityAuditRequest
 	rounds, resultError = measurement.CollectCompletedRounds(roundCount, func(round int) (map[string]any, error) {
 		info, statError := os.Stat(filepath.Join(directory, "host-stderr.log"))
 		if statError != nil {
 			return nil, statError
 		}
 		diagnosticOffset := info.Size()
-		row, err := measureCapacityRound(binary, directory, store, canonicalStore, workspace, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts)
+		if !sameSessions || round == 1 {
+			sessions = make([]string, capacity)
+		}
+		identity := capacityAuditIdentity(sessions, round)
+		row, err := measureCapacityRound(binary, directory, store, canonicalStore, workspace, round, capacity, scenario.EventsPerSecond, duration, sameSessions, deadline, host, fixture, facts, &identity)
+		if row != nil {
+			// Completed work still needs its independent audit when later
+			// resource observations fail and CollectCompletedRounds retains it.
+			sessions = identity.sessions
+			auditRequests = append(auditRequests, identity)
+		}
 		if err != nil {
 			return row, err
 		}
@@ -1692,10 +1716,6 @@ func measureCapacity(binary, root string, scenario capacityScenario, duration ti
 		return row, nil
 	})
 	result = capacityResult(capacity, scenario.EventsPerSecond, roundCount, sameSessions, rounds, fixture.cmd.Process.Pid, host.Cmd.Process.Pid)
-	auditRequests := make([]capacityAuditRequest, 0, len(rounds))
-	for round := 1; round <= len(rounds); round++ {
-		auditRequests = append(auditRequests, capacityAuditIdentity(capacity, round, sameSessions))
-	}
 	audits, err := offlineCapacityAudits(func() error {
 		err := host.Stop(measurement.TeardownAllowance)
 		if err == nil {
@@ -1940,9 +1960,15 @@ func measureSessions(binary, output string, sessions int, hold bool, expectation
 	}()
 	result["host_pid"], result["provider_pid"] = host.Cmd.Process.Pid, fixture.cmd.Process.Pid
 	client := measurement.Client{Binary: binary, Store: store, Artifacts: directory, Deadline: deadline}
-	identity := capacityAuditIdentity(sessions, 1, false)
-	for index, session := range identity.sessions {
-		if err := client.Configure(identity.keys[index], session, "--tools", "none"); err != nil {
+	identity := capacityAuditIdentity(make([]string, sessions), 1)
+	for index := range identity.sessions {
+		identity.sessions[index], err = client.Configure(identity.keys[index], "", "--tools", "none")
+		if err != nil {
+			return result, err
+		}
+	}
+	if sessions > 0 {
+		if err := fixture.BindSessions(deadline, identity.sessions); err != nil {
 			return result, err
 		}
 	}

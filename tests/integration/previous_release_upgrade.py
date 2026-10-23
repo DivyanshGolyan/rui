@@ -41,6 +41,7 @@ class Dialect:
         arguments = checkout / "src/cli_args.zig"
         self.resource_first = arguments.exists() and ".request_inspect" in arguments.read_text()
         self.address_send = arguments.exists() and 'value("to", "ADDRESS")' in arguments.read_text()
+        self.short_ids = "pub const session_id_bytes = 6;" in (checkout / "src/protocol.zig").read_text()
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
@@ -61,16 +62,19 @@ class Dialect:
 
     def configure(self, state, store, key, session, model):
         reply = fixture.command(*(("session", "configure") if self.resource_first else ("configure",)),
-            "--store", store, "--record", state / f"{key}.json", "--key", key, "--session", session,
+            "--store", store, "--record", state / f"{key}.json", "--key", key,
+            *(("--session", session) if not self.short_ids else ()),
             "--workspace", fixture.ROOT, "--provider", "codex", "--model", model,
             "--tools", "bash", "--permission-mode", "ask")
         assert reply["answer"]["status"] == "accepted", reply
+        return reply["answer"]["session"] if self.short_ids else session
 
     def message(self, state, store, key, session, text):
         text_path = state / f"{key}.txt"
         text_path.write_text(text)
-        destination = ("--to", json.dumps({"store": str(store), "session": session})) if self.address_send else (
-            "--store", store, "--session", session)
+        destination = (("--store", store, "--to", session) if self.short_ids else
+            ("--to", json.dumps({"store": str(store), "session": session})) if self.address_send else
+            ("--store", store, "--session", session))
         reply = fixture.command(*(("session", "send") if self.resource_first else ("message",)),
             *destination, "--record", state / f"{key}.json", "--key", key,
             "--text", text_path)
@@ -165,17 +169,17 @@ def main():
                 dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
                 required_fields={"execution": "enabled"},
             )
-            dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
-            dialect.message(root, store, "upgrade-message", "upgrade/session", "Save this real work.")
+            session = dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
+            dialect.message(root, store, "upgrade-message", session, "Save this real work.")
             observation, answer, _ = dialect.wait_for_result_release(
-                store, "upgrade-message", "upgrade/session", time.monotonic() + 15)
+                store, "upgrade-message", session, time.monotonic() + 15)
             assert observation["result"]["status"] == "completed" and answer == expected, observation
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
             configuration = {
                 "workspace": str(workspace), "provider": "codex", "model": "gpt-6-sol",
                 "tools": ["bash"], "permission_mode": "ask",
             }
-            before = dialect.inspect_session(store, "upgrade/session")["session"]
+            before = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
                 assert before[field] == value, (field, value, before)
             subprocess.run([binary, "host", "stop", "--store", store], check=True, timeout=10)
@@ -243,7 +247,7 @@ def main():
             assert recovered["result"]["status"] == "completed", recovered
             assert recovered["processing"] == observation["processing"], "upgrade replayed completed work"
             assert dialect.read_result(store, "upgrade-message") == expected, "saved answer changed"
-            after = dialect.inspect_session(store, "upgrade/session")["session"]
+            after = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
                 assert after[field] == value, (field, value, after)
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"

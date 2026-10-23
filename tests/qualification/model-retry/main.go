@@ -173,14 +173,15 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	store := filepath.Join(directory, "store")
 	deadline := measurement.NewDeadline(2 * time.Minute)
 	marker := "timing-operation"
-	session := "measure/timing"
+	var session string
 	host, err := startHost(deadline, binary, store, e.URL(), directory, 1, "--test-retry-waits-ms", "600000,600000,600000")
 	if err != nil {
 		return nil, err
 	}
 	client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 	work := func() error {
-		if err := client.Submit("timing", session, marker); err != nil {
+		session, err = client.Submit("timing", "", marker)
+		if err != nil {
 			return err
 		}
 		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "initial temporary response", func() (bool, error) { return e.count(marker) == 1, nil }); err != nil {
@@ -287,6 +288,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	deadline := measurement.NewDeadline(8 * time.Minute)
 	created := 0
 	rows := []map[string]any{}
+	sessions := make([]string, 100)
 	for _, target := range []int{1, 10, 100} {
 		host, err := startHost(deadline, binary, store, e.URL(), directory, capacity, "--test-retry-waits-ms", "600000,600000,600000")
 		if err != nil {
@@ -295,20 +297,20 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 		client := measurement.Client{Binary: binary, Artifacts: directory, Store: store, Deadline: deadline}
 		work := func() error {
 			for ordinal := created; ordinal < target; ordinal++ {
-				session := fmt.Sprintf("measure/history-%d", ordinal)
-				if err := client.Submit(fmt.Sprintf("history-%d", ordinal), session, fmt.Sprintf("history-operation-%d", ordinal)); err != nil {
+				sessions[ordinal], err = client.Submit(fmt.Sprintf("history-%d", ordinal), "", fmt.Sprintf("history-operation-%d", ordinal))
+				if err != nil {
 					return err
 				}
 			}
 			if err := measurement.WaitFor(deadline, 10*time.Millisecond, "initial history attempts", func() (bool, error) { return e.total("history-operation-") == target+len(rows), nil }); err != nil {
 				return err
 			}
-			return measurement.WaitFor(deadline, 10*time.Millisecond, "history cleanup", func() (bool, error) { return custodyZero(client, fmt.Sprintf("measure/history-%d", target-1)) })
+			return measurement.WaitFor(deadline, 10*time.Millisecond, "history cleanup", func() (bool, error) { return custodyZero(client, sessions[target-1]) })
 		}()
 		if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
 			return nil, err
 		}
-		operation, err := sql(deadline, store, fmt.Sprintf("SELECT operation_id FROM model_operation WHERE session_ref='measure/history-%d';", target-1))
+		operation, err := sql(deadline, store, fmt.Sprintf("SELECT operation_id FROM model_operation WHERE session_ref='%s';", sessions[target-1]))
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +325,7 @@ func history(binary, root string, e *retryEndpoint) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse future retry count %q: %w", futureText, err)
 		}
-		row, err := replaceDue(binary, directory, store, fmt.Sprintf("measure/history-%d", target-1), operation, fmt.Sprintf("history-operation-%d", target-1), target, future, e, deadline)
+		row, err := replaceDue(binary, directory, store, sessions[target-1], operation, fmt.Sprintf("history-operation-%d", target-1), target, future, e, deadline)
 		if err != nil {
 			return nil, err
 		}
@@ -398,10 +400,11 @@ func churn(binary, root string, e *retryEndpoint) (result map[string]any, result
 		return result, err
 	}
 	rows, work := measurement.CollectCompletedRounds(rounds, func(round int) (map[string]any, error) {
+		var session string
 		for index := 0; index < operationsPerRound; index++ {
 			ordinal := (round-1)*operationsPerRound + index
-			session := fmt.Sprintf("measure/churn-%d", ordinal)
-			if err := client.Submit(fmt.Sprintf("churn-%d", ordinal), session, fmt.Sprintf("churn-operation-%d", ordinal)); err != nil {
+			session, err = client.Submit(fmt.Sprintf("churn-%d", ordinal), "", fmt.Sprintf("churn-operation-%d", ordinal))
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -409,7 +412,7 @@ func churn(binary, root string, e *retryEndpoint) (result map[string]any, result
 		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn attempts", func() (bool, error) { return e.total("churn-operation-") == expected*2, nil }); err != nil {
 			return nil, err
 		}
-		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn cleanup", func() (bool, error) { return custodyZero(client, fmt.Sprintf("measure/churn-%d", expected-1)) }); err != nil {
+		if err := measurement.WaitFor(deadline, 10*time.Millisecond, "churn cleanup", func() (bool, error) { return custodyZero(client, session) }); err != nil {
 			return nil, err
 		}
 		sample, sampleError := measurement.SampleProcess(host.Process, filepath.Join(directory, fmt.Sprintf("footprint-round-%d.txt", round)))

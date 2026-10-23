@@ -73,19 +73,19 @@ func field(value map[string]any, names ...string) any {
 	return current
 }
 
-func configure(deadline measurement.Deadline, socket, store, workspace, session string) error {
+func configure(deadline measurement.Deadline, socket, store, workspace, key string) (string, error) {
 	omitted := optionalField{State: "omitted"}
 	provider := "codex"
 	model := "measurement-model"
-	value := configurationCommand{Version: "1", Kind: "configure", Store: store, Key: "configure-" + session, Session: session, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
+	value := configurationCommand{Version: "1", Kind: "configure", Store: store, Key: "configure-" + key, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
 	var response map[string]any
 	if err := measurement.ExchangeUnix(deadline, socket, "/v1/configure", value, &response); err != nil {
-		return err
+		return "", err
 	}
 	if field(response, "answer", "status") != "accepted" {
-		return fmt.Errorf("configuration failed: %v", response)
+		return "", fmt.Errorf("configuration failed: %v", response)
 	}
-	return nil
+	return measurement.ConfigurationSession(response)
 }
 
 func messageValue(store, key, session, text string) messageCommand {
@@ -146,8 +146,8 @@ func payloadCase(binary, workspace, parent string, size int) (row map[string]any
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
-	session := "measure/payload"
-	if err := configure(deadline, socket, store, workspace, session); err != nil {
+	session, err := configure(deadline, socket, store, workspace, "measure/payload")
+	if err != nil {
 		return nil, err
 	}
 	key := fmt.Sprintf("payload-%d", size)
@@ -204,8 +204,8 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 	defer func() {
 		measurement.JoinCleanup(&resultError, func() error { return host.Stop(measurement.TeardownAllowance) })
 	}()
-	session := "measure/history"
-	if err := configure(deadline, socket, store, workspace, session); err != nil {
+	session, err := configure(deadline, socket, store, workspace, "measure/history")
+	if err != nil {
 		return nil, err
 	}
 	admitted := 0

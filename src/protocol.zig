@@ -25,6 +25,15 @@ pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
+pub const session_id_bytes = 6;
+pub const session_alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+
+pub fn validSessionId(value: []const u8) bool {
+    if (value.len != session_id_bytes) return false;
+    for (value) |byte| if (std.mem.indexOfScalar(u8, session_alphabet, byte) == null) return false;
+    return true;
+}
+
 /// Exact peer address. The issuing Host authenticates the sender separately.
 pub const Address = struct {
     store: Bounded(max_store_bytes) = .{},
@@ -32,8 +41,8 @@ pub const Address = struct {
 
     pub fn validate(self: Address) !void {
         const path = self.store.slice();
-        if (path.len == 0 or path[0] != '/' or self.session.len == 0 or
-            !std.unicode.utf8ValidateSlice(path) or !std.unicode.utf8ValidateSlice(self.session.slice())) return error.InvalidRuiAddress;
+        if (path.len == 0 or path[0] != '/' or !validSessionId(self.session.slice()) or
+            !std.unicode.utf8ValidateSlice(path)) return error.InvalidRuiAddress;
         for (path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
         if (path.len > 1) {
             var components = std.mem.splitScalar(u8, path[1..], '/');

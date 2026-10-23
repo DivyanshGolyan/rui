@@ -45,8 +45,8 @@ def capture(state, binary, label, size, repetition):
     gate = home / "gate"
     # Keep the historical baseline's original syntax; migrate only the candidate.
     send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
-        "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--to",
-        json.dumps({"store": str(state / "offline-store"), "session": "resources/original"}), "--text", str(source)])
+        "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
+        str(state / "offline-store"), "--to", "k7m2qx", "--text", str(source)])
     process = subprocess.Popen([str(binary), *send],
         env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

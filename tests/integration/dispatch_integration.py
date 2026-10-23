@@ -75,11 +75,10 @@ def failed_response_export_case(state, processes, endpoints):
     endpoints[endpoint] = thread
     thread.start()
     store = state / "failed-response-export"
-    session = "direct/failed-response-export"
     host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     processes.append(host)
-    configure(state, store, "export-config", session, "gpt-6-sol")
-    configure(state, store, "export-other-config", "wrong-session", "gpt-6-sol")
+    session = configure(state, store, "export-config", None, "gpt-6-sol")
+    other_session = configure(state, store, "export-other-config", None, "gpt-6-sol")
     for label, code in (("empty", "malformed_provider_output"), ("binary", "provider_http_400")):
         message(state, store, f"export-{label}", session, label)
         result = wait_for(lambda: (value := observe(store, f"export-{label}")).get("result") and value, label)
@@ -123,7 +122,7 @@ def failed_response_export_case(state, processes, endpoints):
         metadata_path = root / metadata["body"].replace(".body", ".json")
         assert export(operation, "body") == expected, "body bytes changed in public export"
         assert export(operation, "metadata") == metadata_path.read_bytes(), "metadata bytes changed in public export"
-        export(operation, "body", target="wrong-session", error="ContentNotFound")
+        export(operation, "body", target=other_session, error="ContentNotFound")
         export(operation, "body", attempt="2", error="ContentNotFound")
     export("999999", "metadata", error="ContentNotFound")
     export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="conflicting")
@@ -231,8 +230,7 @@ def empty_response_retention_case(state, processes, endpoints, status):
     thread.start()
     host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     processes.append(host)
-    session = f"direct/{label}"
-    configure(state, store, label + "-config", session, "gpt-6-sol")
+    session = configure(state, store, label + "-config", None, "gpt-6-sol")
 
     def fail(key, code):
         message(state, store, key, session, "input")
@@ -387,10 +385,9 @@ def compaction_cases(state, processes, endpoints, releases):
         answer, _, _ = sse_answer(f"{route}-answer", f"{route}-reason", f"{route}-message", "recovered answer")
         endpoint, url = endpoint_for([overflow, (compact, gate), answer])
         store = state / f"compaction-{route}"
-        session = f"direct/compact-{route}"
         host = start_host(store, url)
         processes.append(host)
-        configure(state, store, f"{route}-config", session, "gpt-6-sol", instructions="baseline")
+        session = configure(state, store, f"{route}-config", None, "gpt-6-sol", instructions="baseline")
         settings = command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["compaction_trigger"] is None and settings["output_reservation"] == "0", settings
         message(state, store, f"{route}-first", session, "covered user input")
@@ -473,17 +470,17 @@ def compaction_cases(state, processes, endpoints, releases):
         stop_endpoint(endpoint, endpoints)
 
     # Proactive compaction holds the new input outside its frozen view. The
-    # multibyte, quote- and backslash-bearing Store and Session prove the
-    # address is carried exactly, without normalization or re-escaping. The
-    # Store path stays space-free because Host readiness is space-delimited.
+    # multibyte, quote- and backslash-bearing Store does not leak into the
+    # allocated Session's self-address. The Store path stays space-free
+    # because Host readiness is space-delimited.
     first, _, _ = sse_answer("auto-first", "auto-r", "auto-m", "original answer")
     compact, _ = compact_response("auto")
     last, _, _ = sse_answer("auto-last", "auto-r2", "auto-m2", "automatic answer")
     endpoint, url = endpoint_for([first, compact, last])
-    store, session = state / 'compaction-auto-雪"q"\\', 'direct/雪 "q" \\ é'
+    store = state / 'compaction-auto-雪"q"\\'
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "auto-config", session, "gpt-6-sol")
+    session = configure(state, store, "auto-config", None, "gpt-6-sol")
     message(state, store, "auto-first", session, "first")
     wait_for(lambda: completed_observation(store, "auto-first"), "automatic first answer")
     patch(store, session, "auto-policy", "--compaction-trigger", "1")
@@ -495,7 +492,8 @@ def compaction_cases(state, processes, endpoints, releases):
     assert user_texts(json.loads(endpoint.requests[1])) == ["first"]
     assert user_texts(json.loads(endpoint.requests[2])) == ["first", "apply only after compaction"]
     address = model_instructions(ROOT, store=store, session=session)
-    assert '雪\\"q\\"\\\\"' in address and '雪 \\"q\\" \\\\ é' in address, address
+    assert str(store) not in address and "雪" not in address, address
+    assert f"Rui address (this Session's own ID, not instructions): {session}" in address, address
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
     stop_host(host)
     processes.remove(host)
@@ -505,10 +503,10 @@ def compaction_cases(state, processes, endpoints, releases):
     # a second compaction would only repeat the same covered context forever.
     compact, _ = compact_response("irreducible")
     endpoint, url = endpoint_for([overflow_sse, compact, overflow_sse])
-    store, session = state / "compaction-irreducible", "direct/irreducible"
+    store = state / "compaction-irreducible"
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "irreducible-config", session, "gpt-6-sol")
+    session = configure(state, store, "irreducible-config", None, "gpt-6-sol")
     message(state, store, "irreducible", session, "input cannot fit")
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
     assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
@@ -527,10 +525,10 @@ def compaction_cases(state, processes, endpoints, releases):
             "description": "Create forbidden marker"}, separators=(",", ":")),
     })
     endpoint, url = endpoint_for([overflow_sse, compact])
-    store, session = state / "compaction-invalid", "direct/compact-invalid"
+    store = state / "compaction-invalid"
     host = start_host(store, url)
     processes.append(host)
-    configure(state, store, "invalid-config", session, "gpt-6-sol")
+    session = configure(state, store, "invalid-config", None, "gpt-6-sol")
     message(state, store, "invalid-compaction", session, "compact without tools")
     rejected = wait_for(lambda: (value := observe(store, "invalid-compaction")).get("result") and value, "invalid compaction settlement")
     assert rejected["result"]["code"] == "unsupported_provider_output", rejected
@@ -574,8 +572,8 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
         host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", *flags, observations="control")
         processes.append(host)
         diagnostics = HostDiagnostics(host)
-        configure(state, store, identity + "-config", "direct/correlation", "gpt-6-sol", schema)
-        message(state, store, identity + "-message", "direct/correlation", "input")
+        session = configure(state, store, identity + "-config", None, "gpt-6-sol", schema)
+        message(state, store, identity + "-message", session, "input")
         deadline = time.monotonic() + 15
 
         def settled():
@@ -584,7 +582,7 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
 
         result = wait_for(settled, label + " failure settlement", deadline=deadline)
         assert result["result"]["code"] == code, result
-        resources = wait_model_cleanup(diagnostics, store, "direct/correlation", result, deadline)
+        resources = wait_model_cleanup(diagnostics, store, session, result, deadline)
         assert not resources["dispatch_fenced"], resources
         assert result["processing"]["attempt"] == str(len(request_ids)), result
         attempts = [
@@ -606,7 +604,7 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
         processes.append(reopened)
         report = command(
             "session", "inspect", "--store", store,
-            "--session", "direct/correlation", "--profile", "full",
+            "--session", session, "--profile", "full",
         )
         operation = report["full"]["model_operations"][0]
         assert operation["request_id"] == (request_id or None), operation
@@ -638,7 +636,6 @@ def phased_message_cases(state, processes, endpoints):
 
     for phased in (True, False):
         label = "phased" if phased else "unphased"
-        session = f"direct/{label}"
         store = state / f"{label}-store"
         commentary = "commentary" if phased else None
         final = "final_answer" if phased else None
@@ -670,7 +667,7 @@ def phased_message_cases(state, processes, endpoints):
         url = f"http://127.0.0.1:{endpoint.server_port}/responses"
         host = start_host(store, url)
         processes.append(host)
-        configure(state, store, f"{label}-config", session, "gpt-6-luna")
+        session = configure(state, store, f"{label}-config", None, "gpt-6-luna")
         key = f"{label}-request"
         message(state, store, key, session, "Inspect the workspace")
         report = wait_for(lambda: (value := command("session", "inspect", "--store", store,
@@ -748,12 +745,12 @@ def phased_message_cases(state, processes, endpoints):
     store = state / "duplicate-finals-store"
     host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     processes.append(host)
-    configure(state, store, "duplicate-finals-config", "direct/bad-finals", "gpt-6-luna")
-    message(state, store, "duplicate-finals", "direct/bad-finals", "Reject the complete candidate")
+    session = configure(state, store, "duplicate-finals-config", None, "gpt-6-luna")
+    message(state, store, "duplicate-finals", session, "Reject the complete candidate")
     failure = wait_for(lambda: (value := observe(store, "duplicate-finals")).get("result") and value,
                        "duplicate final rejection")
     assert failure["result"]["code"] == "malformed_provider_output", failure
-    report = command("session", "inspect", "--store", store, "--session", "direct/bad-finals", "--profile", "full")
+    report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
     detail = json.loads(report["full"]["model_operations"][0]["resolution"]["content"]["text"])
     assert detail["reason"] == "MultipleFinalAnswers" and detail["stage"] == "response", detail
     stop_host(host)
@@ -832,10 +829,10 @@ def main(mode="all", correlation_case="all"):
         proposal_store = state / "proposal-store"
         proposal_host = start_host(proposal_store, proposal_url)
         processes.append(proposal_host)
-        configure(state, proposal_store, "proposal-config", "direct/proposal", "gpt-6-sol")
-        message(state, proposal_store, "proposal-message", "direct/proposal", "propose mixed calls")
+        proposal_session = configure(state, proposal_store, "proposal-config", None, "gpt-6-sol")
+        message(state, proposal_store, "proposal-message", proposal_session, "propose mixed calls")
         proposal = wait_for(
-            lambda: (value := command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full"))["actions"]["unresolved"] and value,
+            lambda: (value := command("session", "inspect", "--store", proposal_store, "--session", proposal_session, "--profile", "full"))["actions"]["unresolved"] and value,
             "complete exact Action collection",
         )
         assert proposal["actions"]["count"] == "2", proposal
@@ -848,15 +845,15 @@ def main(mode="all", correlation_case="all"):
         assert rejected_calls[0]["rejection"] == "unknown_tool", proposal
         first_request = proposal["actions"]["unresolved"][0]
         assert first_request["call_ordinal"] == "0", first_request
-        assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
-        assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
+        assert read_action(proposal_store, proposal_session, first_request["action"], "call-id") == calls[0][1].encode()
+        assert read_action(proposal_store, proposal_session, first_request["action"], "arguments") == calls[0][2].encode()
         second_before_denial = proposal["actions"]["unresolved"][1]
         assert second_before_denial["call_ordinal"] == "3", second_before_denial
         denied = subprocess.run(
             [
                 str(RUI), "action", "deny", "--store", str(proposal_store),
                 "--record", str(state / "proposal-denial.json"), "--key", "proposal-denial",
-                "--session", "direct/proposal", "--action", first_request["action"],
+                "--session", proposal_session, "--action", first_request["action"],
                 "--test-drop-reply", "after-commit",
             ],
             capture_output=True,
@@ -887,13 +884,13 @@ def main(mode="all", correlation_case="all"):
             "--kind", "permission-decision",
         )
         assert replay["answer"]["status"] == "accepted" and replay["answer"]["replayed"] is True, replay
-        recovered = command("session", "inspect", "--store", proposal_store, "--session", "direct/proposal", "--profile", "full")
+        recovered = command("session", "inspect", "--store", proposal_store, "--session", proposal_session, "--profile", "full")
         assert len([
             call for call in recovered["full"]["tool_calls"] if call["rejection"] is not None
         ]) == 2, recovered
         assert len(recovered["actions"]["unresolved"]) == 1, recovered
-        assert read_action(proposal_store, "direct/proposal", first_request["action"], "call-id") == calls[0][1].encode()
-        assert read_action(proposal_store, "direct/proposal", first_request["action"], "arguments") == calls[0][2].encode()
+        assert read_action(proposal_store, proposal_session, first_request["action"], "call-id") == calls[0][1].encode()
+        assert read_action(proposal_store, proposal_session, first_request["action"], "arguments") == calls[0][2].encode()
         # The Host holds its Store exclusively: canonical rows are checked
         # after it stops; later controls never touch these resolved rows.
         expected_action_rows = {}
@@ -904,16 +901,16 @@ def main(mode="all", correlation_case="all"):
         assert recovered["full"]["model_operations"][0]["resolution"]["code"] == "tool_proposals", recovered
         second = recovered["actions"]["unresolved"][0]
         assert second["call_ordinal"] == "3", second
-        assert read_action(proposal_store, "direct/proposal", second["action"], "call-id") == calls[3][1].encode()
-        assert read_action(proposal_store, "direct/proposal", second["action"], "arguments") == calls[3][2].encode()
+        assert read_action(proposal_store, proposal_session, second["action"], "call-id") == calls[3][1].encode()
+        assert read_action(proposal_store, proposal_session, second["action"], "arguments") == calls[3][2].encode()
         stopped = command(
             "session", "stop", "--store", proposal_store, "--record", state / "proposal-stop.json",
-            "--key", "proposal-stop", "--session", "direct/proposal",
+            "--key", "proposal-stop", "--session", proposal_session,
         )
         assert stopped["answer"]["status"] == "accepted", stopped
         stale = command(
             "action", "deny", "--store", proposal_store, "--record", state / "proposal-stale.json",
-            "--key", "proposal-stale", "--session", "direct/proposal", "--action", second["action"],
+            "--key", "proposal-stale", "--session", proposal_session, "--action", second["action"],
             expect=1,
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
@@ -921,8 +918,7 @@ def main(mode="all", correlation_case="all"):
 
         for index, order in enumerate(("denial-first", "stop-first")):
             order_calls, first_effect, second_effect = race_calls[index]
-            session = f"direct/{order}"
-            configure(state, proposal_store, f"{order}-config", session, "gpt-6-sol")
+            session = configure(state, proposal_store, f"{order}-config", None, "gpt-6-sol")
             message(state, proposal_store, f"{order}-message", session, f"race {order}")
             before = wait_for(
                 lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
@@ -1068,11 +1064,11 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{continuation_endpoint.server_port}/responses",
         )
         processes.append(continuation_host)
-        configure(state, continuation_store, "continuation-config", "direct/continuation", "gpt-6-sol")
-        message(state, continuation_store, "continuation-first", "direct/continuation", "make calls")
+        continuation_session = configure(state, continuation_store, "continuation-config", None, "gpt-6-sol")
+        message(state, continuation_store, "continuation-first", continuation_session, "make calls")
         continuation_report = wait_for(
             lambda: (lambda value: value if len(value["actions"]["unresolved"]) == 2 else None)(
-                command("session", "inspect", "--store", continuation_store, "--session", "direct/continuation")
+                command("session", "inspect", "--store", continuation_store, "--session", continuation_session)
             ),
             "continuation Actions",
         )
@@ -1088,10 +1084,10 @@ def main(mode="all", correlation_case="all"):
         command(
             "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-deny-3.json", "--key", "continuation-deny-3",
-            "--session", "direct/continuation", "--action", continuation_actions[1]["action"],
+            "--session", continuation_session, "--action", continuation_actions[1]["action"],
         )
         partial_results = command(
-            "session", "inspect", "--store", continuation_store, "--session", "direct/continuation"
+            "session", "inspect", "--store", continuation_store, "--session", continuation_session
         )
         assert len(partial_results["actions"]["unresolved"]) == 1, partial_results
         assert len(partial_results["actions"]["resolved"]) == 1, partial_results
@@ -1111,10 +1107,10 @@ def main(mode="all", correlation_case="all"):
         command(
             "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-deny-0.json", "--key", "continuation-deny-0",
-            "--session", "direct/continuation", "--action", continuation_actions[0]["action"],
+            "--session", continuation_session, "--action", continuation_actions[0]["action"],
         )
         complete_results = command(
-            "session", "inspect", "--store", continuation_store, "--session", "direct/continuation"
+            "session", "inspect", "--store", continuation_store, "--session", continuation_session
         )
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
@@ -1200,7 +1196,7 @@ def main(mode="all", correlation_case="all"):
         stale_denial = command(
             "action", "deny", "--store", continuation_store,
             "--record", state / "continuation-stale-denial.json",
-            "--key", "continuation-stale-denial", "--session", "direct/continuation",
+            "--key", "continuation-stale-denial", "--session", continuation_session,
             "--action", continuation_actions[0]["action"],
             expect=1,
         )
@@ -1233,12 +1229,12 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(continuation_host)
 
-        configure(state, continuation_store, "queued-config", "direct/queued-continuation", "gpt-6-sol")
+        queued_continuation_session = configure(state, continuation_store, "queued-config", None, "gpt-6-sol")
         message(
             state,
             continuation_store,
             "queued-first",
-            "direct/queued-continuation",
+            queued_continuation_session,
             "make queued calls",
         )
         queued_report = wait_for(
@@ -1248,7 +1244,7 @@ def main(mode="all", correlation_case="all"):
                     "--store",
                     continuation_store,
                     "--session",
-                    "direct/queued-continuation",
+                    queued_continuation_session,
                 )
             ),
             "queued-input continuation Action",
@@ -1266,7 +1262,7 @@ def main(mode="all", correlation_case="all"):
             state,
             continuation_store,
             "queued-second",
-            "direct/queued-continuation",
+            queued_continuation_session,
             "input queued during tool wait",
         )
         command(
@@ -1278,7 +1274,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "queued-denial",
             "--session",
-            "direct/queued-continuation",
+            queued_continuation_session,
             "--action",
             queued_action["action"],
         )
@@ -1345,7 +1341,7 @@ def main(mode="all", correlation_case="all"):
         success_host = start_host(success_store, success_url)
         processes.append(success_host)
         configure_lost_reply(
-            state, success_store, "success-config", "direct/success", "gpt-6-sol"
+            state, success_store, "success-config", None, "gpt-6-sol"
         )
         stop_host(success_host)
         processes.remove(success_host)
@@ -1363,6 +1359,7 @@ def main(mode="all", correlation_case="all"):
         )
         assert recovered_configuration["answer"]["status"] == "accepted", recovered_configuration
         assert recovered_configuration["answer"]["replayed"] is True, recovered_configuration
+        success_session = recovered_configuration["answer"]["session"]
         command(
             "session", "configure",
             "--store",
@@ -1372,12 +1369,12 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "success-tools",
             "--session",
-            "direct/success",
+            success_session,
             "--tools",
             "none",
         )
         message_lost_reply(
-            state, success_store, "success-first", "direct/success", "first question"
+            state, success_store, "success-first", success_session, "first question"
         )
         first_complete = wait_for(
             lambda: completed_observation(success_store, "success-first"),
@@ -1414,7 +1411,7 @@ def main(mode="all", correlation_case="all"):
         assert recovered_first["answer"]["replayed"] is True, recovered_first
         assert read_result(success_store, "success-first") == first_answer
         before_model_change = command(
-            "session", "inspect", "--store", success_store, "--session", "direct/success"
+            "session", "inspect", "--store", success_store, "--session", success_session
         )["session"]
         incompatible_args = (
             "session", "configure",
@@ -1425,7 +1422,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "incompatible-model",
             "--session",
-            "direct/success",
+            success_session,
             "--model",
             "gpt-6.1-sol",
             "--tools",
@@ -1447,7 +1444,7 @@ def main(mode="all", correlation_case="all"):
         assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
         assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
         after_model_change = command(
-            "session", "inspect", "--store", success_store, "--session", "direct/success"
+            "session", "inspect", "--store", success_store, "--session", success_session
         )["session"]
         assert after_model_change["model"] == "gpt-6-sol", after_model_change
         assert after_model_change["revision"] == before_model_change["revision"], (
@@ -1455,7 +1452,7 @@ def main(mode="all", correlation_case="all"):
             after_model_change,
         )
         message_lost_reply(
-            state, success_store, "success-second", "direct/success", "second question"
+            state, success_store, "success-second", success_session, "second question"
         )
         wait_for(
             lambda: completed_observation(success_store, "success-second"),
@@ -1466,7 +1463,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(success_endpoint.requests) == 2, "two successful requests")
         first_request = json.loads(success_endpoint.requests[0])
         second_request = json.loads(success_endpoint.requests[1])
-        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session="direct/success")
+        assert first_request["instructions"] == second_request["instructions"] == model_instructions(ROOT, store=success_store, session=success_session)
         assert first_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
@@ -1577,8 +1574,8 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{retry_endpoint.server_port}/responses",
         )
         processes.append(retry_host)
-        configure(state, retry_store, "retry-config", "direct/retry", "gpt-6-sol")
-        message(state, retry_store, "retry-message", "direct/retry", "retry exactly")
+        retry_session = configure(state, retry_store, "retry-config", None, "gpt-6-sol")
+        message(state, retry_store, "retry-message", retry_session, "retry exactly")
         retry_complete = wait_for(
             lambda: completed_observation(retry_store, "retry-message"),
             "temporary failures followed by saved answer",
@@ -1591,7 +1588,7 @@ def main(mode="all", correlation_case="all"):
         assert retry_endpoint.request_times[2] - retry_endpoint.request_times[1] >= 0.90
         assert retry_endpoint.requests[0] == retry_endpoint.requests[1]
         assert retry_endpoint.requests[1] == retry_endpoint.requests[2]
-        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session="direct/retry")
+        assert json.loads(retry_endpoint.requests[0])["instructions"] == model_instructions(ROOT, store=retry_store, session=retry_session)
         stop_host(retry_host)
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
@@ -1621,8 +1618,8 @@ def main(mode="all", correlation_case="all"):
         dated_store = state / "dated-retry-store"
         dated_host = start_host(dated_store, f"http://127.0.0.1:{dated_endpoint.server_port}/responses")
         processes.append(dated_host)
-        configure(state, dated_store, "dated-config", "direct/dated", "gpt-6-sol")
-        message(state, dated_store, "dated-message", "direct/dated", "retry date")
+        dated_session = configure(state, dated_store, "dated-config", None, "gpt-6-sol")
+        message(state, dated_store, "dated-message", dated_session, "retry date")
         dated_complete = wait_for(
             lambda: completed_observation(dated_store, "dated-message"),
             "expired Retry-After date after progressing body", timeout=12,
@@ -1660,14 +1657,14 @@ def main(mode="all", correlation_case="all"):
                 f"http://127.0.0.1:{permanent_endpoint.server_port}/responses",
             )
             processes.append(permanent_host)
-            configure(
-                state, permanent_store, f"permanent-config-{index}", "direct/permanent", "gpt-6-sol"
+            permanent_session = configure(
+                state, permanent_store, f"permanent-config-{index}", None, "gpt-6-sol"
             )
             message(
                 state,
                 permanent_store,
                 f"permanent-message-{index}",
-                "direct/permanent",
+                permanent_session,
                 "do not retry",
             )
             permanent_failure = wait_for(
@@ -1690,7 +1687,7 @@ def main(mode="all", correlation_case="all"):
             processes.append(reopened)
             report = command(
                 "session", "inspect", "--store", permanent_store,
-                "--session", "direct/permanent", "--profile", "full",
+                "--session", permanent_session, "--profile", "full",
             )
             operation = report["full"]["model_operations"][0]
             assert operation["request_id"] == request_id, operation
@@ -1734,18 +1731,18 @@ def main(mode="all", correlation_case="all"):
                 f"http://127.0.0.1:{disposition_endpoint.server_port}/responses",
             )
             processes.append(disposition_host)
-            configure(
+            session = configure(
                 state,
                 disposition_store,
                 f"{name}-config",
-                f"direct/{name}",
+                None,
                 "gpt-6-sol",
             )
             message(
                 state,
                 disposition_store,
                 f"{name}-message",
-                f"direct/{name}",
+                session,
                 "do not retry deterministic transport evidence",
             )
             failure = wait_for(
@@ -1782,18 +1779,18 @@ def main(mode="all", correlation_case="all"):
             "request-read",
         )
         processes.append(local_read_host)
-        configure(
+        local_read_session = configure(
             state,
             local_read_store,
             "local-read-config",
-            "direct/local-read",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             local_read_store,
             "local-read-message",
-            "direct/local-read",
+            local_read_session,
             "fence local scratch failure",
         )
         wait_for(
@@ -1846,18 +1843,18 @@ def main(mode="all", correlation_case="all"):
                 fault,
             )
             processes.append(identity_host)
-            configure(
+            session = configure(
                 state,
                 identity_store,
                 f"{fault}-config",
-                f"direct/{fault}",
+                None,
                 "gpt-6-sol",
             )
             message(
                 state,
                 identity_store,
                 f"{fault}-message",
-                f"direct/{fault}",
+                session,
                 fault,
             )
             wait_for(
@@ -1887,7 +1884,7 @@ def main(mode="all", correlation_case="all"):
                 "--store",
                 identity_store,
                 "--session",
-                f"direct/{fault}",
+                session,
             )["execution"]
             assert resources["scratch_used_bytes"] == "0", resources
             stop_host(offline)
@@ -1926,11 +1923,11 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{continued_endpoint.server_port}/responses",
         )
         processes.append(continued_host)
-        configure(
+        continued_retry_session = configure(
             state,
             continued_store,
             "continued-config",
-            "direct/continued-retry",
+            None,
             "gpt-6-sol",
             instructions="original instructions",
         )
@@ -1938,7 +1935,7 @@ def main(mode="all", correlation_case="all"):
             state,
             continued_store,
             "continued-first-message",
-            "direct/continued-retry",
+            continued_retry_session,
             "first input",
         )
         wait_for(
@@ -1949,7 +1946,7 @@ def main(mode="all", correlation_case="all"):
             state,
             continued_store,
             "continued-second-message",
-            "direct/continued-retry",
+            continued_retry_session,
             "historical retry input",
         )
         wait_for(lambda: len(continued_endpoint.requests) >= 2, "first continued Attempt")
@@ -1957,7 +1954,7 @@ def main(mode="all", correlation_case="all"):
             state,
             continued_store,
             "continued-new-instructions",
-            "direct/continued-retry",
+            continued_retry_session,
             "gpt-6-sol",
             instructions="new instructions",
         )
@@ -1965,7 +1962,7 @@ def main(mode="all", correlation_case="all"):
             state,
             continued_store,
             "continued-later-message",
-            "direct/continued-retry",
+            continued_retry_session,
             "unselected later input",
         )
         continued_retry_release.set()
@@ -1974,7 +1971,7 @@ def main(mode="all", correlation_case="all"):
         frozen_retry = json.loads(continued_endpoint.requests[2])
         # Later settings cannot re-address or re-baseline the replacement Attempt.
         assert frozen_retry["instructions"] == model_instructions(
-            ROOT, "original instructions", store=continued_store, session="direct/continued-retry"
+            ROOT, "original instructions", store=continued_store, session=continued_retry_session
         ), frozen_retry
         expected_private = dict(continued_reasoning)
         expected_private.pop("created_by")
@@ -2050,12 +2047,12 @@ def main(mode="all", correlation_case="all"):
             evidence_store = state / f"evidence-{name}-store"
             evidence_host = start_host(evidence_store, evidence_url)
             processes.append(evidence_host)
-            configure(state, evidence_store, f"evidence-{name}-config", f"direct/evidence-{name}", "gpt-6-sol")
+            session = configure(state, evidence_store, f"evidence-{name}-config", None, "gpt-6-sol")
             message(
                 state,
                 evidence_store,
                 f"evidence-{name}-message",
-                f"direct/evidence-{name}",
+                session,
                 "evidence",
             )
             wait_for(
@@ -2109,18 +2106,18 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{contradictory_endpoint.server_port}/responses",
         )
         processes.append(contradictory_host)
-        configure(
+        contradictory_evidence_session = configure(
             state,
             contradictory_store,
             "contradictory-config",
-            "direct/contradictory-evidence",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             contradictory_store,
             "contradictory-message",
-            "direct/contradictory-evidence",
+            contradictory_evidence_session,
             "contradictory evidence",
         )
         contradictory_failure = wait_for(
@@ -2157,7 +2154,7 @@ def main(mode="all", correlation_case="all"):
         }, restarted_failure
         report = command(
             "session", "inspect", "--store", contradictory_store,
-            "--session", "direct/contradictory-evidence", "--profile", "full",
+            "--session", contradictory_evidence_session, "--profile", "full",
         )
         operation = report["full"]["model_operations"][0]
         assert operation["request_id"] == contradictory_request_id, operation
@@ -2210,7 +2207,7 @@ def main(mode="all", correlation_case="all"):
             pending_store, f"http://127.0.0.1:{pending_endpoint.server_port}/responses"
         )
         processes.append(pending_host)
-        configure(state, pending_store, "pending-config", "direct/pending", "gpt-6-sol")
+        pending_session = configure(state, pending_store, "pending-config", None, "gpt-6-sol")
         command(
             "session", "configure",
             "--store",
@@ -2220,13 +2217,13 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "pending-tools",
             "--session",
-            "direct/pending",
+            pending_session,
             "--tools",
             "none",
         )
-        message(state, pending_store, "pending-first", "direct/pending", "before cutoff")
+        message(state, pending_store, "pending-first", pending_session, "before cutoff")
         wait_for(lambda: len(pending_endpoint.requests) == 1, "first frozen pending request")
-        message(state, pending_store, "pending-second", "direct/pending", "after cutoff")
+        message(state, pending_store, "pending-second", pending_session, "after cutoff")
         assert observe(pending_store, "pending-second")["queue"]["status"] == "queued"
         first_release.set()
         wait_for(lambda: len(pending_endpoint.requests) == 2, "next input boundary request")
@@ -2235,7 +2232,7 @@ def main(mode="all", correlation_case="all"):
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
-        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session="direct/pending")
+        assert pending_request["instructions"] == model_instructions(ROOT, store=pending_store, session=pending_session)
         assert pending_request["input"] == [
             {"role": "user", "content": [{"type": "input_text", "text": "before cutoff"}]},
             expected_pending_reasoning,
@@ -2273,11 +2270,11 @@ def main(mode="all", correlation_case="all"):
             )
             processes.append(schema_host)
             schema_diagnostics = HostDiagnostics(schema_host)
-            configure(
+            unsupported_schema_session = configure(
                 state,
                 schema_store,
                 f"schema-config-{index}",
-                "direct/unsupported-schema",
+                None,
                 "gpt-6-sol",
                 {"type": "object"},
             )
@@ -2285,7 +2282,7 @@ def main(mode="all", correlation_case="all"):
                 state,
                 schema_store,
                 f"schema-message-{index}",
-                "direct/unsupported-schema",
+                unsupported_schema_session,
                 "return an object",
             )
             schema_deadline = time.monotonic() + 8
@@ -2296,7 +2293,7 @@ def main(mode="all", correlation_case="all"):
                 assert remaining > 0, "schema result exceeded its original deadline"
                 execution = command(
                     "session", "inspect", "--store", schema_store,
-                    "--session", "direct/unsupported-schema",
+                    "--session", unsupported_schema_session,
                     timeout=remaining,
                 )["execution"]
                 assert not execution["dispatch_fenced"], ("schema rejection must precede metadata acquisition", execution)
@@ -2308,12 +2305,12 @@ def main(mode="all", correlation_case="all"):
                 deadline=schema_deadline,
             )
             assert schema_failure["result"]["code"] == "unsupported_output_schema", schema_failure
-            resources = wait_model_cleanup(schema_diagnostics, schema_store, "direct/unsupported-schema", schema_failure, schema_deadline)
+            resources = wait_model_cleanup(schema_diagnostics, schema_store, unsupported_schema_session, schema_failure, schema_deadline)
             assert not resources["dispatch_fenced"], resources
             assert not list((schema_store / "scratch").glob("response-metadata-*.tmp"))
             before_operation = command(
                 "session", "inspect", "--store", schema_store,
-                "--session", "direct/unsupported-schema", "--profile", "full",
+                "--session", unsupported_schema_session, "--profile", "full",
             )["full"]["model_operations"][0]
             stop_host(schema_host)
             assert_model_cleanup_census(schema_diagnostics, schema_failure)
@@ -2330,7 +2327,7 @@ def main(mode="all", correlation_case="all"):
             processes.append(reopened)
             report = command(
                 "session", "inspect", "--store", schema_store,
-                "--session", "direct/unsupported-schema", "--profile", "full",
+                "--session", unsupported_schema_session, "--profile", "full",
             )
             operation = report["full"]["model_operations"][0]
             assert operation == before_operation, operation
@@ -2490,12 +2487,12 @@ def main(mode="all", correlation_case="all"):
                 invalid_store, f"http://127.0.0.1:{invalid_endpoint.server_port}/responses"
             )
             processes.append(invalid_host)
-            configure(state, invalid_store, f"invalid-config-{index}", f"direct/invalid-{index}", "gpt-6-sol")
+            session = configure(state, invalid_store, f"invalid-config-{index}", None, "gpt-6-sol")
             message(
                 state,
                 invalid_store,
                 f"invalid-message-{index}",
-                f"direct/invalid-{index}",
+                session,
                 "candidate",
             )
             rejected = wait_for(
@@ -2509,7 +2506,7 @@ def main(mode="all", correlation_case="all"):
             expected_request_id = None if index == 0 else f"request-{index + 1}"
             before_operation = command(
                 "session", "inspect", "--store", invalid_store,
-                "--session", f"direct/invalid-{index}", "--profile", "full",
+                "--session", session, "--profile", "full",
             )["full"]["model_operations"][0]
             assert before_operation["request_id"] == expected_request_id, before_operation
             stop_host(invalid_host)
@@ -2529,7 +2526,7 @@ def main(mode="all", correlation_case="all"):
             processes.append(reopened)
             report = command(
                 "session", "inspect", "--store", invalid_store,
-                "--session", f"direct/invalid-{index}", "--profile", "full",
+                "--session", session, "--profile", "full",
             )
             operation = report["full"]["model_operations"][0]
             assert operation["operation"] == before_operation["operation"], operation
@@ -2603,9 +2600,10 @@ def main(mode="all", correlation_case="all"):
             concurrent_store, f"http://127.0.0.1:{concurrent_endpoint.server_port}/responses", active_capacity=500,
         )
         processes.append(concurrent_host)
+        concurrent_sessions = {}
         for text in (*concurrent_bodies, "succeed"):
-            configure(state, concurrent_store, f"{text}-config", f"direct/{text}", "gpt-6-sol")
-            message(state, concurrent_store, f"{text}-message", f"direct/{text}", text)
+            concurrent_sessions[text] = configure(state, concurrent_store, f"{text}-config", None, "gpt-6-sol")
+            message(state, concurrent_store, f"{text}-message", concurrent_sessions[text], text)
         wait_for(lambda: len(concurrent_endpoint.requests) == 5, "concurrent requests in flight")
         wait_for(lambda: completed_observation(concurrent_store, "succeed-message"), "concurrent success")
         assert failed_response_records(concurrent_store) == []
@@ -2620,7 +2618,7 @@ def main(mode="all", correlation_case="all"):
         def saved_failures(text):
             operation, = command(
                 "session", "inspect", "--store", concurrent_store,
-                "--session", f"direct/{text}", "--profile", "full",
+                "--session", concurrent_sessions[text], "--profile", "full",
             )["full"]["model_operations"][-1:]
             return operation
 
@@ -2643,14 +2641,14 @@ def main(mode="all", correlation_case="all"):
         blocker = record_root / "response-99-1-1.json.tmp"
         blocker.mkdir(mode=0o700)
         before_fault = sorted(path.name for path in record_root.iterdir())
-        message(state, concurrent_store, "blocked-message", "direct/concurrent-0", "blocked")
+        message(state, concurrent_store, "blocked-message", concurrent_sessions["concurrent-0"], "blocked")
         assert failed_result("blocked-message") == concurrent_codes["concurrent-0"]
         blocked = saved_failures("concurrent-0")
         assert blocked["resolution"]["code"] == concurrent_codes["concurrent-0"], blocked
         assert json.loads(blocked["resolution"]["content"]["text"])["reason"], blocked
         assert sorted(path.name for path in record_root.iterdir()) == before_fault
         blocker.rmdir()
-        message(state, concurrent_store, "after-fault-message", "direct/concurrent-1", "after-fault")
+        message(state, concurrent_store, "after-fault-message", concurrent_sessions["concurrent-1"], "after-fault")
         assert failed_result("after-fault-message") == concurrent_codes["concurrent-1"]
         records = failed_response_records(concurrent_store)
         assert len(records) == 5, records
@@ -2660,7 +2658,7 @@ def main(mode="all", correlation_case="all"):
 
         # Local metadata acquisition can fail after a complete provider
         # response; it must not discard that failed request's captured bytes.
-        message(state, concurrent_store, "metadata-blocked-message", "direct/concurrent-1", "metadata-blocked")
+        message(state, concurrent_store, "metadata-blocked-message", concurrent_sessions["concurrent-1"], "metadata-blocked")
         wait_for(lambda: len(concurrent_endpoint.requests) == 8, "metadata request awaiting response")
         metadata_operation = saved_failures("concurrent-1")["operation"]
         metadata_blocker = concurrent_store / "scratch" / f"response-metadata-{metadata_operation}-1.tmp"
@@ -2711,8 +2709,8 @@ def main(mode="all", correlation_case="all"):
                 fault,
             )
             processes.append(fault_host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
-            message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
+            session = configure(state, fault_store, f"{fault}-config", None, "gpt-6-sol")
+            message(state, fault_store, f"{fault}-message", session, "fault")
             rejected = wait_for(
                 lambda key=f"{fault}-message": (
                     value := observe(fault_store, key)
@@ -2737,8 +2735,8 @@ def main(mode="all", correlation_case="all"):
                 fault,
             )
             processes.append(fault_host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
-            message(state, fault_store, f"{fault}-message", f"direct/{fault}", "fault")
+            session = configure(state, fault_store, f"{fault}-config", None, "gpt-6-sol")
+            message(state, fault_store, f"{fault}-message", session, "fault")
             wait_for(lambda: fault_host.poll() is not None, f"{fault} fenced shutdown")
             assert fault_host.returncode != 0
             stop_host(fault_host)
@@ -2771,8 +2769,8 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(scratch_host)
         scratch_diagnostics = HostDiagnostics(scratch_host)
-        configure(state, scratch_store, "scratch-config", "direct/response-scratch", "gpt-6-sol")
-        message(state, scratch_store, "scratch-message", "direct/response-scratch", "scratch")
+        response_scratch_session = configure(state, scratch_store, "scratch-config", None, "gpt-6-sol")
+        message(state, scratch_store, "scratch-message", response_scratch_session, "scratch")
         scratch_deadline = time.monotonic() + 8
         rejected = wait_for(
             lambda: (value := observe(
@@ -2784,7 +2782,7 @@ def main(mode="all", correlation_case="all"):
         )
         assert rejected["result"]["code"] == "response_scratch_exhausted", rejected
         wait_model_cleanup(
-            scratch_diagnostics, scratch_store, "direct/response-scratch",
+            scratch_diagnostics, scratch_store, response_scratch_session,
             rejected, scratch_deadline,
         )
         stop_host(scratch_host)
@@ -2809,9 +2807,9 @@ def main(mode="all", correlation_case="all"):
         processes.append(growth_host)
         growth_diagnostics = HostDiagnostics(growth_host)
         growth_peers = PeerCensus(growth_diagnostics)
-        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-a", "direct/growth-a", "gpt-6-sol"))
-        growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-b", "direct/growth-b", "gpt-6-sol"))
-        growth_peers.call("message", lambda: message(state, growth_store, "growth-count", "direct/growth-a", "count"))
+        growth_a_session = growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-a", None, "gpt-6-sol"))
+        growth_b_session = growth_peers.call("configure", lambda: configure(state, growth_store, "growth-config-b", None, "gpt-6-sol"))
+        growth_peers.call("message", lambda: message(state, growth_store, "growth-count", growth_a_session, "count"))
         count_deadline = time.monotonic() + 8
         counted = wait_for(
             lambda: growth_peers.call("observe", lambda: completed_observation(
@@ -2823,10 +2821,10 @@ def main(mode="all", correlation_case="all"):
             growth_store, "growth-count", deadline=count_deadline,
         ), deadline=count_deadline) == b"count answer"
         wait_model_cleanup(
-            growth_diagnostics, growth_store, "direct/growth-a", counted, count_deadline,
+            growth_diagnostics, growth_store, growth_a_session, counted, count_deadline,
             peers=growth_peers,
         )
-        growth_peers.call("message", lambda: message(state, growth_store, "growth-bytes", "direct/growth-b", "bytes"))
+        growth_peers.call("message", lambda: message(state, growth_store, "growth-bytes", growth_b_session, "bytes"))
         bytes_deadline = time.monotonic() + 20
         imported = wait_for(
             lambda: growth_peers.call("observe", lambda: completed_observation(
@@ -2839,7 +2837,7 @@ def main(mode="all", correlation_case="all"):
             growth_store, "growth-bytes", deadline=bytes_deadline,
         ), deadline=bytes_deadline) == large_answer.encode()
         wait_model_cleanup(
-            growth_diagnostics, growth_store, "direct/growth-b", imported, bytes_deadline,
+            growth_diagnostics, growth_store, growth_b_session, imported, bytes_deadline,
             peers=growth_peers,
         )
         # A failed caller destination may retain a prefix, but it cannot make
@@ -2894,7 +2892,7 @@ def main(mode="all", correlation_case="all"):
             actual_digest = hashlib.file_digest(complete_source, "sha256").digest()
         assert actual_digest == hashlib.sha256(large_answer.encode()).digest()
         resources = growth_peers.call("inspect", lambda: command(
-            "session", "inspect", "--store", growth_store, "--session", "direct/growth-b"
+            "session", "inspect", "--store", growth_store, "--session", growth_b_session
         ))["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(growth_host)
@@ -2925,12 +2923,12 @@ def main(mode="all", correlation_case="all"):
         projection_url = f"http://127.0.0.1:{projection_endpoint.server_port}/responses"
         host = start_host(projection_store, projection_url)
         processes.append(host)
-        configure(state, projection_store, "projection-config", "direct/projection", "gpt-6-sol", instructions="caller-first")
-        message(state, projection_store, "projection-first", "direct/projection", "first")
+        projection_session = configure(state, projection_store, "projection-config", None, "gpt-6-sol", instructions="caller-first")
+        message(state, projection_store, "projection-first", projection_session, "first")
         wait_for(lambda: completed_observation(projection_store, "projection-first"), "projected answer")
         assert read_result(projection_store, "projection-first") == projected_answer
-        configure(state, projection_store, "projection-update", "direct/projection", "gpt-6-sol", instructions=projected_answer.decode())
-        message(state, projection_store, "projection-second", "direct/projection", projected_answer.decode())
+        configure(state, projection_store, "projection-update", projection_session, "gpt-6-sol", instructions=projected_answer.decode())
+        message(state, projection_store, "projection-second", projection_session, projected_answer.decode())
         wait_for(lambda: completed_observation(projection_store, "projection-second"), "deduplicated answer")
         assert read_result(projection_store, "projection-second") == b"caller-first"
         replay = json.loads(projection_endpoint.requests[1])["input"]
@@ -2969,11 +2967,11 @@ def main(mode="all", correlation_case="all"):
             "required": ["answer"],
             "additionalProperties": False,
         }
-        frozen_peers.call("configure", lambda: configure(state, store, "config-a", "direct/main", "gpt-6-sol", output_schema, "A"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-b", "direct/main", "gpt-6-sol", instructions="B"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a", "direct/main", "gpt-6-sol", instructions="A"))
-        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a-again", "direct/main", "gpt-6-sol", instructions="A"))
-        frozen_peers.call("message", lambda: message(state, store, "message-a", "direct/main", 'first "message"\n'))
+        main_session = frozen_peers.call("configure", lambda: configure(state, store, "config-a", None, "gpt-6-sol", output_schema, "A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-b", main_session, "gpt-6-sol", instructions="B"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a", main_session, "gpt-6-sol", instructions="A"))
+        frozen_peers.call("configure", lambda: configure(state, store, "instructions-a-again", main_session, "gpt-6-sol", instructions="A"))
+        frozen_peers.call("message", lambda: message(state, store, "message-a", main_session, 'first "message"\n'))
         if not endpoint.received.wait(8):
             raise AssertionError("endpoint did not receive committed request")
         active_model_change = frozen_peers.call("configure", lambda: command(
@@ -2985,7 +2983,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "config-b",
             "--session",
-            "direct/main",
+            main_session,
             "--model",
             "gpt-6.1-sol",
             "--tools",
@@ -2995,14 +2993,14 @@ def main(mode="all", correlation_case="all"):
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
         active_settings = frozen_peers.call("inspect", lambda: command(
-            "session", "inspect", "--store", store, "--session", "direct/main"
+            "session", "inspect", "--store", store, "--session", main_session
         ))["session"]
         assert active_settings["model"] == "gpt-6-sol", active_settings
         assert active_settings["tools"] == ["bash"], active_settings
-        frozen_peers.call("message", lambda: message(state, store, "message-b", "direct/main", "later message"))
+        frozen_peers.call("message", lambda: message(state, store, "message-b", main_session, "later message"))
         assert len(endpoint.requests) == 1
         resources = frozen_peers.call("inspect", lambda: command(
-            "session", "inspect", "--store", store, "--session", "direct/main"
+            "session", "inspect", "--store", store, "--session", main_session
         ))["execution"]
         assert int(resources["scratch_used_bytes"]) == len(endpoint.requests[0]), resources
         # Mutable settings accepted while the request is in flight apply only
@@ -3016,7 +3014,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "mutable-during-flight",
             "--session",
-            "direct/main",
+            main_session,
             "--tools",
             "none",
             "--text-output",
@@ -3044,7 +3042,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "post-failure-model",
             "--session",
-            "direct/main",
+            main_session,
             "--model",
             "gpt-6.1-sol",
             "--permission-mode",
@@ -3069,7 +3067,7 @@ def main(mode="all", correlation_case="all"):
             "store": False,
             "stream": True,
             "include": ["reasoning.encrypted_content"],
-            "instructions": model_instructions(ROOT, "A", store=store, session="direct/main"),
+            "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
             "input": [
                 {
                     "role": "user",
@@ -3129,7 +3127,7 @@ def main(mode="all", correlation_case="all"):
         processes.append(offline)
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
         assert observe(store, "message-b")["result"]["code"] == "provider_http_422"
-        message(state, store, "message-c", "direct/main", "after restart")
+        message(state, store, "message-c", main_session, "after restart")
         assert observe(store, "message-c")["queue"]["status"] == "queued"
         stop_host(offline)
         processes.remove(offline)
@@ -3142,7 +3140,7 @@ def main(mode="all", correlation_case="all"):
             {"role": "user", "content": [{"type": "input_text", "text": "later message"}]}
         ]
         assert successor["input"] == later_input, successor
-        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session="direct/main"), successor
+        assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session), successor
         assert successor["model"] == "gpt-6-sol", successor
         assert successor["tools"] == [], successor
         assert "text" not in successor, successor
@@ -3190,18 +3188,18 @@ def main(mode="all", correlation_case="all"):
             accelerated_retries=False,
         )
         processes.append(preparation_host)
-        configure(
+        preparation_session = configure(
             state,
             preparation_store,
             "preparation-config",
-            "direct/preparation",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             preparation_store,
             "preparation-message",
-            "direct/preparation",
+            preparation_session,
             "known preparation failure",
         )
 
@@ -3214,7 +3212,7 @@ def main(mode="all", correlation_case="all"):
                 "--store",
                 preparation_store,
                 "--session",
-                "direct/preparation",
+                preparation_session,
             )["execution"]
             if resources["custody_occupied"] != "0" or resources["dispatch_fenced"]:
                 return None
@@ -3279,7 +3277,7 @@ def main(mode="all", correlation_case="all"):
             "--store",
             preparation_store,
             "--session",
-            "direct/preparation",
+            preparation_session,
         )["execution"]
         assert resources["dispatch_fenced"] is False, resources
         stop_host(preparation_host)
@@ -3306,14 +3304,14 @@ def main(mode="all", correlation_case="all"):
             "5000",
         )
         processes.append(prelaunch_host)
-        configure(
-            state, prelaunch_store, "prelaunch-config", "direct/prelaunch", "gpt-6-sol"
+        prelaunch_session = configure(
+            state, prelaunch_store, "prelaunch-config", None, "gpt-6-sol"
         )
         message(
             state,
             prelaunch_store,
             "prelaunch-message",
-            "direct/prelaunch",
+            prelaunch_session,
             "crash before launch",
         )
 
@@ -3377,7 +3375,7 @@ def main(mode="all", correlation_case="all"):
             "--store",
             prelaunch_store,
             "--session",
-            "direct/prelaunch",
+            prelaunch_session,
         )["execution"]
         assert resources["dispatch_fenced"] is False, resources
         stop_host(prelaunch_host)
@@ -3409,14 +3407,14 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{launched_endpoint.server_port}/responses",
         )
         processes.append(launched_host)
-        configure(
-            state, launched_store, "launched-config", "direct/launched", "gpt-6-sol"
+        launched_session = configure(
+            state, launched_store, "launched-config", None, "gpt-6-sol"
         )
         message(
             state,
             launched_store,
             "launched-message",
-            "direct/launched",
+            launched_session,
             "crash after launch",
         )
         wait_for(lambda: len(launched_endpoint.requests) == 1, "launched Attempt")
@@ -3456,12 +3454,12 @@ def main(mode="all", correlation_case="all"):
             "5000",
         )
         processes.append(sealed_host)
-        configure(state, sealed_store, "sealed-config", "direct/sealed", "gpt-6-sol")
+        sealed_session = configure(state, sealed_store, "sealed-config", None, "gpt-6-sol")
         message(
             state,
             sealed_store,
             "sealed-message",
-            "direct/sealed",
+            sealed_session,
             "crash after seal",
         )
         wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
@@ -3506,14 +3504,14 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{committed_endpoint.server_port}/responses",
         )
         processes.append(committed_host)
-        configure(
-            state, committed_store, "committed-config", "direct/committed", "gpt-6-sol"
+        committed_session = configure(
+            state, committed_store, "committed-config", None, "gpt-6-sol"
         )
         message(
             state,
             committed_store,
             "committed-message",
-            "direct/committed",
+            committed_session,
             "crash after result commit",
         )
         wait_for(
@@ -3565,25 +3563,25 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(durable_wait_host)
         capacity_peers = PeerCensus(HostDiagnostics(durable_wait_host))
-        capacity_peers.call("configure", lambda: configure(
+        capacity_wait_a_session = capacity_peers.call("configure", lambda: configure(
             state,
             durable_wait_store,
             "capacity-wait-config-a",
-            "direct/capacity-wait-a",
+            None,
             "gpt-6-sol",
         ))
-        capacity_peers.call("configure", lambda: configure(
+        capacity_wait_b_session = capacity_peers.call("configure", lambda: configure(
             state,
             durable_wait_store,
             "capacity-wait-config-b",
-            "direct/capacity-wait-b",
+            None,
             "gpt-6-sol",
         ))
         capacity_peers.call("message", lambda: message(
             state,
             durable_wait_store,
             "capacity-wait-message-a",
-            "direct/capacity-wait-a",
+            capacity_wait_a_session,
             "occupy capacity",
         ))
         wait_for(lambda: len(capacity_endpoint.requests) == 1, "occupied capacity")
@@ -3594,13 +3592,13 @@ def main(mode="all", correlation_case="all"):
             "--store",
             durable_wait_store,
             "--session",
-            "direct/capacity-wait-a",
+            capacity_wait_a_session,
         ))["execution"]["scratch_used_bytes"]
         capacity_peers.call("message", lambda: message(
             state,
             durable_wait_store,
             "capacity-wait-message-b",
-            "direct/capacity-wait-b",
+            capacity_wait_b_session,
             "wait durably",
         ))
         scratch_after = capacity_peers.call("inspect", lambda: command(
@@ -3608,7 +3606,7 @@ def main(mode="all", correlation_case="all"):
             "--store",
             durable_wait_store,
             "--session",
-            "direct/capacity-wait-b",
+            capacity_wait_b_session,
         ))["execution"]["scratch_used_bytes"]
         assert scratch_after == scratch_before, (scratch_before, scratch_after)
         queued_observation = capacity_peers.call("observe", lambda: observe(durable_wait_store, "capacity-wait-message-b"))
@@ -3676,36 +3674,36 @@ def main(mode="all", correlation_case="all"):
         processes.append(stale_host)
         for name in ("older", "newer"):
             expected_requests = len(stale_endpoint.requests) + 1
-            configure(
+            session = configure(
                 state,
                 stale_store,
                 f"stale-{name}-config",
-                f"direct/stale-{name}",
+                None,
                 "gpt-6-sol",
             )
             message(
                 state,
                 stale_store,
                 f"stale-{name}-message",
-                f"direct/stale-{name}",
+                session,
                 f"stale-{name}",
             )
             wait_for(
                 lambda expected=expected_requests: len(stale_endpoint.requests) >= expected,
                 f"{name} initial Attempt",
             )
-        configure(
+        stale_capacity_session = configure(
             state,
             stale_store,
             "stale-capacity-config",
-            "direct/stale-capacity",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             stale_store,
             "stale-capacity-message",
-            "direct/stale-capacity",
+            stale_capacity_session,
             "stale-capacity",
         )
         time.sleep(0.2)
@@ -3752,27 +3750,28 @@ def main(mode="all", correlation_case="all"):
         # An offline Host queues the admission without dispatching it.
         backlog_host = start_host(backlog_store, None)
         processes.append(backlog_host)
-        configure(state, backlog_store, "backlog-config", "direct/backlog", "gpt-6-sol")
+        backlog_session = configure(state, backlog_store, "backlog-config", None, "gpt-6-sol")
         message(
             state,
             backlog_store,
             "backlog-message",
-            "direct/backlog",
+            backlog_session,
             "due-behind-future-history",
         )
         time.sleep(0.2)
         assert backlog_endpoint.requests == []
+        backlog_history = [configure(state, backlog_store, f"backlog-history-{index}", None, "gpt-6-sol")
+                           for index in range(1, 101)]
         stop_host(backlog_host)
         processes.remove(backlog_host)
         database = sqlite3.connect(backlog_store / "rui.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
-            database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<100) "
+            database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
-                "SELECT value,value,printf('future-%d',value),1,1,1,1,1,0,9223372036854775807,0 FROM sequence"
+                "VALUES(?,?,?,1,1,1,1,1,0,9223372036854775807,0)",
+                [(index, index, session) for index, session in enumerate(backlog_history, 1)],
             )
             database.commit()
         finally:
@@ -3787,18 +3786,18 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(backlog_host)
         wait_for(lambda: len(backlog_endpoint.requests) == 1, "future-backlog initial Attempt")
-        configure(
+        backlog_stall_session = configure(
             state,
             backlog_store,
             "backlog-stall-config",
-            "direct/backlog-stall",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             backlog_store,
             "backlog-stall-message",
-            "direct/backlog-stall",
+            backlog_stall_session,
             "occupy-one-slot",
         )
         wait_for(lambda: len(backlog_endpoint.requests) >= 2, "stalled live backlog request")
@@ -3850,20 +3849,18 @@ def main(mode="all", correlation_case="all"):
         recovery_store = state / "exhausted-control-store"
         recovery_host = start_host(recovery_store, None)
         processes.append(recovery_host)
-        for index in range(1, 101):
-            configure(state, recovery_store, f"recovery-history-{index}", f"recovery-{index}", "gpt-6-sol")
+        recovery_history = [configure(state, recovery_store, f"recovery-history-{index}", None, "gpt-6-sol")
+                            for index in range(1, 101)]
         stop_host(recovery_host)
         processes.remove(recovery_host)
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
         try:
             database.execute("PRAGMA foreign_keys=OFF")
-            database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL "
-                "SELECT value+1 FROM sequence WHERE value<100) "
+            database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
                 "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
-                "SELECT value,value,printf('recovery-%d',value),1,1,1,1,1,0,9223372036854775807,0 "
-                "FROM sequence"
+                "VALUES(?,?,?,1,1,1,1,1,0,9223372036854775807,0)",
+                [(index, index, session) for index, session in enumerate(recovery_history, 1)],
             )
             database.commit()
         finally:
@@ -3877,19 +3874,20 @@ def main(mode="all", correlation_case="all"):
             "60000,60000,60000",
         )
         processes.append(recovery_host)
+        recovery_sessions = {}
         for name in ("due", "sentinel"):
-            configure(
+            recovery_sessions[name] = configure(
                 state,
                 recovery_store,
                 f"recovery-{name}-config",
-                f"direct/recovery-{name}",
+                None,
                 "gpt-6-sol",
             )
             message(
                 state,
                 recovery_store,
                 f"recovery-{name}-message",
-                f"direct/recovery-{name}",
+                recovery_sessions[name],
                 f"recovery-{name}",
             )
         wait_for(lambda: len(recovery_endpoint.requests) == 2, "recovery setup Attempts")
@@ -3899,7 +3897,7 @@ def main(mode="all", correlation_case="all"):
                 "--store",
                 recovery_store,
                 "--session",
-                "direct/recovery-sentinel",
+                recovery_sessions["sentinel"],
             )["execution"]["custody_occupied"]
             == "0",
             "recovery setup cleanup",
@@ -3908,18 +3906,18 @@ def main(mode="all", correlation_case="all"):
         processes.remove(recovery_host)
         recovery_host = start_host(recovery_store, None)
         processes.append(recovery_host)
-        configure(
+        recovery_new_session = configure(
             state,
             recovery_store,
             "recovery-new-config",
-            "direct/recovery-new",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             recovery_store,
             "recovery-new-message",
-            "direct/recovery-new",
+            recovery_new_session,
             "recovery-new",
         )
         time.sleep(0.2)
@@ -3930,10 +3928,10 @@ def main(mode="all", correlation_case="all"):
         try:
             database.execute("PRAGMA foreign_keys=OFF")
             due_operation = database.execute(
-                "SELECT operation_id FROM model_operation WHERE session_ref='direct/recovery-due'"
+                "SELECT operation_id FROM model_operation WHERE session_ref=?", (recovery_sessions["due"],)
             ).fetchone()[0]
             sentinel_operation = database.execute(
-                "SELECT operation_id FROM model_operation WHERE session_ref='direct/recovery-sentinel'"
+                "SELECT operation_id FROM model_operation WHERE session_ref=?", (recovery_sessions["sentinel"],)
             ).fetchone()[0]
             database.execute(
                 "UPDATE model_operation SET attempt_ordinal=4,allowance_used=4,uncertain=1,retry_due_at_ms=0 "
@@ -3944,10 +3942,10 @@ def main(mode="all", correlation_case="all"):
                 "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?",
                 (due_operation,),
             )
-            database.execute(
-                "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<100) "
+            database.executemany(
                 "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) "
-                "SELECT value+10000,printf('recovery-%d',value),1,1,value FROM sequence"
+                "VALUES(?,?,1,1,?)",
+                [(index + 10000, session, index) for index, session in enumerate(recovery_history, 1)],
             )
             database.execute(
                 "UPDATE model_operation SET turn_id=operation_id+10000 WHERE operation_id<=100"
@@ -3994,7 +3992,7 @@ def main(mode="all", correlation_case="all"):
             "--store",
             recovery_store,
             "--session",
-            "direct/recovery-sentinel",
+            recovery_sessions["sentinel"],
         )
         assert inspection["execution"]["dispatch_fenced"] is False, inspection
         try:
@@ -4070,7 +4068,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(
             lambda: command(
                 "session", "inspect", "--store", recovery_store,
-                "--session", "direct/recovery-new",
+                "--session", recovery_new_session,
             )["execution"]["custody_occupied"] == "0",
             "recovery custody drainage",
         )
@@ -4117,18 +4115,18 @@ def main(mode="all", correlation_case="all"):
             f"http://127.0.0.1:{exhaustion_endpoint.server_port}/responses",
         )
         processes.append(exhaustion_host)
-        configure(
+        exhaustion_session = configure(
             state,
             exhaustion_store,
             "exhaustion-config",
-            "direct/exhaustion",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             exhaustion_store,
             "exhaustion-first",
-            "direct/exhaustion",
+            exhaustion_session,
             "selected first",
         )
         wait_for(lambda: len(exhaustion_endpoint.requests) == 1, "first exhaustion Attempt")
@@ -4136,7 +4134,7 @@ def main(mode="all", correlation_case="all"):
             state,
             exhaustion_store,
             "exhaustion-later",
-            "direct/exhaustion",
+            exhaustion_session,
             "unselected later",
         )
         assert observe(exhaustion_store, "exhaustion-later")["queue"]["status"] == "queued"
@@ -4198,10 +4196,10 @@ def main(mode="all", correlation_case="all"):
             "101",
         )
         processes.append(host)
-        configure(state, capacity_store, "capacity-config-a", "direct/capacity-a", "gpt-6-sol")
-        configure(state, capacity_store, "capacity-config-b", "direct/capacity-b", "gpt-6-sol")
-        message(state, capacity_store, "capacity-message-a", "direct/capacity-a", "alpha")
-        message(state, capacity_store, "capacity-message-b", "direct/capacity-b", "beta")
+        capacity_a_session = configure(state, capacity_store, "capacity-config-a", None, "gpt-6-sol")
+        capacity_b_session = configure(state, capacity_store, "capacity-config-b", None, "gpt-6-sol")
+        message(state, capacity_store, "capacity-message-a", capacity_a_session, "alpha")
+        message(state, capacity_store, "capacity-message-b", capacity_b_session, "beta")
         wait_for(lambda: len(capacity_endpoint.requests) == 2, "two concurrent reactor requests")
         beta_release.set()
         wait_for(
@@ -4247,13 +4245,13 @@ def main(mode="all", correlation_case="all"):
             "2",
         )
         processes.append(h1_host)
-        configure(state, h1_store, "h1-config-first", "direct/h1-first", "gpt-6-sol")
-        configure(state, h1_store, "h1-config-second", "direct/h1-second", "gpt-6-sol")
-        message(state, h1_store, "h1-message-first", "direct/h1-first", "first")
+        h1_first_session = configure(state, h1_store, "h1-config-first", None, "gpt-6-sol")
+        h1_second_session = configure(state, h1_store, "h1-config-second", None, "gpt-6-sol")
+        message(state, h1_store, "h1-message-first", h1_first_session, "first")
         wait_for(lambda: len(h1_endpoint.requests) == 1, "first H1 request")
-        message(state, h1_store, "h1-message-second", "direct/h1-second", "second")
+        message(state, h1_store, "h1-message-second", h1_second_session, "second")
         wait_for(
-            lambda: command("session", "inspect", "--store", h1_store, "--session", "direct/h1-second")["execution"]["custody_occupied"] == "2",
+            lambda: command("session", "inspect", "--store", h1_store, "--session", h1_second_session)["execution"]["custody_occupied"] == "2",
             "second H1 Attempt queued under the connection bound",
         )
         assert len(h1_endpoint.requests) == 1, h1_endpoint.requests
@@ -4286,17 +4284,17 @@ def main(mode="all", correlation_case="all"):
             active_capacity=2,
         )
         processes.append(slow_host)
-        configure(state, slow_store, "slow-config-first", "direct/slow-first", "gpt-6-sol")
-        configure(state, slow_store, "slow-config-second", "direct/slow-second", "gpt-6-sol")
-        message(state, slow_store, "slow-message-first", "direct/slow-first", "first")
+        slow_first_session = configure(state, slow_store, "slow-config-first", None, "gpt-6-sol")
+        slow_second_session = configure(state, slow_store, "slow-config-second", None, "gpt-6-sol")
+        message(state, slow_store, "slow-message-first", slow_first_session, "first")
         wait_for(lambda: len(slow_endpoint.requests) == 1, "progressing first H1 response")
-        message(state, slow_store, "slow-message-second", "direct/slow-second", "second")
+        message(state, slow_store, "slow-message-second", slow_second_session, "second")
         wait_for(
-            lambda: command("session", "inspect", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "2",
+            lambda: command("session", "inspect", "--store", slow_store, "--session", slow_second_session)["execution"]["custody_occupied"] == "2",
             "both H1 Attempts in custody",
         )
         wait_for(
-            lambda: command("session", "inspect", "--store", slow_store, "--session", "direct/slow-second")["execution"]["custody_occupied"] == "1",
+            lambda: command("session", "inspect", "--store", slow_store, "--session", slow_second_session)["execution"]["custody_occupied"] == "1",
             "queued H1 Attempt releases custody on expiry",
         )
         assert len(slow_endpoint.requests) == 1, slow_endpoint.requests
@@ -4315,7 +4313,7 @@ def main(mode="all", correlation_case="all"):
         with sqlite3.connect(slow_store / "rui.sqlite3") as database:
             retry = database.execute(
                 "SELECT attempt_ordinal,uncertain,retry_due_at_ms FROM model_operation "
-                "WHERE session_ref='direct/slow-second'"
+                "WHERE session_ref=?", (slow_second_session,)
             ).fetchone()
         assert retry[0] == 1 and retry[1] == 0 and retry[2] is not None, retry
         stop_endpoint(slow_endpoint, endpoints)
@@ -4329,8 +4327,8 @@ def main(mode="all", correlation_case="all"):
         host = start_host(rollback_store, url, "--fault", "attempt-before-commit")
         processes.append(host)
         rollback_diagnostics = HostDiagnostics(host)
-        configure(state, rollback_store, "rollback-config", "direct/rollback", "gpt-6-sol")
-        message(state, rollback_store, "rollback-message", "direct/rollback", "rollback")
+        rollback_session = configure(state, rollback_store, "rollback-config", None, "gpt-6-sol")
+        message(state, rollback_store, "rollback-message", rollback_session, "rollback")
         host.wait(timeout=10)
         assert host.returncode != 0, rollback_diagnostics.tail()
         assert b"dispatch fenced after Attempt admission failure: InjectedAttemptCommitFailure" in rollback_diagnostics.tail()
@@ -4343,13 +4341,13 @@ def main(mode="all", correlation_case="all"):
                 "WHERE command_key='rollback-message'"
             ).fetchone() == (1, 0)
             assert database.execute(
-                "SELECT count(*) FROM turn WHERE session_ref='direct/rollback'"
+                "SELECT count(*) FROM turn WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (0,)
             assert database.execute(
-                "SELECT count(*) FROM model_operation WHERE session_ref='direct/rollback'"
+                "SELECT count(*) FROM model_operation WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (0,)
             assert database.execute(
-                "SELECT count(*) FROM conversation_entry WHERE session_ref='direct/rollback'"
+                "SELECT count(*) FROM conversation_entry WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (0,)
 
         # Retrying the original caller record after rollback recovers the one
@@ -4376,14 +4374,14 @@ def main(mode="all", correlation_case="all"):
                 "WHERE command_key='rollback-message'"
             ).fetchone() == (1, 1)
             assert database.execute(
-                "SELECT count(*) FROM turn WHERE session_ref='direct/rollback'"
+                "SELECT count(*) FROM turn WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (1,)
             assert database.execute(
-                "SELECT count(*) FROM model_operation WHERE session_ref='direct/rollback'"
+                "SELECT count(*) FROM model_operation WHERE session_ref=?", (rollback_session,)
             ).fetchone() == (1,)
             assert database.execute(
-                "SELECT count(*) FROM conversation_entry WHERE session_ref='direct/rollback' "
-                "AND entry_kind=1"
+                "SELECT count(*) FROM conversation_entry WHERE session_ref=? "
+                "AND entry_kind=1", (rollback_session,)
             ).fetchone() == (1,)
         endpoint.requests.clear()
         endpoint.received.clear()
@@ -4395,8 +4393,8 @@ def main(mode="all", correlation_case="all"):
         first_store = state / "first-step-store"
         host = start_host(first_store, url, "--fault", "request-first-step")
         processes.append(host)
-        configure(state, first_store, "first-config", "direct/first", "gpt-6-sol")
-        message(state, first_store, "first-message", "direct/first", "first step")
+        first_session = configure(state, first_store, "first-config", None, "gpt-6-sol")
+        message(state, first_store, "first-message", first_session, "first step")
         failed = wait_for(
             lambda: (value := observe(first_store, "first-message"))["status"] == "accepted"
             and value.get("result", {}).get("code") == "request_preparation_failed"
@@ -4415,7 +4413,7 @@ def main(mode="all", correlation_case="all"):
             state,
             first_store,
             "first-later-message",
-            "direct/first",
+            first_session,
             "later input",
         )
         later_failed = wait_for(
@@ -4440,7 +4438,7 @@ def main(mode="all", correlation_case="all"):
             ).fetchone() == (2, 2)
             assert database.execute(
                 "SELECT resolution_code FROM model_operation "
-                "WHERE session_ref='direct/first' ORDER BY operation_id"
+                "WHERE session_ref=? ORDER BY operation_id", (first_session,)
             ).fetchall() == [
                 ("request_preparation_failed",),
                 ("request_preparation_failed",),
@@ -4458,8 +4456,8 @@ def main(mode="all", correlation_case="all"):
             )
             processes.append(host)
             fault_diagnostics = HostDiagnostics(host)
-            configure(state, fault_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
-            message(state, fault_store, f"{fault}-message", f"direct/{fault}", fault)
+            session = configure(state, fault_store, f"{fault}-config", None, "gpt-6-sol")
+            message(state, fault_store, f"{fault}-message", session, fault)
             fault_deadline = time.monotonic() + 8
             failed = wait_for(
                 lambda key=f"{fault}-message", code=expected_code: (
@@ -4474,7 +4472,7 @@ def main(mode="all", correlation_case="all"):
             assert failed["processing"]["attempt"] == "1", failed
             assert endpoint.requests == []
             wait_model_cleanup(
-                fault_diagnostics, fault_store, f"direct/{fault}", failed, fault_deadline,
+                fault_diagnostics, fault_store, session, failed, fault_deadline,
             )
             stop_host(host)
             assert_model_cleanup_census(fault_diagnostics, failed)
@@ -4501,18 +4499,18 @@ def main(mode="all", correlation_case="all"):
         )
         processes.append(preparation_stop_host)
         preparation_stop_trace = HostDiagnostics(preparation_stop_host)
-        configure(
+        preparation_stop_session = configure(
             state,
             preparation_stop_store,
             "preparation-stop-config",
-            "direct/preparation-stop",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             preparation_stop_store,
             "preparation-stop-message",
-            "direct/preparation-stop",
+            preparation_stop_session,
             "p" * (64 * 1024),
         )
         preparation_stop_trace.wait("preparation_advance_completed")
@@ -4525,7 +4523,7 @@ def main(mode="all", correlation_case="all"):
             "--key",
             "preparation-stop",
             "--session",
-            "direct/preparation-stop",
+            preparation_stop_session,
         )
         assert stopped_preparation["answer"]["status"] == "accepted", stopped_preparation
         stopped_resources = wait_for(
@@ -4536,7 +4534,7 @@ def main(mode="all", correlation_case="all"):
                     "--store",
                     preparation_stop_store,
                     "--session",
-                    "direct/preparation-stop",
+                    preparation_stop_session,
                 )
             ),
             "preparation stop cleanup",
@@ -4571,18 +4569,18 @@ def main(mode="all", correlation_case="all"):
         preparation_shutdown_store = state / "preparation-shutdown-store"
         offline_shutdown_host = start_host(preparation_shutdown_store, None)
         processes.append(offline_shutdown_host)
-        configure(
+        preparation_shutdown_session = configure(
             state,
             preparation_shutdown_store,
             "preparation-shutdown-config",
-            "direct/preparation-shutdown",
+            None,
             "gpt-6-sol",
         )
         message(
             state,
             preparation_shutdown_store,
             "preparation-shutdown-message",
-            "direct/preparation-shutdown",
+            preparation_shutdown_session,
             "s" * (64 * 1024),
         )
         stop_host(offline_shutdown_host)
@@ -4608,7 +4606,7 @@ def main(mode="all", correlation_case="all"):
                 "--store",
                 str(preparation_shutdown_store),
                 "--session",
-                "direct/preparation-shutdown",
+                preparation_shutdown_session,
             ],
             capture_output=True,
             timeout=10,
@@ -4650,8 +4648,8 @@ def main(mode="all", correlation_case="all"):
         save_store = state / "save-fault-store"
         host = start_host(save_store, url, "--fault", "result-before-commit")
         processes.append(host)
-        configure(state, save_store, "save-config", "direct/save", "gpt-6-sol")
-        message(state, save_store, "save-message", "direct/save", "save fault")
+        save_session = configure(state, save_store, "save-config", None, "gpt-6-sol")
+        message(state, save_store, "save-message", save_session, "save fault")
         wait_for(lambda: len(endpoint.requests) == 1, "save-fault endpoint request")
         time.sleep(0.2)
         failed_observation = subprocess.run(
@@ -4679,14 +4677,14 @@ def main(mode="all", correlation_case="all"):
         # while one byte below it fails before HTTP.
         endpoint.requests.clear()
         endpoint.release.clear()
-        # Store and Session names share one byte length across the three
-        # cases: each request carries its own address.
+        # Each request carries only its six-byte Session ID, so all three
+        # cases have identical address framing regardless of their Store paths.
         framing_store = state / "framing-meter-store"
         host = start_host(framing_store, None)
         processes.append(host)
-        configure(state, framing_store, "framing-config", "direct/framing-meter", "gpt-6-sol")
+        framing_meter_session = configure(state, framing_store, "framing-config", None, "gpt-6-sol")
         for index in range(40):
-            message(state, framing_store, f"framing-{index}", "direct/framing-meter", "")
+            message(state, framing_store, f"framing-{index}", framing_meter_session, "")
         stop_host(host)
         processes.remove(host)
         host = start_host(framing_store, url)
@@ -4694,7 +4692,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(endpoint.requests) == 1, "many-input materialization")
         actual_request_bytes = len(endpoint.requests[0])
         resources = command(
-            "session", "inspect", "--store", framing_store, "--session", "direct/framing-meter"
+            "session", "inspect", "--store", framing_store, "--session", framing_meter_session
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
         endpoint.release.set()
@@ -4711,9 +4709,9 @@ def main(mode="all", correlation_case="all"):
         framing_exact_store = state / "framing-exact-store"
         host = start_host(framing_exact_store, None)
         processes.append(host)
-        configure(state, framing_exact_store, "exact-config", "direct/framing-exact", "gpt-6-sol")
+        framing_exact_session = configure(state, framing_exact_store, "exact-config", None, "gpt-6-sol")
         for index in range(40):
-            message(state, framing_exact_store, f"exact-{index}", "direct/framing-exact", "")
+            message(state, framing_exact_store, f"exact-{index}", framing_exact_session, "")
         stop_host(host)
         processes.remove(host)
         host = start_host(
@@ -4732,7 +4730,7 @@ def main(mode="all", correlation_case="all"):
             "--store",
             framing_exact_store,
             "--session",
-            "direct/framing-exact",
+            framing_exact_session,
         )["execution"]
         assert int(resources["scratch_used_bytes"]) == actual_request_bytes, resources
         exact_deadline = time.monotonic() + 8
@@ -4749,7 +4747,7 @@ def main(mode="all", correlation_case="all"):
         # intentionally leaves no shared scratch for the fixture response.
         assert exact_result["result"]["code"] == "response_scratch_exhausted", exact_result
         wait_model_cleanup(
-            exact_diagnostics, framing_exact_store, "direct/framing-exact",
+            exact_diagnostics, framing_exact_store, framing_exact_session,
             exact_result, exact_deadline,
         )
         stop_host(host)
@@ -4761,9 +4759,9 @@ def main(mode="all", correlation_case="all"):
         framing_limit_store = state / "framing-limit-store"
         host = start_host(framing_limit_store, None)
         processes.append(host)
-        configure(state, framing_limit_store, "limit-config", "direct/framing-limit", "gpt-6-sol")
+        framing_limit_session = configure(state, framing_limit_store, "limit-config", None, "gpt-6-sol")
         for index in range(40):
-            message(state, framing_limit_store, f"limit-{index}", "direct/framing-limit", "")
+            message(state, framing_limit_store, f"limit-{index}", framing_limit_session, "")
         stop_host(host)
         processes.remove(host)
         host = start_host(
@@ -4788,7 +4786,7 @@ def main(mode="all", correlation_case="all"):
         assert limited["processing"]["attempt"] == "1", limited
         assert endpoint.requests == []
         wait_model_cleanup(
-            limit_diagnostics, framing_limit_store, "direct/framing-limit",
+            limit_diagnostics, framing_limit_store, framing_limit_session,
             limited, limit_deadline,
         )
         stop_host(host)
@@ -4821,8 +4819,8 @@ def main(mode="all", correlation_case="all"):
             "1",
         )
         processes.append(host)
-        configure(state, progress_store, "progress-config", "direct/progress", "gpt-6-sol")
-        message(state, progress_store, "progress-message", "direct/progress", "progress")
+        progress_session = configure(state, progress_store, "progress-config", None, "gpt-6-sol")
+        message(state, progress_store, "progress-message", progress_session, "progress")
         progress_failure = wait_for(
             lambda: (value := observe(progress_store, "progress-message")).get("result", {}).get("code")
             == "provider_http_422"
@@ -4845,17 +4843,17 @@ def main(mode="all", correlation_case="all"):
             accelerated_retries=False,
         )
         processes.append(host)
-        configure(state, stall_store, "stall-config", "direct/stall", "gpt-6-sol")
-        message(state, stall_store, "stall-message", "direct/stall", "stall")
+        stall_session = configure(state, stall_store, "stall-config", None, "gpt-6-sol")
+        message(state, stall_store, "stall-message", stall_session, "stall")
         wait_for(
             lambda: command(
-                "session", "inspect", "--store", stall_store, "--session", "direct/stall"
+                "session", "inspect", "--store", stall_store, "--session", stall_session
             )["execution"]["custody_occupied"] == "1",
             "stalled response takes custody",
         )
         stalled_resources = wait_for_execution_release(
             lambda remaining: command(
-                "session", "inspect", "--store", stall_store, "--session", "direct/stall", timeout=remaining,
+                "session", "inspect", "--store", stall_store, "--session", stall_session, timeout=remaining,
             )["execution"],
             time.monotonic() + 8,
         )
@@ -4893,12 +4891,12 @@ def main(mode="all", correlation_case="all"):
                 accelerated_retries=False,
             )
             processes.append(host)
-            configure(case_state, transient_store, "config", "direct/transient", "gpt-6-sol")
-            message(case_state, transient_store, "message", "direct/transient", "input")
+            transient_session = configure(case_state, transient_store, "config", None, "gpt-6-sol")
+            message(case_state, transient_store, "message", transient_session, "input")
             wait_for(lambda: len(endpoint.requests) == 1, "one endpoint request")
             resources = wait_for_execution_release(
                 lambda remaining: command(
-                    "session", "inspect", "--store", transient_store, "--session", "direct/transient", timeout=remaining,
+                    "session", "inspect", "--store", transient_store, "--session", transient_session, timeout=remaining,
                 )["execution"],
                 time.monotonic() + 8,
             )
@@ -4909,7 +4907,7 @@ def main(mode="all", correlation_case="all"):
             else:
                 assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
                 assert observation["processing"]["attempt"] == "1", observation
-                message(case_state, transient_store, "later", "direct/transient", "later")
+                message(case_state, transient_store, "later", transient_session, "later")
                 assert observe(transient_store, "later")["queue"]["status"] == "queued"
             retry_observed_at_ms = int(time.time() * 1000)
             stop_host(host)
@@ -4958,32 +4956,32 @@ def main(mode="all", correlation_case="all"):
         race_store = state / "fence-race-store"
         host = start_host(race_store, url)
         processes.append(host)
-        configure(state, race_store, "race-config", "direct/race", "gpt-6-sol")
-        configure(state, race_store, "race-other-config", "direct/other", "gpt-6-sol")
+        race_session = configure(state, race_store, "race-config", None, "gpt-6-sol")
+        other_session = configure(state, race_store, "race-other-config", None, "gpt-6-sol")
         stop_host(host)
         processes.remove(host)
         # The Host holds its Store exclusively, so damage another Session
-        # while it is stopped: admitting and preparing direct/race never read
+        # while it is stopped: admitting and preparing the race Session never read
         # it, and the inspection below reads it inside the launch delay.
         database = sqlite3.connect(race_store / "rui.sqlite3")
         original_instructions = database.execute(
-            "SELECT instructions_content_id FROM session WHERE session_ref='direct/other'"
+            "SELECT instructions_content_id FROM session WHERE session_ref=?", (other_session,)
         ).fetchone()[0]
         database.execute("PRAGMA foreign_keys=OFF")
         database.execute(
-            "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref='direct/other'"
+            "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?", (other_session,)
         )
         database.commit()
         database.close()
         host = start_host(race_store, url, "--test-before-launch-delay-ms", "1500")
         processes.append(host)
-        message(state, race_store, "race-message", "direct/race", "race")
+        message(state, race_store, "race-message", race_session, "race")
         wait_for(
             lambda: observe(race_store, "race-message")["queue"]["status"] == "processing",
             "admitted request before launch",
         )
         canonical_read = subprocess.run(
-            [str(RUI), "session", "inspect", "--store", str(race_store), "--session", "direct/other"],
+            [str(RUI), "session", "inspect", "--store", str(race_store), "--session", other_session],
             text=True,
             capture_output=True,
             timeout=10,
@@ -5000,8 +4998,8 @@ def main(mode="all", correlation_case="all"):
         ).fetchone()
         database.execute("PRAGMA foreign_keys=OFF")
         database.execute(
-            "UPDATE session SET instructions_content_id=? WHERE session_ref='direct/other'",
-            (original_instructions,),
+            "UPDATE session SET instructions_content_id=? WHERE session_ref=?",
+            (original_instructions, other_session),
         )
         database.commit()
         database.close()
@@ -5015,6 +5013,11 @@ def main(mode="all", correlation_case="all"):
         # the Host stops instead of accumulating ownerless names; startup owns
         # the recognizable empty file and either removes it or refuses service.
         report_unlink_store = state / "report-unlink-store"
+        report_setup_host = start_host(report_unlink_store, None)
+        processes.append(report_setup_host)
+        report_unlink_session = configure(state, report_unlink_store, "report-unlink-config", None, "gpt-6-sol")
+        stop_host(report_setup_host)
+        processes.remove(report_setup_host)
         report_unlink_host = start_host(
             report_unlink_store, None, "--fault", "report-unlink"
         )
@@ -5026,7 +5029,7 @@ def main(mode="all", correlation_case="all"):
                 "--store",
                 str(report_unlink_store),
                 "--session",
-                "direct/report-unlink",
+                report_unlink_session,
                 "--profile",
                 "full",
             ],
@@ -5090,10 +5093,10 @@ def main(mode="all", correlation_case="all"):
             owned_store = state / f"{fault}-owned-store"
             owned_host = start_host(owned_store, unlink_url, "--fault", fault)
             processes.append(owned_host)
-            configure(state, owned_store, f"{fault}-config", f"direct/{fault}", "gpt-6-sol")
-            message(state, owned_store, f"{fault}-message", f"direct/{fault}", "unlink")
+            session = configure(state, owned_store, f"{fault}-config", None, "gpt-6-sol")
+            message(state, owned_store, f"{fault}-message", session, "unlink")
             resources = wait_for(
-                lambda store=owned_store, session=f"direct/{fault}": (
+                lambda store=owned_store, session=session: (
                     report["execution"]
                     if (report := command(
                         "session", "inspect", "--store", store, "--session", session
@@ -5139,7 +5142,7 @@ def main(mode="all", correlation_case="all"):
             processes.append(cleanup_host)
             assert not list((owned_store / "scratch").glob(pattern))
             resources = command(
-                "session", "inspect", "--store", owned_store, "--session", f"direct/{fault}"
+                "session", "inspect", "--store", owned_store, "--session", session
             )["execution"]
             assert resources["scratch_used_bytes"] == "0", resources
             stop_host(cleanup_host)
@@ -5154,14 +5157,14 @@ def main(mode="all", correlation_case="all"):
         unlink_store = state / "unlink-store"
         host = start_host(unlink_store, url, "--fault", "request-unlink")
         processes.append(host)
-        configure(state, unlink_store, "unlink-config", "direct/unlink", "gpt-6-sol")
-        message(state, unlink_store, "unlink-message", "direct/unlink", "unlink")
+        unlink_session = configure(state, unlink_store, "unlink-config", None, "gpt-6-sol")
+        message(state, unlink_store, "unlink-message", unlink_session, "unlink")
         unlink_deadline = time.monotonic() + 20
         resources = wait_for(
             lambda: (
                 execution
                 if (execution := command(
-                    "session", "inspect", "--store", unlink_store, "--session", "direct/unlink",
+                    "session", "inspect", "--store", unlink_store, "--session", unlink_session,
                     timeout=min(15, max(0, unlink_deadline - time.monotonic())),
                 )["execution"])["dispatch_fenced"]
                 and execution["custody_occupied"] == "1"
@@ -5184,7 +5187,7 @@ def main(mode="all", correlation_case="all"):
         processes.append(offline)
         assert not list(unlink_store.rglob("request-*"))
         resources = command(
-            "session", "inspect", "--store", unlink_store, "--session", "direct/unlink"
+            "session", "inspect", "--store", unlink_store, "--session", unlink_session
         )["execution"]
         assert resources["scratch_used_bytes"] == "0", resources
         stop_host(offline)

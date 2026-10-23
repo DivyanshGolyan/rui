@@ -77,7 +77,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.front.* = .{
                 .init = undefined,
                 .store = "td1-no-host",
-                .session = "model",
+                .session = "k7m2qx",
                 .directory = path,
                 .scratch = self.page,
                 .inspection_file = self.page,
@@ -90,7 +90,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             };
             self.front.init.io = std.testing.io;
             self.front.input.init();
-            self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = "model", .directory = path, .input = &self.front.input };
+            self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = self.front.session, .directory = path, .input = &self.front.input };
             try self.setPage("EARLIER PAGE\n");
             try self.action.writePositionalAll(std.testing.io, "Run Bash\nprintf exact\nWorkspace: /model\n", 0);
             try ops.draw(self.front);
@@ -499,6 +499,7 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const store = environ.get("RUI_TD1_STORE") orelse return error.MissingRetentionHost;
+    const session = environ.get("RUI_TD1_SESSION") orelse return error.MissingRetentionSession;
     const gate = environ.get("RUI_TD1_GATE") orelse return error.MissingRetentionGate;
     var gate_dir = try std.Io.Dir.openDirAbsolute(std.testing.io, gate, .{});
     defer gate_dir.close(std.testing.io);
@@ -511,6 +512,9 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
     defer fixture.deinit();
     const front = fixture.front;
     front.store = store;
+    front.session = session;
+    front.submission.store = store;
+    front.submission.session = session;
     front.read_phase = .activity;
     front.job = ops.freeze(front, .activity);
     var task: Task = .{ .io = std.testing.io };
@@ -567,7 +571,7 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     const requests: client.Requests = .{ .io = std.testing.io };
     for (0..16) |_| {
         const next = cursor orelse break;
-        const page = switch (try requests.conversationPage(front.store, "model", next)) {
+        const page = switch (try requests.conversationPage(front.store, front.session, next)) {
             .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };

@@ -12,6 +12,17 @@ import (
 	"testing"
 )
 
+func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *testing.T) {
+	// Independently derived with model_fixture.py, not the Go encoder.
+	body := wireRequest("/workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})
+	if len(body) != 572 || fmt.Sprintf("%x", sha256.Sum256(body)) != "e39ef5ed113775d5db73aee09e134e14c8a41694f73edda4d2936c9f37bf9d8b" {
+		t.Fatalf("request differs from independent oracle: %s", body)
+	}
+	if bytes.Equal(body, wireRequest("/workspace", "k7m2qy", [][]byte{userItem("capacity-1-0")})) {
+		t.Fatal("request oracle ignored the configuration's allocated identity")
+	}
+}
+
 func TestBashSSEPreservesValidArguments(t *testing.T) {
 	timeout := 1250
 	for _, timeoutMS := range []*int{nil, &timeout} {

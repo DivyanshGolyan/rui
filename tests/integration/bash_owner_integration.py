@@ -85,8 +85,7 @@ def stage_action(state, store, name, command, stdin=None):
     try:
         endpoint_thread.start()
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-        session = f"direct/{name}"
-        bash_fixture.configure(state, store, f"{name}-config", session)
+        session = bash_fixture.configure(state, store, f"{name}-config")
         fixture.message(state, store, f"{name}-message", session, "execute")
         action = fixture.wait_for(
             lambda: bash_fixture.action_for(store, session),
@@ -96,7 +95,7 @@ def stage_action(state, store, name, command, stdin=None):
             lambda: execution_idle(store, session),
             f"{name} Action creation cleanup",
         )
-        return action
+        return session, action
     finally:
         dispose_owner_case(host, endpoint, endpoint_thread)
 
@@ -118,8 +117,7 @@ def prove_timeout_feedback(state):
         thread.start()
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses", "--bash-timeout-ms", "500")
         for index, (name, _, effective) in enumerate(cases):
-            session = f"direct/{name}"
-            bash_fixture.configure(state, store, f"{name}-config", session, workspace=workspace)
+            session = bash_fixture.configure(state, store, f"{name}-config", workspace=workspace)
             fixture.message(state, store, f"{name}-message", session, "execute")
             action = fixture.wait_for(lambda: bash_fixture.action_for(store, session), f"{name} Action")
             bash_fixture.allow(state, store, f"{name}-allow", session, action["action"])
@@ -165,13 +163,11 @@ def main():
     completed = False
     try:
         prove_timeout_feedback(state)
-        actions = {
-            # One byte over the command limit fails after incremental decoding.
-            "preparation-failure": stage_action(
-                state, store, "preparation-failure", ":" + " " * (120 * 1024)
-            ),
-            "slot-reuse": stage_action(state, store, "slot-reuse", "true"),
-        }
+        # One byte over the command limit fails after incremental decoding.
+        preparation_session, preparation_action = stage_action(
+            state, store, "preparation-failure", ":" + " " * (120 * 1024)
+        )
+        reuse_session, reuse_action = stage_action(state, store, "slot-reuse", "true")
         endpoint, endpoint_thread, continuations = continuation_endpoint(
             ("preparation-failure", "slot-reuse")
         )
@@ -185,8 +181,8 @@ def main():
             state,
             store,
             "preparation-failure-allow",
-            "direct/preparation-failure",
-            actions["preparation-failure"]["action"],
+            preparation_session,
+            preparation_action["action"],
         )
         fixture.wait_for(
             lambda: continuations[0].body_finished_at,
@@ -196,21 +192,21 @@ def main():
             state,
             store,
             "slot-reuse-allow",
-            "direct/slot-reuse",
-            actions["slot-reuse"]["action"],
+            reuse_session,
+            reuse_action["action"],
         )
         fixture.wait_for(
             lambda: continuations[1].body_finished_at,
             "slot reuse after incremental preparation failure",
         )
-        for name in ("preparation-failure", "slot-reuse"):
-            fixture.wait_for(lambda name=name: bash_fixture.execution_custody_idle(store, f"direct/{name}"), f"{name} cleanup")
+        for name, session in (("preparation-failure", preparation_session), ("slot-reuse", reuse_session)):
+            fixture.wait_for(lambda session=session: bash_fixture.execution_custody_idle(store, session), f"{name} cleanup")
         fixture.stop_host(host)
         host = None
         dispose_owner_case(None, endpoint, endpoint_thread)
         endpoint = endpoint_thread = None
-        assert resolution_after_stop(store, "direct/preparation-failure") == "spawn_failed"
-        assert resolution_after_stop(store, "direct/slot-reuse") == "succeeded"
+        assert resolution_after_stop(store, preparation_session) == "spawn_failed"
+        assert resolution_after_stop(store, reuse_session) == "succeeded"
 
         for name, command, stdin, expected in (
             ("exact-budget", "printf %05d 0", None, "succeeded"),
@@ -218,7 +214,7 @@ def main():
             ("input-budget", f"touch {root / 'forbidden-input-budget'}", "123456", "storage_failed"),
         ):
             isolated_store = root / f"{name}-store"
-            action = stage_action(state, isolated_store, name, command, stdin=stdin)
+            session, action = stage_action(state, isolated_store, name, command, stdin=stdin)
             endpoint, endpoint_thread, continuations = continuation_endpoint((name,))
             host = fixture.start_host(
                 isolated_store,
@@ -230,33 +226,31 @@ def main():
                 state,
                 isolated_store,
                 f"{name}-allow",
-                f"direct/{name}",
+                session,
                 action["action"],
             )
             fixture.wait_for(
                 lambda: continuations[0].body_finished_at,
                 f"{name} continuation",
             )
-            fixture.wait_for(lambda: bash_fixture.execution_custody_idle(isolated_store, f"direct/{name}"), f"{name} cleanup")
+            fixture.wait_for(lambda: bash_fixture.execution_custody_idle(isolated_store, session), f"{name} cleanup")
             fixture.stop_host(host)
             host = None
             dispose_owner_case(None, endpoint, endpoint_thread)
             endpoint = endpoint_thread = None
-            assert resolution_after_stop(isolated_store, f"direct/{name}") == expected
+            assert resolution_after_stop(isolated_store, session) == expected
             assert not (root / "forbidden-input-budget").exists(), "uncharged stdin launched"
 
         retention_store = root / "retention-store"
-        retention_actions = {
-            "retention-first": stage_action(
-                state, retention_store, "retention-first",
-                # Paths are named only for truncated streams: truncate both.
-                "head -c 10001 /dev/zero | tr '\\0' o; head -c 10001 /dev/zero | tr '\\0' e >&2",
-            ),
-            "retention-second": stage_action(
-                state, retention_store, "retention-second",
-                "head -c 10001 /dev/zero | tr '\\0' c; printf current",
-            ),
-        }
+        first_session, first_action = stage_action(
+            state, retention_store, "retention-first",
+            # Paths are named only for truncated streams: truncate both.
+            "head -c 10001 /dev/zero | tr '\\0' o; head -c 10001 /dev/zero | tr '\\0' e >&2",
+        )
+        second_session, second_action = stage_action(
+            state, retention_store, "retention-second",
+            "head -c 10001 /dev/zero | tr '\\0' c; printf current",
+        )
         endpoint, endpoint_thread, continuations = continuation_endpoint(
             ("retention-first", "retention-second")
         )
@@ -274,15 +268,15 @@ def main():
             state,
             retention_store,
             "retention-first-allow",
-            "direct/retention-first",
-            retention_actions["retention-first"]["action"],
+            first_session,
+            first_action["action"],
         )
         fixture.wait_for(
             lambda: continuations[0].body_finished_at,
             "first retained-output continuation",
         )
         first_result = bash_fixture.result_text(
-            retention_store, "direct/retention-first"
+            retention_store, first_session
         )
         retained_paths = [
             pathlib.Path(line.split(": ", 1)[1])
@@ -295,7 +289,7 @@ def main():
         retained_bytes = sum(path.stat().st_size for path in retained_paths)
         fixture.wait_for(
             lambda: execution_idle(
-                retention_store, "direct/retention-first", retained_bytes
+                retention_store, first_session, retained_bytes
             ),
             "first retained-output cleanup",
         )
@@ -304,32 +298,32 @@ def main():
             state,
             retention_store,
             "retention-second-allow",
-            "direct/retention-second",
-            retention_actions["retention-second"]["action"],
+            second_session,
+            second_action["action"],
         )
         fixture.wait_for(
             lambda: continuations[1].body_finished_at,
             "settlement despite retained-output removal failure",
         )
         second_result = bash_fixture.result_text(
-            retention_store, "direct/retention-second"
+            retention_store, second_session
         )
         assert second_result.endswith("current\n[earlier output omitted]\n\nFull output was not retained.\n"), second_result
         # Optional retention failure occurs after canonical settlement. Both
         # saved answers must remain byte-identical when read again; neither
         # the failed eviction nor the unavailable new paths may rewrite them.
         assert (
-            bash_fixture.result_text(retention_store, "direct/retention-first")
+            bash_fixture.result_text(retention_store, first_session)
             == first_result
         )
         assert (
-            bash_fixture.result_text(retention_store, "direct/retention-second")
+            bash_fixture.result_text(retention_store, second_session)
             == second_result
         )
         # The public Conversation projection reads the same canonical Tool
         # Result despite optional full-output retention failure. No spillover
         # pathname is needed to address or complete this content.
-        session = "direct/retention-second"
+        session = second_session
         page_request = {"version": "1", "kind": "conversation_page",
                         "store": str(retention_store), "session": session, "end": "0",
                         "before_position": "0", "before_ordinal": "0"}
@@ -354,7 +348,7 @@ def main():
         assert content == second_result.encode(), (content, second_result)
         after = fixture.wait_for(
             lambda: execution_idle(
-                retention_store, "direct/retention-second", retained_bytes
+                retention_store, second_session, retained_bytes
             ),
             "retention-unavailable cleanup",
         )["execution"]

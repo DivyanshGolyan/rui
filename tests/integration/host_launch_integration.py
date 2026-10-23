@@ -307,10 +307,8 @@ def assert_configure_defaults(root, store, env):
 
     module = (DEFAULTS.recommended_model, DEFAULTS.tools.split(","), DEFAULTS.permission_mode)
     assert settings(configure()) == module  # Fresh CLI capture resolves every omitted value.
-    # An addressed first configuration leaves tools and permission to the Store.
-    addressed = "defaults/addressed"
-    assert configure("--session", addressed, "--workspace", root, "--provider", "codex",
-                     "--model", "gpt-6-sol") == addressed
+    # A fresh explicitly bound configuration receives the same product defaults.
+    addressed = configure("--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
     assert settings(addressed) == ("gpt-6-sol", *module[1:])
     # Explicit values save; a later sparse update preserves them, not defaults.
     configure("--session", addressed, "--tools", "none", "--permission-mode", "ask")
@@ -851,9 +849,17 @@ def main():
             assert len(captures) == 1, captures
             captured = json.loads(captures[0].read_text())
             key = captures[0].stem
-            reference = "rui/" + key
             assert captured["key"] == key and captured["kind"] == "configure", captured
-            assert captured["session"] == reference and captured["store"] == str(bare_store.resolve()), captured
+            assert captured["session"] == "" and captured["store"] == str(bare_store.resolve()), captured
+            observation = subprocess.run([RUI, "request", "inspect", key],
+                env=bare_env, capture_output=True, text=True, timeout=5)
+            assert observation.returncode == 0, observation.stderr
+            observed = json.loads(observation.stdout)
+            assert observed["type"] == "command_observation" and observed["key"] == key, observed
+            accepted = observed["observation"]
+            assert accepted["status"] == "accepted" and accepted["kind"] == "configure" and accepted["created"] is True, observed
+            reference = accepted["target"]
+            assert re.fullmatch(r"[0-9a-hjkmnp-tv-z]{6}", reference), reference
             configuration = captured["configuration"]
             assert configuration["workspace"] == {"state": "value", "value": str(root.resolve())}, captured
             assert configuration["provider"] == {"state": "value", "value": "codex"}, captured
@@ -892,6 +898,7 @@ def main():
             assert recovered.returncode == 0, recovered.stderr
             answer = json.loads(recovered.stdout)["answer"]
             assert answer["status"] == "accepted" and answer["replayed"] is True, answer
+            assert answer["session"] == reference and answer["created"] is True, answer
             stopped = subprocess.run([RUI, "host", "stop", "--store", bare_store],
                 env=bare_env, capture_output=True, text=True, timeout=5)
             assert stopped.returncode == 0 and json.loads(stopped.stdout)["status"] == "acknowledged", stopped

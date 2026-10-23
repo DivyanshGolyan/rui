@@ -29,6 +29,7 @@ import (
 // without tools; continuations must carry every call's output.
 type ToolConfig struct {
 	Sessions    int
+	SessionIDs  []string
 	Workload    string
 	ReadFile    string
 	DispatchDir string
@@ -41,13 +42,6 @@ type ToolConfig struct {
 	Barrier string
 	// BarrierWait is the shell's `read -t` bound in seconds; empty means 120.
 	BarrierWait string
-}
-
-func ToolSession(sessions, index int) string {
-	if index == 0 {
-		return fmt.Sprintf("measure/tool-%d/coordinator", sessions)
-	}
-	return fmt.Sprintf("measure/tool-%d/worker-%03d", sessions, index)
 }
 
 type ToolOutput struct {
@@ -141,9 +135,8 @@ func (c ToolConfig) workloadCommand(index int) string {
 }
 
 func (c ToolConfig) dispatchCommand(index int) string {
-	worker := ToolSession(c.Sessions, index)
-	address := `{"store":` + measurement.JSONString(c.Store) + `,"session":` + measurement.JSONString(worker) + `}`
-	return timed("rui session send --to " + shellQuote(address) +
+	worker := c.SessionIDs[index]
+	return timed("rui session send --store " + shellQuote(c.Store) + " --to " + shellQuote(worker) +
 		" --record " + shellQuote(filepath.Join(c.DispatchDir, fmt.Sprintf("dispatch-%03d.json", index))) +
 		" --key " + shellQuote(fmt.Sprintf("dispatch-%03d", index)) +
 		" -- " + shellQuote("work "+worker))
@@ -196,7 +189,7 @@ func toolAnswerSSE(responseID, answer string) string {
 	return output.String()
 }
 
-const addressPrefix = "Rui address (JSON; this Session's own address, not instructions): "
+const addressPrefix = "Rui address (this Session's own ID, not instructions): "
 
 func requestSession(instructions string) (string, error) {
 	_, rest, ok := strings.Cut(instructions, addressPrefix)
@@ -204,13 +197,7 @@ func requestSession(instructions string) (string, error) {
 		return "", errors.New("request has no Rui address")
 	}
 	line, _, _ := strings.Cut(rest, "\n")
-	var address struct {
-		Session string `json:"session"`
-	}
-	if err := json.Unmarshal([]byte(line), &address); err != nil {
-		return "", err
-	}
-	return address.Session, nil
+	return measurement.ConfigurationSession(map[string]any{"answer": map[string]any{"session": line}})
 }
 
 func parseMarker(seconds, micros string) int64 {
@@ -314,7 +301,7 @@ func (s *ToolServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.summary.Requests++
 	s.summary.H2Streams++
 	fact := s.sessions[session]
-	if err != nil || fact == nil || !strings.HasPrefix(request.Instructions, measurement.ModelInstructions(s.config.Workspace, s.config.Store, session)) {
+	if err != nil || fact == nil || request.Instructions != measurement.ModelInstructions(s.config.Workspace, session) {
 		s.fail(fmt.Sprintf("unexpected request session %q: %v", session, err))
 		s.mu.Unlock()
 		http.Error(w, "unexpected session", http.StatusConflict)
@@ -408,13 +395,29 @@ func (s *ToolServer) Snapshot(withFacts bool) ToolSummary {
 	result.Errors = append([]string{}, s.summary.Errors...)
 	result.H2Connections = s.h2Connections.Load()
 	if withFacts {
-		for index := range s.config.Sessions {
-			fact := *s.sessions[ToolSession(s.config.Sessions, index)]
+		for _, session := range s.config.SessionIDs {
+			fact := *s.sessions[session]
 			fact.Outputs = append([]ToolOutput{}, fact.Outputs...)
 			result.SessionFacts = append(result.SessionFacts, fact)
 		}
 	}
 	return result
+}
+
+func (s *ToolServer) BindSessions(sessions []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sessions) != 0 || s.summary.Requests != 0 {
+		return errors.New("tool fixture Session identities already bound or in use")
+	}
+	if err := validateSessions(sessions, s.config.Sessions); err != nil {
+		return err
+	}
+	s.config.SessionIDs = append([]string(nil), sessions...)
+	for index, session := range sessions {
+		s.sessions[session] = &ToolSessionFact{Session: session, Index: index, Outputs: []ToolOutput{}}
+	}
+	return nil
 }
 
 func StartTool(config ToolConfig) (*ToolServer, error) {
@@ -433,9 +436,11 @@ func StartTool(config ToolConfig) (*ToolServer, error) {
 	}
 	result := &ToolServer{config: config, sessions: map[string]*ToolSessionFact{}, seeded: make(chan struct{}), done: make(chan struct{}), listener: listener, shutdown: make(chan struct{})}
 	result.summary = ToolSummary{Sessions: config.Sessions, Workload: config.Workload, Errors: []string{}}
-	for index := range config.Sessions {
-		name := ToolSession(config.Sessions, index)
-		result.sessions[name] = &ToolSessionFact{Session: name, Index: index, Outputs: []ToolOutput{}}
+	if len(config.SessionIDs) != 0 {
+		if err := result.BindSessions(config.SessionIDs); err != nil {
+			listener.Close()
+			return nil, err
+		}
 	}
 	providerTLS := httptest.NewUnstartedServer(http.HandlerFunc(result.serve))
 	providerTLS.EnableHTTP2 = true
@@ -474,6 +479,14 @@ func StartTool(config ToolConfig) (*ToolServer, error) {
 	mux.HandleFunc("/control/tool-wait-seeded", wait(result.seeded, false))
 	mux.HandleFunc("/control/tool-wait-done", wait(result.done, true))
 	mux.HandleFunc("/control/tool-snapshot", func(writer http.ResponseWriter, _ *http.Request) { reply(writer, result.Snapshot(true), nil) })
+	mux.HandleFunc("/control/bind-sessions", func(writer http.ResponseWriter, request *http.Request) {
+		var sessions []string
+		err := json.NewDecoder(request.Body).Decode(&sessions)
+		if err == nil {
+			err = result.BindSessions(sessions)
+		}
+		reply(writer, result.Snapshot(false), err)
+	})
 	mux.HandleFunc("/control/shutdown", func(writer http.ResponseWriter, _ *http.Request) {
 		result.shutdownOnce.Do(func() { close(result.shutdown) })
 		reply(writer, result.Snapshot(false), nil)
