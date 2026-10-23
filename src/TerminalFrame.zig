@@ -126,7 +126,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
                 var storage: [128]u8 = undefined;
                 try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
                 heading_height = try rows(&self.heading, layout);
-            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.measure(layout, .{}, available).next.order(.end) != .eq) and available -| call_rows > 1) 1 else 0;
+            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.measure(layout, .{}, available -| (needed - 1)).next.order(.end) != .eq) and available -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= available) break;
             if (omitted != 0 and !compact) {
                 compact = true;
@@ -145,7 +145,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
             try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
-    self.draft_height = @min(needed, input.height - self.status_height - heading_height - call_rows);
+    // A selected page needs a readable row so browsing can still advance.
+    const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and available > heading_height + call_rows);
+    self.draft_height = @min(needed, input.height - self.status_height - heading_height - call_rows - document_reserve);
     self.draft_first = caret.row -| (self.draft_height - 1);
     available = input.height - self.draft_height - self.status_height;
     self.height = available - heading_height - call_rows;
@@ -275,6 +277,14 @@ test "a fitting multiline draft uses free terminal rows without scrolling" {
         try std.testing.expectEqual(height - 5, frame.draft_height);
         try std.testing.expectEqual(@as(u16, 41) - frame.draft_height, frame.draft_first);
         try std.testing.expectEqual(height - 1, frame.caret_row);
+    }
+    // Browsing and Action pages must remain readable beside an oversized draft.
+    document.top = .{};
+    for ([_]bool{ false, true }) |action| {
+        try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
+        try std.testing.expectEqual(@as(usize, 1), frame.document_rows);
+        try std.testing.expectEqualStrings(if (action) "Action continues · PgDn" else "Browsing · Esc returns", frame.heading.text());
+        try std.testing.expect(!frame.approval_ready);
     }
 }
 
