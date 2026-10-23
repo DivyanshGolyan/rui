@@ -59,15 +59,15 @@ def resources(pid):
     return {"rss_kib": rss, "fds": len(os.listdir(root / "fd"))}
 
 
-def checkpoint_readers():
+def checkpoint_readers(repetitions=12_000):
     """Slow canonical replies cannot prevent WAL reuse by unrelated commits."""
     with tempfile.TemporaryDirectory(prefix="rui-reader-checkpoint-") as root:
         state = canonical_fixture_root(root)
         store = state / "store"
         store.mkdir(mode=0o700)
-        text = "asymmetric-é中-0123456789\n" * 12_000
+        text = "asymmetric-é中-0123456789\n" * repetitions
         user_text = "raw-user-prefix:" + text
-        arguments = "proposal-arguments-é\n" * 12_000
+        arguments = "proposal-arguments-é\n" * repetitions
         endpoint = model.SuccessEndpoint([
             model.sse_tool_calls("checkpoint", [("unknown", "checkpoint-call", arguments)]),
             model.sse_answer("checkpoint-final", "private", "answer", text)[0],
@@ -283,4 +283,5 @@ def main():
 
 if __name__ == "__main__":
     checkpoint_readers()
+    checkpoint_readers(48_000)
     main()
