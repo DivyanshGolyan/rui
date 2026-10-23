@@ -901,7 +901,7 @@ func expectedCapacityRequests(keys, sessions []string, workspace, store string) 
 	rows := make([]keyedDigest, 0, len(keys))
 	totalBytes := 0
 	for index, key := range keys {
-		body := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, store, sessions[index])) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
+		body := []byte(`{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, store, sessions[index])) + `,"input":[{"role":"user","content":[{"type":"input_text","text":` + measurement.JSONString(key) + `}]}],"tools":[]}`)
 		digest := sha256.Sum256(body)
 		rows = append(rows, keyedDigest{key: key, digest: hex.EncodeToString(digest[:])})
 		totalBytes += len(body)

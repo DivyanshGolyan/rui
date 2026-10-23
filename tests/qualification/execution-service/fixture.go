@@ -174,7 +174,7 @@ func (e *endpoint) serve(w http.ResponseWriter, r *http.Request) {
 	p.Calls++
 	sum := sha256.Sum256(body)
 	p.Hash = hex.EncodeToString(sum[:])
-	if envelope.Model != "model-a" {
+	if envelope.Model != "gpt-6-luna" {
 		e.faults = append(e.faults, "wrong model")
 	}
 	if p.Expected != nil && !bytes.Equal(body, p.Expected) {
@@ -252,7 +252,7 @@ func userItem(text string) []byte {
 	return []byte(`{"role":"user","content":[{"type":"input_text","text":` + string(marshal(text)) + `}]}`)
 }
 func wireRequest(input [][]byte) []byte {
-	prefix := []byte(`{"model":"model-a","store":false,"stream":true,"include":["reasoning.encrypted_content"],"input":[{"role":"system","content":[{"type":"input_text","text":""}]}`)
+	prefix := []byte(`{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"input":[{"role":"system","content":[{"type":"input_text","text":""}]}`)
 	for _, item := range input {
 		prefix = append(prefix, ',')
 		prefix = append(prefix, item...)

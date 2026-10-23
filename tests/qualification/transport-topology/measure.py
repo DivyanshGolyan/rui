@@ -141,7 +141,7 @@ def main():
         try:
             for index in range(100):
                 text = f"compare-{index}"
-                dispatch.configure(root, store, f"config-{index}", f"direct/{text}", "model-a")
+                dispatch.configure(root, store, f"config-{index}", f"direct/{text}", "gpt-6-luna")
                 dispatch.message(root, store, f"message-{index}", f"direct/{text}", text)
             assert endpoint.ready.wait(45), "100 requests not simultaneously live"
             requests = endpoint.requests if topology == "h1" else {

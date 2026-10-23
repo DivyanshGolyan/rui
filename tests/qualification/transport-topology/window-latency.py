@@ -112,7 +112,7 @@ def run(binary, update_delay, iteration):
                                    active_capacity=1)
         diagnostics = HostDiagnostics(host)
         try:
-            dispatch.configure(root, store, "config", "direct/latency", "model-a")
+            dispatch.configure(root, store, "config", "direct/latency", "gpt-6-luna")
             dispatch.message(root, store, "message", "direct/latency", "latency")
             assert endpoint.ready.wait(30), "H2 request not ready"
             started = time.monotonic_ns()
