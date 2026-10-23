@@ -8,7 +8,10 @@ reads that sender from the Message's leading part, not from text A wrote. A's
 send returns after admission and A finishes its Turn while B's own Bash call
 is held. B's Bash then replies to the recorded sender, which A receives as a
 peer Message from B. The generated capture recovers the original send with
-its saved sender, outside any Bash, with no login or idle peer process.
+its saved sender, outside any Bash, with no login or idle peer process. A
+then inspects that original receipt and reads B's saved report on its first
+read-result call, without guessing Conversation positions. This scripted
+provider proves the workflow and wording, not future model compliance.
 """
 import json
 import os
@@ -96,7 +99,7 @@ class PeerModel(TestHTTPServer):
         text = last_user_text(request)
         if address["session"] == SESSION_B:
             if outputs:
-                return answer("b-done", "replied")
+                return answer("b-done", "peer report: 42")
             self.b_received.set()
             reply_to = sender_of(request)
             # B's execution waits for the test's release file, then replies.
@@ -107,7 +110,20 @@ class PeerModel(TestHTTPServer):
             ))
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
-            return answer("a-final", "peer said 42")
+            if outputs and outputs[-1].endswith("peer report: 42"):
+                return answer("a-final", "peer said 42")
+            # A retained its delegation receipt before B ran. Inspect only
+            # that request, then issue exactly one read-result after completion.
+            completed = ('import json,sys; '
+                         'sys.exit(json.load(open("a-peer-inspect.json"))["observation"]'
+                         '.get("result", {}).get("status") != "completed")')
+            return bash_call("a-read-report", (
+                "set -e; handle=$(sed -n 's/^request: \\([^ ]*\\) .*/\\1/p' b-send.err); test -n \"$handle\"; "
+                "i=0; while :; do rui request inspect \"$handle\" > a-peer-inspect.json; "
+                f"if python3 -c {shlex.quote(completed)}; then break; fi; "
+                "i=$((i+1)); [ $i -lt 200 ] || exit 124; sleep 0.05; done; "
+                "rui request read-result \"$handle\" > a-peer-report.txt; cat a-peer-report.txt"
+            ))
         if outputs:
             self.a_continued.set()
             return answer("a-wait", "waiting for peer/b")
@@ -248,6 +264,19 @@ def main():
         a_reply_request = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A][-1]
         assert last_user_text(a_reply_request) == "from peer/b: 42" and a_final
         assert sender_of(a_reply_request) == {"store": canonical_store, "session": SESSION_B}
+        assert (workspace / "a-peer-report.txt").read_bytes() == b"peer report: 42"
+        inspected = json.loads((workspace / "a-peer-inspect.json").read_text())
+        assert inspected["key"] == receipt["context"]["key"], (inspected, receipt)
+        assert inspected["observation"]["target"] == receipt["context"]["session"], (inspected, receipt)
+        assert inspected["observation"]["result"]["status"] == "completed", inspected
+        # The parent consumed the peer's saved report through its original
+        # request handle in one Bash Action, not the peer's latest Conversation.
+        a_actions = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A,
+                        "--profile", "full", home=home)["full"]["actions"]
+        assert len(a_actions) == 2, a_actions
+        assert a_actions[-1]["resolution"] == "succeeded", a_actions
+        assert a_actions[-1]["result"]["text"].endswith("stdout tail:\npeer report: 42"), a_actions
+        assert tool_outputs(a_reply_request)[-1] == a_actions[-1]["result"]["text"], a_reply_request
         final = subprocess.run([str(installed), "request", "read-result", "--store", store, "--key", reply["context"]["key"]],
                                capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert final.returncode == 0 and final.stdout == b"peer said 42", final
@@ -266,7 +295,10 @@ def main():
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
         print("peer round trip passed: installed Bash rui configured B and sent with a durable receipt, "
-              "Host-recorded senders both ways, B replied to its recorded sender, original capture recovered its saved sender without duplicate, A finished while B was held, no idle peer or login, controlled PATH/HOME")
+              "Host-recorded senders both ways, B explicitly sent its report to its recorded sender, "
+              "A inspected its retained delegation receipt and got B's saved report on its first read-result, "
+              "original capture recovered its saved sender without duplicate, A finished while B was held, "
+              "no idle peer or login, controlled PATH/HOME; scripted provider, not a model-compliance guarantee")
     except BaseException:
         retain_failure_state("peer integration failure state", state)
         state = None
