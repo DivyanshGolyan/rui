@@ -5014,8 +5014,9 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
-    if selected in ("all", "compiled-models"):
+    split_callers = selected == "callers"
+    assert selected in ("all", "callers", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    if selected in ("all", "callers", "compiled-models"):
         compiled_model_cases()
     if selected == "compiled-models":
         return
@@ -5024,6 +5025,8 @@ def main(selected="all"):
         return
     if selected == "all":
         renderer_cases()
+    if split_callers:
+        selected = "all"
     if selected in ("all", "compaction-settings"):
         help_case()
     if selected in ("all", "terminal-waits"):
@@ -5052,7 +5055,7 @@ def main(selected="all"):
         persistent_permission_case(stale_target=True)
     if selected == "persistent-permission":
         return
-    if selected == "all":
+    if selected == "all" and not split_callers:
         terminal_restoration_integration.main()
         canonical_failure_integration.main()
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-human-cli."))

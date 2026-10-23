@@ -45,7 +45,14 @@ cases() {
     run_case execution bash python3 "$directory/bash_integration.py" "$release_safe"
     run_case execution peer python3 "$directory/peer_integration.py" "$release_safe"
     run_case execution sender-identity python3 "$directory/sender_identity_integration.py" "$release_safe"
-    run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe"
+    if [ "$part" = all ]; then
+        run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe"
+    else
+        run_case callers human-cli env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe" callers
+        run_case callers human-cli-renderer env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/human_cli_integration.py" "$release_safe" renderer
+        run_case callers terminal-restoration env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/terminal_restoration_integration.py" "$release_safe"
+        run_case callers canonical-failure env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/canonical_failure_integration.py" "$release_safe"
+    fi
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"

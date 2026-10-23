@@ -686,14 +686,19 @@ class FullCheckPartitionTest(unittest.TestCase):
             command = '''#!/bin/sh
 if [ "$1" = - ]; then exec "$TEST_PYTHON" "$@"; fi
 fixture=$(basename "${1:-$0}")
+base_fixture=$fixture
+case "$fixture" in
+    human_cli_integration.py|terminal_restoration_integration.py|canonical_failure_integration.py)
+        test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46 ;;
+esac
+if [ "$fixture" = human_cli_integration.py ]; then
+    fixture="$fixture${3:+:$3}"
+fi
 identity="$fixture.$2"
 printf "%s %s\\n" "$identity" "$$" >> "$GATE_DIR/peer-pids"
-if [ "$fixture" = human_cli_integration.py ]; then
-    test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46
-fi
 if [ "$CHECK_TIMING" = 1 ]; then
     case "$fixture" in
-        human_cli_integration.py|preference_policy_integration.py)
+        human_cli_integration.py:callers|preference_policy_integration.py)
             touch "$GATE_DIR/$fixture.started"
             read -r release < "$GATE_DIR/$fixture.release"
             test "$release" = r || exit 45 ;;
@@ -701,7 +706,7 @@ if [ "$CHECK_TIMING" = 1 ]; then
 fi
 if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.started"
-    if [ "$fixture" = human_cli_integration.py ]; then
+    if [ "$base_fixture" = human_cli_integration.py ]; then
         while [ ! -e "$GATE_DIR/activity_integration.py.release.started" ]; do
             sleep 0.01
         done
@@ -709,7 +714,9 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
     case "$fixture:$2" in
         host_launch_integration.py:*|host_process_test.py:*|host_allocator_test.py:*|admission_integration.sh:debug)
             touch "$GATE_DIR/isolated.started"
-            peers="human_cli_integration.py.release preference_policy_integration.py.preferences
+            peers="human_cli_integration.py:callers.release human_cli_integration.py:renderer.release
+                terminal_restoration_integration.py.release canonical_failure_integration.py.release
+                preference_policy_integration.py.preferences
                 session_list_integration.py.release conversation_page_integration.py.release
                 proposal_integration.py.release activity_integration.py.release
                 host_status_integration.py.release host_stop_integration.py.release"
@@ -732,7 +739,7 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
     touch "$GATE_DIR/$identity.done"
 fi
 printf "%s %s\\n" "$fixture" "$2" >> "$GATE_DIR/invocations"
-if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
+if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
 '''
             for name in ("python3", "sh", "native"):
                 (root / name).write_text(command)
@@ -767,7 +774,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     "import os, time\nfrom pathlib import Path\n"
                     "time.monotonic_ns = lambda: int(Path(os.environ['GATE_DIR'], 'clock').read_text())\n")
                 env.update(PYTHONPATH=str(root), TMPDIR=str(root))
-                fixtures = ("human_cli_integration.py", "preference_policy_integration.py")
+                fixtures = ("human_cli_integration.py:callers", "preference_policy_integration.py")
             # The serial driver starts 43 real interpreters, including its
             # version check. This is a functional test, not a startup benchmark.
             # One coarse deadline owns readiness, drainage and every child.
@@ -890,9 +897,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                           "fail_at": "held_ready"}, AssertionError, "held_ready",
              ("dispatch_integration.py.release",)),
             ("callers", {"timing": True, "fail_at": "timed_ready"}, AssertionError, "timed_ready",
-             ("human_cli_integration.py.release", "preference_policy_integration.py.preferences")),
+             ("human_cli_integration.py:callers.release", "preference_policy_integration.py.preferences")),
             ("callers", {"timing": True, "fail_at": "timed_recorded"}, AssertionError, "timed_recorded",
-             ("human_cli_integration.py.release",)),
+             ("human_cli_integration.py:callers.release",)),
         ):
             with self.subTest(part=part, message=message):
                 with self.assertRaises(error) as rejected:
@@ -1114,12 +1121,18 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
             outputs[part] = set(lines)
         self.assertEqual(outputs["all"], expected)
         # The ordinary driver also owns the native binary; the full gate runs
-        # that binary in the build graph instead. Every process case is shared.
-        self.assertEqual(outputs["parallel"], expected | {"native "})
+        # that binary in the build graph instead. Independent human CLI groups
+        # split; the unsplit serial invocation retains its original order.
+        parallel_expected = expected - {"human_cli_integration.py release"} | {
+            "human_cli_integration.py:callers release", "human_cli_integration.py:renderer release",
+            "terminal_restoration_integration.py release", "canonical_failure_integration.py release",
+        }
+        self.assertEqual(outputs["parallel"], parallel_expected | {"native "})
         self.assertEqual(outputs["execution"] & outputs["callers"], set())
-        self.assertEqual(outputs["execution"] | outputs["callers"], expected)
+        self.assertEqual(outputs["execution"] | outputs["callers"], parallel_expected)
         self.assertIn("dispatch_integration.py release", outputs["execution"])
-        self.assertIn("human_cli_integration.py release", outputs["callers"])
+        self.assertIn("human_cli_integration.py:callers release", outputs["callers"])
+        self.assertIn("human_cli_integration.py:renderer release", outputs["callers"])
 
     def test_callers_overlap_private_fixtures_then_drain_before_deadline_cases(self):
         for part in ("callers", "parallel"):
@@ -1158,6 +1171,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
                     self.assertEqual(lines[-1].split()[0], fixture)
                 else:
                     self.assertEqual(set(lines), complete[part])
+        for part in ("callers", "parallel"):
+            for fixture, record in (("human_cli_integration.py:renderer", "human-cli-renderer"),
+                                    ("terminal_restoration_integration.py", "terminal-restoration"),
+                                    ("canonical_failure_integration.py", "canonical-failure")):
+                result, lines = self.run_part(part, fixture)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(set(lines), complete[part])
+                self.assertIn((record, "42"), [(name, status) for name, status, _ in self.records(result)])
         for part in ("execution", "parallel", "all"):
             result, _ = self.run_part(part, "dispatch_integration.py")
             self.assertNotEqual(result.returncode, 0, part)
@@ -1170,13 +1191,15 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
 
     def test_failure_still_drains_a_held_peer_before_isolated_cases(self):
         for part in ("callers", "parallel"):
-            result, _ = self.run_part(part, fail="preference_policy_integration.py",
-                                      overlap=True, hold="host_stop_integration.py")
-            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-            records = {name: status for name, status, _ in self.records(result)}
-            self.assertEqual(records["preference-policy"], "42")
-            self.assertEqual(records["host-stop"], "0")
-            self.assertEqual(records["host-launch"], "0")
+            for held in ("host_stop_integration.py", "human_cli_integration.py:renderer"):
+                result, _ = self.run_part(part, fail="preference_policy_integration.py",
+                                          overlap=True, hold=held)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                records = {name: status for name, status, _ in self.records(result)}
+                self.assertEqual(records["preference-policy"], "42")
+                self.assertEqual(records["host-stop"], "0")
+                self.assertEqual(records["human-cli-renderer"], "0")
+                self.assertEqual(records["host-launch"], "0")
 
     def test_clock_failure_preserves_fixture_results(self):
         for clock_error in ("start", "finish"):
