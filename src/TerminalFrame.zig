@@ -12,8 +12,6 @@ pub const approval_choice = "Type a + Enter to allow once · d + Enter to deny";
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
 pub const max_cells = 24 * 2048;
-/// Drafts beyond this many rows scroll to keep the caret in view.
-const draft_rows = 5;
 
 pub fn validateGeometry(width: u16, height: u16) !void {
     if (height < 2 or width < 8) return error.TerminalTooSmall;
@@ -107,9 +105,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     const caret = Viewport.caret(draft, input.draft[0..input.cursor]);
     // An exactly filled last row puts the caret on a row of its own.
     const needed = @max(Viewport.draftRows(draft, input.draft), caret.row + 1);
-    self.draft_height = @max(1, @min(@min(needed, draft_rows), (input.height - self.status_height) -| 2));
-    self.draft_first = caret.row -| (self.draft_height - 1);
-    const available: u16 = input.height - self.draft_height - self.status_height;
+    // Fit required footer and navigation rows with one draft row first;
+    // the draft can then grow into every remaining terminal row.
+    var available: u16 = input.height - 1 - self.status_height;
     try document.prepare();
     for (input.calls, 0..) |line, index| {
         try self.calls[index].append(line);
@@ -147,6 +145,9 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
             try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
+    self.draft_height = @min(needed, input.height - self.status_height - heading_height - call_rows);
+    self.draft_first = caret.row -| (self.draft_height - 1);
+    available = input.height - self.draft_height - self.status_height;
     self.height = available - heading_height - call_rows;
     self.browsing_height = available - @intFromBool(available > 1);
     self.first = document.first(layout, self.height);
@@ -244,6 +245,36 @@ test "an exactly filled draft row puts the caret on the next row" {
         try std.testing.expectEqual(height, frame.draft_height);
         try std.testing.expectEqual(frame.draft_top + height - 1, frame.caret_row);
         try std.testing.expectEqual(column, frame.caret_column);
+    }
+}
+
+test "a fitting multiline draft uses free terminal rows without scrolling" {
+    var document: Viewport.Document = .{};
+    try document.append("› hi\nHi! What would you like to work on?\n");
+    const draft = "Please inspect this project.\n\nFirst read README.md.\nKeep all input bytes unchanged.\n\nThen compare the layout.\n\nDo not claim a missing recording was inspected.\n\nPeer A: summarise README.md and preserve literal backticks in the report so every character wraps to the next visual row.\n\nEnd of representative paste.";
+    var frame: Self = undefined;
+    for ([_]u16{ 20, 24 }) |height| {
+        for ([_]usize{ 0, draft.len / 2, draft.len }) |cursor| {
+            try frame.plan(&document, .{ .width = 100, .height = height, .draft = draft, .cursor = cursor, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true });
+            // Twelve logical lines, with the Peer line wrapping once.
+            try std.testing.expectEqual(@as(u16, 13), frame.draft_height);
+            try std.testing.expectEqual(@as(u16, 0), frame.draft_first);
+            try std.testing.expectEqual(Position{}, frame.first);
+            try std.testing.expectEqual(@as(u16, 3), frame.draft_top);
+            try std.testing.expect(frame.draft_top + frame.draft_height <= height);
+        }
+    }
+    // Oversized drafts yield to the actual status, complete calls and overflow
+    // rows, not a fixed transcript reservation or a fixed editor maximum.
+    var tall: [200]u8 = undefined;
+    for (0..40) |index| @memcpy(tall[index * 5 ..][0..5], "line\n");
+    for ([_]u16{ 8, 24 }) |height| {
+        try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .cursor = tall.len, .status = "Working…", .approval = false, .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
+        try std.testing.expectEqual(@as(usize, 2), frame.used);
+        try std.testing.expectEqualStrings("+1 more calls · /status", frame.heading.text());
+        try std.testing.expectEqual(height - 5, frame.draft_height);
+        try std.testing.expectEqual(@as(u16, 41) - frame.draft_height, frame.draft_first);
+        try std.testing.expectEqual(height - 1, frame.caret_row);
     }
 }
 
