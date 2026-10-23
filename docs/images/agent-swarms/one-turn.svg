@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="1190" viewBox="0 0 960 1190" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">A Rui turn: durable rows, shared execution, model streaming and Bash output</title>
+  <desc id="desc">One master Host diagram follows a successful turn with a Bash call. Step 1: session send writes message content and admission rows in durable SQLite. Step 2: the execution loop discovers eligible work, reserves an in-memory Active Capacity record and commits Attempt admission before launch. Step 3: requests and model events use a shared HTTP/2 connection to the provider. Step 4: Bash runs outside the Host as a tool subprocess; its stdout and stderr are captured into temporary scratch, with a bounded tail for the saved tool result. Step 5: results commit in SQLite, the saved tool tail goes into the next model request, and custody is released only after safe cleanup. Full output may remain in optional scratch retention and can be evicted. A tool turn repeats the model and tool cycle before its final answer. Arrows distinguish admission, request, events, launch, capture and result import. The opaque light canvas remains readable on light and dark pages.</desc>
+  <metadata>
+    Source revision: b250c8c397a95001ccbbe52c8f7985d183f0a8b8, DivyanshGolyan/rui.
+    Source owners: src/store.zig (Message admission, Attempt admission, result
+    settlement); src/server.zig (custody records); src/server_execution.zig
+    executionMain, ExecutionSlot, serviceOneCompletion, finishCustodyNow;
+    src/provider.zig Reactor.init; src/bash.zig Execution and result rendering;
+    src/output_retention.zig (optional full-output retention).
+    Contracts: ARCHITECTURE.md, Capacity ownership; Transactions, execution and
+    recovery; Tool excerpts and full output; Shared scratch ownership.
+    Depicts one successful Bash path, not all errors, retries or permission waits.
+    H2 depicts the HTTPS provider route, not historical H1 benchmark topology.
+    Theme: fixed opaque #f8fafc canvas and explicit colors; no inherited page colors.
+    Intended reading width: 720–960 CSS pixels. No external fonts or assets.
+  </metadata>
+  <defs>
+    <style>
+      svg { background: #f8fafc; }
+      text { font-family: Arial, Helvetica, sans-serif; fill: #172b3a; font-size: 20px; }
+      .title { font-size: 32px; font-weight: 700; }
+      .heading { font-size: 25px; font-weight: 700; }
+      .label { font-weight: 700; }
+      .note { fill: #465b6c; }
+      .panel { fill: #ffffff; stroke: #52697b; stroke-width: 2; }
+      .memory { fill: #edf6f6; stroke: #246568; stroke-width: 2; }
+      .durable { fill: #eef1fa; stroke: #4c5f94; stroke-width: 2; }
+      .network { fill: #eff5fc; stroke: #315f91; stroke-width: 2; }
+      .scratch { fill: #faf3e6; stroke: #896322; stroke-width: 2; }
+      .tool { fill: #ffffff; stroke: #52697b; stroke-width: 2; stroke-dasharray: 8 5; }
+      .flow { fill: none; stroke: #315f91; stroke-width: 3; marker-end: url(#arrow); }
+      .return { fill: none; stroke: #4c5f94; stroke-width: 3; marker-end: url(#saved); }
+      .badge { fill: #172b3a; }
+      .number { fill: #ffffff; font-weight: 700; text-anchor: middle; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#315f91"/>
+    </marker>
+    <marker id="saved" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#4c5f94"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="1188" fill="#f8fafc" stroke="#7b8c9b" stroke-width="2"/>
+  <text x="32" y="51" class="title">One Host, one turn through the system</text>
+  <text x="32" y="88" class="note">A successful Bash path · model/tool cycle repeats until the final answer</text>
+
+  <rect x="32" y="136" width="568" height="916" class="panel"/>
+  <text x="80" y="180" class="heading">Rui Host · shared orchestration</text>
+  <text x="704" y="180" class="note">Outside the Host</text>
+
+  <rect x="80" y="214" width="488" height="138" class="durable"/>
+  <rect x="96" y="232" width="32" height="32" class="badge"/>
+  <text x="112" y="255" class="number">1</text>
+  <text x="142" y="257" class="heading">Send writes rows</text>
+  <text x="100" y="297">SQLite · durable messages and admission</text>
+  <text x="100" y="329" class="note">Saved work, not an in-memory agent object</text>
+
+  <rect x="704" y="224" width="224" height="102" class="panel"/>
+  <text x="722" y="260" class="label">Caller / CLI</text>
+  <text x="722" y="294">session send</text>
+  <path d="M 704 278 H 570" class="flow"/>
+
+  <path d="M 340 352 V 410" class="flow"/>
+  <text x="360" y="390" class="note">Discover eligible work</text>
+
+  <rect x="80" y="412" width="488" height="182" class="memory"/>
+  <rect x="96" y="430" width="32" height="32" class="badge"/>
+  <text x="112" y="453" class="number">2</text>
+  <text x="142" y="455" class="heading">Loop admits an Attempt</text>
+  <text x="100" y="493">Reserve capacity; commit before launch.</text>
+  <rect x="100" y="513" width="448" height="60" class="panel"/>
+  <text x="116" y="538" class="label">Active Capacity array · in memory</text>
+  <text x="116" y="561">One record per execution or cleanup</text>
+
+  <rect x="704" y="412" width="224" height="182" class="network"/>
+  <rect x="720" y="430" width="32" height="32" class="badge"/>
+  <text x="736" y="453" class="number">3</text>
+  <text x="764" y="455" class="label">Shared H2</text>
+  <text x="722" y="493">HTTPS connection</text>
+  <text x="722" y="535">Model provider</text>
+  <text x="722" y="569" class="note">Model streams</text>
+  <path d="M 568 474 H 702" class="flow"/>
+  <text x="615" y="458" class="note">Request</text>
+  <path d="M 704 552 H 570" class="flow"/>
+  <text x="618" y="581" class="note">Events</text>
+
+  <path d="M 540 594 V 646 H 816 V 708" class="flow"/>
+  <text x="80" y="645" class="note">A model tool call becomes a saved Action.</text>
+  <text x="710" y="635" class="note">Launch Bash</text>
+  <text x="80" y="677" class="note">Permission and admission precede launch.</text>
+
+  <rect x="704" y="710" width="224" height="142" class="tool"/>
+  <rect x="720" y="728" width="32" height="32" class="badge"/>
+  <text x="736" y="751" class="number">4</text>
+  <text x="764" y="753" class="heading">Bash</text>
+  <text x="722" y="794">Tool subprocess</text>
+  <text x="722" y="829" class="note">stdout / stderr</text>
+
+  <rect x="80" y="710" width="488" height="142" class="scratch"/>
+  <text x="100" y="749" class="heading">Scratch · temporary output</text>
+  <text x="100" y="788">Full files on disk; bounded tail for the model.</text>
+  <text x="100" y="825" class="note">Optional full-output retention can be evicted.</text>
+  <path d="M 704 782 H 570" class="flow"/>
+  <text x="610" y="767" class="note">Capture</text>
+
+  <path d="M 340 852 V 910" class="flow"/>
+  <text x="360" y="889" class="note">Sealed result import</text>
+
+  <rect x="80" y="912" width="488" height="112" class="durable"/>
+  <rect x="96" y="930" width="32" height="32" class="badge"/>
+  <text x="112" y="953" class="number">5</text>
+  <text x="142" y="955" class="heading">Save, then release</text>
+  <text x="100" y="987">Commit results in SQLite; clean up safely.</text>
+  <text x="100" y="1014">Return custody only after safe cleanup.</text>
+  <path d="M 80 968 H 56 V 314 H 78" class="return"/>
+
+  <text x="32" y="1090" class="note">The saved tool tail enters the next model request; the final answer is saved too.</text>
+  <text x="32" y="1124" class="note">A saved result does not prove cleanup finished. Retained full output is not durable state.</text>
+  <text x="32" y="1158" class="note">H2 scope: one origin at capacity 100; peer limits may queue work. Not an H1 benchmark.</text>
+</svg>

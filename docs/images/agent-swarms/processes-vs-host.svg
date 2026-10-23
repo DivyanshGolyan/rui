@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="900" viewBox="0 0 960 900" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">100 agents: separate processes or one shared Rui Host</title>
+  <desc id="desc">An illustrative process-per-agent design repeats a heap, threads and a provider connection in each of 100 processes. Rui instead uses one Host with SQLite, one execution event loop and up to 100 model streams on one shared HTTP/2 connection at Active Capacity 100 and one provider origin. Processes 3 through 99 and streams 3 through 99 are aggregated, not omitted from the count. The Host also has shared worker threads, and Bash tools run as subprocesses. Provider stream limits can queue work. This is architecture, not a measured performance comparison or a depiction of the historical HTTP/1.1 fixture. An opaque light canvas preserves the same contrast on light and dark pages.</desc>
+  <metadata>
+    Source revision: b250c8c397a95001ccbbe52c8f7985d183f0a8b8, DivyanshGolyan/rui.
+    Source owners: src/provider.zig Reactor.init (ceil(capacity/100) connections,
+    100 streams per connection); src/server_execution.zig executionMain (one
+    execution loop and capacity-sized slots); src/server.zig (Host custody array
+    and execution thread). Contracts: ARCHITECTURE.md, Capacity ownership;
+    Model requests, continuation and compaction; Tool excerpts and full output.
+    H1 evidence boundary: tests/qualification/README.md, Model output.
+    Left side is an explicitly illustrative topology, not a measured competitor.
+    Theme: fixed opaque #f8fafc canvas and explicit colors; no inherited page colors.
+    Intended reading width: 720–960 CSS pixels. No external fonts or assets.
+  </metadata>
+  <defs>
+    <style>
+      svg { background: #f8fafc; }
+      text { font-family: Arial, Helvetica, sans-serif; fill: #172b3a; font-size: 20px; }
+      .title { font-size: 32px; font-weight: 700; }
+      .heading { font-size: 25px; font-weight: 700; }
+      .label { font-weight: 700; }
+      .note { fill: #465b6c; }
+      .panel { fill: #ffffff; stroke: #52697b; stroke-width: 2; }
+      .memory { fill: #edf6f6; stroke: #246568; stroke-width: 2; }
+      .durable { fill: #eef1fa; stroke: #4c5f94; stroke-width: 2; }
+      .network { fill: #eff5fc; stroke: #315f91; stroke-width: 2; }
+      .flow { fill: none; stroke: #315f91; stroke-width: 3; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#315f91"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="958" height="898" fill="#f8fafc" stroke="#7b8c9b" stroke-width="2"/>
+  <text x="32" y="51" class="title">100 agents, two runtime shapes</text>
+  <text x="32" y="88" class="note">Architecture comparison · counts describe topology, not benchmark results</text>
+
+  <rect x="32" y="136" width="400" height="610" class="panel"/>
+  <text x="56" y="178" class="heading">100 separate processes</text>
+  <text x="56" y="208" class="note">Illustrative process-per-agent layout</text>
+
+  <rect x="56" y="234" width="352" height="116" class="panel"/>
+  <text x="76" y="269" class="label">Agent process 1</text>
+  <text x="76" y="300">Own heap · own threads</text>
+  <text x="76" y="329">Own provider connection</text>
+
+  <rect x="56" y="374" width="352" height="116" class="panel"/>
+  <text x="76" y="409" class="label">Agent process 2</text>
+  <text x="76" y="440">Own heap · own threads</text>
+  <text x="76" y="469">Own provider connection</text>
+
+  <text x="76" y="535" class="note">⋮  Processes 3–99: repeat</text>
+
+  <rect x="56" y="568" width="352" height="116" class="panel"/>
+  <text x="76" y="603" class="label">Agent process 100</text>
+  <text x="76" y="634">Own heap · own threads</text>
+  <text x="76" y="663">Own provider connection</text>
+  <text x="56" y="721" class="note">Each process owns its runtime.</text>
+
+  <rect x="464" y="136" width="464" height="424" class="panel"/>
+  <text x="488" y="178" class="heading">One Rui Host</text>
+  <text x="488" y="208" class="note">Active Capacity 100 · one provider origin</text>
+
+  <rect x="488" y="230" width="416" height="70" class="durable"/>
+  <text x="508" y="260" class="label">SQLite · durable state</text>
+  <text x="508" y="286">Messages, decisions, saved results</text>
+
+  <rect x="488" y="320" width="416" height="70" class="memory"/>
+  <text x="508" y="350" class="label">One execution event loop</text>
+  <text x="508" y="376">Shared across all active agents</text>
+
+  <rect x="488" y="410" width="416" height="126" class="network"/>
+  <text x="508" y="444" class="label">100 model streams</text>
+  <text x="508" y="476">Stream 1 · stream 2 · … · stream 100</text>
+  <text x="508" y="508" class="note">Multiplexed when peer limits permit</text>
+
+  <path d="M 696 536 V 582" class="flow"/>
+  <rect x="500" y="584" width="392" height="66" class="network"/>
+  <text x="520" y="612" class="label">One shared HTTP/2 connection</text>
+  <text x="520" y="638">HTTPS / TLS · request and response</text>
+  <path d="M 696 650 V 680" class="flow"/>
+  <rect x="500" y="682" width="392" height="64" class="panel"/>
+  <text x="520" y="722" class="label">Model provider</text>
+
+  <path d="M 32 778 H 928" stroke="#7b8c9b" stroke-width="2"/>
+  <text x="32" y="812" class="note">Scope: up to 100 live model streams; peer limits may queue requests.</text>
+  <text x="32" y="843" class="note">One execution loop ≠ one Host thread. Shared workers and Bash subprocesses remain.</text>
+  <text x="32" y="874" class="note">H2 architecture is separate from historical loopback HTTP/1.1 benchmark evidence.</text>
+</svg>
