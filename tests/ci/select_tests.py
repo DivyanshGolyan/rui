@@ -184,13 +184,14 @@ def setup_requirements(targets):
 def execution_batches(targets, check_part="all"):
     # Share compilation and graph execution only among independent owner suites.
     # Composed gates and latency-sensitive/long witnesses keep isolated execution.
-    if check_part != "all" and "check-full" not in targets:
-        raise ValueError("A full-check part requires check-full in the selection")
+    composed = [target for target in targets if target in {"check", "check-full"}]
+    if check_part != "all" and not composed:
+        raise ValueError("A check part requires check or check-full in the selection")
     if check_part == "execution":
-        return [["check-full", "-Dcheck-part=execution"],
-                *execution_batches([target for target in targets if target != "check-full"])]
+        return [*([target, "-Dcheck-part=execution"] for target in composed),
+                *execution_batches([target for target in targets if target not in composed])]
     if check_part not in {"all", "callers"}:
-        raise ValueError(f"Unknown full-check part: {check_part}")
+        raise ValueError(f"Unknown check part: {check_part}")
     isolated = {"check", "check-full", "admission-debug-integration", "test-full",
                 "evaluator-churn", "host-launch-integration", "server-delivery-integration",
                 "transport-h2-integration", "codex-h2-integration"}
@@ -198,7 +199,7 @@ def execution_batches(targets, check_part="all"):
                  if target in {"workflow-check", "evaluator-host-integration"}]
     shared = [target for target in targets if target not in isolated and target not in evaluator]
     return (([evaluator] if evaluator else []) + ([shared] if shared else [])
-            + [[target, "-Dcheck-part=callers"] if target == "check-full" and check_part == "callers"
+            + [[target, "-Dcheck-part=callers"] if target in composed and check_part == "callers"
                else [target] for target in targets if target in isolated])
 
 
