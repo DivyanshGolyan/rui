@@ -3268,20 +3268,34 @@ def renderer_cases():
 
         def wait(self, marker=None, *, predicate=None, after=None, timeout=15):
             deadline = time.monotonic() + timeout
-            while not ((after is None or self.capture.generation > after) and
-                       (predicate() if predicate is not None else self.capture.reached(marker))):
-                remaining = deadline - time.monotonic()
-                assert remaining > 0 and select.select([self.master], [], [], remaining)[0], (
-                    "renderer screen deadline", marker, self.capture.completed,
-                    self.caller.poll(), self.capture.screen.cursor)
-                chunk = os.read(self.master, 65536)
-                assert chunk, ("renderer terminal closed", marker)
-                # Collection budget excludes observer work on long combining
-                # cells; this is not a native wall-response performance claim.
-                before = time.monotonic()
-                self.feed(chunk)
-                deadline += time.monotonic() - before
-            return self.capture.completed
+            matched = None
+            previous = self.capture.listener
+            def reached():
+                return ((after is None or self.capture.generation > after) and
+                        (predicate() if predicate is not None else self.capture.reached(marker)))
+            def observe(screen, x, y):
+                nonlocal matched
+                if previous is not None:
+                    previous(screen, x, y)
+                if matched is None and reached():
+                    matched = screen
+            self.capture.listener = observe
+            try:
+                while matched is None and not reached():
+                    remaining = deadline - time.monotonic()
+                    assert remaining > 0 and select.select([self.master], [], [], remaining)[0], (
+                        "renderer screen deadline", marker, self.capture.completed,
+                        self.caller.poll(), self.capture.screen.cursor)
+                    chunk = os.read(self.master, 65536)
+                    assert chunk, ("renderer terminal closed", marker)
+                    # Collection budget excludes observer work on long combining
+                    # cells; this is not a native wall-response performance claim.
+                    before = time.monotonic()
+                    self.feed(chunk)
+                    deadline += time.monotonic() - before
+                return matched if matched is not None else self.capture.completed
+            finally:
+                self.capture.listener = previous
 
         def every_frame(self):
             """Every committed frame from now on. One read can commit several
@@ -3430,6 +3444,24 @@ def renderer_cases():
         tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
 
     try:
+        # One read can replace a valid Message frame with the final reply.
+        # The wait and existing every-frame oracle must both see that frame.
+        master, writer = os.pipe()
+        try:
+            tty = Terminal(master, None, None)
+            frames = tty.every_frame()
+            listener = tty.capture.listener
+            os.write(writer, ("\x1b[?1049h\x1b[?2026h\x1b[2J\x1b[H" + "m" * 40 +
+                "\r\n› \x1b[?2026l\x1b[?2026h\x1b[2J\x1b[HREPLY-04399\r\n› \x1b[?2026l").encode())
+            os.close(writer)
+            writer = None
+            observed = tty.wait(predicate=lambda: tty.capture.draft("", 2) and "m" * 40 in tty.capture.completed,
+                after=0)
+            assert "m" * 40 in observed and "REPLY-04399" not in observed, observed
+            assert len(frames) == 2 and "m" * 40 in frames[0] and "REPLY-04399" in frames[1], frames
+            assert "REPLY-04399" in tty.capture.completed and tty.capture.listener is listener
+        finally:
+            dispose_all(lambda: os.close(master), lambda: os.close(writer) if writer is not None else None)
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         configure("renderer/geometry")
         codex_fixture.credentials(home / ".config/rui/codex.json")
