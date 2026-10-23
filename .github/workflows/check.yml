@@ -18,6 +18,9 @@ on:
         description: Qualify current main on Mac, including candidates with no selected native targets
         type: boolean
         default: false
+      targets:
+        description: Hillclimb harness only. Fixed Linux target JSON replacing selection
+        default: ''
 
 permissions:
   contents: read
@@ -47,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Refuse a second open landing stack before native jobs start
-        if: ${{ github.event_name != 'pull_request' && github.ref_name != 'main' }}
+        if: ${{ github.event_name != 'pull_request' && github.ref_name != 'main' && startsWith(github.ref_name, 'wip/land-') }}
         run: python3 -B tests/ci/auto_land.py --preflight "$GITHUB_REF_NAME"
       - name: Select existing targets
         id: select
@@ -57,6 +60,7 @@ jobs:
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
           STABLE: ${{ inputs.stable || false }}
+          TARGETS_OVERRIDE: ${{ inputs.targets || '' }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = push ]; then
@@ -73,6 +77,10 @@ jobs:
           from qualification import shards
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
+          if os.environ['TARGETS_OVERRIDE']:
+              p['targets'] = json.loads(os.environ['TARGETS_OVERRIDE'])
+              p['native_targets'] = []
+              p['cache_execution_checks'] = False
           if os.environ['STABLE'] == 'true':
               assert os.environ['GITHUB_REF_NAME'] == 'main', 'stable qualifies main only'
               p['targets'] = []
@@ -147,7 +155,12 @@ jobs:
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+        run: |
+          set -o pipefail
+          python3 -B tests/ci/build_artifact.py build "$TARGETS" 2>&1 | tee "$RUNNER_TEMP/hc-build.log"
+      - name: Hillclimb timings
+        if: ${{ always() }}
+        run: python3 .github/hc_notice.py build "$RUNNER_TEMP/hc-build.log" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         id: publish
         with:
@@ -238,7 +251,10 @@ jobs:
           test "$(uname -m)" = x86_64
           echo "Source SHA $(git rev-parse HEAD); actual native $(uname -s)/$(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
           zig fmt --check --ast-check build.zig src
-          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY
+          python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY 2>&1 | tee "$RUNNER_TEMP/hc-suite.log"
+      - name: Hillclimb timings
+        if: ${{ always() }}
+        run: python3 .github/hc_notice.py "suite ${{ matrix.name }}" "$RUNNER_TEMP/hc-suite.log" || true
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
