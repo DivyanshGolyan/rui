@@ -77,7 +77,7 @@ jobs:
           from qualification import shards
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
-          if os.environ['TARGETS_OVERRIDE']:
+          if os.environ.get('TARGETS_OVERRIDE'):
               p['targets'] = json.loads(os.environ['TARGETS_OVERRIDE'])
               p['native_targets'] = []
               p['cache_execution_checks'] = False
