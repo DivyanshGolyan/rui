@@ -2684,3 +2684,4 @@ test "incremental ingress preserves grammar and releases both captures after lat
 // hillclimb nonce a3b-check-split--1-1792789921
 // hillclimb nonce a3b-check-split-0-1792791103
 // hillclimb nonce a3b-check-split-1-1792791806
+// hillclimb nonce a3b-check-split-2-1792792643
