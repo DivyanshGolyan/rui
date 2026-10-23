@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 30;
+pub const schema_version: u32 = 31;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -938,13 +938,9 @@ const SessionReportCapture = struct {
     }
 
     fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
-        if (tools_mask > 3) return error.CorruptStore;
+        if (tools_mask > tool_catalog.toolBit(.bash)) return error.CorruptStore;
         try self.append("[");
-        if (tools_mask & 1 != 0) try self.append("\"bash\"");
-        if (tools_mask & 2 != 0) {
-            if (tools_mask & 1 != 0) try self.append(",");
-            try self.append("\"edit\"");
-        }
+        if (tools_mask & tool_catalog.toolBit(.bash) != 0) try self.append("\"bash\"");
         try self.append("]");
     }
 
@@ -1091,21 +1087,13 @@ const ContentBlob = struct {
 
 const Tool = tool_catalog.Tool;
 
-/// Persisted session.tools_mask bit for one tool.
-fn toolBit(tool: Tool) u8 {
-    return switch (tool) {
-        .bash => 1,
-        .edit => 2,
-    };
-}
-
 /// Decodes a persisted tools_mask.
 fn toolSet(mask: c_int) !tool_catalog.ToolSet {
     var set: tool_catalog.ToolSet = .empty;
     var remaining = std.math.cast(u8, mask) orelse return error.CorruptStore;
     inline for (comptime std.meta.tags(Tool)) |tool| {
-        if (remaining & toolBit(tool) != 0) set.insert(tool);
-        remaining &= ~toolBit(tool);
+        if (remaining & tool_catalog.toolBit(tool) != 0) set.insert(tool);
+        remaining &= ~tool_catalog.toolBit(tool);
     }
     if (remaining != 0) return error.CorruptStore;
     return set;
@@ -1120,7 +1108,7 @@ fn permissionModeCode(mode: []const u8) u8 {
 const default_tools_mask: u8 = blk: {
     var mask: u8 = 0;
     var names = std.mem.splitScalar(u8, product_defaults.tools, ',');
-    while (names.next()) |name| mask |= toolBit(std.meta.stringToEnum(Tool, name).?);
+    while (names.next()) |name| mask |= tool_catalog.toolBit(std.meta.stringToEnum(Tool, name).?);
     break :blk mask;
 };
 
@@ -1241,7 +1229,7 @@ fn planConfigurationUpdate(
     if (requested.tools.state == .value) {
         next.tools_mask = 0;
         for (requested.tools.values[0..requested.tools.count]) |tool| {
-            next.tools_mask |= toolBit(tool);
+            next.tools_mask |= tool_catalog.toolBit(tool);
         }
     }
     if (requested.permission_mode.state == .value) {
@@ -2846,7 +2834,7 @@ pub const Store = struct {
             result.code = std.meta.stringToEnum(protocol.ToolPresentation.Code, code.slice()) orelse return error.CorruptStore;
         } else if (c.sqlite3_column_int(statement, 2) == 0) result.code = .pending_permission;
         if (result.description == null) switch (result.code) {
-            .unknown_tool, .invalid_arguments, .tool_unavailable => {},
+            .unknown_tool, .invalid_arguments => {},
             else => return error.CorruptStore,
         };
         return result;
@@ -3361,7 +3349,7 @@ pub const Store = struct {
             try readText(statement, 4, &model);
             const tools = c.sqlite3_column_int(statement, 5);
             const permission = c.sqlite3_column_int(statement, 6);
-            if (tools < 0 or tools > 3 or permission < 0 or permission > 1) return error.CorruptStore;
+            if (tools < 0 or tools > tool_catalog.toolBit(.bash) or permission < 0 or permission > 1) return error.CorruptStore;
             if (count != 0) try capture.append(",");
             try capture.append("{\"reference\":");
             try capture.appendJsonString(reference.slice());
@@ -3847,7 +3835,7 @@ pub const Store = struct {
             const tools = c.sqlite3_column_int(statement, 4);
             const permission = c.sqlite3_column_int(statement, 5);
             const instructions_id = c.sqlite3_column_int64(statement, 6);
-            if (revision <= 0 or tools < 0 or tools > 3 or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
+            if (revision <= 0 or tools < 0 or tools > tool_catalog.toolBit(.bash) or permission < 0 or permission > 1 or instructions_id <= 0) return error.CorruptStore;
             try capture.appendFmt("{{\"revision\":\"{d}\",\"command_key\":", .{revision});
             try appendColumnString(statement, 1, 128, capture);
             try capture.append(",\"workspace\":");
@@ -5267,7 +5255,7 @@ pub const Store = struct {
         const instructions_id = try readNullablePositiveI64(statement, 1) orelse return error.CorruptStore;
         const output_schema_id = try readNullablePositiveI64(statement, 2);
         const tools = c.sqlite3_column_int(statement, 3);
-        if (tools < 0 or tools > 3) return error.CorruptStore;
+        if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
         const instructions = try self.readContentMetadata(instructions_id);
         const output_schema = if (output_schema_id) |content_id| blk: {
             const metadata = try self.readContentMetadata(content_id);
@@ -6869,7 +6857,7 @@ pub const Store = struct {
         current.instructions_id = (readNullablePositiveI64(statement, 2) catch return error.CorruptStore) orelse
             return error.CorruptStore;
         const tools = c.sqlite3_column_int(statement, 3);
-        if (tools < 0 or tools > 3) return error.CorruptStore;
+        if (tools < 0 or tools > tool_catalog.toolBit(.bash)) return error.CorruptStore;
         current.tools_mask = @intCast(tools);
         const permission = c.sqlite3_column_int(statement, 4);
         if (permission < 0 or permission > 1) return error.CorruptStore;
@@ -7238,7 +7226,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ provider TEXT NOT NULL,
         \\ model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
-        \\ tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND 3),
+    ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
         \\ permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ revision INTEGER NOT NULL CHECK(revision>0),
@@ -7268,7 +7256,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ model TEXT NOT NULL,
         \\ instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ instructions_updated INTEGER NOT NULL CHECK(instructions_updated IN (0,1)),
-        \\ tools_mask INTEGER NOT NULL,
+    ++ std.fmt.comptimePrint(" tools_mask INTEGER NOT NULL CHECK(tools_mask BETWEEN 0 AND {d}),\n", .{comptime tool_catalog.toolBit(.bash)}) ++
         \\ permission_mode INTEGER NOT NULL,
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
@@ -7394,7 +7382,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ arguments_content_id INTEGER NOT NULL REFERENCES content(content_id),
         \\ description TEXT CHECK(description IS NULL OR length(CAST(description AS BLOB)) BETWEEN 1 AND 100),
         \\ field_metadata BLOB NOT NULL CHECK(length(field_metadata)=160),
-        \\ rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments','tool_unavailable')),
+        \\ rejection_code TEXT CHECK(rejection_code IS NULL OR rejection_code IN ('unknown_tool','invalid_arguments')),
         \\ rejection_content_id INTEGER REFERENCES content(content_id),
         \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
         \\ action_kind INTEGER CHECK(action_kind IS NULL OR action_kind=1),
@@ -8014,15 +8002,13 @@ fn configureTestSessionAsk(
     storage: *Store,
     key: []const u8,
     session_ref: []const u8,
-    include_edit: bool,
 ) !void {
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration(key, session_ref, workspace, "model-a");
     command.configuration.tools.state = .value;
-    command.configuration.tools.count = if (include_edit) 2 else 1;
+    command.configuration.tools.count = 1;
     command.configuration.tools.values[0] = .bash;
-    if (include_edit) command.configuration.tools.values[1] = .edit;
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
     try std.testing.expect(storage.configure(&command, true, .{}) == .accepted);
@@ -8652,9 +8638,8 @@ test "Full revisions own repeated content once and render semantic settings" {
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var initial = try completeConfiguration("revision-owner-1", "direct/revision-owner", workspace, "model-a");
     initial.configuration.tools.state = .value;
-    initial.configuration.tools.count = 2;
+    initial.configuration.tools.count = 1;
     initial.configuration.tools.values[0] = .bash;
-    initial.configuration.tools.values[1] = .edit;
     initial.configuration.permission_mode.state = .value;
     try initial.configuration.permission_mode.value.set("ask");
     initial.configuration.instructions = try testingContent(&tmp, "revision-owner-instructions", 1, 64 * 1024);
@@ -8667,8 +8652,7 @@ test "Full revisions own repeated content once and render semantic settings" {
     try second.key.set("revision-owner-2");
     try second.session.set("direct/revision-owner");
     second.configuration.tools.state = .value;
-    second.configuration.tools.count = 1;
-    second.configuration.tools.values[0] = .edit;
+    second.configuration.tools.count = 0;
     second.configuration.permission_mode.state = .value;
     try second.configuration.permission_mode.value.set("bypass");
     const schema_b = "{\"type\":\"object\"}";
@@ -8731,8 +8715,8 @@ test "Full revisions own repeated content once and render semantic settings" {
     try std.testing.expectEqualStrings("output_schema", fourth_schema_owner.get("field").?.string);
 
     const expected_tools = [_][]const []const u8{
-        &.{ "bash", "edit" },
-        &.{"edit"},
+        &.{"bash"},
+        &.{},
         &.{"bash"},
         &.{},
         &.{},
@@ -8782,7 +8766,7 @@ test "Bash proposals retain exact order permission provenance denial and stop te
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "action-config", "direct/actions", false);
+    try configureTestSessionAsk(&storage, "action-config", "direct/actions");
     try submitTestMessage(&storage, &tmp, "action-message", "action-message", "direct/actions", "propose");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "action-metadata");
@@ -8946,7 +8930,7 @@ test "allow once survives mode changes and reopen without granting another Attem
     var storage = try testingStore(&tmp, std.testing.io);
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
-    try configureTestSessionAsk(&storage, "allow-config", "direct/allow", false);
+    try configureTestSessionAsk(&storage, "allow-config", "direct/allow");
     try submitTestMessage(&storage, &tmp, "allow-input", "allow-message", "direct/allow", "propose");
     const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, model_binding, "allow-metadata");
@@ -9007,7 +8991,7 @@ test "Current reports progress alongside an actionable sibling" {
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed", false);
+    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed");
     try submitTestMessage(&storage, &tmp, "mixed-file", "mixed-message", "direct/mixed", "propose");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try settleTwoActionsForTesting(&storage, &tmp, binding, "mixed-metadata");
@@ -9058,7 +9042,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "settlement-stop-config", "direct/settlement-stop", false);
+    try configureTestSessionAsk(&storage, "settlement-stop-config", "direct/settlement-stop");
     try submitTestMessage(
         &storage,
         &tmp,
@@ -9130,7 +9114,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "settlement-first-config", "direct/settlement-first", false);
+    try configureTestSessionAsk(&storage, "settlement-first-config", "direct/settlement-first");
     try submitTestMessage(
         &storage,
         &tmp,
@@ -9227,7 +9211,7 @@ test "Full reports every closed Action resolution without fencing" {
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "shutdown-report-config", "direct/shutdown-report", false);
+    try configureTestSessionAsk(&storage, "shutdown-report-config", "direct/shutdown-report");
     try submitTestMessage(&storage, &tmp, "shutdown-report-message", "shutdown-report-message", "direct/shutdown-report", "execute");
     const model_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{.{
@@ -9468,7 +9452,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed-calls", true);
+    try configureTestSessionAsk(&storage, "mixed-config", "direct/mixed-calls");
     try submitTestMessage(&storage, &tmp, "mixed-message", "mixed-message", "direct/mixed-calls", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
@@ -9484,7 +9468,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
 
     try std.testing.expectEqual(@as(u64, 7), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call"));
     try std.testing.expectEqual(@as(u64, 5), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE rejection_code IS NOT NULL"));
-    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE rejection_code='tool_unavailable'"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=4 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=5 AND rejection_code='unknown_tool'"));
     try std.testing.expectEqual(@as(u64, 2), try queryU64(storage.database, "SELECT count(*) FROM action_operation"));
     try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM action_operation action JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal WHERE call.rejection_code IS NOT NULL"));
@@ -9628,7 +9612,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try configureTestSessionAsk(&storage, "result-config", "direct/tool-results", false);
+    try configureTestSessionAsk(&storage, "result-config", "direct/tool-results");
     try submitTestMessage(&storage, &tmp, "result-first", "result-first", "direct/tool-results", "first");
     const first_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const calls = [_]TestingCall{
@@ -9718,8 +9702,8 @@ test "kind-specific admission selects a tool continuation despite fresh input an
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try configureTestSessionAsk(&storage, "peer-config", "peer", false);
-    try configureTestSessionAsk(&storage, "fresh-config", "fresh", false);
+    try configureTestSessionAsk(&storage, "peer-config", "peer");
+    try configureTestSessionAsk(&storage, "fresh-config", "fresh");
     try submitTestMessage(&storage, &tmp, "peer-input", "peer-input", "peer", "start");
     const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
@@ -9948,7 +9932,7 @@ test "terminal call-result import and read failures preserve canonical authority
     defer import_tmp.cleanup();
     var import_store = try testingStore(&import_tmp, std.testing.io);
     defer import_store.close() catch unreachable;
-    try configureTestSessionAsk(&import_store, "result-import-config", "direct/result-import", false);
+    try configureTestSessionAsk(&import_store, "result-import-config", "direct/result-import");
     try submitTestMessage(&import_store, &import_tmp, "result-import-message", "result-import-message", "direct/result-import", "call");
     const import_binding = (try import_store.admitNextModelAttempt(.{})).?.permit.binding;
     const valid_call = [_]TestingCall{.{ .item_id = "import-item", .name = "bash", .encoded_call_id = "import-call", .decoded_call_id = "import-call", .encoded_arguments = "{\\\"description\\\":\\\"Run no-op command\\\",\\\"cmd\\\":\\\"true\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run no-op command\",\"cmd\":\"true\",\"timeout_ms\":null}" }};
@@ -10117,7 +10101,7 @@ test "missing canonical call outcome rows fence history and inspection" {
         var storage = try testingStore(&tmp, std.testing.io);
         defer storage.close() catch unreachable;
         const session_ref = session_refs[index];
-        try configureTestSessionAsk(&storage, config_keys[index], session_ref, false);
+        try configureTestSessionAsk(&storage, config_keys[index], session_ref);
         try submitTestMessage(
             &storage,
             &tmp,
@@ -10923,11 +10907,10 @@ test "call classification uses the proposing Operation frozen catalog" {
 
     try configureTestSession(&storage, "frozen-call-config", "direct/frozen-call");
     var remove_bash: protocol.ConfigureCommand = .{};
-    try remove_bash.key.set("frozen-call-edit-only");
+    try remove_bash.key.set("frozen-call-no-tools");
     try remove_bash.session.set("direct/frozen-call");
     remove_bash.configuration.tools.state = .value;
-    remove_bash.configuration.tools.count = 1;
-    remove_bash.configuration.tools.values[0] = .edit;
+    remove_bash.configuration.tools.count = 0;
     try std.testing.expect(storage.configure(&remove_bash, true, .{}) == .accepted);
     try submitTestMessage(&storage, &tmp, "frozen-call-message", "frozen-call-message", "direct/frozen-call", "classify");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -11913,9 +11896,8 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var configuration = try completeConfiguration("provider-reopen", "direct/provider-reopen", workspace, "model-a");
     configuration.configuration.tools.state = .value;
-    configuration.configuration.tools.count = 2;
+    configuration.configuration.tools.count = 1;
     configuration.configuration.tools.values[0] = .bash;
-    configuration.configuration.tools.values[1] = .edit;
     configuration.configuration.permission_mode.state = .value;
     try configuration.configuration.permission_mode.value.set("ask");
     var storage = try testingStore(&tmp, std.testing.io);
@@ -11926,7 +11908,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     defer storage.close() catch unreachable;
     const reopened = try storage.inspectSession("direct/provider-reopen");
     try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
-    try std.testing.expectEqual(@as(u8, 3), reopened.tools_mask);
+    try std.testing.expectEqual(@as(u8, 1), reopened.tools_mask);
     try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
     try expectBindingPreserved(&storage, "direct/provider-reopen", "after-reopen");
 
@@ -11955,8 +11937,7 @@ test "created Session tools and permission resolve to product defaults" {
     var tools: [16]u8 = undefined;
     var writer = std.Io.Writer.fixed(&tools);
     if (created.tools_mask & 1 != 0) try writer.writeAll("bash");
-    if (created.tools_mask & 2 != 0) try writer.writeAll(if (created.tools_mask & 1 != 0) ",edit" else "edit");
-    try std.testing.expect(created.tools_mask & ~@as(u8, 3) == 0);
+    try std.testing.expect(created.tools_mask & ~@as(u8, 1) == 0);
     try std.testing.expectEqualStrings(product_defaults.tools, writer.buffered());
     try std.testing.expectEqualStrings(product_defaults.permission_mode, switch (created.permission_mode) {
         0 => "ask",
@@ -11986,7 +11967,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         expected_rejection: ?ConfigurationRejection = null,
         expected_actions: ?Actions = null,
         expected_model: []const u8 = "model-a",
-        expected_tools: u8 = 3,
+        expected_tools: u8 = 1,
         expected_permission: u8 = 0,
         expected_revision: u64 = 8,
     };
@@ -12053,7 +12034,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         existing.provider = .codex;
         try existing.model.set("model-a");
         existing.instructions_id = 11;
-        existing.tools_mask = 3;
+        existing.tools_mask = 1;
         existing.permission_mode = 0;
         existing.output_schema_id = 12;
         existing.revision = case.current_revision;
@@ -14057,7 +14038,7 @@ test "public completed Action sibling corruption fences first Conversation read"
             defer tmp.cleanup();
             var storage = try testingStore(&tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            try configureTestSessionAsk(&storage, "config", "direct/actions", false);
+            try configureTestSessionAsk(&storage, "config", "direct/actions");
             try submitTestMessage(&storage, &tmp, "input", "message", "direct/actions", "two tools");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, binding, "output");
@@ -15901,7 +15882,7 @@ test "proposal callable cursor domain preserves healthy Store" {
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try configureTestSessionAsk(&storage, "proposal-config", "direct/proposal", true);
+    try configureTestSessionAsk(&storage, "proposal-config", "direct/proposal");
     var request: protocol.ProposalPage = .{};
     try request.session.set("direct/proposal");
     request.end = std.math.maxInt(u64);
@@ -16004,7 +15985,7 @@ test "persisted tool label corruption fences every publication route" {
             defer tmp.cleanup();
             var storage = try testingStore(&tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            try configureTestSessionAsk(&storage, "label-config", "direct/label", true);
+            try configureTestSessionAsk(&storage, "label-config", "direct/label");
             try submitTestMessage(&storage, &tmp, "label-input", "label-input", "direct/label", "propose");
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, binding, "label-calls");

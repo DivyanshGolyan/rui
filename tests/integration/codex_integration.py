@@ -250,23 +250,20 @@ def run():
 
         schema = state / "unsupported-schema.json"
         schema.write_text('{"type":"object"}')
-        for feature, tools, extra in (("edit", "edit", []),
-                                      ("schema", "none", ["--output-schema", schema])):
-            session = f"managed/{feature}"
-            configured = fixture.command(
-                "session", "configure", "--store", stop_store,
-                "--record", state / f"{feature}-config.json", "--key", f"{feature}-config",
-                "--session", session, "--workspace", fixture.ROOT, "--provider", "codex",
-                "--model", "gpt-6-sol", "--tools", tools, *extra,
-            )
-            assert configured["answer"]["status"] == "accepted"
-            fixture.message(state, stop_store, feature, session, "unsupported managed request")
-            rejected = fixture.wait_for(
-                lambda feature=feature: (value := fixture.observe(stop_store, feature)).get("result", {}).get("code") and value,
-                f"{feature} rejected before managed dispatch",
-            )
-            assert rejected["result"]["code"] == "unsupported_codex_configuration", rejected
-            assert len(endpoint.requests) == 4
+        configured = fixture.command(
+            "session", "configure", "--store", stop_store,
+            "--record", state / "schema-config.json", "--key", "schema-config",
+            "--session", "managed/schema", "--workspace", fixture.ROOT, "--provider", "codex",
+            "--model", "gpt-6-sol", "--tools", "none", "--output-schema", schema,
+        )
+        assert configured["answer"]["status"] == "accepted"
+        fixture.message(state, stop_store, "schema", "managed/schema", "unsupported managed request")
+        rejected = fixture.wait_for(
+            lambda: (value := fixture.observe(stop_store, "schema")).get("result", {}).get("code") and value,
+            "schema rejected before managed dispatch",
+        )
+        assert rejected["result"]["code"] == "unsupported_codex_configuration", rejected
+        assert len(endpoint.requests) == 4
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:

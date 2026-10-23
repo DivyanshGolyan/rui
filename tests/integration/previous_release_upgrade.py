@@ -62,7 +62,7 @@ class Dialect:
         reply = fixture.command(*(("session", "configure") if self.resource_first else ("configure",)),
             "--store", store, "--record", state / f"{key}.json", "--key", key, "--session", session,
             "--workspace", fixture.ROOT, "--provider", "codex", "--model", model,
-            "--tools", "bash,edit", "--permission-mode", "ask")
+            "--tools", "bash", "--permission-mode", "ask")
         assert reply["answer"]["status"] == "accepted", reply
 
     def message(self, state, store, key, session, text):
@@ -170,7 +170,7 @@ def main():
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
             configuration = {
                 "workspace": str(workspace), "provider": "codex", "model": "gpt-6-sol",
-                "tools": ["bash", "edit"], "permission_mode": "ask",
+                "tools": ["bash"], "permission_mode": "ask",
             }
             before = dialect.inspect_session(store, "upgrade/session")["session"]
             for field, value in configuration.items():

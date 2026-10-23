@@ -717,7 +717,6 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
         .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
         .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
         .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
-        .tool_unavailable => .{ .glyph = "•", .suffix = " — Rejected: tool unavailable", .style = .normal },
         .failed => .{ .glyph = "!", .suffix = " — Failed", .style = .failure },
         .timed_out => .{ .glyph = "!", .suffix = " — Timed out", .style = .failure },
         .indeterminate => .{ .glyph = "!", .suffix = " — Outcome unknown; may have run", .style = .failure },
@@ -1105,7 +1104,7 @@ pub fn toolResult(presentation: protocol.ToolPresentation, source: anytype, sink
         .code = presentation.code,
         .colour = colour,
         .section = switch (presentation.code) {
-            .denied, .unknown_tool, .invalid_arguments, .tool_unavailable => .ended,
+            .denied, .unknown_tool, .invalid_arguments => .ended,
             else => .summary,
         },
     };

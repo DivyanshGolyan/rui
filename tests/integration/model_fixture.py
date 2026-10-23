@@ -533,7 +533,7 @@ def configure(state, store, key, session, model, schema=None, instructions=None)
         "--model",
         model,
         "--tools",
-        "bash,edit",
+        "bash",
         "--permission-mode",
         "ask",
     ]

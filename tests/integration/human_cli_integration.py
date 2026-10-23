@@ -5520,8 +5520,16 @@ def main(selected="all"):
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
-        for tools, mode, warning in (("none", "bypass", False), ("edit", "bypass", False),
-                                     ("bash,edit", "bypass", True), ("bash", "ask", False)):
+        for index, tools in enumerate(("edit", "bash,edit", "edit,bash", "bash,bash", "Bash", "none,bash")):
+            record = state / f"removed-tools-{index}.json"
+            rejected = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
+                "--session", "removed-tools", "--record", str(record), "--key", f"removed-tools-{index}",
+                "--tools", tools], env={**os.environ, "HOME": str(preferences_home)},
+                capture_output=True, text=True, timeout=10)
+            assert rejected.returncode != 0 and "UnknownTool" in rejected.stderr, (tools, rejected)
+            assert not record.exists(), ("invalid tool selection published a capture", tools)
+        for tools, mode in (("none", "bypass"), ("none", "ask"),
+                            ("bash", "bypass"), ("bash", "ask")):
             warning_ref = f"warnings/{tools}/{mode}"
             admit(preferences_home, "session", "configure", "--store", store, "--session", warning_ref,
                   "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",

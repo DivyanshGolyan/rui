@@ -51,8 +51,8 @@ pub const ContentField = struct {
 
 pub const ToolsField = struct {
     state: FieldState = .omitted,
-    count: u2 = 0,
-    values: [2]enum { bash, edit } = undefined,
+    count: u1 = 0,
+    values: [1]enum { bash } = undefined,
 };
 
 pub const Configuration = struct {
@@ -297,7 +297,7 @@ pub const ConversationContent = struct {
 };
 
 pub const ProposalField = enum { item_id, name, call_id, arguments };
-pub const ProposalRejection = enum { unknown_tool, invalid_arguments, tool_unavailable };
+pub const ProposalRejection = enum { unknown_tool, invalid_arguments };
 pub const proposal_page_items = 16;
 pub const ProposalMetadata = struct {
     position: u64,
@@ -347,7 +347,7 @@ pub const ToolPresentation = struct {
     description: ?Bounded(max_tool_description_bytes),
     code: Code,
     publication_position: ?u64,
-    pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments, tool_unavailable };
+    pub const Code = enum { unresolved, pending_permission, succeeded, failed, timed_out, indeterminate, storage_failed, spawn_failed, cancelled, infrastructure_shutdown, denied, unknown_tool, invalid_arguments };
 
     pub fn writeJson(self: ToolPresentation, out: *std.Io.Writer) !void {
         try out.writeAll("{\"description\":");
@@ -1372,24 +1372,12 @@ const Parser = struct {
             try self.expectKey("value");
             try self.expectByte('[');
             if (!try self.consumeIf(']')) {
-                while (true) {
-                    if (tools.count == tools.values.len) return error.TooManyTools;
-                    var value: Bounded(16) = .{};
-                    try self.readSmallString(&value);
-                    const tool: @TypeOf(tools.values[0]) = if (value.eql("bash"))
-                        .bash
-                    else if (value.eql("edit"))
-                        .edit
-                    else
-                        return error.UnknownTool;
-                    for (tools.values[0..tools.count]) |existing| {
-                        if (existing == tool) return error.DuplicateTool;
-                    }
-                    tools.values[tools.count] = tool;
-                    tools.count += 1;
-                    if (try self.consumeIf(']')) break;
-                    try self.expectByte(',');
-                }
+                var value: Bounded(16) = .{};
+                try self.readSmallString(&value);
+                if (!value.eql("bash")) return error.UnknownTool;
+                tools.values[0] = .bash;
+                tools.count = 1;
+                try self.expectByte(']');
             }
         } else return error.InvalidFieldState;
         try self.expectByte('}');
@@ -2406,6 +2394,44 @@ test "configuration provider envelope preserves exact spelling and omission" {
         if (index > 2) try std.testing.expect(!std.mem.eql(u8, &codex_digest, &digest));
     }
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
+}
+
+test "configuration tools accept only an empty catalog or Bash" {
+    const cases = [_]struct { value: []const u8, count: u1 = 0, failure: ?anyerror = null }{
+        .{ .value = "[]" },
+        .{ .value = "[\"bash\"]", .count = 1 },
+        .{ .value = "[\"edit\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"Bash\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"none\"]", .failure = error.UnknownTool },
+        .{ .value = "[\"bash\",\"bash\"]", .failure = error.InvalidJsonShape },
+        .{ .value = "[\"bash\",\"edit\"]", .failure = error.InvalidJsonShape },
+    };
+    for (cases) |case| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"1\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+            "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
+            "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
+            "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..json.len], json);
+        source.end = json.len;
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .fd = -1,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .retained_scratch = &retained,
+        } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parser.parse());
+        } else {
+            const request = try parser.parse();
+            try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
+            if (case.count == 1) try std.testing.expectEqual(.bash, request.configure.configuration.tools.values[0]);
+        }
+    }
 }
 
 test "Session inspection selects a closed report profile or exact failed response stream" {

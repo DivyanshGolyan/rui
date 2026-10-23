@@ -1337,20 +1337,15 @@ fn ReportNumber(comptime allow_zero: bool) type {
 
 const ReportTools = struct {
     bash: bool = false,
-    edit: bool = false,
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
-        if (try source.next() != .array_begin) return error.InvalidObservation;
+        if (try source.next() != .array_begin) return error.UnexpectedToken;
         var result: ReportTools = .{};
         while (try source.peekNextTokenType() != .array_end) {
-            const tool = try std.json.innerParse(JsonEnum(enum { bash, edit }), allocator, source, options);
+            const tool = try std.json.innerParse(JsonEnum(enum { bash }), allocator, source, options);
             switch (tool.value) {
                 .bash => {
                     if (result.bash) return error.DuplicateField;
                     result.bash = true;
-                },
-                .edit => {
-                    if (result.edit) return error.DuplicateField;
-                    result.edit = true;
                 },
             }
         }
@@ -1361,7 +1356,6 @@ const ReportTools = struct {
     pub fn jsonStringify(self: ReportTools, jw: anytype) !void {
         try jw.beginArray();
         if (self.bash) try jw.write("bash");
-        if (self.edit) try jw.write("edit");
         try jw.endArray();
     }
 };
@@ -1461,40 +1455,16 @@ pub const SessionListPage = struct {
         workspace: protocol.Bounded(protocol.max_workspace_bytes),
         provider: protocol.Provider,
         model: protocol.Bounded(protocol.max_model_bytes),
-        tools: struct { bash: bool = false, edit: bool = false },
+        tools: ReportTools,
         permission_mode: enum { ask, bypass },
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Row {
-            const Tools = struct {
-                bash: bool = false,
-                edit: bool = false,
-
-                pub fn jsonParse(a: std.mem.Allocator, s: anytype, opts: std.json.ParseOptions) !@This() {
-                    if (try s.next() != .array_begin) return error.UnexpectedToken;
-                    var result: @This() = .{};
-                    while (try s.peekNextTokenType() != .array_end) {
-                        const tool = try std.json.innerParse(JsonEnum(enum { bash, edit }), a, s, opts);
-                        switch (tool.value) {
-                            .bash => {
-                                if (result.bash) return error.DuplicateField;
-                                result.bash = true;
-                            },
-                            .edit => {
-                                if (result.edit) return error.DuplicateField;
-                                result.edit = true;
-                            },
-                        }
-                    }
-                    _ = try s.next();
-                    return result;
-                }
-            };
             const Wire = struct {
                 reference: JsonString(protocol.max_session_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
                 provider: JsonEnum(protocol.Provider),
                 model: JsonString(protocol.max_model_bytes),
-                tools: Tools,
+                tools: ReportTools,
                 permission_mode: JsonEnum(@FieldType(Row, "permission_mode")),
             };
             const wire = try std.json.innerParse(Wire, allocator, source, options);
@@ -1504,7 +1474,7 @@ pub const SessionListPage = struct {
                 .workspace = wire.workspace.value,
                 .provider = wire.provider.value,
                 .model = wire.model.value,
-                .tools = .{ .bash = wire.tools.bash, .edit = wire.tools.edit },
+                .tools = wire.tools,
                 .permission_mode = wire.permission_mode.value,
             };
         }
@@ -1589,7 +1559,6 @@ pub const SessionListPage = struct {
             try std.json.Stringify.value(row.model.slice(), .{}, writer);
             try writer.writeAll(",\"tools\":[");
             if (row.tools.bash) try writer.writeAll("\"bash\"");
-            if (row.tools.edit) try writer.writeAll(if (row.tools.bash) ",\"edit\"" else "\"edit\"");
             try writer.print("],\"permission_mode\":\"{s}\"}}", .{@tagName(row.permission_mode)});
         }
     }
@@ -2166,7 +2135,7 @@ pub const JsonToolPresentation = struct {
         if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
         if (wire.description) |d| if (!@import("tools.zig").validDescription(d.slice())) return error.InvalidCharacter;
         if (wire.description == null) switch (wire.code.value) {
-            .unknown_tool, .invalid_arguments, .tool_unavailable => {},
+            .unknown_tool, .invalid_arguments => {},
             else => return error.InvalidCharacter,
         };
         if (position != null and (wire.code.value == .unresolved or wire.code.value == .pending_permission)) return error.InvalidCharacter;
@@ -3142,23 +3111,8 @@ const Capture = struct {
         const value = tools orelse return self.write("{\"state\":\"omitted\"}");
         try self.write("{\"state\":\"value\",\"value\":[");
         if (!std.mem.eql(u8, value, "none")) {
-            var iterator = std.mem.splitScalar(u8, value, ',');
-            var count: usize = 0;
-            var seen_bash = false;
-            var seen_edit = false;
-            while (iterator.next()) |tool| {
-                if (count != 0) try self.write(",");
-                if (std.mem.eql(u8, tool, "bash")) {
-                    if (seen_bash) return error.DuplicateTool;
-                    seen_bash = true;
-                } else if (std.mem.eql(u8, tool, "edit")) {
-                    if (seen_edit) return error.DuplicateTool;
-                    seen_edit = true;
-                } else return error.UnknownTool;
-                try self.writeJsonString(tool);
-                count += 1;
-                if (count > 2) return error.TooManyTools;
-            }
+            if (!std.mem.eql(u8, value, "bash")) return error.UnknownTool;
+            try self.writeJsonString(value);
         }
         try self.write("]}");
     }
@@ -4659,7 +4613,7 @@ test "Session list facts own complete rows and render semantic output after scra
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\\u002fµ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"edit\",\"bash\"],\"permission_mode\":\"ask\",\"extra\":[null,{\"discard\":true}]}],\"next\":null,\"extra\":1}";
+    const wire = "{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s\\u002fµ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"extra\":[null,{\"discard\":true}]}],\"next\":null,\"extra\":1}";
     try file.writePositionalAll(io, wire, 0);
     const decoded = try SessionListReply.decode(io, file, "/w\nµ", .{}, .{ .report = .{ .bytes = wire.len } });
     const page = &decoded.page;
@@ -4670,7 +4624,7 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s/µ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\"}],\"next\":null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"1\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"s/µ\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"}],\"next\":null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -4842,7 +4796,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.json.Stringify.value(&workspace, .{}, writer);
         try writer.writeAll(",\"provider\":\"codex\",\"model\":");
         try std.json.Stringify.value(&model, .{}, writer);
-        try writer.writeAll(",\"tools\":[\"edit\"],\"permission_mode\":\"bypass\"}");
+        try writer.writeAll(",\"tools\":[\"bash\"],\"permission_mode\":\"bypass\"}");
     }
     try writer.writeAll("],\"next\":{\"after\":\"19\",\"ceiling\":\"23\"}}");
     try writer.flush();
@@ -4857,7 +4811,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqual(protocol.max_session_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
         try std.testing.expectEqualStrings(&model, row.model.slice());
-        try std.testing.expect(row.tools.edit and !row.tools.bash and row.permission_mode == .bypass);
+        try std.testing.expect(row.tools.bash and row.permission_mode == .bypass);
     }
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, "/wrong", .{}));
     try std.testing.expectError(error.InvalidSessionPage, SessionListPage.read(io, file, length, null, .{ .after = 19, .ceiling = 23 }));
@@ -5338,7 +5292,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[\"edit\"],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -5350,7 +5304,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     const facts = &reply.current;
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expect(facts.settings.tools.edit and !facts.settings.tools.bash);
+    try std.testing.expect(!facts.settings.tools.bash);
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
     try std.testing.expect(facts.settings.reasoning_effort.value == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
@@ -5380,7 +5334,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\",\"edit\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"s\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
@@ -5471,7 +5425,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try std.testing.expectEqual(prefix.len, try file.readPositionalAll(io, &prefix, 0));
     inline for (.{
         .{ "\"version\":\"1\"", "\"version\":\"2\"" },
-        .{ "\"tools\":[\"bash\",\"edit\"]", "\"tools\":[\"edit\",\"edit\"]" },
+        .{ "\"tools\":[\"bash\"]", "\"tools\":[\"edit\"]" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
         .{ "\"selected_message\"", "\"ignored__message\"" },

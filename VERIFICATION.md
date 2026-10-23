@@ -256,6 +256,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Capture cannot be completed | `'stops a running Attempt'` | None |
 | Evidence layers | `test-logic`, `bash-owner-integration`, `bash-lifecycle-integration` | No reruns to pass |
 | [Frozen catalog and permission mode](ARCHITECTURE.md#authorizing-exact-actions) | `'frozen catalog'`, `'allow once survives'` | Workflow bypass across restart: none located |
+| Bash-only catalog and configuration: exact `bash`/`none` CLI, `["bash"]`/`[]` wire; removed Edit and duplicate/alternate spellings reject | `human_cli_integration.py`, `proposal_integration.py`, `dispatch_integration.py`, `'Current facts'` | Public arrays and private SQLite masks remain distinct representations |
 
 ## Exact Edit
 

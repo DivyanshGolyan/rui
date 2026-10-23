@@ -96,7 +96,7 @@ def main():
             process, fields = start_host(store, provider)
             configured = command("session", "configure", "--store", store, "--record", state / "config.json", "--key", "config",
                 "--session", SESSION, "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol",
-                "--tools", "bash,edit", "--permission-mode", "ask")
+                "--tools", "bash", "--permission-mode", "ask")
             assert configured["answer"]["status"] == "accepted", configured
             configure(state, store, "foreign-config", "direct/foreign")
             empty = page(store)
@@ -115,7 +115,7 @@ def main():
             assert not last["more"] and len(last["items"]) == len(CALLS) - 16
             items = first["items"] + last["items"]
             assert items[0]["action"] is not None and items[0]["rejection"] is None
-            assert [i["rejection"] for i in items[1:4]] == ["unknown_tool", "invalid_arguments", "tool_unavailable"]
+            assert [i["rejection"] for i in items[1:4]] == ["unknown_tool", "invalid_arguments", "unknown_tool"]
             assert all(i["rejection"] == "invalid_arguments" for i in items[DESCRIPTION_START:])
             assert all(i["action"] is None for i in items[1:])
             for index, item in enumerate(items):

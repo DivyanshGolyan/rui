@@ -469,7 +469,6 @@ pub const Preparation = struct {
         tool_result_suffix,
         tools_prefix,
         bash_tool,
-        edit_tool,
         tools_suffix,
         schema_prefix,
         schema,
@@ -579,8 +578,7 @@ pub const Preparation = struct {
             switch (self.phase) {
                 .settings => {
                     self.settings = self.view.settings() catch |err| return .{ .failed = err };
-                    if (self.faults.managed_route and
-                        (self.settings.?.tools_mask & 2 != 0 or self.settings.?.output_schema != null))
+                    if (self.faults.managed_route and self.settings.?.output_schema != null)
                         return .{ .failed = error.UnsupportedCodexConfiguration };
                     self.phase = .history_validation;
                 },
@@ -736,16 +734,8 @@ pub const Preparation = struct {
                 },
                 .tools_prefix => self.emitFixed("],\"tools\":[", .bash_tool),
                 .bash_tool => {
-                    if (self.settings.?.tools_mask & 1 != 0) {
-                        self.emitFixed(tools.bash_definition_json, .edit_tool);
-                    } else self.phase = .edit_tool;
-                },
-                .edit_tool => {
-                    if (self.settings.?.tools_mask & 2 != 0) {
-                        self.emitFixed(if (self.settings.?.tools_mask & 1 != 0)
-                            ",{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}"
-                        else
-                            "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}", .tools_suffix);
+                    if (self.settings.?.tools_mask & tools.toolBit(.bash) != 0) {
+                        self.emitFixed(tools.bash_definition_json, .tools_suffix);
                     } else self.phase = .tools_suffix;
                 },
                 .tools_suffix => {
@@ -1281,7 +1271,6 @@ const DrainedRequest = struct { bytes: []u8, length: u64, digest: [32]u8 };
 // Independently authored tool definitions for full-request goldens. These
 // literals must match the provider's frozen tool catalog, not reference it.
 const bash_tool_json = "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"},\"stdin\":{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"},\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"},\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}},\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
-const edit_tool_json = "{\"type\":\"function\",\"name\":\"edit\",\"description\":\"Edit one file\"}";
 
 // Supply only fixture inputs, never the adapter's emitted context or constants.
 fn requestGolden(workspace: []const u8, store_selector: []const u8, session: []const u8, request: []const u8) ![]u8 {
@@ -1561,9 +1550,8 @@ fn establishComposedHistory(setup: *PreparationTestSetup, session: []const u8) !
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
         command.configuration.tools.state = .value;
-        command.configuration.tools.count = 2;
+        command.configuration.tools.count = 1;
         command.configuration.tools.values[0] = .bash;
-        command.configuration.tools.values[1] = .edit;
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("ask");
         command.configuration.output_schema = .{
@@ -1612,7 +1600,7 @@ const composed_expected =
     composed_replayed_call_b ++ "," ++
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-b\",\"output\":\"Permission denied.\"}]," ++
-    "\"tools\":[" ++ bash_tool_json ++ "," ++ edit_tool_json ++ "]," ++
+    "\"tools\":[" ++ bash_tool_json ++ "]," ++
     "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
 test "request preparation minimal golden is exact across schedules" {
@@ -1832,9 +1820,8 @@ test "request preparation freezes settings at admission" {
         try update.key.set("prep-settings-catalog");
         try update.session.set("direct/prep-settings");
         update.configuration.tools.state = .value;
-        update.configuration.tools.count = 2;
+        update.configuration.tools.count = 1;
         update.configuration.tools.values[0] = .bash;
-        update.configuration.tools.values[1] = .edit;
         try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
     }
     try setup.submit("prep-settings-file", "prep-settings-message", "direct/prep-settings", "hi");
@@ -1859,7 +1846,7 @@ test "request preparation freezes settings at admission" {
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
     const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
-        bash_tool_json ++ "," ++ edit_tool_json ++ "]}";
+        bash_tool_json ++ "]}";
     const full_expected = try requestGolden(setup.workspace, setup.root, "direct/prep-settings", expected);
     defer std.testing.allocator.free(full_expected);
     try std.testing.expectEqualStrings(full_expected, result.bytes);

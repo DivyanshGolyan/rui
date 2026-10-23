@@ -17,7 +17,14 @@ pub const BashArguments = struct {
 
 pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
 pub const ToolSet = std.EnumSet(Tool);
-pub const CallName = enum { bash, edit, unknown };
+pub const CallName = enum { bash, unknown };
+
+/// Persisted tools_mask bit shared by Store encoding and model preparation.
+pub fn toolBit(tool: Tool) u8 {
+    return switch (tool) {
+        .bash => 1,
+    };
+}
 
 pub const CallFacts = struct {
     name: CallName,
@@ -33,7 +40,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !
         while (length < name.len) : (length += 1) name[length] = (try name_source.next()) orelse break;
     }
     const kind: CallName = if (length == name.len and try name_source.next() == null)
-        if (std.mem.eql(u8, &name, "bash")) .bash else if (std.mem.eql(u8, &name, "edit")) .edit else .unknown
+        if (std.mem.eql(u8, &name, "bash")) .bash else .unknown
     else
         .unknown;
     return .{ .name = kind, .bash_arguments = if (kind == .bash) try inspectBashArguments(arguments) else null };
@@ -42,7 +49,6 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype) !
 pub fn rejectionResult(code: protocol.ProposalRejection, name: anytype, name_length: u64, name_digest: [32]u8, buffer: *[192]u8) ![]const u8 {
     switch (code) {
         .invalid_arguments => return "Invalid arguments for tool 'bash'.",
-        .tool_unavailable => return "Tool 'edit' is unavailable.",
         .unknown_tool => {
             var prefix: [32]u8 = undefined;
             var prefix_length: usize = 0;
@@ -63,7 +69,6 @@ pub fn rejectionResult(code: protocol.ProposalRejection, name: anytype, name_len
 pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?protocol.ProposalRejection {
     return switch (name) {
         .bash => if (!frozen.contains(.bash)) .unknown_tool else if (!valid_arguments) .invalid_arguments else null,
-        .edit => if (frozen.contains(.edit)) .tool_unavailable else .unknown_tool,
         .unknown => .unknown_tool,
     };
 }
@@ -71,13 +76,10 @@ pub fn classifyCall(name: CallName, valid_arguments: bool, frozen: ToolSet) ?pro
 test "tool classification uses frozen availability before argument validity" {
     const none: ToolSet = .empty;
     const bash_only = ToolSet.initOne(.bash);
-    const edit_only = ToolSet.initOne(.edit);
     try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, false, none).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, true, edit_only).?);
+    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.bash, true, none).?);
     try std.testing.expectEqual(protocol.ProposalRejection.invalid_arguments, classifyCall(.bash, false, bash_only).?);
     try std.testing.expect(classifyCall(.bash, true, bash_only) == null);
-    try std.testing.expectEqual(protocol.ProposalRejection.tool_unavailable, classifyCall(.edit, true, edit_only).?);
-    try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.edit, true, bash_only).?);
     try std.testing.expectEqual(protocol.ProposalRejection.unknown_tool, classifyCall(.unknown, true, .full).?);
 }
 

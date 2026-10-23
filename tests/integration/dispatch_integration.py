@@ -2998,7 +2998,7 @@ def main(mode="all", correlation_case="all"):
             "session", "inspect", "--store", store, "--session", "direct/main"
         ))["session"]
         assert active_settings["model"] == "gpt-6-sol", active_settings
-        assert active_settings["tools"] == ["bash", "edit"], active_settings
+        assert active_settings["tools"] == ["bash"], active_settings
         frozen_peers.call("message", lambda: message(state, store, "message-b", "direct/main", "later message"))
         assert len(endpoint.requests) == 1
         resources = frozen_peers.call("inspect", lambda: command(
@@ -3108,7 +3108,6 @@ def main(mode="all", correlation_case="all"):
                         "additionalProperties": False,
                     },
                 },
-                {"type": "function", "name": "edit", "description": "Edit one file"},
             ],
             "text": {
                 "format": {
