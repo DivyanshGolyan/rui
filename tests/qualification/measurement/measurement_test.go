@@ -17,6 +17,37 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
+func TestModelInstructionsMatchIndependentRequestOracle(t *testing.T) {
+	fixtures, err := filepath.Abs("../../integration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := "/workspace/quoted \"path\"\\雪\n<&\u2028"
+	store, err := CanonicalStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := "peer/quoted\"\\雪"
+	command := exec.Command("python3", "-c", `
+import sys
+sys.path.insert(0, sys.argv[1])
+from model_fixture import model_instructions
+sys.stdout.buffer.write(model_instructions(sys.argv[2], store=sys.argv[3], session=sys.argv[4] + "\0").encode())
+`, fixtures, workspace, store, session)
+	// Process arguments cannot carry NUL; cover it inside each oracle instead.
+	want, err := command.Output()
+	if err != nil {
+		var exited *exec.ExitError
+		if errors.As(err, &exited) {
+			t.Fatalf("independent Python request oracle: %v: %s", err, exited.Stderr)
+		}
+		t.Fatalf("independent Python request oracle: %v", err)
+	}
+	if got := ModelInstructions(workspace, store, session+"\x00"); got != string(want) {
+		t.Fatalf("Go request instructions differ from independent oracle:\ngot: %q\nwant: %q", got, want)
+	}
+}
+
 func TestQualificationPublisherProcess(t *testing.T) {
 	if os.Getenv("RUI_TEST_QUALIFICATION_CHILD") == "1" {
 		status := os.Getenv("RUI_TEST_QUALIFICATION_STATUS")

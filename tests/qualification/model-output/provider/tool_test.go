@@ -15,13 +15,12 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"rui.local/qualification/measurement"
 )
 
-func toolRequest(t *testing.T, client *http.Client, url, workspace, store, session string, input ...any) []map[string]any {
+func toolRequest(t *testing.T, client *http.Client, url, session string, input ...any) []map[string]any {
 	t.Helper()
-	body, _ := json.Marshal(map[string]any{"instructions": measurement.ModelInstructions(workspace, store, session), "input": input})
+	encoded, _ := json.Marshal(input)
+	body := []byte(testRequestEnvelope(session) + `"input":` + string(encoded) + `}`)
 	response, err := client.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -66,11 +65,11 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}, ForceAttemptHTTP2: true}}
 	user := map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "seed"}}}
 	for index := range 3 {
-		if items := toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, index), user); len(items) != 1 || items[0]["type"] != "message" {
+		if items := toolRequest(t, client, server.ProviderURL(), ToolSession(3, index), user); len(items) != 1 || items[0]["type"] != "message" {
 			t.Fatalf("seed answer for %d = %v", index, items)
 		}
 	}
-	coordinator := toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, 0), user)
+	coordinator := toolRequest(t, client, server.ProviderURL(), ToolSession(3, 0), user)
 	if len(coordinator) != 3 {
 		t.Fatalf("coordinator calls = %d, want 2 sends + 1 workload", len(coordinator))
 	}
@@ -90,7 +89,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 		}
 		outputs = append(outputs, item, map[string]any{"type": "function_call_output", "call_id": item["call_id"], "output": text})
 	}
-	toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, 0), outputs...)
+	toolRequest(t, client, server.ProviderURL(), ToolSession(3, 0), outputs...)
 	summary := server.Snapshot(true)
 	if summary.DispatchCalls != 2 || summary.WorkloadCalls != 1 || summary.SucceededCalls != 2 || summary.FailedCalls != 1 || summary.Done != 1 || len(summary.Errors) != 1 {
 		t.Fatalf("summary = %+v", summary)
@@ -100,7 +99,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 			t.Fatalf("workload markers = %+v", output)
 		}
 	}
-	if items := toolRequest(t, client, server.ProviderURL(), "/workspace", "/store", ToolSession(3, 1), user); len(items) != 1 || !strings.Contains(fmt.Sprint(items[0]["arguments"]), "cat ") {
+	if items := toolRequest(t, client, server.ProviderURL(), ToolSession(3, 1), user); len(items) != 1 || !strings.Contains(fmt.Sprint(items[0]["arguments"]), "cat ") {
 		t.Fatalf("worker calls = %v", items)
 	}
 }
