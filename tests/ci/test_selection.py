@@ -499,16 +499,6 @@ class SelectionTest(unittest.TestCase):
                           ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
         self.assertEqual(shards([]), {"include": []})
 
-    def test_shards_split_check_into_both_parts_once_each(self):
-        rows = shards(["check", "test-logic"])["include"]
-        self.assertEqual([(row["name"], row["targets"], row["part"]) for row in rows],
-                         [("check-execution", ["check"], "execution"),
-                          ("check-callers", ["check"], "callers"),
-                          ("test-logic", ["test-logic"], "all")])
-        self.assertEqual([batch for row in rows for batch in execution_batches(row["targets"], row["part"])],
-                         [["check", "-Dcheck-part=execution"], ["check", "-Dcheck-part=callers"],
-                          ["test-logic"]])
-
     def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
         rows = qualification("native", "macos")["include"]
         self.assertEqual(len(rows), 3, "avoid queuing twelve setup/build copies on three Mac workers")

@@ -22,13 +22,7 @@ if [ "${3:-}" = parallel ]; then
     activity_client=$8
     preference_policy_actor=$9
     terminal_notice=${10}
-    group=${11:-all}
-    case "$group" in
-        all|execution|callers) ;;
-        *) printf 'Unknown check part: %s\n' "$group" >&2; exit 2 ;;
-    esac
 else
-    group=all
     host_status_actor=$3
     session_list_client=$4
     proposal_client=$5
@@ -109,16 +103,13 @@ PY
 )
 
 run_case() {
-    case "$group:$1" in
-        execution:callers|callers:execution|callers:isolated) return ;;
-    esac
+    group=$1
     name=$2
-    case_group=$1
     shift 2
-    case "$part:$case_group" in
+    case "$part:$group" in
         execution:callers|execution:isolated|callers:execution) return ;;
     esac
-    case "$phase:$case_group" in
+    case "$phase:$group" in
         batch:isolated|isolated:execution|isolated:callers) return ;;
     esac
     if [ "$phase" = serial ]; then
