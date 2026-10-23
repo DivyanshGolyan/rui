@@ -110,6 +110,8 @@ fn run(init: std.process.Init) !void {
             TerminalText.diagnostic("rui: {s} {s} was not accepted; stdout carries the saved answer and its code. Repeating the same key replays it.\n", .{ @tagName(resource), definition.name });
             return err;
         }
+        // Model rejection already names the ID, supported IDs and repair.
+        if (err == error.UnsupportedModel) return err;
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
