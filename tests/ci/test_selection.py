@@ -94,6 +94,7 @@ class SelectionTest(unittest.TestCase):
     def test_strict_paths_never_retry(self):
         # Each of these selected retryable suites before strictness decided retries.
         for paths in (["tests/integration/bash_integration.py"], ["src/store.zig"], ["src/server.zig"],
+                      ["src/server_execution.zig"], ["src/server_host.zig"],
                       ["src/cli.zig", "build.zig.zon"]):
             with self.subTest(paths=paths):
                 self.assertFalse(select(paths, "review", AVAILABLE)["retry"])
@@ -267,7 +268,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_startup_capacity_owners_keep_every_refusal_oracle(self):
         for path in ("src/descriptor_capacity.zig", "src/descriptor_limit.zig",
-                     "src/server.zig", "src/platform.zig", "src/cli.zig", "src/host_launch.c",
+                     "src/server.zig", "src/server_execution.zig", "src/server_host.zig",
+                     "src/platform.zig", "src/cli.zig", "src/host_launch.c",
                      "tests/integration/descriptor_capacity_integration.py",
                      "tests/integration/host_launch_integration.py"):
             with self.subTest(path=path):
@@ -442,7 +444,8 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(combined["native_targets"], ["check"])
 
     def test_admission_owners_keep_complete_debug_matrix(self):
-        for path in ("src/server.zig", "tests/integration/admission_integration.sh"):
+        for path in ("src/server.zig", "src/server_execution.zig", "src/server_host.zig",
+                     "tests/integration/admission_integration.sh"):
             result = select([path, "src/store.zig"], "review", AVAILABLE)
             self.assertIn("admission-debug-integration", result["targets"])
             self.assertIn("admission-debug-integration", result["native_targets"])
