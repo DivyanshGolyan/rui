@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import resource
+import signal
 import struct
 import subprocess
 import sys
@@ -36,6 +37,12 @@ def invoke(mode, source):
 
 def expression(source):
     return f'export default async function workflow(capabilities) {{ return ({source}); }}'
+
+
+def child_wait(result):
+    prefix = b'evaluator-wait '
+    assert result.stderr.startswith(prefix), ('missing native child wait', result)
+    return json.loads(result.stderr[len(prefix):])
 
 
 def check_repetition(mode):
@@ -367,8 +374,13 @@ with tempfile.TemporaryDirectory() as directory:
     assert owned(binary, 'run', 2).returncode == 1
     source.write_text(expression('(()=>{while(true) {}})()'))
     start = time.monotonic()
-    assert owned(binary, 'run').returncode == 1
-    assert time.monotonic() - start < 5
+    cpu = owned(binary, 'run')
+    assert cpu.returncode == 1, cpu
+    assert time.monotonic() - start < 5, cpu
+    cpu_wait = child_wait(cpu)
+    assert not cpu.stdout and cpu_wait['reaped'], cpu
+    assert cpu_wait['signal'] == signal.SIGXCPU, cpu_wait
+    print(f'evaluator CPU child wait: {cpu_wait}')
     start = time.monotonic()
     assert owned(binary, 'cancel').returncode == 1
     assert time.monotonic() - start < 1
@@ -430,10 +442,16 @@ while :; do printf "\\001\\000\\000\\000x"; done
     assert owned(fake, 'run').returncode == 1
     fake.write_text('#!/bin/sh\nprintf "\\001\\000\\000\\000xy\\000\\000\\000\\000"\n')
     assert owned(fake, 'run').returncode == 1
-    fake.write_text('#!/bin/sh\nexec 1>&-\nwhile :; do :; done\n')
+    fake.write_text(f'#!/bin/sh\necho $$ > "{marker}"\nexec 1>&-\nwhile :; do :; done\n')
     start = time.monotonic()
-    assert owned(fake, 'run').returncode == 1
-    assert 4.5 < time.monotonic() - start < 7
+    elapsed = owned(fake, 'run')
+    assert elapsed.returncode == 1, elapsed
+    assert 4.5 < time.monotonic() - start < 7, elapsed
+    elapsed_wait = child_wait(elapsed)
+    assert not elapsed.stdout and elapsed_wait['reaped'], elapsed
+    assert elapsed_wait['pid'] == int(marker.read_text()), elapsed_wait
+    assert elapsed_wait['signal'] == signal.SIGKILL, elapsed_wait
+    print(f'evaluator elapsed child wait: {elapsed_wait}')
     assert owned(binary, 'run').stdout == b'5'
     assert owned(probe, 'check').returncode == 0
     assert json.loads(owned(probe, 'run').stdout) == {'env': 0, 'extraFds': 2}

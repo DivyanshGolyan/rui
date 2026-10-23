@@ -9,9 +9,30 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+static struct {
+    pid_t pid;
+    int status;
+    struct rusage usage;
+} child_wait;
+
+/* Observe the production bridge's real reap without replacing its decisions.
+ * wait4 has the same wait ownership and adds the terminated child's CPU use. */
+pid_t waitpid(pid_t pid, int *status, int options) {
+    struct rusage usage;
+    pid_t result = wait4(pid, status, options, &usage);
+    if (result > 0) {
+        child_wait.pid = result;
+        child_wait.status = *status;
+        child_wait.usage = usage;
+    }
+    return result;
+}
 
 #include "evaluator_race.h"
 
@@ -162,6 +183,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < repeat && result == 0; i++) {
         if (ftruncate(output, 0) || lseek(output, 0, SEEK_SET) < 0) return 4;
         sink.length = 0;
+        memset(&child_wait, 0, sizeof(child_wait));
         result = (race.mode && i == 0 ? race_evaluate : rui_evaluate)(argv[1], input, prepared, check,
                               use_callback ? cancelled : NULL, &cancellation,
                               append_output, &sink,
@@ -209,5 +231,17 @@ int main(int argc, char **argv) {
     close(input);
     if (prepared >= 0) close(prepared);
     close(output);
+    if (result != 0 && !check) {
+        int status;
+        int reaped = child_wait.pid > 0 &&
+            waitpid(child_wait.pid, &status, WNOHANG) == -1 && errno == ECHILD;
+        fprintf(stderr, "evaluator-wait {\"pid\":%ld,\"status\":%d,\"signal\":%d,"
+            "\"cpu_us\":%lld,\"reaped\":%s}\n",
+            (long)child_wait.pid, child_wait.status,
+            WIFSIGNALED(child_wait.status) ? WTERMSIG(child_wait.status) : 0,
+            (long long)(child_wait.usage.ru_utime.tv_sec + child_wait.usage.ru_stime.tv_sec) * 1000000 +
+                child_wait.usage.ru_utime.tv_usec + child_wait.usage.ru_stime.tv_usec,
+            reaped ? "true" : "false");
+    }
     return result == 0 ? 0 : 1;
 }
