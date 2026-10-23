@@ -22,12 +22,12 @@ func TestModelInstructionsMatchIndependentRequestOracle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace := "/workspace/quoted \"path\"\\雪\n<&\u2028"
+	workspace := "/workspace/quoted{} \"path\"\\雪\n<&\u2028"
 	store, err := CanonicalStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := "peer/quoted\"\\雪"
+	session := "peer/quoted{}\"\\雪"
 	command := exec.Command("python3", "-c", `
 import sys
 sys.path.insert(0, sys.argv[1])

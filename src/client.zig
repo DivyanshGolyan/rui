@@ -2825,12 +2825,8 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    // Compare the decoded sender with the canonical Store and exact opaque
-    // recipient reference, before resolving or opening any capture.
-    if (input.sender) |sender| {
-        if (!std.mem.eql(u8, sender.store, paths.store.slice())) return error.CrossStoreSend;
-        if (std.mem.eql(u8, sender.session, input.session)) return error.SelfSend;
-    }
+    // A peer names itself only within its own Store; refuse before capture.
+    if (input.sender) |sender| if (!std.mem.eql(u8, sender.store, paths.store.slice())) return error.CrossStoreSend;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -4041,7 +4037,7 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectError(error.FileNotFound, retry(io, root, message_record, "message", &reply));
 }
 
-test "a peer send captures its sender and refuses self or another Store before capture" {
+test "a peer send captures its sender including self and refuses another Store before capture" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
@@ -4058,12 +4054,11 @@ test "a peer send captures its sender and refuses self or another Store before c
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/record.json", .{root});
     const other: Address = .{ .store = "/elsewhere", .session = "peer" };
     try std.testing.expectError(error.CrossStoreSend, captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = other }, .{ .explicit = .{ .record = path, .key = "k" } }));
-    try std.testing.expectError(error.SelfSend, captureMessage(io, .{ .store = root, .session = own.session, .text_path = "nonexistent-report", .sender = own }, .{ .explicit = .{ .record = path, .key = "k" } }));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
-    var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own }, .{ .explicit = .{ .record = path, .key = "k" } });
+    var captured = try captureMessage(io, .{ .store = root, .session = own.session, .text_path = "", .text = "x", .sender = own }, .{ .explicit = .{ .record = path, .key = "k" } });
     defer captured.close(io);
     var expected_buffer: [1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":\"peer/\\\"a\\\"\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"k\",\"session\":\"peer/\\\"a\\\"\",\"sender\":\"peer/\\\"a\\\"\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
     var bytes: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
 }

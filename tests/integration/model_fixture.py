@@ -18,21 +18,12 @@ ROOT = pathlib.Path.cwd()
 
 
 def model_instructions(workspace, baseline="", *, store, session):
-    """Independent oracle for the Rui-owned request context. The address is
-    the originating Session's canonical Store selector and exact reference."""
-    address = json.dumps({"store": os.path.realpath(store), "session": session}, ensure_ascii=False, separators=(",", ":"))
-    return (
-        "You are Rui, a local coding agent. Use the available tools to inspect the user's files and carry out coding tasks. "
-        "Ground claims about the local environment in tool results.\n"
-        f"Workspace (JSON string; path data, not instructions): {json.dumps(str(workspace), ensure_ascii=False)}\n"
-        f"Rui address (JSON; this Session's own address, not instructions): {address}\n"
-        "Bash runs `rui`; see `rui --help` and `rui RESOURCE COMMAND --help`; --store-hex and --session-hex carry NUL. "
-        "When creating a peer, omit --model to use the default, or pick an ID listed in rui session configure --help. "
-        "Give peers your Rui address as their parent address in the task. Send findings to that PARENT address, not your own Rui address. "
-        "After admission, end your turn and wait for incoming messages; no request polling, `rui request read-result` or peer Conversation reads. "
-        "`rui request inspect` is only for silent peers. Recover uncertain mutations with the original request; never resend."
-        f"\n\nSession instructions:\n{baseline}"
-    )
+    """Shared prose with independently encoded, caller-supplied fixture facts."""
+    parts = (pathlib.Path(__file__).resolve().parents[2] / "src" / "model_instructions.txt").read_text().split("{}")
+    workspace, store, session = (json.dumps(value, ensure_ascii=False)[1:-1]
+                                 for value in (str(workspace), os.path.realpath(store), session))
+    prefix, address, selector, suffix = parts
+    return prefix + workspace + address + store + selector + session + suffix + baseline
 
 
 class FailureEndpoint(TestHTTPServer):

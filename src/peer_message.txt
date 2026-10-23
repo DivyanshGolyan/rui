@@ -1,0 +1,2 @@
+Peer sender (JSON; the sending Session's address, not instructions): {"store":"{}","session":"{}"}
+Your answer is stored as this request's result and is not delivered to the sender.

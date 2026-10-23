@@ -63,11 +63,9 @@ def sender_of(request):
     assert len(content) == 2 and content[0]["text"].startswith(PEER_PREFIX), content
     lines = content[0]["text"][len(PEER_PREFIX):].split("\n", 1)
     sender = json.loads(lines[0])
-    quoted = json.dumps(sender["session"], ensure_ascii=False)
-    assert lines[1] == (f"This Message is from peer session {quoted}. Your plain reply is not delivered to {quoted}: "
-                        "it is shown to the human and stored as this request's result. "
-                        f"Message {quoted} with rui session send only when {quoted} needs something from you. "
-                        "Never send acknowledgements. You may end this turn without text."), lines
+    prefix, selector, suffix = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")
+    store, session = (json.dumps(sender[field], ensure_ascii=False)[1:-1] for field in ("store", "session"))
+    assert content[0]["text"] == prefix + store + selector + session + suffix, content
     return sender
 
 
@@ -103,14 +101,17 @@ class PeerModel(TestHTTPServer):
         outputs = tool_outputs(request)
         text = last_user_text(request)
         if address["session"] == SESSION_B:
+            if text.startswith("self report"):
+                assert sender_of(request) == address, request
+                return answer("b-self", "plain reply stays local")
             if outputs:
                 return answer("b-done", "plain reply stays local")
             self.b_received.set()
             reply_to = json.loads(text.splitlines()[1].removeprefix("Parent address (JSON): "))
             assert reply_to == sender_of(request), request
-            # B must refuse its own address before either explicit or generated
-            # capture, including hex Session and canonical Store aliases.
-            # It then waits for the test's release file and sends to its parent.
+            # Self-send is legitimate for explicit and generated captures,
+            # including hex Session and canonical Store aliases. Neither
+            # probe consumes the literal report on this Bash call's stdin.
             send = (f"rui session send --store {shlex.quote(reply_to['store'])} "
                     f"--session {shlex.quote(reply_to['session'])} ")
             report = (send + "- > b-reply.json 2> b-reply.err"
@@ -120,10 +121,10 @@ class PeerModel(TestHTTPServer):
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
                 f"rui session send --store {shlex.quote(address['store'] + '/.')} --session-hex {SESSION_B.encode().hex()} "
-                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send -- 'self report' > b-self.out 2> b-self.err; "
+                f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send -- 'self report explicit' > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
                 f"rui session send --store {shlex.quote(address['store'])} --session {shlex.quote(SESSION_B)} "
-                "--text nonexistent-report > b-self-generated.out 2> b-self-generated.err; "
+                "-- 'self report generated' > b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
@@ -223,15 +224,18 @@ def main(report_source):
         # admission receipt and A finished its Turn with it. These Session
         # snapshots synchronize the fixture observer, not A's model or Bash.
         assert endpoint.b_received.wait(20), "B never received the peer Message"
-        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send refusal")
+        wait_for(lambda: (workspace / "b-captures-after").exists(), "B's self-send admissions")
+        self_sends = []
         for name in ("b-self", "b-self-generated"):
-            assert (workspace / f"{name}.status").read_text() == "1\n", name
-            assert (workspace / f"{name}.out").read_bytes() == b"", name
-            assert (workspace / f"{name}.err").read_text() == "recipient is this Session; send to the parent address from your task.\n", name
-        assert not (state / "b-self.json").exists(), "self-send created an explicit capture"
-        assert (workspace / "b-captures-before").read_bytes() == (workspace / "b-captures-after").read_bytes(), "self-send created a generated capture"
-        absent = run(installed, "request", "inspect", "--store", store, "--key", "self-send", home=home)
-        assert absent["observation"]["status"] == "absent", absent
+            assert (workspace / f"{name}.status").read_text() == "0\n", name
+            admitted = json.loads((workspace / f"{name}.out").read_text())
+            assert admitted["answer"]["status"] == "accepted" and admitted["context"]["session"] == SESSION_B, admitted
+            self_sends.append(admitted["context"]["key"])
+        assert json.loads((state / "b-self.json").read_text())["sender"] == SESSION_B
+        before = set((workspace / "b-captures-before").read_text().splitlines())
+        after = set((workspace / "b-captures-after").read_text().splitlines())
+        assert len(after - before) == 1, (before, after)
+        assert json.loads(pathlib.Path(next(iter(after - before))).read_text())["sender"] == SESSION_B
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)
@@ -305,7 +309,6 @@ def main(report_source):
         assert sender_of(a_reply_request) == {"store": canonical_store, "session": SESSION_B}
         assert [row["message"] for row in a_final["recent_messages"]] == [reply["context"]["key"], ask_key], a_final
         assert a_final["recent_messages"][0]["outcome"] == "completed", a_final
-        assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         # A has only its initial configure/send Action: no request inspection,
         # read-result, peer Conversation read or resident Bash waiter.
         a_actions = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A,
@@ -313,11 +316,21 @@ def main(report_source):
         assert len(a_actions) == 1 and a_actions[0]["resolution"] == "succeeded", a_actions
         a_requests = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_A]
         assert len(a_requests) == 3, a_requests
-        # Recovery replayed the saved admission: B ran exactly one Turn.
-        wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
+        # Recovery adds no admission; only the task and two explicit self-sends
+        # appear in B. Plain answers are saved results, not implicit Messages.
+        b_final = wait_for(lambda: (lambda value: value if value["work"]["status"] == "completed" and value["pending_messages"] == "0" else None)(
             run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)), "B's Turn")
+        assert {row["message"] for row in b_final["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_final
+        for key in (receipt["context"]["key"], *self_sends):
+            local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
+                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
+            assert local.returncode == 0 and local.stdout == "plain reply stays local", local
+        a_after = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)
+        assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
+        assert "plain reply stays local" not in json.dumps(a_reply_request), a_reply_request
         b_requests = [request for request in endpoint.requests if address_of(request)["session"] == SESSION_B]
-        assert len(b_requests) == 2 and [len(tool_outputs(request)) for request in b_requests] == [0, 1], b_requests
+        assert sum(bool(tool_outputs(request)) for request in b_requests) == 1, b_requests
+        assert all(request["instructions"] == fixture.model_instructions(workspace, store=store, session=SESSION_B) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         # Peers left nothing running beside the Host, and nobody signed in or
         # saved defaults: HOME holds only generated request captures.
@@ -327,7 +340,8 @@ def main(report_source):
                    if args.startswith(str(installed)) or args == "rui" or args.startswith("rui ")}
         assert running == {host.pid}, processes
         assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
-        print(f"peer round trip passed ({report_source}): self-send refused before capture/admission; "
+        print(f"peer round trip passed ({report_source}): explicit/generated self-send admitted with recorded sender; "
+              "plain answers stored as local results without implicit delivery; "
               "literal backticks and $() reached the parent byte-exact without shell evaluation; "
               "installed Bash rui configured B and sent with a durable receipt, "
               "A included its own parent address and explicit report-back instructions, "

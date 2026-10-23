@@ -41,6 +41,18 @@ class SelectionTest(unittest.TestCase):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["test-logic"])
 
+    def test_shared_context_text_keeps_all_request_oracle_consumers(self):
+        consumers = {
+            "src/model_instructions.txt": ["src/model_adapter.zig", "tests/integration/model_fixture.py",
+                                           "tests/qualification/measurement/client.go"],
+            "src/peer_message.txt": ["src/model_adapter.zig", "tests/integration/peer_integration.py"],
+        }
+        for path, sources in consumers.items():
+            owners = select(sources, "review", AVAILABLE)
+            result = select([path], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertEqual(result[family], owners[family], path)
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
