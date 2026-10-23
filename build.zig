@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
+    const gate_optimize = b.option(std.builtin.OptimizeMode, "gate-optimize", "Optimization for gate tests and checked CLIs (default ReleaseSafe)") orelse .ReleaseSafe;
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
@@ -38,7 +39,7 @@ pub fn build(b: *std.Build) void {
 
     const evaluator_driver = b.addExecutable(.{
         .name = "rui-evaluator-boundary-test",
-        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
+        .root_module = b.createModule(.{ .target = target, .optimize = gate_optimize }),
     });
     evaluator_driver.root_module.link_libc = true;
     evaluator_driver.root_module.addCSourceFile(.{
@@ -51,7 +52,7 @@ pub fn build(b: *std.Build) void {
     });
     const evaluator_probe = b.addExecutable(.{
         .name = "rui-evaluator-containment-probe",
-        .root_module = b.createModule(.{ .target = target, .optimize = .ReleaseSafe }),
+        .root_module = b.createModule(.{ .target = target, .optimize = gate_optimize }),
     });
     evaluator_probe.root_module.link_libc = true;
     evaluator_probe.root_module.addCSourceFile(.{
@@ -79,14 +80,14 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/evaluator_host.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     evaluator_host.root_module.link_libc = true;
     const evaluator_module = b.createModule(.{
         .root_source_file = b.path("src/evaluator.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = gate_optimize,
     });
     evaluator_module.addIncludePath(b.path("src"));
     const evaluator_bindings = addBindings(b, evaluator_module, "evaluator_native", "#include <evaluator_parent.h>\n#include <unistd.h>\n");
@@ -107,7 +108,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
@@ -133,7 +134,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/logic_tests.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
         .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
@@ -151,13 +152,13 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/answer_renderer_allocation.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     renderer_allocation.root_module.addImport("AnswerRenderer", b.createModule(.{
         .root_source_file = b.path("src/AnswerRenderer.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = gate_optimize,
     }));
     const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);
@@ -168,12 +169,12 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/terminal_notice_test.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     configureTerminalEditor(b, terminal_notice);
 
-    const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const release_safe = addRui(b, target, gate_optimize, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
@@ -226,14 +227,14 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/session_list_client.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     session_list_client.root_module.link_libc = true;
     const read_client = b.createModule(.{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = gate_optimize,
     });
     configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
@@ -242,7 +243,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/proposal_client.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     proposal_client.root_module.link_libc = true;
@@ -257,7 +258,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/activity_client.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     activity_client.root_module.link_libc = true;
@@ -378,14 +379,14 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/codex_credential_actor.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     credential_actor.root_module.link_libc = true;
     const credentials_module = b.createModule(.{
         .root_source_file = b.path("src/codex_credentials.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = gate_optimize,
     });
     configurePosix(b, credentials_module);
     credential_actor.root_module.addImport("codex_credentials", credentials_module);
@@ -403,14 +404,14 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/preference_policy.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     preference_policy_actor.root_module.link_libc = true;
     const preferences_module = b.createModule(.{
         .root_source_file = b.path("src/preferences.zig"),
         .target = target,
-        .optimize = .ReleaseSafe,
+        .optimize = gate_optimize,
     });
     configurePosix(b, preferences_module);
     preference_policy_actor.root_module.addImport("preferences", preferences_module);
@@ -452,7 +453,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/host_status_actor.zig"),
             .target = target,
-            .optimize = .ReleaseSafe,
+            .optimize = gate_optimize,
         }),
     });
     host_status_actor.root_module.link_libc = true;

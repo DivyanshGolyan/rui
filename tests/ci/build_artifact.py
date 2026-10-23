@@ -50,12 +50,17 @@ def runner():
     return [os.environ.get("ImageOS"), os.environ.get("ImageVersion")]
 
 
+def gate_optimize():
+    mode = os.environ.get("RUI_GATE_OPTIMIZE")
+    return ["-Dgate-optimize=" + mode] if mode else []
+
+
 def build(targets):
     prefix = Path(os.environ["RUNNER_TEMP"]) / "rui-compiled-build"
     # A prior failed build must not supply extra or stale installed binaries.
     if prefix.exists():
         shutil.rmtree(prefix)
-    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets),
+    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets), *gate_optimize(),
                     "--prefix", str(prefix), "--summary", "all"], check=True)
     return prefix / "bin"
 

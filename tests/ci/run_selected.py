@@ -6,6 +6,7 @@ import os
 import subprocess
 import time
 
+from build_artifact import gate_optimize
 from select_tests import execution_batches
 
 
@@ -46,7 +47,7 @@ def execute(batch, ci_artifacts):
     start = time.monotonic()
     artifacts = ["-Dci-artifacts=" + ci_artifacts] if ci_artifacts else []
     # Fixtures copy their own retained diagnostics; this only runs the gate.
-    returncode = subprocess.run(["zig", "build", *batch, *artifacts, "--summary", "all"]).returncode
+    returncode = subprocess.run(["zig", "build", *batch, *artifacts, *gate_optimize(), "--summary", "all"]).returncode
     print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {returncode}", flush=True)
     return returncode
 
