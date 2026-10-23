@@ -143,7 +143,7 @@ def successful_sse(index, answer=None):
                 "response": {
                     "id": f"response-{index}",
                     "status": "completed",
-                    "model": "model-a",
+                    "model": "gpt-6-sol",
                     "output": [message_item],
                     "usage": {
                         "input_tokens": 7,
@@ -197,7 +197,7 @@ class SuccessfulHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(content_length))
-        self.send_header("OpenAI-Model", "model-a")
+        self.send_header("OpenAI-Model", "gpt-6-sol")
         self.send_header("X-Request-Id", f"request-{index}")
         self.send_header("Connection", "close")
         self.end_headers()
@@ -317,7 +317,7 @@ def configure(state, store, key, session):
         "--provider",
         "codex",
         "--model",
-        "model-a",
+        "gpt-6-sol",
     )
     assert result["answer"]["status"] == "accepted", result
 

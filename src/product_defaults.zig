@@ -23,6 +23,37 @@ pub const permission_mode = "bypass";
 /// Model for a fresh Session when no explicit or saved model applies.
 pub const recommended_model = "gpt-6-luna";
 
+/// Rui's release-supported IDs, not live account availability or qualification.
+/// Visible models in OpenAI Codex's pinned catalog:
+/// https://github.com/openai/codex/blob/8531184b49bcb160175a84e140b659a83a426df7/codex-rs/models-manager/models.json
+pub const supported_models = [_][]const u8{
+    "gpt-6-luna",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+};
+
+pub fn supportsModel(model: []const u8) bool {
+    const std = @import("std");
+    for (supported_models) |supported| {
+        if (std.mem.eql(u8, supported, model)) return true;
+    }
+    return false;
+}
+
+/// Derive every user-facing list from the admission authority above.
+pub const model_help = blk: {
+    var text: []const u8 = "Supported model IDs: ";
+    for (supported_models, 0..) |model, index| {
+        text = text ++ (if (index == 0) "" else ", ") ++ model;
+    }
+    break :blk text ++ "\n";
+};
+
 /// Automatic compaction begins at this percentage of a known model's context.
 /// Unknown models have no automatic threshold.
 pub const compaction_trigger_percent: u64 = 90;
@@ -38,6 +69,7 @@ test "approved product defaults" {
     try std.testing.expectEqualStrings("bash", tools);
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("gpt-6-luna", recommended_model);
+    try std.testing.expect(supportsModel(recommended_model));
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);
 }

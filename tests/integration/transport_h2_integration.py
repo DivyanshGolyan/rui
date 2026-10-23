@@ -484,7 +484,7 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                         session=session, configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
-                            "model": {"state": "value", "value": "model-a"},
+                            "model": {"state": "value", "value": "gpt-6-sol"},
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash", "edit"]},
                             "permission_mode": {"state": "value", "value": "ask"},
@@ -625,7 +625,7 @@ def queued_h1(root):
                         session=session, configuration={
                             "workspace": {"state": "value", "value": str(dispatch.ROOT)},
                             "provider": {"state": "value", "value": "codex"},
-                            "model": {"state": "value", "value": "model-a"},
+                            "model": {"state": "value", "value": "gpt-6-sol"},
                             "instructions": {"state": "omitted"},
                             "tools": {"state": "value", "value": ["bash", "edit"]},
                             "permission_mode": {"state": "value", "value": "ask"},
@@ -717,7 +717,7 @@ def queued_h1_inactivity(root):
             active_capacity=2,
         )
         for index in range(2):
-            dispatch.configure(root, store, f"queued-config-{index}", f"direct/queued-{index}", "model-a")
+            dispatch.configure(root, store, f"queued-config-{index}", f"direct/queued-{index}", "gpt-6-sol")
             dispatch.message(root, store, f"queued-message-{index}", f"direct/queued-{index}", f"queued-{index}")
         assert endpoint.first_ready.wait(15), "first H1 request never arrived"
         time.sleep(1.7)
@@ -767,7 +767,7 @@ def stalled_capture(root, endpoint, after_progress=False):
     try:
         for index in range(100):
             session = f"direct/stalled-{index}"
-            dispatch.configure(records, store, f"stalled-config-{index}", session, "model-a")
+            dispatch.configure(records, store, f"stalled-config-{index}", session, "gpt-6-sol")
             dispatch.message(records, store, f"stalled-message-{index}", session, f"stalled-{index}")
         dispatch.wait_for(lambda: len(endpoint.streams) == 100, "100 live H2 streams", timeout=45)
         gate_event = diagnostics.wait("capture_write_gate_entered", timeout=30)[0]
@@ -841,7 +841,7 @@ def paused_capture_inactivity(root, endpoint):
     try:
         for index in range(20):
             session = f"direct/paused-{index}"
-            dispatch.configure(root, store, f"paused-config-{index}", session, "model-a")
+            dispatch.configure(root, store, f"paused-config-{index}", session, "gpt-6-sol")
             dispatch.message(root, store, f"paused-message-{index}", session, f"paused-{index}")
         assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
         diagnostics.wait("capture_write_gate_entered", timeout=15)
@@ -899,7 +899,7 @@ def capture_failure_on_resume(root, endpoint):
     try:
         for index in range(20):
             session = f"direct/resume-{index}"
-            dispatch.configure(root, store, f"resume-config-{index}", session, "model-a")
+            dispatch.configure(root, store, f"resume-config-{index}", session, "gpt-6-sol")
             dispatch.message(root, store, f"resume-message-{index}", session, f"resume-{index}")
         assert endpoint.ready.wait(15), "20 H2 requests did not arrive"
         diagnostics.wait("capture_write_gate_entered", timeout=15)
@@ -921,7 +921,7 @@ def capture_failure_on_resume(root, endpoint):
         assert outcomes.count("response_write_failed") == 1, outcomes
         assert len(diagnostics.matching("transport_resume_capture_failure")) == 1, diagnostics.records[-12:]
         assert completed == 19, outcomes
-        dispatch.configure(root, store, "resume-after-config", "direct/resume-after", "model-a")
+        dispatch.configure(root, store, "resume-after-config", "direct/resume-after", "gpt-6-sol")
         dispatch.message(root, store, "resume-after-message", "direct/resume-after", "resume-after")
         result_deadline = time.monotonic() + 20
         later = dispatch.wait_for(
@@ -956,7 +956,7 @@ def refused_stream(root, endpoint, phase):
         "--test-retry-waits-ms", "60000,60000,60000",
     )
     try:
-        dispatch.configure(root, store, f"refused-{phase}-config", "direct/refused", "model-a")
+        dispatch.configure(root, store, f"refused-{phase}-config", "direct/refused", "gpt-6-sol")
         dispatch.message(root, store, f"refused-{phase}-message", "direct/refused", "refused-request")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
@@ -992,7 +992,7 @@ def dead_reused_connection(root, endpoint):
     )
     try:
         for text in ("warm", "dead"):
-            dispatch.configure(root, store, f"dead-{text}-config", f"direct/{text}", "model-a")
+            dispatch.configure(root, store, f"dead-{text}-config", f"direct/{text}", "gpt-6-sol")
             dispatch.message(root, store, f"dead-{text}-message", f"direct/{text}", text)
             result_deadline = time.monotonic() + 20
             result = dispatch.wait_for(
@@ -1025,7 +1025,7 @@ def isolated_bad_header(root, endpoint):
     )
     try:
         for index in range(2):
-            dispatch.configure(root, store, f"sibling-config-{index}", f"direct/sibling-{index}", "model-a")
+            dispatch.configure(root, store, f"sibling-config-{index}", f"direct/sibling-{index}", "gpt-6-sol")
             dispatch.message(root, store, f"sibling-message-{index}", f"direct/sibling-{index}", f"sibling-{index}")
         codes = []
         result_deadline = time.monotonic() + 20
@@ -1059,7 +1059,7 @@ def isolated_terminal_stream(root, endpoint, mode):
     )
     try:
         for name in ("target", "sibling"):
-            dispatch.configure(root, store, f"{mode}-{name}-config", f"direct/{name}", "model-a")
+            dispatch.configure(root, store, f"{mode}-{name}-config", f"direct/{name}", "gpt-6-sol")
             dispatch.message(root, store, f"{mode}-{name}-message", f"direct/{name}", f"isolation-{name}")
         assert endpoint.ready.wait(20), f"both {mode} streams did not become live"
         if mode == "cancel":
@@ -1123,7 +1123,7 @@ def connection_failure(root, endpoint):
     try:
         diagnostics = HostDiagnostics(host)
         for index in range(2):
-            dispatch.configure(root, store, f"drop-config-{index}", f"direct/drop-{index}", "model-a")
+            dispatch.configure(root, store, f"drop-config-{index}", f"direct/drop-{index}", "gpt-6-sol")
             dispatch.message(root, store, f"drop-message-{index}", f"direct/drop-{index}", f"drop-{index}")
         result_deadline = time.monotonic() + 20
 
@@ -1230,7 +1230,7 @@ def unsupported_https(root):
         "--provider-ca-file", str(root / "cert.pem"),
     )
     try:
-        dispatch.configure(root, store, "non-h2-config", "direct/non-h2", "model-a")
+        dispatch.configure(root, store, "non-h2-config", "direct/non-h2", "gpt-6-sol")
         dispatch.message(root, store, "non-h2-message", "direct/non-h2", "non-h2")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(
@@ -1261,7 +1261,7 @@ def negotiated_h2_early_error(root, endpoint):
         "--provider-ca-file", str(root / "cert.pem"), "--test-retry-waits-ms", "1,1,1",
     )
     try:
-        dispatch.configure(root, store, "early-h2-config", "direct/early-h2", "model-a")
+        dispatch.configure(root, store, "early-h2-config", "direct/early-h2", "gpt-6-sol")
         dispatch.message(root, store, "early-h2-message", "direct/early-h2", "early-h2")
         result_deadline = time.monotonic() + 20
         result = dispatch.wait_for(

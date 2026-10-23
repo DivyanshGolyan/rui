@@ -151,7 +151,7 @@ def execute(command, overlay, log, retention, cache):
         done = os.open(root / "release", os.O_RDWR | os.O_NONBLOCK)
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
-            configured = fixture.command("session", "configure", "--store", store, "--session", "model", "--record", root / "configure.json", "--key", "configure", "--provider", "codex", "--model", "model-a", "--workspace", workspace)
+            configured = fixture.command("session", "configure", "--store", store, "--session", "model", "--record", root / "configure.json", "--key", "configure", "--provider", "codex", "--model", "gpt-6-sol", "--workspace", workspace)
             assert configured["answer"]["status"] == "accepted", configured
             for key, text in (("driver", "driver"), ("queued", "m" * 59199)):
                 text_path = root / f"{key}.txt"

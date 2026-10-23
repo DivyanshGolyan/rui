@@ -80,7 +80,7 @@ def checkpoint_readers():
                                              "--test-client-send-buffer-bytes", "1024", observations="control_peers")
             peers = PeerCensus(HostDiagnostics(host))
             sock = ready["socket"]
-            peers.call("configure", lambda: model.configure(state, store, "config", "direct/checkpoint", "model-a"))
+            peers.call("configure", lambda: model.configure(state, store, "config", "direct/checkpoint", "gpt-6-sol"))
             peers.call("message", lambda: model.message(state, store, "message", "direct/checkpoint", user_text))
             model.wait_for(lambda: peers.call("observe", lambda: model.observe(store, "message"))
                            .get("result", {}).get("status") == "completed", "checkpoint saved answer")
@@ -117,7 +117,7 @@ def checkpoint_readers():
                 sizes = [(store / "rui.sqlite3-wal").stat().st_size]
                 for index in range(8):
                     peers.call("configure", lambda: model.configure(state, store, f"write-{case}-{index}",
-                               "direct/writer", "model-a", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
+                               "direct/writer", "gpt-6-sol", instructions=f"{case}:{index}:" + "x" * (1024 * 1024)))
                     sizes.append((store / "rui.sqlite3-wal").stat().st_size)
                 # This is reuse/reset, not a 4-MiB quota: a large transaction
                 # can exceed journal_size_limit before a later WAL reset.

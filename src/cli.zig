@@ -209,6 +209,7 @@ fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u
 }
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bool) !void {
+    if (parsed.get("model")) |model| try requireSupportedModel(model);
     const home = init.environ_map.get("HOME") orelse {
         TerminalText.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
@@ -238,7 +239,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
         } else if (err == error.PreferenceProviderRequired) {
             TerminalText.diagnostic("rui: setup needs --provider codex with --model; no preferences saved.\n", .{});
         } else if (err == error.UnsupportedPreferenceModel) {
-            TerminalText.diagnostic("rui: setup supports only exact model " ++ product_defaults.recommended_model ++ " for Codex; no preferences saved. Existing Sessions are unchanged.\n", .{});
+            TerminalText.diagnostic("rui: setup model is unsupported; no preferences saved.\n" ++ product_defaults.model_help, .{});
         } else if (err == error.InvalidPreferenceModel) {
             TerminalText.diagnostic("rui: setup model must be 1–256 printable non-space ASCII bytes; no preferences saved.\n", .{});
         } else if (err == error.InvalidPreferenceStore or err == error.FileNotFound) {
@@ -267,7 +268,8 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, interactive: bo
     try writeSafeField(init.io, "Provider: ", if (values.provider.len != 0) values.provider.slice() else "not selected");
     try writeSafeField(init.io, "Model: ", if (values.model.len != 0) values.model.slice() else "not selected");
     var output: [std.Io.Dir.max_path_bytes + 512]u8 = undefined;
-    const codex = model_capability.capability(readiness);
+    var codex = model_capability.capability(readiness);
+    codex.valid_model = product_defaults.supportsModel;
     const local_status = switch (readiness) {
         .configured => "Codex credential: configured locally (remote acceptance not checked).\n",
         .renewal_due => "Codex credential: usable locally; renewal due at dispatch (remote acceptance not checked).\n",
@@ -334,7 +336,8 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
     try writer.writeAll(",\"model\":");
     try std.json.Stringify.value(facts.model, .{}, writer);
     try writer.print(",\"local_credential\":\"{s}\",\"next_session\":", .{@tagName(facts.readiness)});
-    const codex = model_capability.capability(facts.readiness);
+    var codex = model_capability.capability(facts.readiness);
+    codex.valid_model = product_defaults.supportsModel;
     if (provider_selection.resolve(&.{codex}, null, null, facts.provider, facts.model)) |choice| switch (choice) {
         .chooser => try writer.writeAll("{\"status\":\"choose_provider\"}"),
         .selected => |selected| {
@@ -542,6 +545,16 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool) !void {
         }
         switch (client.hostStatusUntil(io, paths.store.slice(), until)) {
             .ready => |ready| {
+                // Startup notices precede readiness. The first read may have
+                // raced their write; collect once more after readiness proves
+                // that startup passed that point, without waiting for stderr.
+                const final_count = std.c.read(startup_read, startup_bytes[startup_length..].ptr, startup_bytes.len - startup_length);
+                if (final_count > 0) startup_length += @intCast(final_count);
+                const notices = startup_bytes[0..startup_length];
+                // A competing launcher lost to this ready owner; its expected
+                // lease refusal is not a warning about the running Host.
+                if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+                    _ = @import("stderr.zig").write(notices);
                 if (!quiet) try writeHostStatus(io, .{ .ready = ready });
                 return;
             },
@@ -975,6 +988,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
 }
 
 fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.CapturedIdentity {
+    if (options.model) |model| try requireSupportedModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
@@ -999,6 +1013,15 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
         const destination = try snapshot.destination(home, &fallback);
         selected_store = destination.path;
         try preflightNewSession(init.io, selected_store, destination.saved);
+        // Check the prospective pin before credential lookup or login. Local
+        // identifier syntax and release support are separate policies.
+        const prospective = snapshot.resolve(.configured) catch |err| {
+            if (after_choice) {
+                TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
+            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
+            return err;
+        };
+        if (prospective) |binding| try requireSupportedModel(binding.model.slice());
         if (credential == null) credential = try credentialPath(init, &credential_buffer, false);
         const now = codex_auth.nowSeconds(init.io);
         const readiness: provider_selection.Readiness = if (codex_auth.localStatus(credential.?, now)) |state| switch (state) {
@@ -1013,12 +1036,7 @@ fn createSession(init: std.process.Init, options: NewSessionOptions) !?client.Ca
             }
             break :blk .credential_error;
         };
-        const selection = snapshot.resolve(readiness) catch |err| {
-            if (after_choice) {
-                TerminalText.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
-            } else TerminalText.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
-            return err;
-        };
+        const selection = try snapshot.resolve(readiness);
         if (selection) |binding| break binding;
         if (after_choice) {
             try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect or rui auth login codex when ready; existing work is unchanged.\n");
@@ -1215,6 +1233,25 @@ test "policy arguments reset and preserve spelling" {
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
+fn requireSupportedModel(model: []const u8) error{UnsupportedModel}!void {
+    if (product_defaults.supportsModel(model)) return;
+    // Optional diagnostics stay bounded and cannot retain a restored terminal
+    // on stderr credit. Spell arbitrary bytes safely, without changing input.
+    var bytes: [4 * protocol.max_model_bytes + product_defaults.model_help.len + 256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    out.writeAll("\nrui: unsupported model ") catch unreachable;
+    if (model.len <= protocol.max_model_bytes) {
+        out.writeByte('"') catch unreachable;
+        writeSafeTextTo(&out, model) catch unreachable;
+        out.writeByte('"') catch unreachable;
+    } else {
+        out.print("ID ({d} bytes exceeds the {d}-byte limit)", .{ model.len, protocol.max_model_bytes }) catch unreachable;
+    }
+    out.writeAll(". Nothing captured or changed.\n" ++ product_defaults.model_help ++ "See rui session configure --help.\n") catch unreachable;
+    _ = @import("stderr.zig").write(out.buffered());
+    return error.UnsupportedModel;
+}
+
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress) !void {
     const io = init.io;
     const interactive = live != null;
@@ -1225,7 +1262,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
-    if (parsed.get("model")) |model| input.model = .{ .present = true, .value = model };
+    if (parsed.get("model")) |model| {
+        try requireSupportedModel(model);
+        input.model = .{ .present = true, .value = model };
+    }
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
     input.tools = parsed.get("tools");
@@ -1252,6 +1292,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         // Credential readiness belongs to the serving Host, not this peer
         // caller: select as if usable and let the Host answer for credentials.
         binding = (try snapshot.resolve(.configured)).?;
+        try requireSupportedModel(binding.model.slice());
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
         if (!input.workspace.present) {
@@ -1525,7 +1566,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         return;
     }
     if (std.mem.eql(u8, text, "/setup") or std.mem.startsWith(u8, text, "/setup ")) {
-        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model " ++ product_defaults.recommended_model ++ " | --clear-model]; no changes saved.\n";
+        const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model]; no changes saved. See rui session configure --help for model IDs.\n";
         var setup_args: [6][]const u8 = undefined;
         const count = interactiveTokens(input_buffer["/setup".len..text.len], &setup_args) catch
             return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -1535,7 +1576,9 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             return;
         };
         if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
-        setup(init, &parsed, true) catch |err| TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+        setup(init, &parsed, true) catch |err| {
+            if (err != error.UnsupportedModel) TerminalText.diagnostic("rui: /setup: {s}; active Session unchanged\n", .{@errorName(err)});
+        };
     } else if (std.mem.startsWith(u8, text, "/result ")) {
         const saved = client.MessageAddress.init(destination, reference, std.mem.trim(u8, text[8..], " ")) catch |err| {
             TerminalText.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
@@ -1556,6 +1599,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-"))
             return std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Use a file for /configure content; terminal stdin belongs to this Session.\n");
         configure(init, requests_context, &parsed, .{ .store = destination, .session = reference }) catch |err| {
+            if (err == error.UnsupportedModel) return; // The pre-capture diagnostic already gives the repair.
             TerminalText.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
             if (err == error.CanonicalStoreFailure) return err;
         };

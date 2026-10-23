@@ -106,7 +106,7 @@ def retained(state, binary, label):
         samples = [sample(process.pid)]
         for _ in range(3):
             for _ in range(10):
-                assert "Configured." in cli.terminal_step(master, "/configure --model model-a",
+                assert "Configured." in cli.terminal_step(master, "/configure --model gpt-6-sol",
                     prompt if label == "baseline" else "Configured.", composer=label != "baseline")
                 listing = cli.terminal_step(master, "/requests",
                     prompt if label == "baseline" else "Local recovery handles", composer=label != "baseline")
@@ -144,7 +144,7 @@ def main():
             cli.fixture.RUI = baseline
             cli.fixture.command("configure", "--store", state / "live-store", "--session", "resources/original",
                 "--record", state / "configure-record", "--key", "resources-configure",
-                "--workspace", state, "--provider", "codex", "--model", "model-a")
+                "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
             for label, binary in (("baseline", baseline), ("candidate", candidate)):
                 print(json.dumps(retained(state, binary, label)), flush=True)
         finally:

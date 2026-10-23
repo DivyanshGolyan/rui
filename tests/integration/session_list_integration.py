@@ -161,7 +161,7 @@ def main():
                 config = {
                     "workspace": {"state": "value", "value": workspace} if complete else {"state": "omitted"},
                     "provider": {"state": "value", "value": "codex"},
-                    "model": {"state": "value", "value": "model-a"},
+                    "model": {"state": "value", "value": "gpt-6-sol"},
                     "instructions": {"state": "omitted"},
                     "tools": {"state": "omitted"},
                     "permission_mode": {"state": "omitted"},
@@ -179,7 +179,7 @@ def main():
             assert first["next"] and int(first["next"]["ceiling"]) == 10
             assert configure("created-later", "later", str(root))[1]["answer"]["status"] == "accepted"
             assert listing(str(root), first["next"]) == (200, {"version": "1", "type": "session_list", "sessions": [
-                {"reference": names[9], "workspace": str(root), "provider": "codex", "model": "model-a", "tools": ["bash"], "permission_mode": "bypass"}
+                {"reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"], "permission_mode": "bypass"}
             ], "next": None})
             assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
             assert listing(str(root) + "-alias")[1]["sessions"] == []

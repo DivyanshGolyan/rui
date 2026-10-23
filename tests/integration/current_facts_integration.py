@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory(prefix="rui-current-facts-") as temporary:
     store = state / "store"
     host = fixture.start_host(store, None)
     try:
-        fixture.configure(state, store, "configuration", "s", "model-a")
+        fixture.configure(state, store, "configuration", "s", "gpt-6-sol")
         original = fixture.command("session", "inspect", "--store", store, "--session", "s")
         missing = fixture.command("session", "inspect", "--store", store, "--session", "missing")
         assert missing["session"] is None and missing["execution"]["reason"] == "session_not_found", missing

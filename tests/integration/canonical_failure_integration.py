@@ -85,7 +85,7 @@ def producer_cases(state):
     text = state / "input"
     text.write_text("original mutation bytes")
     commands = {
-        "configure": ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
+        "configure": ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"],
         "message": ["session", "send", "--text", text],
         "permission-decision": ["action", "allow", "--action", "7"],
         "permission-denial": ["action", "deny", "--action", "7"],
@@ -262,7 +262,7 @@ def binding_cases(state, null_code=False):
     text = home / "input"
     text.write_text("a\nµ")
     commands = (
-        ("configure", "/v1/configure", ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"]),
+        ("configure", "/v1/configure", ["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"]),
         ("message", "/v1/message", ["session", "send", "--text", text]),
         ("session-stop", "/v1/control/session-stop", ["session", "stop"]),
         ("model-interruption", "/v1/control/model-interruption", ["session", "interrupt-model", "--turn", "3", "--operation", "11"]),
@@ -323,7 +323,7 @@ def committed_cases(state):
     host = fixture.start_host(store, None)
     try:
         configured = invoke(home, "session", "configure", "--store", store, "--session", "original/session",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
         proxy = ReplyProxy(host, "/v1/message")
         try:
@@ -404,7 +404,7 @@ def interactive_cases(state, binding=False, null_code=False):
     host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
     try:
         configured = invoke(home, "session", "configure", "--store", store, "--session", "original/session",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
         codex.credentials(home / ".config/rui/codex.json")
         for route, line in (("/v1/configure", "/configure --permission-mode ask"),
@@ -620,7 +620,7 @@ def permission_read_cases(state):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         assert invoke(home, "session", "configure", "--store", store, "--session", "permission/read",
-            "--workspace", state, "--provider", "codex", "--model", "model-a",
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol",
             "--permission-mode", "ask").returncode == 0
         assert invoke(home, "session", "send", "--store", store, "--session", "permission/read",
             "inspect exact permission").returncode == 0
@@ -688,7 +688,7 @@ def permission_read_cases(state):
         # An ordinary details preparation failure stays live and is delivered
         # before the next Activity borrower can reset its diagnostic storage.
         assert invoke(home, "session", "configure", "--store", store, "--session", "details/read",
-            "--workspace", state, "--provider", "codex", "--model", "model-a").returncode == 0
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol").returncode == 0
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         body = b'{"version":"1","type":"busy","code":"host_busy"}'
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
@@ -743,7 +743,7 @@ def store_read_cases(state):
     store = home / "store"
     host = fixture.start_host(store, None)
     try:
-        fixture.configure(home, store, "store-read-configure", "s", "model-a")
+        fixture.configure(home, store, "store-read-configure", "s", "gpt-6-sol")
         fixture.message(home, store, "store-read-message", "s", "queued work")
         before = invoke(home, "request", "read-result", "--store", store, "--key", "store-read-message")
         assert content_failure(before)["error"]["code"] == "result_not_ready", before
@@ -784,7 +784,7 @@ def keyed_observation_cases(state, only="keyed"):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         kinds = ("configure", "message", "session_stop", "model_interruption", "permission_decision")
-        commands = (["session", "configure", "--workspace", state, "--provider", "codex", "--model", "model-a"],
+        commands = (["session", "configure", "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol"],
             ["session", "send", "submitted bytes"], ["session", "stop"],
             ["session", "interrupt-model", "--turn", "733", "--operation", "911"], ["action", "allow", "--action", "721"])
         keys = {}

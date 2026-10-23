@@ -193,6 +193,94 @@ def help_case():
         assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
 
+def compiled_model_cases():
+    """One release list owns admission, help and the stale-pin notice."""
+    import host_launch_integration as launch
+    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
+              "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
+    listing = "Supported model IDs: " + ", ".join(models) + "\n"
+    root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
+    home, store = root / "home", root / "host-store"
+    home.mkdir(mode=0o700)
+    env = {**os.environ, "HOME": str(home), "RUI_CODEX_CREDENTIAL_FILE": str(root / "missing-credential")}
+    completed = False
+    try:
+        output = run(home, "session", "configure", "--help")
+        assert listing in output and output.count("Supported model IDs:") == 1, output
+        assert list(home.iterdir()) == [], "model help created state"
+        no_home = {key: value for key, value in env.items() if key != "HOME"}
+        help_without_home = subprocess.run([str(fixture.RUI), "session", "configure", "--help"],
+            env=no_home, capture_output=True, text=True, timeout=10)
+        assert help_without_home.returncode == 0 and listing in help_without_home.stdout and not help_without_home.stderr
+        for named in ((), ("--session", "models/existing")):
+            for model in ("retired-model", "gpt-6-so", "gpt-6-sol-extra", "GPT-6-SOL", "codex-auto-review", "bad\x1b[31m"):
+                record = root / "must-not-exist.json"
+                result = subprocess.run([str(fixture.RUI), "session", "configure",
+                    "--store", str(root / "absent-store"), *named, "--provider", "codex", "--model", model,
+                    "--record", str(record), "--key", "invalid-model", "--instructions", str(root / "absent-instructions")],
+                    env=env, capture_output=True, text=True, timeout=10)
+                assert result.returncode != 0 and not result.stdout, result
+                assert listing in result.stderr and "unsupported model" in result.stderr, result.stderr
+                assert model.replace("\x1b", "\\x1b") in result.stderr, result.stderr
+                assert "\x1b" not in result.stderr, result.stderr
+                assert not record.exists() and not (root / "absent-store").exists()
+                assert list(home.iterdir()) == [], "invalid model created capture or preference state"
+        rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "retired-model"],
+            env=env, capture_output=True, text=True, timeout=10)
+        assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
+        defaults(home, "--provider", "codex", "--model", models[0])
+        saved = home / ".config/rui/preferences"
+        saved.write_bytes(saved.read_bytes().replace(b"model=gpt-6-luna", b"model=retired-model"))
+        original = saved.read_bytes()
+        result = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(root / "absent-store")],
+            env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode != 0 and "retired-model" in result.stderr and listing in result.stderr, result
+        assert saved.read_bytes() == original and not (home / ".config/rui/requests").exists()
+        with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
+            diagnostic = read_terminal(master, "See rui session configure --help.")
+            assert "retired-model" in diagnostic and listing.strip() in diagnostic, diagnostic
+            assert "Choose Codex login" not in diagnostic, diagnostic
+            assert entered.wait(timeout=5) != 0
+        assert saved.read_bytes() == original and not (root / "absent-store").exists()
+        assert not (home / ".config/rui/requests").exists()
+        started = launch.run_start(store, env)
+        assert started.returncode == 0, started.stderr
+        assert started.stderr.count("saved new-Session default model") == 1, started.stderr
+        assert "retired-model" in started.stderr and listing in started.stderr, started.stderr
+        assert "rui defaults configure --model ID" in started.stderr and "--clear-model" in started.stderr, started.stderr
+        assert saved.read_bytes() == original, "startup substituted or rewrote a stale pin"
+        attached = launch.run_start(store, env)
+        assert attached.returncode == 0 and not attached.stderr, attached
+        for index, model in enumerate(models):
+            admitted = admit(home, "session", "configure", "--store", store, "--session", f"models/{index}",
+                "--workspace", root, "--provider", "codex", "--model", model)
+            assert admitted["admission"]["answer"]["status"] == "accepted", admitted
+            current = fixture.command("session", "inspect", "--store", store, "--session", f"models/{index}")
+            assert current["session"]["model"] == model, current
+        captures = home / ".config/rui/requests"
+        before = {path.name: path.read_bytes() for path in captures.glob("*.json")}
+        original_session = fixture.command("session", "inspect", "--store", store, "--session", "models/0")["session"]
+        rejected = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
+            "--session", "models/0", "--model", "gpt-6-lun"], env=env, capture_output=True, text=True, timeout=10)
+        assert rejected.returncode != 0 and listing in rejected.stderr, rejected
+        assert {path.name: path.read_bytes() for path in captures.glob("*.json")} == before
+        assert fixture.command("session", "inspect", "--store", store, "--session", "models/0")["session"] == original_session
+        assert saved.read_bytes() == original
+        launch.forced_crash_cleanup(store)
+        for flags in (("--model", "gpt-6-sol"), ("--clear-model",)):
+            defaults(home, *flags)
+            retained = saved.read_bytes()
+            started = launch.run_start(store, env)
+            assert started.returncode == 0 and not started.stderr, started
+            assert saved.read_bytes() == retained
+            launch.forced_crash_cleanup(store)
+        completed = True
+        print("compiled models: shared help/error/notice membership, pre-capture rejection, all accepted IDs and retained defaults passed")
+    finally:
+        dispose_all(lambda: launch.forced_crash_cleanup(store),
+            lambda: shutil.rmtree(root) if completed else retain_failure_state("compiled model CLI failure state", root))
+
+
 def compaction_settings_case(home, store, workspace):
     # Pages word-wrap; phrases are checked across their soft breaks.
     flat = lambda text: " ".join(text.split())
@@ -231,7 +319,7 @@ def compaction_settings_case(home, store, workspace):
     assert report["session"]["model"] == "gpt-6-luna", report
     unknown = "human/compaction-unknown-model"
     run(home, "session", "configure", "--store", store, "--session", unknown,
-        "--workspace", workspace, "--provider", "codex", "--model", "unknown-model")
+        "--workspace", workspace, "--provider", "codex", "--model", "gpt-5.6-terra")
     with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
@@ -587,7 +675,7 @@ def terminal_wait_oracles():
             raise AssertionError("an earlier frame satisfied a later wait")
         forget_terminal(reader.fileno())
     # The command writer: a queued composer cannot acknowledge a command.
-    for command, marker in (("/configure --model model-a", "Configured."), ("/status", "Session: example")):
+    for command, marker in (("/configure --model gpt-6-sol", "Configured."), ("/status", "Session: example")):
         stale = terminal_frame(["› /con"], (1, 7))
         for suffix in (b"", terminal_frame([marker], (1, 1)), terminal_frame([marker, "›"], (2, 3))):
             reader, peer = socket.socketpair()
@@ -955,9 +1043,9 @@ def command_entry_cases():
         other.mkdir()
         for index in range(9):
             run(home, "session", "configure", "--session", f"last/{index}", "--workspace", workspace,
-                "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         run(home, "session", "configure", "--session", "foreign/newer", "--workspace", other,
-            "--provider", "codex", "--model", "model-b", "--permission-mode", "ask")
+            "--provider", "codex", "--model", "gpt-6.1-sol", "--permission-mode", "ask")
         older = admit(home, "session", "send", "--session", "last/0", "older activity")
         fixture.wait_for(lambda: fixture.completed_observation(store, older["request"]), "older Session activity")
         alias = state / "workspace-alias"
@@ -1008,8 +1096,8 @@ def command_entry_cases():
         # over the pin; a saved unsupported provider is refused before capture.
         preferences_file = home / ".config/rui/preferences"
         original_preferences = preferences_file.read_bytes()
-        preferences_file.write_bytes(original_preferences.replace(b"model=gpt-6-luna", b"model=family=variant"))
-        for flags, model in (((), "family=variant"), (("--model", "explicit-model"), "explicit-model")):
+        preferences_file.write_bytes(original_preferences.replace(b"model=gpt-6-luna", b"model=gpt-5.6-sol"))
+        for flags, model in (((), "gpt-5.6-sol"), (("--model", "gpt-6.1-sol"), "gpt-6.1-sol")):
             chosen = admit(home, "session", "configure", *flags, cwd=workspace)["admission"]["answer"]["session"]
             assert fixture.command("session", "inspect", "--store", store, "--session", chosen)["session"]["model"] == model, flags
         # Peer identity belongs to Message sending, not new-Session defaults.
@@ -1018,7 +1106,7 @@ def command_entry_cases():
         for address in (json.dumps({"store": str(pathlib.Path(store).resolve()), "session": chosen}),
                         json.dumps({"store": str(pathlib.Path(store).resolve()), "session": "missing/caller"}),
                         "not json"):
-            for flags, model in (((), "family=variant"), (("--model", "family=other"), "family=other")):
+            for flags, model in (((), "gpt-5.6-sol"), (("--model", "gpt-6-astra"), "gpt-6-astra")):
                 peer = admit(home, "session", "configure", *flags, cwd=workspace,
                     environment={"RUI_ADDRESS": address})["admission"]["answer"]["session"]
                 assert fixture.command("session", "inspect", "--store", store, "--session", peer)["session"]["model"] == model, (address, flags)
@@ -1155,9 +1243,9 @@ def command_entry_cases():
             caller.stderr.close()
             # Both selectors now have a plausible different destination.
             run(home, "session", "configure", "--store", store, "--session", f"newer/{index}",
-                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+                "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
             run(home, "session", "configure", "--store", lookalike_store, "--session", chosen,
-                "--workspace", other, "--provider", "codex", "--model", "lookalike-model")
+                "--workspace", other, "--provider", "codex", "--model", "gpt-5.6-luna")
             defaults(home, "--store", lookalike_store)
             before_resume = set(records.glob("*.json"))
             caller = subprocess.Popen(["bash", "-c", exact_resume], cwd=workspace,
@@ -1166,7 +1254,7 @@ def command_entry_cases():
             read_terminal(master, "› ")
             status = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {chosen}\n" in status and shown(f"Store: {store}\n", status), status
-            assert "lookalike-model" not in status, status
+            assert "gpt-5.6-luna" not in status, status
             terminal_step(master, "/exit", "Resume: ")
             _, errors = terminal_exit(caller, master)
             assert caller.returncode == 0 and not errors, errors
@@ -1238,7 +1326,7 @@ def scroll_return_case():
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         for session, count in (("scroll/long", 24), ("scroll/brief", 1)):
             run(home, "session", "configure", "--store", store, "--session", session,
-                "--workspace", state, "--provider", "codex", "--model", "model-a")
+                "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
             for i in range(count):
                 message = admit(home, "session", "send", "--store", store, "--session", session, f"scroll input {i:02d}")
                 fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved scroll answer")
@@ -1339,7 +1427,7 @@ def persistent_opening_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         run(home, "session", "configure", "--store", store, "--session", "persistent/opening",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         message = admit(home, "session", "send", "--store", store, "--session", "persistent/opening", "literal **user** é")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "opening saved answer")
         assert run(home, "request", "read-result", "--store", store, "--key", message["request"]) == large_answer
@@ -1615,7 +1703,7 @@ def persistent_pending_case():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         run(home, "session", "configure", "--store", store, "--session", "persistent/pending", "--workspace", state,
-            "--provider", "codex", "--model", "model-a")
+            "--provider", "codex", "--model", "gpt-6-sol")
         admit(home, "session", "send", "--store", store, "--session", "persistent/pending", "active original")
         fixture.wait_for(lambda: len(endpoint.requests) == 1, "held first provider request")
         for i in range(1, 25):
@@ -1689,7 +1777,7 @@ def persistent_input_cases():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         run(home, "session", "configure", "--store", store, "--session", "persistent/input",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         original = termios.tcgetattr(slave)
@@ -1890,7 +1978,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
             *(("--fault", "bash-signal") if signal_failure else ()), active_capacity=4)
         run(home, "session", "configure", "--store", store, "--session", reference,
-            "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
         original = termios.tcgetattr(slave)
@@ -1900,7 +1988,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "RUI_TEST_ACTION_READY_FD": str(ready_write)}, pass_fds=(ready_write,),
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         opening = read_terminal(master, "› ")
-        assert all(noise not in opening for noise in ("model-a", "Workspace:", "Session:", "Store:", "/help commands")), opening
+        assert all(noise not in opening for noise in ("gpt-6-sol", "Workspace:", "Session:", "Store:", "/help commands")), opening
         def hold_arguments(response):
             if not arguments_held.is_set():
                 arguments_held.set()
@@ -2143,7 +2231,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fixture.sse_answer("bypass-answer", "bypass-reason", "bypass-message", "bypass complete")[0],
             ])
             run(home, "session", "configure", "--store", store, "--session", reference,
-                "--workspace", state, "--provider", "codex", "--model", "model-a", "--permission-mode", "bypass")
+                "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "bypass")
             try:
                 os.write(master, b"run without approval\n")
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
@@ -2660,7 +2748,7 @@ def saved_capture_cases(state, store, workspace):
     home.mkdir()
     records = home / ".config/rui/requests"
     args = ["session", "configure", "--store", store, "--session", "capture/original",
-        "--workspace", workspace, "--provider", "codex", "--model", "model-a"]
+        "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"]
     gate = state / "capture-original-reader"
     caller = subprocess.Popen([str(fixture.RUI), *map(str, args)],
         env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
@@ -2783,7 +2871,7 @@ def silent_read_edit_cases():
         for index, route in enumerate(("/v1/activity-page",)):
             reference = f"silent/{index}"
             run(home, "session", "configure", "--store", store, "--session", reference,
-                "--workspace", state, "--provider", "codex", "--model", "model-a")
+                "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
             held, release = threading.Event(), threading.Event()
@@ -2858,7 +2946,7 @@ def opaque_session_commands_case():
             body = {"version": "1", "kind": "configure", "store": str(store), "key": key,
                     "session": session, "configuration": {
                         **{name: {"state": "value", "value": value} for name, value in
-                           (("workspace", str(state)), ("provider", "codex"), ("model", "model-a"))},
+                           (("workspace", str(state)), ("provider", "codex"), ("model", "gpt-6-sol"))},
                         **{name: {"state": "omitted"} for name in
                            ("instructions", "tools", "permission_mode", "output_schema")}}}
             body["configuration"]["permission_mode"] = {"state": "value", "value": "ask"}
@@ -2961,7 +3049,7 @@ def long_input_case(home, store, workspace, endpoint, host):
     endpoint.responses.append(fixture.sse_answer("long-answer", "long-reason", "long-message", "long input intact")[0])
     long_session = "human/long-input"
     run(home, "session", "configure", "--store", store, "--session", long_session,
-        "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+        "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
     proxy = canonical.ReplyProxy(host, "/v1/message", lambda response: response)
     master = slave = entered = None
     try:
@@ -2975,7 +3063,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", "Session: ", composer=True)
-        assert permission_row(binding, "bypass") and "Provider: codex" in binding and "Model: model-a" in binding, binding
+        assert permission_row(binding, "bypass") and "Provider: codex" in binding and "Model: gpt-6-sol" in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -3276,7 +3364,7 @@ def renderer_cases():
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
             arguments = (["session", "resume", "--store", str(store), "--", session] if initial_text is None else
-                ["--store", str(store), "--provider", "codex", "--model", "model-a", "--", initial_text])
+                ["--store", str(store), "--provider", "codex", "--model", "gpt-6-sol", "--", initial_text])
             caller = subprocess.Popen([str(fixture.RUI), *arguments],
                 cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)),
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
@@ -3308,7 +3396,7 @@ def renderer_cases():
 
     def configure(session, permission="bypass"):
         run(home, "session", "configure", "--store", store, "--session", session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a", "--permission-mode", permission)
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission)
 
     def answer(index):
         marker = f"renderer answer {index}"
@@ -4910,7 +4998,11 @@ def main(selected="all"):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
-    assert selected in ("all", "renderer", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    assert selected in ("all", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input"), selected
+    if selected in ("all", "compiled-models"):
+        compiled_model_cases()
+    if selected == "compiled-models":
+        return
     if selected == "renderer":
         renderer_cases()
         return
@@ -4993,7 +5085,7 @@ def main(selected="all"):
             return
         if selected == "incomplete-input":
             run(home, "session", "configure", "--store", store, "--session", "incomplete/input",
-                "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+                "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
             incomplete_input_case(home, store, "incomplete/input", endpoint, host)
             completed = True
             return
@@ -5049,9 +5141,9 @@ def main(selected="all"):
         assert saved.read_text() == f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=gpt-6-luna\n"
         preference_edits(preferences_home, store)
         original_preferences = saved.read_text()
-        saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=family=variant"))
-        assert saved.read_text().endswith("provider=codex\nmodel=family=variant\n")
-        assert defaults(preferences_home)["model"] == "family=variant"
+        saved.write_text(original_preferences.replace("model=gpt-6-luna", "model=gpt-5.6-sol"))
+        assert saved.read_text().endswith("provider=codex\nmodel=gpt-5.6-sol\n")
+        assert defaults(preferences_home)["model"] == "gpt-5.6-sol"
         saved.write_text(original_preferences)
         assert saved.stat().st_mode & 0o777 == 0o600
         assert saved.parent.stat().st_mode & 0o777 == 0o700
@@ -5120,8 +5212,8 @@ def main(selected="all"):
         assert defaults(preferences_home)["local_credential"] == "credential_error"
         credential.unlink()
         defaults(preferences_home, "--provider", "other", success=False)
-        defaults(preferences_home, "--model", "other-model")
-        assert saved.read_text().endswith("model=other-model\n")
+        defaults(preferences_home, "--model", "gpt-5.5")
+        assert saved.read_text().endswith("model=gpt-5.5\n")
         defaults(preferences_home, "--model", "gpt-6-luna")
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         defaults(preferences_home, "--store", state / "missing", success=False)
@@ -5158,7 +5250,8 @@ def main(selected="all"):
         defaults(preferences_home, "--provider", "codex", "--model", "gpt-6-luna")
         saved.write_text(f"version=1\nstore={store.resolve()}\nprovider=codex\nmodel=old-model\n")
         prospective = defaults(preferences_home)["next_session"]
-        assert (prospective["status"], prospective["provider"], prospective["model"]) == ("selected", "codex", "old-model"), prospective
+        assert prospective == {"status": "unsupported_model"}, prospective
+        assert defaults(preferences_home)["model"] == "old-model", "inspection rewrote the stale pin"
         defaults(preferences_home, "--model", "gpt-6-luna")
         saved.rename(saved.parent / "preferences.backup")
         sole = defaults(preferences_home)
@@ -5181,7 +5274,7 @@ def main(selected="all"):
         defaults(preferences_home, "--model", "bad\nmodel", success=False)
         assert saved.read_text().endswith("model=gpt-6-luna\n")
         config = admit(home, "session", "configure", "--store", store, "--session", session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
         assert config["admission"]["answer"]["status"] == "accepted", config
         # A one-shot read selects the saved Store; explicit targeting bypasses
@@ -5415,7 +5508,7 @@ def main(selected="all"):
                                      ("bash,edit", "bypass", True), ("bash", "ask", False)):
             warning_ref = f"warnings/{tools}/{mode}"
             admit(preferences_home, "session", "configure", "--store", store, "--session", warning_ref,
-                  "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+                  "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
                   "--tools", tools, "--permission-mode", mode)
             listing = json.loads(run(preferences_home, "session", "list", "--store", store, "--all"))
             selected, = [row for row in listing["sessions"] if row["reference"] == warning_ref]
@@ -5638,7 +5731,7 @@ def main(selected="all"):
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", "Session: ", composer=True)
             assert f"Session: {session}" in binding and shown(f"Workspace (Bash cwd): {workspace.resolve()}", binding), binding
-            assert "Provider: codex" in binding and "Model: model-a" in binding and "Permission: ask" in binding, binding
+            assert "Provider: codex" in binding and "Model: gpt-6-sol" in binding and "Permission: ask" in binding, binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
@@ -5658,19 +5751,22 @@ def main(selected="all"):
             terminal_step(master, "/status", "Permission: ask", composer=True)
             assert not credential.exists(), "unsupported in-session login created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
-            terminal_step(master, "/setup --model other-model", "Saved defaults for future Sessions", composer=True)
+            terminal_step(master, "/setup --model gpt-5.5", "Saved defaults for future Sessions", composer=True)
             interactive_saved = preferences_home / ".config/rui/preferences"
             terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
             for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
                                    ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
-                                   ('/setup --model ""', "InvalidPreferenceModel")):
-                terminal_step(master, command, error, composer=True)
+                                   ('/setup --model ""', 'unsupported model ""')):
+                rejected = terminal_step(master, command, error, composer=True)
+                if 'unsupported model' in error:
+                    assert "Supported model IDs:" in rejected and "See rui session configure --help." in rejected, rejected
+                    assert "active Session unchanged" not in rejected, rejected
                 assert interactive_saved.read_bytes() == cleared_preferences
             terminal_step(master, "/status", "Permission: ask", composer=True)
             active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
-            assert active["model"] == "model-a" and active["permission_mode"] == "ask", active
+            assert active["model"] == "gpt-6-sol" and active["permission_mode"] == "ask", active
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             spaced_store = state / "spaced store"
             spaced_store.mkdir(mode=0o700)
@@ -5686,12 +5782,12 @@ def main(selected="all"):
             terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
             terminal_step(master, "/status", "Permission: ask", composer=True)
             assert fixture.command("session", "inspect", "--store", store,
-                "--session", session)["session"]["model"] == "model-a"
+                "--session", session)["session"]["model"] == "gpt-6-sol"
             terminal_step(master, "/configure --session human/other", "Usage: /configure", composer=True)
             terminal_step(master, "/configure --instructions -", "Use a file for", composer=True)
             terminal_step(master, "/configure --output-schema -", "Use a file for", composer=True)
             terminal_step(master, "/status", f"Session: {session}", composer=True)
-            configured = configured_frame(master, '/configure --model "model-a"')
+            configured = configured_frame(master, '/configure --model "gpt-6-sol"')
             assert "Configured." in configured and "request:" not in configured, configured
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
@@ -5748,7 +5844,7 @@ def main(selected="all"):
         host = fixture.start_host(store, url, active_capacity=2)
         sibling_session = "human/siblings"
         sibling_config = admit(home, "session", "configure", "--store", store, "--session", sibling_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")["admission"]
         assert sibling_config["context"] == {"store": str(store), "session": sibling_session,
             "key": sibling_config["context"]["key"], "kind": "configure"}, sibling_config
@@ -5845,7 +5941,7 @@ def main(selected="all"):
         ])
         failure_session = "human/failure"
         run(home, "session", "configure", "--store", store, "--session", failure_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         failed_key = admit(home, "session", "send", "--store", store, "--session", failure_session,
             "first failing Turn")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 6, "held first failed Turn")
@@ -5876,7 +5972,7 @@ def main(selected="all"):
             "stopped-message", "must not appear")[0], stop_release))
         stop_session = "human/stopped"
         run(home, "session", "configure", "--store", store, "--session", stop_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         stopped_key = admit(home, "session", "send", "--store", store, "--session", stop_session,
             "running when stopped")["request"]
         fixture.wait_for(lambda: len(endpoint.requests) == 8, "held stopped Turn")
@@ -5910,7 +6006,7 @@ def main(selected="all"):
             "large-message", large_answer)[0])
         large_session = "human/large"
         run(home, "session", "configure", "--store", store, "--session", large_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         large_key = admit(home, "session", "send", "--store", store, "--session", large_session,
             "large output")["request"]
         fixture.wait_for(lambda: fixture.completed_observation(store, large_key), "large saved answer")
@@ -5945,7 +6041,7 @@ def main(selected="all"):
         ])
         race_session = "human/follow-race"
         run(home, "session", "configure", "--store", store, "--session", race_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
         prior_receipt = invoke(home, "session", "send", "--store", store, "--session", race_session, "prior")
         prior = CAPTURE_NOTICE.match(prior_receipt.stderr).group(1)
@@ -5990,7 +6086,7 @@ def main(selected="all"):
         ])
         interactive = "human/interactive"
         run(home, "session", "configure", "--store", store, "--session", interactive,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a",
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol",
             "--tools", "bash", "--permission-mode", "ask")
         # Tall enough that the whole 4 KiB command is one committed frame.
         master, slave = open_pty(80, 100)
@@ -6079,7 +6175,7 @@ def main(selected="all"):
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         control_session = "human/name\n\x1b[2J\u202e"
         terminal_safe_json(run(home, "session", "configure", "--store", store, "--session", control_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a"))
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol"))
         # Current inspection and listing carry the Session's own name.
         current = terminal_safe_json(run(home, "session", "inspect", "--store", store, "--session", control_session))
         assert control_session in json_strings(current), current
@@ -6123,7 +6219,7 @@ def main(selected="all"):
         endpoint.responses.append((fixture.sse_answer("unsafe-answer", "unsafe-reason",
             "unsafe-message", "safe result")[0], unsafe_release))
         run(home, "session", "configure", "--store", store, "--session", unsafe_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         unsafe_text = state / "unsafe-input"
         unsafe_text.write_text("report status")
         run(home, "session", "send", "--store", store, "--session", unsafe_session,
@@ -6161,7 +6257,7 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
         empty_session = "human/empty-key"
         run(home, "session", "configure", "--store", store, "--session", empty_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         empty_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("empty-answer", "empty-reason", "empty-message",
             "empty key answer")[0], empty_release))
@@ -6186,7 +6282,7 @@ def main(selected="all"):
         long_input_case(home, store, workspace, endpoint, host)
         editor_session = "human/editor"
         run(home, "session", "configure", "--store", store, "--session", editor_session,
-            "--workspace", workspace, "--provider", "codex", "--model", "model-a")
+            "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")
         cases = [
             ("first second\x1b\x7fZ", "first Z"),
             ("A中e\u0301🧑‍🌾\x7f", "A中e\u0301"),

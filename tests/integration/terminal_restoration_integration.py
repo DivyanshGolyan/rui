@@ -889,7 +889,7 @@ def capture_receipt_case(state, library):
             "RUI_DIAGNOSTIC_DROP_FIRST_INSPECTION": "1",
             "RUI_DIAGNOSTIC_ARM": str(arm), "RUI_DIAGNOSTIC_RELEASE": str(release)})
         diagnostics = HostDiagnostics(host)
-        fixture.configure(root, store, "capture-config", "diagnostic/session", "model-a")
+        fixture.configure(root, store, "capture-config", "diagnostic/session", "gpt-6-sol")
         # Admission uses the ordinary worker; complete it before that worker
         # holds optional stderr. Only provider capture must progress under hold.
         fixture.message(root, store, "capture-message", "diagnostic/session", "hello")
@@ -1184,7 +1184,7 @@ def renderer_backpressure_case(state, library, home, store):
 
     session = "terminal/renderer-backpressure"
     human.run(home, "session", "configure", "--store", store, "--session", session,
-        "--workspace", state, "--provider", "codex", "--model", "model-a")
+        "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
     master, slave = open_pty()
     output_master, output_slave = open_pty()
     original = termios.tcgetattr(slave)
@@ -1370,7 +1370,7 @@ def consent_boundary_cases(state, library):
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "session", "configure", "--store", store, "--session", "consent/boundary",
-                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", "consent/boundary"], stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                 env={**os.environ, "HOME": str(home), "NO_COLOR": "1",
@@ -1472,7 +1472,7 @@ def command_interruption_cases(state, library):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         human.run(home, "session", "configure", "--store", store, "--session", "command/signals",
-            "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         message = human.admit(home, "session", "send", "--store", store, "--session", "command/signals", "saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved command result")
         human.admit(home, "session", "send", "--store", store, "--session", "command/signals", "propose tool")
@@ -1487,7 +1487,7 @@ def command_interruption_cases(state, library):
                 ("configure-commit-term", "/configure --permission-mode ask", "/v1/configure", signal.SIGTERM),
                 ("configure-admitted", "/configure --permission-mode ask", "", signal.SIGINT),
                 ("configure-presentation", "/configure --permission-mode ask", "", signal.SIGINT),
-                ("configure-rejected", "/configure --model model-b", "", signal.SIGINT),
+                ("configure-rejected", "/configure --model gpt-6.1-sol", "", signal.SIGINT),
                 ("configure-canonical", "/configure --permission-mode ask", "", signal.SIGINT),
                 ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
                 ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
@@ -1674,11 +1674,11 @@ def fatal_reporting_cases(state):
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         human.run(home, "session", "configure", "--store", store, "--session", "fatal/original",
-            "--workspace", root, "--provider", "codex", "--model", "model-a")
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
         diagnostics = [
             (["session", "resume", "--store", str(store), "missing/fatal"], b"SessionNotConfigured"),
             (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "model-a"], b"UnsupportedSelectionProvider"),
+            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"UnsupportedSelectionProvider"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1821,7 +1821,7 @@ def decision_reporting_cases(state):
             name = f"{decision}-{lost}"
             session = f"reporting/{name}"
             human.run(home, "session", "configure", "--store", store, "--session", session,
-                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()
@@ -1925,7 +1925,7 @@ def entry_enable_cases(state, library):
     host = fixture.start_host(store, None)
     try:
         human.run(home, "session", "configure", "--store", store, "--session", "entry/enable",
-            "--workspace", root, "--provider", "codex", "--model", "model-a")
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")
         before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
         for target in (0, 1):
             for mode in ("mutated", "unmutated", "mutated-reset"):
@@ -1999,7 +1999,7 @@ def detach_reporting_cases(state, library):
             name = f"{kind}-{fault}"
             session = f"detach/{name}"
             human.run(home, "session", "configure", "--store", store, "--session", session,
-                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             master, slave = open_pty()
             read_ready, write_ready = os.pipe()
             original, flags = termios.tcgetattr(slave), fcntl.fcntl(slave, fcntl.F_GETFL)
@@ -2110,7 +2110,7 @@ def startup_reporting_cases(state, library):
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "session", "configure", "--store", store, "--session", "startup/case",
-                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "startup/case"],
                 env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
                     "DYLD_INSERT_LIBRARIES" if sys.platform == "darwin" else "LD_PRELOAD": str(library),
@@ -2226,7 +2226,7 @@ def visible_stream_handoff_cases(state, library):
         try:
             host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
             human.run(home, "session", "configure", "--store", store, "--session", "visible/stream",
-                "--workspace", root, "--provider", "codex", "--model", "model-a", "--permission-mode", "ask")
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             if phase not in ("activity", "permission", "interrupt", "completion"):
                 for i in range(len(responses)):
                     admission = human.admit(home, "session", "send", "--store", store, "--session", "visible/stream", f"saved input {i}")
@@ -2451,7 +2451,7 @@ def host_diagnostic_cases(state, library):
         # the native readiness gate. No live raw Store reads or new hooks.
         seed = fixture.start_host(store, None)
         try:
-            fixture.configure(root, store, "config", "ready/session", "model-a")
+            fixture.configure(root, store, "config", "ready/session", "gpt-6-sol")
             fixture.message(root, store, "queued", "ready/session", "READY-ANSWER")
         finally:
             fixture.stop_host(seed)
@@ -2541,7 +2541,7 @@ def host_diagnostic_cases(state, library):
             else:
                 assert kind == "readiness-alias" and fields["execution"] == "unavailable"
                 assert "readiness-aliased\n" in log.read_text()
-                fixture.configure(root, root / "store", "alias-config", "alias/session", "model-a")
+                fixture.configure(root, root / "store", "alias-config", "alias/session", "gpt-6-sol")
                 assert fixture.command("session", "inspect", "--store", root / "store", "--session", "alias/session")["session"]
             print(f"Host diagnostics: {kind}: required stdout outcome checked", flush=True)
         finally:
@@ -2604,9 +2604,9 @@ def host_diagnostic_cases(state, library):
                 observations="control" if credit == "diagnostic-contention-host" else None,
                 required_fields={"execution": "enabled", "curl": "8.22.0"})
             session = "diagnostic/session"
-            fixture.configure(root, store, "config", session, "model-a")
+            fixture.configure(root, store, "config", session, "gpt-6-sol")
             if credit == "diagnostic-contention-host":
-                fixture.configure(root, store, "config-other", "diagnostic/session-extra", "model-a")
+                fixture.configure(root, store, "config-other", "diagnostic/session-extra", "gpt-6-sol")
             status = subprocess.run([str(fixture.RUI), "host", "status", "--store", str(store)],
                 capture_output=True, text=True, timeout=8)
             assert status.returncode == 0, status
@@ -3027,7 +3027,7 @@ def main(selected=None):
             return
         host = fixture.start_host(store, None)
         human.run(home, "session", "configure", "--store", store, "--session", "terminal/restoration",
-            "--workspace", state, "--provider", "codex", "--model", "model-a")
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         if selected in (None, "renderer-backpressure"):
             renderer_backpressure_case(state, library, home, store)
         if selected == "renderer-backpressure":

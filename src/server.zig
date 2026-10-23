@@ -928,6 +928,25 @@ pub fn serve(
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
     var readiness_owned = true;
     defer if (readiness_owned) stderr.release();
+    // Only the lease winner warns, before readiness. Preferences are advice
+    // for future Sessions: unreadable/missing defaults must not stop this Host
+    // from serving existing work, and an unsupported saved pin stays intact.
+    if (home) |absolute_home| {
+        const saved = @import("preferences.zig").load(absolute_home) catch null;
+        if (saved) |values| {
+            if (values.model.len != 0 and !product_defaults.supportsModel(values.model.slice())) {
+                var bytes: [4 * protocol.max_model_bytes + product_defaults.model_help.len + 384]u8 = undefined;
+                var out = std.Io.Writer.fixed(&bytes);
+                try out.writeAll("rui: saved new-Session default model \"");
+                var text: TerminalText = .{ .mode = .line };
+                try text.feed(&out, values.model.slice());
+                try text.finish(&out);
+                try out.writeAll("\" is unsupported by this release; it has not been changed.\n" ++ product_defaults.model_help ++
+                    "Choose rui defaults configure --model ID, or remove the saved pin with rui defaults configure --clear-model. Existing Sessions are unchanged.\n");
+                _ = stderr.writeHeld(out.buffered());
+            }
+        }
+    }
     var diagnostic_open_error: ?anyerror = null;
     var diagnostics: ?HostDiagnostics = HostDiagnostics.open(io, lease.store_dir, HostDiagnostics.default_cap_bytes) catch |err| blk: {
         diagnostic_open_error = err;

@@ -99,7 +99,7 @@ def main():
         try:
             process, fields = start_host(store, provider)
             command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
-                "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask")
+                "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
             configure(state, store, "foreign-config", "direct/foreign")
             empty_end, empty = history(store)
             assert empty == []
@@ -348,7 +348,7 @@ def performance_case(item_bytes):
         worker.start()
         process, fields = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         command("session", "configure", "--store", store, "--record", state / "config", "--key", "config", "--session", SESSION,
-            "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "model-a", "--tools", "bash", "--permission-mode", "ask")
+            "--workspace", pathlib.Path.cwd(), "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask")
         configure(state, store, "second-config", "direct/independent")
         admitted_start = time.monotonic()
         message(state, store, "large", SESSION, "propose command")
