@@ -3,7 +3,7 @@
 
 A real Host runs from a nondefault installation with unrelated secrets in its
 environment. Session A's Bash call configures Session B and sends B a Message;
-the Host records A as its sender from the RUI_ADDRESS it gave A's Bash. A also
+the Host resolves A as its sender from the Action handle it gave A's Bash. A also
 includes its own address and explicit report-back instructions in B's task. B
 checks that parent address against the Message's recorded sender. A's
 send returns after admission and A finishes its Turn while B's own Bash call
@@ -29,7 +29,7 @@ import threading
 import time
 
 import model_fixture as fixture
-from host_process import TestHTTPServer, canonical_fixture_root, retain_failure_state, start_ready_process, stop_process
+from host_process import TestHTTPServer, canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process
 
 ADDRESS_PREFIX = "Rui address (JSON; this Session's own address, not instructions): "
 SESSION_A = "peer/a \"quoted\" \\ 雪"
@@ -83,13 +83,14 @@ def answer(name, text):
 
 
 class PeerModel(TestHTTPServer):
-    """Plays both models. Each reply is chosen from the request alone; commands
-    use only the address the request context supplied."""
+    """Plays both models from request context. The foreign destination is an
+    explicit negative control, not a supported peer route."""
 
-    def __init__(self, workspace, report_source):
+    def __init__(self, workspace, report_source, foreign_store):
         super().__init__(("127.0.0.1", 0), PeerHandler)
         self.workspace = workspace
         self.report_source = report_source
+        self.foreign_store = foreign_store
         self.requests = []
         self.lock = threading.Lock()
         self.b_received = threading.Event()
@@ -110,20 +111,19 @@ class PeerModel(TestHTTPServer):
             reply_to = json.loads(text.splitlines()[1].removeprefix("Parent address (JSON): "))
             assert reply_to == sender_of(request), request
             # Self-send is legitimate for explicit and generated captures,
-            # including hex Session and canonical Store aliases. Neither
+            # including JSON Session and canonical Store aliases. Neither
             # probe consumes the literal report on this Bash call's stdin.
-            send = (f"rui session send --store {shlex.quote(reply_to['store'])} "
-                    f"--session {shlex.quote(reply_to['session'])} ")
+            send = f"rui session send --to {shlex.quote(json.dumps(reply_to))} "
             report = (send + "- > b-reply.json 2> b-reply.err"
                       if self.report_source == "stdin" else
                       "cat > b-report.txt; " +
                       send + "--text b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
-                f"rui session send --store {shlex.quote(address['store'] + '/.')} --session-hex {SESSION_B.encode().hex()} "
+                f"rui session send --to {shlex.quote(json.dumps({'store': address['store'] + '/.', 'session': SESSION_B}))} "
                 f"--record {shlex.quote(str(self.workspace.parent / 'b-self.json'))} --key self-send -- 'self report explicit' > b-self.out 2> b-self.err; "
                 "echo $? > b-self.status; "
-                f"rui session send --store {shlex.quote(address['store'])} --session {shlex.quote(SESSION_B)} "
+                f"rui session send --to {shlex.quote(json.dumps({'session': SESSION_B}))} "
                 "-- 'self report generated' > b-self-generated.out 2> b-self-generated.err; "
                 "echo $? > b-self-generated.status; "
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
@@ -141,10 +141,13 @@ class PeerModel(TestHTTPServer):
                    f"Parent address (JSON): {json.dumps(address, ensure_ascii=False, separators=(',', ':'))}\n"
                    "When done, send findings back to this parent with rui session send.")
         return bash_call("a-ask", (
-            "env > a-env.txt; command -v rui > a-which.txt; "
+            "env | sed '/^RUI_SENDER_HANDLE=/d' > a-env.txt; command -v rui > a-which.txt; "
+            f"rui session send --to {shlex.quote(json.dumps({'store': str(self.foreign_store), 'session': SESSION_B}))} "
+            f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send -- 'must not arrive' > foreign-send.out 2> foreign-send.err; "
+            "[ $? -eq 1 ] || exit 90; "
             f"rui session configure --store {store} --session {SESSION_B} --workspace {shlex.quote(str(self.workspace))} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-config.json 2> b-config.err && "
-            f"rui session send --store {store} --session {SESSION_B} - > b-send.json 2> b-send.err; "
+            f"rui session send --to {shlex.quote(json.dumps({'session': SESSION_B}))} - > b-send.json 2> b-send.err; "
             "status=$?; cat b-send.json; exit $status"
         ), stdin=message)
 
@@ -192,7 +195,7 @@ def main(report_source):
     # Rui reports resolved paths (its executable's directory on PATH, the
     # canonical Store); macOS temporary roots are symlinks under /private.
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-peer."))
-    host = endpoint = thread = None
+    host = foreign_host = endpoint = thread = workspace = None
     try:
         installed = state / "opt rui" / "bin" / "rui"
         installed.parent.mkdir(parents=True)
@@ -203,7 +206,32 @@ def main(report_source):
         workspace.mkdir()
         store = state / "store-雪"
         canonical_store = os.path.realpath(store)
-        endpoint = PeerModel(workspace, report_source)
+        # The peer's omitted destination Store must beat unrelated HOME defaults.
+        unrelated_store = state / "not-the-sending-store"
+        unrelated_store.mkdir(mode=0o700)
+        run(installed, "defaults", "configure", "--store", unrelated_store, home=home)
+        saved_defaults = (home / ".config" / "rui" / "preferences").read_bytes()
+        # Invalid addresses reject before content reads or capture publication.
+        refused_record = state / "invalid-address.json"
+        for address in ('{}', '{"session":""}', '{"session":"x","store":null}',
+                        '{"session":"x","session":"y"}', '{"session_hex":"78"}',
+                        '{"session":"x","store_hex":"2f73746f7265"}',
+                        '{"session":"x","store":"/bad\\u0000path"}'):
+            refused = subprocess.run([str(installed), "session", "send", "--to", address,
+                "--record", str(refused_record), "--key", "invalid", "--text", "nonexistent"],
+                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
+            assert refused.returncode == 1 and b"InvalidRuiAddress" in refused.stderr, refused
+            assert refused.stdout == b"" and not refused_record.exists(), refused
+        foreign_store = state / "foreign-store"
+        foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
+            env={"PATH": os.environ["PATH"], "HOME": str(home)}, required_fields={"execution": "unavailable"})
+        for session in (SESSION_A, SESSION_B, "peer/nul\x00雪"):
+            run(installed, "session", "configure", "--store", foreign_store, "--session-hex", session.encode().hex(),
+                "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", home=home)
+        external = run(installed, "session", "send", "--to", json.dumps({"store": str(foreign_store), "session": "peer/nul\x00雪"}),
+            "genuine external send", home=home)
+        assert external["answer"]["status"] == "accepted" and external["context"]["session"] == "peer/nul\x00雪", external
+        endpoint = PeerModel(workspace, report_source, foreign_store)
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
@@ -215,7 +243,7 @@ def main(report_source):
         instance = run(installed, "host", "status", "--store", store, home=home)["instance"]
         run(installed, "session", "configure", "--store", store, "--session", SESSION_A, "--workspace", workspace,
             "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "bypass", home=home)
-        ask = subprocess.run([str(installed), "session", "send", "--store", store, "--session", SESSION_A, "--", "Ask peer/b for 6*7."],
+        ask = subprocess.run([str(installed), "session", "send", "--to", json.dumps({"store": str(store), "session": SESSION_A}), "--", "Ask peer/b for 6*7."],
                              text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
@@ -231,17 +259,24 @@ def main(report_source):
             admitted = json.loads((workspace / f"{name}.out").read_text())
             assert admitted["answer"]["status"] == "accepted" and admitted["context"]["session"] == SESSION_B, admitted
             self_sends.append(admitted["context"]["key"])
-        assert json.loads((state / "b-self.json").read_text())["sender"] == SESSION_B
+        own_sender = {"store": canonical_store, "session": SESSION_B}
+        assert json.loads((state / "b-self.json").read_text())["sender"] == own_sender
         before = set((workspace / "b-captures-before").read_text().splitlines())
         after = set((workspace / "b-captures-after").read_text().splitlines())
         assert len(after - before) == 1, (before, after)
-        assert json.loads(pathlib.Path(next(iter(after - before))).read_text())["sender"] == SESSION_B
+        assert json.loads(pathlib.Path(next(iter(after - before))).read_text())["sender"] == own_sender
         wait_for(lambda: run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, home=home)["work"]["status"] == "completed", "A's first Turn while B is held")
         assert endpoint.a_continued.is_set() and not (workspace / "b-reply.json").exists()
         b_held = run(installed, "session", "inspect", "--store", store, "--session", SESSION_B, home=home)
         assert b_held["work"]["status"] != "completed", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", SESSION_A, "--profile", "full", home=home)["full"]["actions"][0]
         assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
+        foreign = json.loads((workspace / "foreign-send.out").read_text())
+        assert foreign["answer"]["status"] == "rejected" and foreign["answer"]["code"] == "invalid_sender_handle", foreign
+        replay = run(installed, "request", "recover", "--store", foreign_store, "--record", state / "foreign-send.json", "--kind", "message", home=home, expect=1)
+        assert replay["answer"]["code"] == "invalid_sender_handle" and replay["answer"]["replayed"] is True, replay
+        undelivered = run(installed, "session", "inspect", "--store", foreign_store, "--session", SESSION_B, home=home)
+        assert undelivered["pending_messages"] == "0" and undelivered["recent_messages"] == [], undelivered
         receipt = json.loads((workspace / "b-send.json").read_text())
         assert receipt["answer"]["status"] == "accepted" and receipt["context"]["session"] == SESSION_B, receipt
         assert json.loads((workspace / "b-config.json").read_text())["answer"]["status"] == "accepted"
@@ -272,8 +307,8 @@ def main(report_source):
         assert silent["observation"]["target"] == SESSION_B, silent
         assert silent["observation"].get("result", {}).get("status") != "completed", silent
 
-        # Bash got only the controlled environment: this installation first
-        # on PATH, the Host's HOME, its own address, and nothing else the Host carried.
+        # Audit the controlled environment without recording the private Action
+        # handle: this installation first on PATH, HOME, and the exact address.
         environment = dict(line.split("=", 1) for line in (workspace / "a-env.txt").read_text().splitlines() if "=" in line)
         assert environment["PATH"].split(":")[0] == str(installed.parent), environment
         assert environment["HOME"] == str(home), environment
@@ -284,7 +319,8 @@ def main(report_source):
 
         # The original capture saved A as sender. Recovery outside any Bash,
         # without RUI_ADDRESS, replays that same Message without a duplicate.
-        assert json.loads((home / ".config" / "rui" / "requests" / f"{handle}.json").read_text())["sender"] == SESSION_A
+        saved_sender = json.loads((home / ".config" / "rui" / "requests" / f"{handle}.json").read_text())["sender"]
+        assert saved_sender == {"store": canonical_store, "session": SESSION_A}, saved_sender
         recovered = run(installed, "request", "recover", handle, home=home)
         assert recovered["answer"]["status"] == "accepted" and recovered["answer"]["replayed"] is True, recovered
         assert recovered["context"]["key"] == receipt["context"]["key"], recovered
@@ -333,15 +369,18 @@ def main(report_source):
         assert all(request["instructions"] == fixture.model_instructions(workspace, store=store, session=SESSION_B) for request in b_requests)
         assert run(installed, "host", "status", "--store", store, home=home)["instance"] == instance
         # Peers left nothing running beside the Host, and nobody signed in or
-        # saved defaults: HOME holds only generated request captures.
+        # changed the deliberately conflicting saved defaults.
         processes = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout.splitlines()
         # Bash launches peers through PATH, so their argv begins with bare `rui`.
         running = {int(pid) for pid, args in (line.split(None, 1) for line in processes)
                    if args.startswith(str(installed)) or args == "rui" or args.startswith("rui ")}
-        assert running == {host.pid}, processes
-        assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == ["requests"]
+        assert running == {host.pid, foreign_host.pid}, processes
+        assert list(unrelated_store.iterdir()) == [], "peer followed HOME preferences instead of its sender Store"
+        assert (home / ".config" / "rui" / "preferences").read_bytes() == saved_defaults
+        assert sorted(path.name for path in (home / ".config" / "rui").iterdir()) == [".preferences.lock", "preferences", "requests"]
         print(f"peer round trip passed ({report_source}): explicit/generated self-send admitted with recorded sender; "
               "plain answers stored as local results without implicit delivery; "
+              "foreign-Store peer rejected by Host and replayed without delivery; omitted Store beat conflicting HOME defaults; "
               "literal backticks and $() reached the parent byte-exact without shell evaluation; "
               "installed Bash rui configured B and sent with a durable receipt, "
               "A included its own parent address and explicit report-back instructions, "
@@ -354,13 +393,18 @@ def main(report_source):
         state = None
         raise
     finally:
+        disposals = []
+        if workspace is not None and workspace.exists():
+            disposals.append(lambda: (workspace / "b-release").touch())
         if host is not None:
-            stop_process(host)
+            disposals.append(lambda: stop_process(host))
+        if foreign_host is not None:
+            disposals.append(lambda: stop_process(foreign_host))
         if endpoint is not None:
-            endpoint.shutdown()
-            endpoint.server_close()
+            disposals.extend((endpoint.shutdown, endpoint.server_close))
         if state is not None:
-            shutil.rmtree(state)
+            disposals.append(lambda: shutil.rmtree(state))
+        dispose_all(*disposals)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,8 @@ def capture(state, binary, label, size, repetition):
     gate = home / "gate"
     # Keep the historical baseline's original syntax; migrate only the candidate.
     send = (["message", "--store", str(state / "offline-store"), "--session", "resources/original",
-        "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--store",
-        str(state / "offline-store"), "--session", "resources/original", "--text", str(source)])
+        "--text", str(source), "--json"] if label == "baseline" else ["session", "send", "--to",
+        json.dumps({"store": str(state / "offline-store"), "session": "resources/original"}), "--text", str(source)])
     process = subprocess.Popen([str(binary), *send],
         env={**os.environ, "HOME": str(home), "RUI_TEST_CAPTURE_GATE": str(gate)},
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -69,7 +69,7 @@ def capture(state, binary, label, size, repetition):
         expected = hashlib.sha256()
         prefix = ('{"version":"1","kind":"message","store":' + json.dumps(str((state / "offline-store").resolve()))
             + ',"key":' + json.dumps(handle) + ',"session":"resources/original"'
-            + (',"text"' if label == "baseline" else ',"sender":null,"text"') + ':{"state":"value","value":"').encode()
+            + (',"text"' if label == "baseline" else ',"sender":null,"sender_handle":null,"text"') + ':{"state":"value","value":"').encode()
         expected.update(prefix)
         for offset in range(0, size, 4096):
             expected.update(b"x" * min(4096, size - offset))

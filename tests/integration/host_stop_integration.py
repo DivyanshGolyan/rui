@@ -292,7 +292,7 @@ def main():
             # work that an explicit restart would later execute.
             for kind in ("message", "configure"):
                 for phase in ("header", "body"):
-                    fields = {"sender": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
+                    fields = {"sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 8192}} if kind == "message" else {
                         "configuration": {name: {"state": "omitted"} for name in
                             ("workspace", "provider", "model", "tools", "permission_mode", "output_schema")}}
                     if kind == "configure":

@@ -803,7 +803,8 @@ func measureTools(binary, output string, sessions int, workload, trace, expectat
 		seedRows[index] = map[string]any{"session": name, "bytes": len(text), "sha256": hex.EncodeToString(digest[:]), "estimated_tokens_bytes_div_4": len(text) / 4}
 		key := fmt.Sprintf("seed-%03d", index)
 		var answer map[string]any
-		if err := measurement.RunJSON(deadline, &answer, binary, "session", "send", "--store", store, "--record", filepath.Join(records, key+".json"), "--key", key, "--session", name, "--text", path); err != nil {
+		address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(name) + `}`
+		if err := measurement.RunJSON(deadline, &answer, binary, "session", "send", "--to", address, "--record", filepath.Join(records, key+".json"), "--key", key, "--text", path); err != nil {
 			return result, err
 		}
 	}

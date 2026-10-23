@@ -580,14 +580,12 @@ def message(state, store, key, session, text):
     text_path.write_text(text)
     result = command(
         "session", "send",
-        "--store",
-        store,
+        "--to",
+        json.dumps({"store": str(store), "session": session}),
         "--record",
         state / f"{key}.json",
         "--key",
         key,
-        "--session",
-        session,
         "--text",
         text_path,
     )
@@ -602,14 +600,12 @@ def message_lost_reply(state, store, key, session, text):
         [
             str(RUI),
             "session", "send",
-            "--store",
-            str(store),
+            "--to",
+            json.dumps({"store": str(store), "session": session}),
             "--record",
             str(state / f"{key}.json"),
             "--key",
             key,
-            "--session",
-            session,
             "--text",
             str(text_path),
             "--test-drop-reply",

@@ -40,6 +40,7 @@ class Dialect:
     def __init__(self, checkout):
         arguments = checkout / "src/cli_args.zig"
         self.resource_first = arguments.exists() and ".request_inspect" in arguments.read_text()
+        self.address_send = arguments.exists() and 'value("to", "ADDRESS")' in arguments.read_text()
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
@@ -68,8 +69,10 @@ class Dialect:
     def message(self, state, store, key, session, text):
         text_path = state / f"{key}.txt"
         text_path.write_text(text)
+        destination = ("--to", json.dumps({"store": str(store), "session": session})) if self.address_send else (
+            "--store", store, "--session", session)
         reply = fixture.command(*(("session", "send") if self.resource_first else ("message",)),
-            "--store", store, "--record", state / f"{key}.json", "--key", key, "--session", session,
+            *destination, "--record", state / f"{key}.json", "--key", key,
             "--text", text_path)
         assert reply["answer"]["status"] == "accepted", reply
 

@@ -103,7 +103,8 @@ def producer_cases(state):
             key = f"{kind}-{mode}"
             host = fixture.start_host(store, None, "--fault", "before-commit")
             try:
-                args = [*command, "--store", store, "--session", "original/session"]
+                address = ["--to", json.dumps({"store": str(store), "session": "original/session"})] if name == "message" else ["--store", store, "--session", "original/session"]
+                args = [*command, *address]
                 if mode == "raw":
                     args += ["--record", record, "--key", key]
                 result = invoke(home, *args)
@@ -274,7 +275,8 @@ def binding_cases(state, null_code=False):
             kind = "permission-decision" if name == "permission-allow" else name
             for mode in ("raw", "generated"):
                 record = home / f"{name}-{mode}.json"
-                args = [*command, "--store", store, "--session", "original/session"]
+                address = ["--to", json.dumps({"store": str(store), "session": "original/session"})] if name == "message" else ["--store", store, "--session", "original/session"]
+                args = [*command, *address]
                 args += ["--record", record, "--key", f"{name}-{mode}"] if mode == "raw" else []
                 proxy = ReplyProxy(host, route, rewrite)
                 try:
@@ -327,7 +329,7 @@ def committed_cases(state):
         assert configured.returncode == 0, configured
         proxy = ReplyProxy(host, "/v1/message")
         try:
-            result = invoke(home, "session", "send", "--store", store, "--session", "original/session",
+            result = invoke(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "original/session"}),
                 "original committed bytes")
             expect_fatal(result)
         finally:
@@ -622,7 +624,7 @@ def permission_read_cases(state):
         assert invoke(home, "session", "configure", "--store", store, "--session", "permission/read",
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol",
             "--permission-mode", "ask").returncode == 0
-        assert invoke(home, "session", "send", "--store", store, "--session", "permission/read",
+        assert invoke(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "permission/read"}),
             "inspect exact permission").returncode == 0
         records = home / ".config/rui/requests"
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
@@ -789,7 +791,8 @@ def keyed_observation_cases(state, only="keyed"):
             ["session", "interrupt-model", "--turn", "733", "--operation", "911"], ["action", "allow", "--action", "721"])
         keys = {}
         for kind, command in zip(kinds, commands):
-            args = [*command, "--store", store, "--session", "s"]
+            address = ["--to", json.dumps({"store": str(store), "session": "s"})] if kind == "message" else ["--store", store, "--session", "s"]
+            args = [*command, *address]
             args += [] if kind == "message" else ["--record", home / f"{kind}.json", "--key", kind]
             submitted = invoke(home, *args)
             # A saved rejection is delivered on stdout with exit 1.

@@ -327,14 +327,12 @@ def message(state, store, key, session, text):
     text_path.write_text(text)
     result = command(
         "session", "send",
-        "--store",
-        store,
+        "--to",
+        json.dumps({"store": str(store), "session": session}),
         "--record",
         state / f"{key}.json",
         "--key",
         key,
-        "--session",
-        session,
         "--text",
         text_path,
     )

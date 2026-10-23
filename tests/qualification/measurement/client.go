@@ -125,9 +125,10 @@ func (c Client) Message(key, session, text string) error {
 		return err
 	}
 	var answer map[string]any
+	address := `{"store":` + JSONString(c.Store) + `,"session":` + JSONString(session) + `}`
 	if err := RunJSON(c.Deadline, &answer, c.Binary,
-		"session", "send", "--store", c.Store, "--record", filepath.Join(c.Artifacts, key+".json"),
-		"--key", key, "--session", session, "--text", source); err != nil {
+		"session", "send", "--to", address, "--record", filepath.Join(c.Artifacts, key+".json"),
+		"--key", key, "--text", source); err != nil {
 		return err
 	}
 	if nested(answer, "answer", "status") != "accepted" {

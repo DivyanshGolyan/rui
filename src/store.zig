@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 31;
+pub const schema_version: u32 = 32;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -182,7 +182,7 @@ pub const ConfigureReply = union(enum) {
 pub const MessageRejection = enum {
     invalid_session_reference,
     unknown_session,
-    unknown_sender_session,
+    invalid_sender_handle,
 };
 
 pub const AcceptedMessage = struct {
@@ -321,6 +321,7 @@ pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
 pub const BashExecutionInput = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
+    sender_handle: protocol.Bounded(32),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     arguments: ContentReference,
     timeout_ms: u64,
@@ -1532,6 +1533,8 @@ pub const Store = struct {
         // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
         try exec(database.?, "PRAGMA journal_size_limit=4194304");
         if (!existing) try bootstrap(database.?, selector);
+        // A new Host never inherits a lost Action's sender authority.
+        try exec(database.?, "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL");
 
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
@@ -1823,13 +1826,14 @@ pub const Store = struct {
             },
             .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code, .content = supplied_content } },
         }
-        // An unknown sender has no sequence to record a failed send in; a
-        // known one sees its own rejected send.
-        const sender_known = if (command.sender) |sender| try self.readSession(sender.slice()) != null else false;
+        // Only an authenticated Action can acquire a sender position.
+        // A committed exact replay above needs no still-live launch handle.
+        const sender_valid = try self.messageSenderMatchesLocked(command);
+        const sender_known = command.sender != null and sender_valid;
         const code: ?MessageRejection = if (command.session.len == 0)
             .invalid_session_reference
-        else if (command.sender != null and !sender_known)
-            .unknown_sender_session
+        else if (!sender_valid)
+            .invalid_sender_handle
         else if (try self.readSession(command.session.slice()) == null)
             .unknown_session
         else
@@ -1850,8 +1854,8 @@ pub const Store = struct {
                 const statement = try prepare(self.database, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position) VALUES(?1,?2,?3)");
                 defer _ = c.sqlite3_finalize(statement);
                 try bindText(statement, 1, command.key.slice());
-                try bindText(statement, 2, sender.slice());
-                try bindU64(statement, 3, try self.claimSessionPosition(sender.slice()));
+                try bindText(statement, 2, sender.session.slice());
+                try bindU64(statement, 3, try self.claimSessionPosition(sender.session.slice()));
                 try expectDone(statement);
             };
             if (faults.before_commit) return error.InjectedCommitFailure;
@@ -1873,7 +1877,7 @@ pub const Store = struct {
             command.session.slice(),
             command.key.slice(),
             text_id,
-            if (command.sender) |*sender| sender.slice() else null,
+            if (command.sender) |*sender| sender.session.slice() else null,
         );
         if (faults.before_commit) return error.InjectedCommitFailure;
         try exec(self.database, "COMMIT");
@@ -1882,6 +1886,23 @@ pub const Store = struct {
             .admission_id = admission_id,
             .content = .{ .length = metadata.length, .digest = metadata.digest },
         } };
+    }
+
+    fn messageSenderMatchesLocked(self: *Store, command: *const protocol.MessageCommand) !bool {
+        const handle = command.sender_handle orelse return command.sender == null;
+        const claimed = command.sender orelse return false;
+        if (!claimed.store.eql(self.selector.slice())) return false;
+        const statement = try prepare(self.database, "SELECT action.session_ref FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+            "WHERE action.sender_handle=?1 AND action.attempt_ordinal=1 AND action.resolution_code IS NULL " ++
+            "AND NOT EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id)");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindText(statement, 1, handle.slice());
+        const step = c.sqlite3_step(statement);
+        if (step == c.SQLITE_DONE) return false;
+        if (step != c.SQLITE_ROW) return error.ActionReadFailed;
+        var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try readText(statement, 0, &sender);
+        return sender.eql(claimed.session.slice());
     }
 
     pub fn stopSession(
@@ -4471,14 +4492,18 @@ pub const Store = struct {
         // read outside the transaction is still current inside it.
         _ = c.sqlite3_reset(select);
         try exec(self.database, "BEGIN IMMEDIATE");
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(self.io, &random);
+        const sender_handle = std.fmt.bytesToHex(random, .lower);
         const update = try prepare(
             self.database,
-            "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2 " ++
+            "UPDATE action_operation SET attempt_ordinal=1,bash_timeout_ms=?2,sender_handle=?3 " ++
                 "WHERE action_id=?1 AND permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0",
         );
         defer _ = c.sqlite3_finalize(update);
         try bindI64(update, 1, action_id);
         try bindU64(update, 2, selected_timeout_ms);
+        try bindText(update, 3, &sender_handle);
         try expectDone(update);
         if (c.sqlite3_changes(self.database) != 1) return error.ActionSelectionChanged;
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -4500,7 +4525,7 @@ pub const Store = struct {
     fn readBashExecutionInputLocked(self: *Store, binding: ActionAttemptBinding) !BashExecutionInput {
         const statement = try prepare(
             self.database,
-            "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref " ++
+            "SELECT revision.workspace,call.arguments_content_id,action.bash_timeout_ms,operation.turn_id,action.session_ref,action.sender_handle " ++
                 "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
                 "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
                 "JOIN model_tool_call call ON call.operation_id=action.parent_operation_id AND call.call_ordinal=action.call_ordinal " ++
@@ -4522,13 +4547,31 @@ pub const Store = struct {
         if (content_id <= 0 or timeout_ms <= 0) return error.CorruptStore;
         var session: protocol.Bounded(protocol.max_session_bytes) = .{};
         try readText(statement, 4, &session);
+        var sender_handle: protocol.Bounded(32) = .{};
+        try readText(statement, 5, &sender_handle);
         const arguments = try self.actionContentLocked(session.slice(), binding.action_id, "arguments_content_id");
         return .{
             .session = session,
+            .sender_handle = sender_handle,
             .workspace = workspace,
             .arguments = arguments,
             .timeout_ms = @intCast(timeout_ms),
         };
+    }
+
+    pub fn revokeActionSender(self: *Store, binding: ActionAttemptBinding) !void {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finish(Ordinary.none, self.revokeActionSenderLocked(binding));
+    }
+
+    fn revokeActionSenderLocked(self: *Store, binding: ActionAttemptBinding) !void {
+        const statement = try prepare(self.database, "UPDATE action_operation SET sender_handle=NULL WHERE action_id=?1 AND parent_operation_id=?2 AND attempt_ordinal=?3");
+        defer _ = c.sqlite3_finalize(statement);
+        try bindU64(statement, 1, binding.action_id);
+        try bindU64(statement, 2, binding.parent_operation_id);
+        try bindU64(statement, 3, binding.attempt_ordinal);
+        try expectDone(statement);
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
@@ -4638,7 +4681,7 @@ pub const Store = struct {
         const content_id = try self.importBytesContent(effective_result, false, faults.content_import);
         const update = try prepare(
             self.database,
-            "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4 " ++
+            "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,sender_handle=NULL " ++
                 "WHERE action_id=?1 AND parent_operation_id=?5 AND attempt_ordinal=?6 AND resolution_code IS NULL",
         );
         defer _ = c.sqlite3_finalize(update);
@@ -7404,6 +7447,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ attempt_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(attempt_ordinal IN (0,1)),
         \\ bash_timeout_override_ms INTEGER CHECK(bash_timeout_override_ms IS NULL OR bash_timeout_override_ms>0),
         \\ bash_timeout_ms INTEGER CHECK(bash_timeout_ms IS NULL OR bash_timeout_ms>0),
+        \\ sender_handle TEXT CHECK(sender_handle IS NULL OR (length(sender_handle)=32 AND sender_handle NOT GLOB '*[^0-9a-f]*')),
         \\ resolution_code TEXT CHECK(resolution_code IS NULL OR resolution_code IN ('denied','cancelled','succeeded','failed','timed_out','indeterminate','storage_failed','spawn_failed','infrastructure_shutdown')),
         \\ resolution_content_id INTEGER REFERENCES content(content_id),
         \\ acceptance_position INTEGER CHECK(acceptance_position IS NULL OR acceptance_position>0),
@@ -7438,6 +7482,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff);
         \\CREATE INDEX session_stop_turn ON session_stop(selected_turn_id);
         \\CREATE INDEX action_operation_session_order ON action_operation(session_ref,action_id);
+        \\CREATE UNIQUE INDEX action_operation_sender_handle ON action_operation(sender_handle) WHERE sender_handle IS NOT NULL;
         \\CREATE INDEX action_operation_acceptance ON action_operation(session_ref,acceptance_position);
         \\CREATE INDEX action_operation_executable ON action_operation(action_id) WHERE permission_state=1 AND resolution_code IS NULL AND attempt_ordinal=0;
         \\CREATE INDEX action_operation_unresolved_attempt ON action_operation(action_id) WHERE resolution_code IS NULL AND attempt_ordinal=1;
@@ -7476,7 +7521,7 @@ fn validateExisting(database: *c.sqlite3, selector: []const u8) !void {
             "SELECT count(*) FROM sqlite_schema WHERE " ++
                 "(type='table' AND name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
                 "(type='index' AND ((sql IS NULL AND tbl_name NOT IN ('store_meta','content','session','core_command','session_revision','message_admission','sent_rejection','turn','session_stop','model_interruption_command','model_operation','conversation_entry','model_output_item','model_tool_call','action_operation','permission_decision_command','answer_text_projection')) OR " ++
-                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','session_stop_turn','action_operation_session_order','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
+                "(sql IS NOT NULL AND name NOT IN ('session_workspace_list','message_admission_session_order','message_admission_pending','message_admission_session_pending','message_admission_sent','session_stop_exclusion','session_stop_turn','action_operation_session_order','action_operation_sender_handle','action_operation_acceptance','action_operation_executable','action_operation_unresolved_attempt','model_tool_call_rejections','turn_one_active_per_session','model_operation_retry_due','model_operation_retry_exhausted','model_operation_session_history','model_operation_turn_history','model_operation_context_history','model_operation_compaction_bases','conversation_entry_history','model_output_history','model_output_compaction_anchor','turn_session_latest')))) OR " ++
                 "type NOT IN ('table','index')",
         );
         defer _ = c.sqlite3_finalize(statement);
@@ -12844,7 +12889,7 @@ test "message rejections replay before current Session checks without retained i
     try std.testing.expect(observed.message == null);
 }
 
-test "a peer sender is recorded, ordered in its own sequence and rejected when unknown" {
+test "a peer sender is resolved from its Action handle and exact replays survive revocation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try testingStore(&tmp, std.testing.io);
@@ -12854,6 +12899,21 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try configureTestSession(&storage, "configure-sender", sender);
     try configureTestSession(&storage, "configure-neighbour", "rui/1a2b3c49-0000-4000-8000-000000000002");
     try configureTestSession(&storage, "configure-receiver", "direct/receiver");
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("sender-tools");
+    try tools.session.set(sender);
+    tools.configuration.tools = .{ .state = .value, .count = 1, .values = .{.bash} };
+    tools.configuration.permission_mode.state = .value;
+    try tools.configuration.permission_mode.value.set("bypass");
+    try std.testing.expect(storage.configure(&tools, true, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "sender-seed", "sender-seed", sender, "send a report");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleTwoActionsForTesting(&storage, &tmp, model, "sender-calls");
+    const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    const handle = (try storage.readBashExecutionInput(action)).sender_handle;
+    var own_ref: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try own_ref.set(sender);
+    const sender_end = (try storage.activityPage(.{ .session = own_ref })).end;
     const Send = struct {
         fn make(dir: std.Io.Dir, key: []const u8, target: []const u8, from: ?[]const u8, text: []const u8) !protocol.MessageCommand {
             const file = try dir.createFile(std.testing.io, key, .{ .read = true });
@@ -12862,13 +12922,16 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
             var command = try completeMessage(key, target, file, text);
             if (from) |ref| {
                 command.sender = .{};
-                try command.sender.?.set(ref);
+                var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+                try command.sender.?.store.set(root_buffer[0..try dir.realPath(std.testing.io, &root_buffer)]);
+                try command.sender.?.session.set(ref);
             }
             return command;
         }
     };
 
     var sent = try Send.make(tmp.dir, "peer-send", "direct/receiver", sender, "look at this\nsecond line");
+    sent.sender_handle = handle;
     defer sent.removeTemporaryContent(std.testing.io) catch unreachable;
     const accepted = storage.submitMessage(&sent, .{});
     try std.testing.expect(accepted == .accepted);
@@ -12880,14 +12943,34 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try std.testing.expect(storage.submitMessage(&anonymous, .{}) == .conflict);
 
     var refused = try Send.make(tmp.dir, "peer-refused", "direct/absent", sender, "lost");
+    refused.sender_handle = handle;
     defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expectEqual(MessageRejection.unknown_session, storage.submitMessage(&refused, .{}).rejected.code);
 
     var forged = try Send.make(tmp.dir, "peer-forged", "direct/receiver", "rui/ffffffff-0000-4000-8000-000000000003", "forged");
     defer forged.removeTemporaryContent(std.testing.io) catch unreachable;
-    try std.testing.expectEqual(MessageRejection.unknown_sender_session, storage.submitMessage(&forged, .{}).rejected.code);
+    try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&forged, .{}).rejected.code);
     const forged_replay = storage.submitMessage(&forged, .{});
-    try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .unknown_sender_session);
+    try std.testing.expect(forged_replay.rejected.replayed and forged_replay.rejected.code == .invalid_sender_handle);
+    // Every invalid binding must leave both receiver admission and the
+    // falsely claimed sender's Activity untouched.
+    for (0..5) |variant| {
+        var invalid = sent;
+        var key_buffer: [32]u8 = undefined;
+        try invalid.key.set(try std.fmt.bufPrint(&key_buffer, "invalid-binding-{d}", .{variant}));
+        switch (variant) {
+            0 => invalid.sender_handle = null,
+            1 => try invalid.sender_handle.?.set(""),
+            2 => try invalid.sender_handle.?.set("00000000000000000000000000000000"),
+            3 => try invalid.sender.?.session.set("direct/receiver"),
+            4 => invalid.sender = null,
+            else => unreachable,
+        }
+        try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&invalid, .{}).rejected.code);
+    }
+    var changed_handle = sent;
+    changed_handle.sender_handle = null;
+    try std.testing.expect(storage.submitMessage(&changed_handle, .{}) == .conflict);
     // An invalid target is refused first, whichever sender: an unknown one
     // claims no sequence position, and the Store stays open.
     for ([_]struct { key: []const u8, from: []const u8 }{
@@ -12895,6 +12978,7 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
         .{ .key = "peer-empty-known", .from = sender },
     }) |case| {
         var empty = try Send.make(tmp.dir, case.key, "", case.from, "nowhere");
+        if (std.mem.eql(u8, case.from, sender)) empty.sender_handle = handle;
         defer empty.removeTemporaryContent(std.testing.io) catch unreachable;
         try std.testing.expectEqual(MessageRejection.invalid_session_reference, storage.submitMessage(&empty, .{}).rejected.code);
     }
@@ -12910,7 +12994,7 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try std.testing.expectEqualStrings(sender, peer.session.slice());
 
     try session.set(sender);
-    const own = try storage.activityPage(.{ .session = session });
+    const own = try storage.activityPage(.{ .session = session, .position = sender_end });
     try std.testing.expectEqual(@as(usize, 3), own.count);
     try std.testing.expectEqualStrings("invalid_session_reference", own.items[2].value.send_failed.code.slice());
     const out = own.items[0].value.sent;
@@ -12920,6 +13004,11 @@ test "a peer sender is recorded, ordered in its own sequence and rejected when u
     try std.testing.expectEqualStrings("direct/absent", failed.target.session.slice());
     try std.testing.expectEqualStrings("unknown_session", failed.code.slice());
     try std.testing.expect(own.items[0].position < own.items[1].position);
+    try storage.revokeActionSender(action);
+    try std.testing.expect(storage.submitMessage(&sent, .{}).accepted.replayed);
+    var stale = sent;
+    try stale.key.set("stale-handle");
+    try std.testing.expectEqual(MessageRejection.invalid_sender_handle, storage.submitMessage(&stale, .{}).rejected.code);
     // The sent row's bytes are the Message's, read through the sender.
     var reader = try storage.openActivityContent(.{ .session = session, .position = own.items[0].position });
     reader.close();

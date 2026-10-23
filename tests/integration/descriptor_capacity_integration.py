@@ -196,14 +196,12 @@ def message(state, store, session, ordinal):
     result = command(
         state,
         "session", "send",
-        "--store",
-        store,
+        "--to",
+        json.dumps({"store": str(store), "session": session}),
         "--record",
         state / f"message-{ordinal}.json",
         "--key",
         f"message-{ordinal}",
-        "--session",
-        session,
         "--text",
         text,
     )

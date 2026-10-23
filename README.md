@@ -144,10 +144,13 @@ STORE="$HOME/.local/share/rui/store"
 A new named Session needs its Workspace, provider and model; later changes to it keep any settings you omit. Without `--session`, `session configure` instead creates a fresh Session in the current directory with your saved defaults, and its receipt reports the generated reference to use below. Then send the Session a message:
 
 ```sh
-"$RUI" session send --store "$STORE" --session my/project "Investigate the failing test"
+TO=$(python3 -c 'import json, sys; print(json.dumps({"store": sys.argv[1], "session": "my/project"}))' "$STORE")
+"$RUI" session send --to "$TO" "Investigate the failing test"
 "$RUI" request inspect SAVED_HANDLE
 "$RUI" request read-result SAVED_HANDLE
 ```
+
+`--to` takes one JSON address, with an exact `session` and optional `store`. For example, `--to '{"session":"my/project"}'` uses the sending agent's Store, or your saved Store default outside an agent. Peer sends require the same Host; cross-Store peer sends fail at the receiving Host.
 
 Replace `SAVED_HANDLE` with the handle that `session send` prints on stderr. `session send` returns once the message is admitted, not when the work finishes. `request inspect` reports that message's current state once. `request read-result` prints its saved answer only after completion, even if the Session has done newer work since. To wait, run `request inspect` again later.
 

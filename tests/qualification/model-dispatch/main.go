@@ -173,9 +173,10 @@ func message(deadline measurement.Deadline, binary, parent, store, key, session 
 		return err
 	}
 	var answer map[string]any
+	address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(session) + `}`
 	err = runJSON(deadline, binary, &answer,
-		"session", "send", "--store", store, "--record", filepath.Join(parent, key+".json"),
-		"--key", key, "--session", session, "--text", path)
+		"session", "send", "--to", address, "--record", filepath.Join(parent, key+".json"),
+		"--key", key, "--text", path)
 	if err != nil {
 		return err
 	}

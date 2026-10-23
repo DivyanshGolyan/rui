@@ -156,7 +156,7 @@ def execute(command, overlay, log, retention, cache):
             for key, text in (("driver", "driver"), ("queued", "m" * 59199)):
                 text_path = root / f"{key}.txt"
                 text_path.write_text(text)
-                admitted = fixture.command("session", "send", "--store", store, "--session", "model", "--record", root / f"{key}.json", "--key", key, "--text", text_path)
+                admitted = fixture.command("session", "send", "--to", json.dumps({"store": str(store), "session": "model"}), "--record", root / f"{key}.json", "--key", key, "--text", text_path)
                 assert admitted["answer"]["status"] == "accepted", admitted
                 if key == "driver":
                     fixture.wait_for(lambda: len(endpoint.requests) == 1, "held provider request")

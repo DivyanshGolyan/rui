@@ -40,7 +40,7 @@ pub const Command = enum {
     fn definitionValue(self: Command) Definition {
         return switch (self) {
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
-            .session_send => .{ .resource = .session, .name = "send", .description = "Capture exact text and admit a Message to an already configured Session. Returns after admission, before the recipient completes. -- ends options; a dash after -- is literal.", .options = destination ++ session ++ capture ++ &[_]Option{value("text", "FILE|-")}, .positional = "TEXT|-", .positional_conflicts = &.{"text"}, .mutation = true, .requires = need_session ++ &[_][]const []const u8{&.{ "text", "" }} },
+            .session_send => .{ .resource = .session, .name = "send", .description = "Capture exact text and admit a Message to --to ADDRESS, a JSON object with session and optional store. An omitted Store uses the sender's Store, then saved defaults for a human sender. Peer sends require the issuing Host; cross-Store peer sends are unsupported. Returns after admission, before the recipient completes. -- ends options; a dash after -- is literal.", .options = capture ++ &[_]Option{ value("to", "ADDRESS"), value("text", "FILE|-") }, .positional = "TEXT|-", .positional_conflicts = &.{"text"}, .mutation = true, .requires = &.{ &.{"to"}, &.{ "text", "" } } },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ value("profile", "current|full"), value("failed-response", "body|metadata"), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ "profile", "failed-response" }}, .requires = need_session },
             .session_list => .{ .resource = .session, .name = "list", .description = "List configured Sessions in the current Workspace, or all Workspaces with --all, as one JSON value.", .options = destination ++ &[_]Option{flag("all")} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The address remains reusable by later input; acknowledgment is not physical retirement.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
@@ -430,22 +430,23 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
 }
 
 test "grammar rejects ambiguous invocations before any effect" {
-    try expectValidation(.session_send, &.{ "--session", "a", "--session", "a", "hi" }, error.DuplicateArgument);
-    try expectValidation(.session_send, &.{ "--session", "a", "--text", "f", "hi" }, error.ConflictingArguments);
-    try expectValidation(.session_send, &.{ "--session", "a", "hi", "again" }, error.InvalidArguments);
-    try expectValidation(.session_send, &.{ "--session", "a", "--bogus" }, error.UnknownArgument);
-    try expectValidation(.session_send, &.{ "--session", "a", "--store", "/s", "--store-hex", "2f" }, error.ConflictingArguments);
-    try expectValidation(.session_send, &.{"--session"}, error.MissingArgumentValue);
+    try expectValidation(.session_send, &.{ "--to", "a", "--to", "a", "hi" }, error.DuplicateArgument);
+    try expectValidation(.session_send, &.{ "--to", "a", "--text", "f", "hi" }, error.ConflictingArguments);
+    try expectValidation(.session_send, &.{ "--to", "a", "hi", "again" }, error.InvalidArguments);
+    try expectValidation(.session_send, &.{ "--to", "a", "--bogus" }, error.UnknownArgument);
+    for ([_][]const u8{ "--store", "--store-hex", "--session", "--session-hex" }) |old|
+        try expectValidation(.session_send, &.{ "--to", "a", old, "value", "hi" }, error.UnknownArgument);
+    try expectValidation(.session_send, &.{"--to"}, error.MissingArgumentValue);
     try expectValidation(.session_configure, &.{ "--output-schema", "f", "--text-output" }, error.ConflictingArguments);
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
     try expectValidation(.request_inspect, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
     try expectValidation(.session_list, &.{"--json"}, error.UnknownArgument);
     // Values are data: an option value spelling --help does not request help,
     // and literal text after -- may look like an option or a dash.
-    try expectValidation(.session_send, &.{ "--session", "--help", "--", "--help" }, false);
-    try expectValidation(.session_send, &.{ "--session", "a", "--", "-" }, false);
-    try expectValidation(.session_send, &.{ "--session", "a", "-" }, false);
-    try expectValidation(.session_send, &.{ "--session", "a", "--help" }, true);
+    try expectValidation(.session_send, &.{ "--to", "--help", "--", "--help" }, false);
+    try expectValidation(.session_send, &.{ "--to", "a", "--", "-" }, false);
+    try expectValidation(.session_send, &.{ "--to", "a", "-" }, false);
+    try expectValidation(.session_send, &.{ "--to", "a", "--help" }, true);
     try expectValidation(.session_resume, &.{ "--store", "/s", "REF" }, false);
     try expectValidation(.session_resume, &.{ "--session", "a", "REF" }, error.ConflictingArguments);
     try expectValidation(.host_serve, &.{ "--test-phase-trace", "--fault", "before-commit", "--codex" }, false);
@@ -531,14 +532,14 @@ test "live /configure and /setup share the one-shot grammar" {
 }
 
 test "complete syntax still names the first missing requirement" {
-    try std.testing.expectEqualStrings("session", (try expectMissing(.session_send, &.{"hi"})).?);
-    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--session", "a" })).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--session", "a", "--", "--text" }) == null);
-    // Option values are data: --session's value does not supply the text.
-    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--session", "hi" })).?);
-    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--session", "a", "--key", "k", "hi" })).?);
-    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--session", "a", "--record", "r", "hi" })).?);
-    try std.testing.expect(try expectMissing(.session_send, &.{ "--session", "a", "--test-drop-reply", "x" }) != null);
+    try std.testing.expectEqualStrings("to", (try expectMissing(.session_send, &.{"hi"})).?);
+    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--to", "a" })).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--", "--text" }) == null);
+    // Option values are data: --to's value does not supply the text.
+    try std.testing.expectEqualStrings("text", (try expectMissing(.session_send, &.{ "--to", "hi" })).?);
+    try std.testing.expectEqualStrings("record", (try expectMissing(.session_send, &.{ "--to", "a", "--key", "k", "hi" })).?);
+    try std.testing.expectEqualStrings("key", (try expectMissing(.session_send, &.{ "--to", "a", "--record", "r", "hi" })).?);
+    try std.testing.expect(try expectMissing(.session_send, &.{ "--to", "a", "--test-drop-reply", "x" }) != null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s", "--last" }) == null);
     try std.testing.expect(try expectMissing(.session_resume, &.{ "--store", "/s" }) != null);
     try std.testing.expect(try expectMissing(.request_recover, &.{"HANDLE"}) == null);

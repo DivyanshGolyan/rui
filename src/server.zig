@@ -3139,7 +3139,7 @@ test "retired ordinary capture still consumes its intake classification and reso
                 });
                 retained.ingress = ingress;
                 // Seal the content file, but leave request framing incomplete.
-                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
+                try ingress.feed("{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"abc\"");
             },
             .retained_scratch, .report => {
                 const file = try tmp.dir.createFile(host.io, "retained", .{ .read = true });
@@ -3398,7 +3398,7 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/rui-{s}.sock", .{std.fs.path.basename(root)});
     defer std.Io.Dir.deleteFileAbsolute(std.testing.io, socket_path) catch {};
     const address = try std.Io.net.UnixAddress.init(socket_path);
-    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
+    const message = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++
         @as([4097]u8, @splat('x')) ++ "\"}}";
     for (std.enums.values(Probe.Phase)) |phase| {
         Probe.phase = phase;
@@ -3610,7 +3610,7 @@ test "ingress resumes its peer wait after local capture completion" {
     defer _ = std.c.close(sockets[1]);
     try setNonblocking(sockets[0]);
     const payload = @as([4097]u8, @splat('x'));
-    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
+    const body = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"" ++ payload ++ "\"}}";
     var header_buffer: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/message HTTP/1.1\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 1\r\nContent-Length: {d}\r\n\r\n", .{body.len});
     try writeAll(std.testing.io, sockets[1], header);
@@ -3664,7 +3664,7 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         .store = undefined, // Failed/incomplete captures never reach admission.
         .faults = .{},
     };
-    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"peer\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const payload = @as([8192]u8, @splat('x'));
     const suffix = "\"}}";
     for ([_]bool{ false, true }) |seal| {

@@ -41,15 +41,16 @@ pub const empty_environment: std.process.Environ.Map = .{ .array_hash_map = .emp
 
 /// One tool process's environment: the shared Host map, unchanged, plus
 /// RUI_ADDRESS naming the Session whose Action runs it, as compact JSON
-/// `{"store":…,"session":…}`. `rui session send` reads it to record that
-/// Session as the sender. The caller deinitializes the owned map.
-pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.Environ.Map, store_selector: []const u8, session: []const u8) !std.process.Environ.Map {
+/// `{"store":…,"session":…}` and its Host-issued RUI_SENDER_HANDLE.
+/// The caller deinitializes the owned map.
+pub fn toolEnvironment(allocator: std.mem.Allocator, shared: *const std.process.Environ.Map, store_selector: []const u8, session: []const u8, sender_handle: []const u8) !std.process.Environ.Map {
     var result = try shared.clone(allocator);
     errdefer result.deinit();
     var address: std.Io.Writer.Allocating = .init(allocator);
     defer address.deinit();
     try std.json.Stringify.value(.{ .store = store_selector, .session = session }, .{}, &address.writer);
     try result.put("RUI_ADDRESS", address.written());
+    if (sender_handle.len != 0) try result.put("RUI_SENDER_HANDLE", sender_handle);
     return result;
 }
 
@@ -233,6 +234,7 @@ pub const Prepared = struct {
     allocator: std.mem.Allocator,
     // The Session whose Action this is, in the Host's Store (borrowed).
     session: protocol.Bounded(protocol.max_session_bytes),
+    sender_handle: protocol.Bounded(32) = .{},
     store_selector: []const u8,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
@@ -279,7 +281,7 @@ pub const Prepared = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        var child_environment = toolEnvironment(arena, shared_environment, self.store_selector, self.session.slice()) catch return error.BashSpawnFailed;
+        var child_environment = toolEnvironment(arena, shared_environment, self.store_selector, self.session.slice(), self.sender_handle.slice()) catch return error.BashSpawnFailed;
         const environment_block = child_environment.createPosixBlock(arena, .{ .zig_progress_fd = -1 }) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
         const cwd = arena.dupeSentinel(u8, self.workspace.slice(), 0) catch return error.BashSpawnFailed;
@@ -880,6 +882,7 @@ pub const Preparation = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     session: protocol.Bounded(protocol.max_session_bytes),
+    sender_handle: protocol.Bounded(32) = .{},
     store_selector: []const u8,
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     scratch_path: []const u8,
@@ -913,6 +916,7 @@ pub const Preparation = struct {
             .io = self.io,
             .allocator = self.allocator,
             .session = self.session,
+            .sender_handle = self.sender_handle,
             .store_selector = self.store_selector,
             .workspace = self.workspace,
             .scratch_path = self.scratch_path,
@@ -1857,13 +1861,15 @@ test "Bash environment carries only this executable's PATH and an absolute HOME"
     defer relative_home.deinit();
     try std.testing.expectEqual(@as(usize, 1), relative_home.count());
     // Each tool process adds its own Session's address; the shared map stays as it was.
-    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "peer/\x00a");
+    var tool = try toolEnvironment(std.testing.allocator, &with_home, "/store \"q\"", "peer/\x00a", "test-action-handle");
     defer tool.deinit();
-    try std.testing.expectEqual(@as(usize, 3), tool.count());
+    try std.testing.expectEqual(@as(usize, 4), tool.count());
     try std.testing.expectEqualStrings("{\"store\":\"/store \\\"q\\\"\",\"session\":\"peer/\\u0000a\"}", tool.get("RUI_ADDRESS").?);
+    try std.testing.expectEqualStrings("test-action-handle", tool.get("RUI_SENDER_HANDLE").?);
     try std.testing.expectEqualStrings("/home/peer", tool.get("HOME").?);
     try std.testing.expectEqual(@as(usize, 2), with_home.count());
     try std.testing.expect(with_home.get("RUI_ADDRESS") == null);
+    try std.testing.expect(with_home.get("RUI_SENDER_HANDLE") == null);
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings(system_path, try searchPath(&buffer, "/opt/a:b/bin"));
     try std.testing.expectEqualStrings("/opt/rui/bin:" ++ system_path, try searchPath(&buffer, "/opt/rui/bin"));

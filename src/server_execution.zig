@@ -758,7 +758,13 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, window: []u8) bool {
     var made_progress = false;
     for (slots) |*slot| switch (slot.*) {
         .bash => |*active| {
+            const was_running = active.execution.lifecycle.process == .running;
             const service = active.execution.service(window);
+            if (was_running and active.execution.lifecycle.process != .running) {
+                host.store.revokeActionSender(active.binding) catch |err| {
+                    _ = failBash(host, active, "Bash sender retirement", err);
+                };
+            }
             made_progress = made_progress or service.made_progress;
             if (service.timeout_action) |action| {
                 traceActionDeadline(host, "bash_deadline_serviced", action.deadline_ns, action.signal_failed, active.binding);
@@ -853,6 +859,7 @@ fn admitBashAttempt(
     switch (started) {
         .preparing => |value| {
             preparation.* = value;
+            preparation.*.?.sender_handle = input.sender_handle;
             slot.* = .{ .bash_preparing = .{
                 .token = token,
                 .binding = action_binding,
@@ -1040,6 +1047,9 @@ fn stopSupersededBash(
                     active.stop_accepted = true;
                     traceActionControl(host, "effect_stop_requested", control.command_key.slice(), active.binding);
                     const action = active.execution.requestStop(.now(host.io, .awake));
+                    host.store.revokeActionSender(active.binding) catch |err| {
+                        _ = failBash(host, active, "Bash sender retirement", err);
+                    };
                     traceActionControlOutcome(
                         host,
                         "lifecycle_action_attempted",

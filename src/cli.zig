@@ -969,7 +969,7 @@ const NewSessionOptions = struct {
 /// any Host or Session change when that terminal is absent or cannot draw.
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        TerminalText.diagnostic("rui needs terminal input and output {s}; to message a Session from a script or agent, use rui session send --session SESSION TEXT. No Host or Session changed.\n", .{purpose});
+        TerminalText.diagnostic("rui needs terminal input and output {s}; to message a Session from a script or agent, use rui session send --to '{{\"session\":\"SESSION\"}}' TEXT. No Host or Session changed.\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
@@ -1349,26 +1349,31 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
-    var input = client.MessageInput{ .store = "", .session = parsed.get("session").?, .text_path = parsed.get("text") orelse "" };
+    var address_buffer: [client.Address.storage_bytes]u8 = undefined;
+    const destination = client.Address.parse(parsed.get("to").?, &address_buffer) catch |err| {
+        TerminalText.diagnostic("rui: --to needs a Rui address: {{\"store\":\"PATH\",\"session\":\"REF\"}}; Store may be omitted. Nothing was sent.\n", .{});
+        return err;
+    };
+    var input = client.MessageInput{ .store = "", .session = destination.session, .text_path = parsed.get("text") orelse "" };
     if (parsed.positional) |value| {
         // Only an unescaped dash selects stdin; after -- it is literal text.
         if (!parsed.literal_positional and std.mem.eql(u8, value, "-")) input.text_path = "-" else input.text = value;
     }
-    if (input.session.len == 0) return usage();
-    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     // An agent's tool process names its own Session; the Host records it.
-    var address_buffer: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
-    if (init.environ_map.get("RUI_ADDRESS")) |address| input.sender = client.Address.parse(address, &address_buffer) catch |err| {
-        TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was sent.\n", .{});
-        return err;
-    };
+    var sender_buffer: [client.Address.storage_bytes]u8 = undefined;
+    if (init.environ_map.get("RUI_ADDRESS")) |address| {
+        input.sender = client.Address.parse(address, &sender_buffer) catch |err| {
+            TerminalText.diagnostic("rui: RUI_ADDRESS is not a Rui address; nothing was sent.\n", .{});
+            return err;
+        };
+        if (input.sender.?.store == null) return error.InvalidRuiAddress;
+    }
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = try selectedStore(init, destination.store orelse if (input.sender) |sender| sender.store else null, &selected_buffer);
+    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = client.captureMessage(io, input, target) catch |err| {
-        if (err == error.CrossStoreSend) TerminalText.diagnostic("rui: This Session's Store is not the selected Store; a peer can message only Sessions in its own Store. Nothing was sent.\n", .{});
-        return err;
-    };
+    var captured = try client.captureMessage(io, input, target);
     try sendCapturedMutation(io, &captured, target == .generated, parsed.get("test-drop-reply"));
 }
 

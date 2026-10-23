@@ -246,7 +246,7 @@ def prove_stdin(state):
         ("timeout", {"cmd": "sleep 30", "stdin": large, "timeout_ms": 100}, "timed_out"),
     ]
     for name, input_text in (("empty-send", ""), ("null-send", None)):
-        command = shlex.join([str(fixture.RUI), "session", "send", "--store", str(store), "--session", "stdin/recipient",
+        command = shlex.join([str(fixture.RUI), "session", "send", "--to", json.dumps({"store": str(store), "session": "stdin/recipient"}),
                               "--record", str(state / f"{name}.json"), "--key", name,
                               *(["--text", "-"] if name == "null-send" else ["-"])])
         cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
@@ -817,14 +817,12 @@ def walkthrough():
         text_path.write_text("make one independently counted file effect")
         message_args = (
             "session", "send",
-            "--store",
-            store,
+            "--to",
+            json.dumps({"store": str(store), "session": session}),
             "--record",
             message_record,
             "--key",
             message_key,
-            "--session",
-            session,
             "--text",
             text_path,
         )

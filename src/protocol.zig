@@ -25,6 +25,23 @@ pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
+/// Exact peer address. The issuing Host authenticates the sender separately.
+pub const Address = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+
+    pub fn validate(self: Address) !void {
+        const path = self.store.slice();
+        if (path.len == 0 or path[0] != '/' or self.session.len == 0 or
+            !std.unicode.utf8ValidateSlice(path) or !std.unicode.utf8ValidateSlice(self.session.slice())) return error.InvalidRuiAddress;
+        for (path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
+        if (path.len > 1) {
+            var components = std.mem.splitScalar(u8, path[1..], '/');
+            while (components.next()) |component| if (component.len == 0 or std.mem.eql(u8, component, ".") or std.mem.eql(u8, component, "..")) return error.InvalidRuiAddress;
+        }
+    }
+};
+
 pub const FieldState = enum { omitted, value, explicit_null };
 
 pub fn OptionalBounded(comptime capacity: usize) type {
@@ -135,9 +152,9 @@ pub const MessageCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
-    // The sending Session in the same Store, captured from its tool process's
-    // RUI_ADDRESS; null when a human or script sends.
-    sender: ?Bounded(max_session_bytes) = null,
+    // The full sending address; null when a human or script sends.
+    sender: ?Address = null,
+    sender_handle: ?Bounded(32) = null,
     text: ContentField = .{},
 
     pub fn removeTemporaryContent(self: *MessageCommand, io: std.Io) !void {
@@ -146,10 +163,15 @@ pub const MessageCommand = struct {
 
     pub fn semanticDigest(self: *const MessageCommand) [32]u8 {
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hashField(&hash, "rui/core/message/v2");
+        hashField(&hash, "rui/core/message/v3");
         hashField(&hash, self.session.slice());
         hash.update(&.{@intFromBool(self.sender != null)});
-        if (self.sender) |sender| hashField(&hash, sender.slice());
+        if (self.sender) |sender| {
+            hashField(&hash, sender.store.slice());
+            hashField(&hash, sender.session.slice());
+        }
+        hash.update(&.{@intFromBool(self.sender_handle != null)});
+        if (self.sender_handle) |handle| hashField(&hash, handle.slice());
         hashContent(&hash, &self.text);
         return hash.finalResult();
     }
@@ -1032,7 +1054,24 @@ const Parser = struct {
         } else {
             self.source.start -= 1;
             request.sender = .{};
-            try self.readSmallString(&request.sender.?);
+            try self.expectByte('{');
+            try self.expectKey("store");
+            try self.readSmallString(&request.sender.?.store);
+            try self.expectByte(',');
+            try self.expectKey("session");
+            try self.readSmallString(&request.sender.?.session);
+            try self.expectByte('}');
+            try request.sender.?.validate();
+        }
+        try self.expectByte(',');
+        try self.expectKey("sender_handle");
+        try self.skipWhitespace();
+        if (try self.source.readByte() == 'n') {
+            for ("ull") |expected| if (try self.source.readByte() != expected) return error.InvalidJsonShape;
+        } else {
+            self.source.start -= 1;
+            request.sender_handle = .{};
+            try self.readSmallString(&request.sender_handle.?);
         }
         try self.expectByte(',');
         try self.expectKey("text");
@@ -2511,13 +2550,32 @@ test "Session listing wire distinguishes all, exact workspace, continuation and 
     }
 }
 
+test "peer wire rejects old sender strings, malformed addresses and missing handles" {
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
+    const cases = [_]struct { json: []const u8, failure: anyerror }{
+        .{ .json = prefix ++ "\"peer\",\"sender_handle\":null", .failure = error.InvalidJsonShape },
+        .{ .json = prefix ++ "{\"store\":\"/s\"},\"sender_handle\":null", .failure = error.InvalidJsonShape },
+        .{ .json = prefix ++ "{\"store\":\"relative\",\"session\":\"peer\"},\"sender_handle\":null", .failure = error.InvalidRuiAddress },
+        .{ .json = prefix ++ "null,\"text\":{}", .failure = error.UnexpectedField },
+    };
+    for (cases) |case| {
+        var source = SocketBody.init(-1, 0);
+        @memcpy(source.buffer[0..case.json.len], case.json);
+        source.end = case.json.len;
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .fd = -1, .content_length = case.json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        try std.testing.expectError(case.failure, parser.parse());
+        try std.testing.expect(retained == null);
+    }
+}
+
 test "incremental ingress streams fragmented content and transfers charged custody only at complete framing" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
-    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"text\":{\"state\":\"value\",\"value\":\"";
+    const prefix = "{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"p\\u0000é\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"";
     const encoded = @as([8193]u8, @splat('x')) ++ "\\n\\ud83d\\ude42\\u0000é\\\"\\\\";
     const expected = @as([8193]u8, @splat('x')) ++ "\n🙂\x00é\"\\";
     const suffix = "\"}}";

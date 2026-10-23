@@ -76,7 +76,8 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 	for index, item := range coordinator {
 		var arguments struct{ Cmd string }
 		json.Unmarshal([]byte(item["arguments"].(string)), &arguments)
-		isSend := strings.Contains(arguments.Cmd, "rui session send --store '/store'") && strings.Contains(arguments.Cmd, "--session '"+ToolSession(3, index+1)+"'")
+		address := fmt.Sprintf(`{"store":"/store","session":%q}`, ToolSession(3, index+1))
+		isSend := strings.Contains(arguments.Cmd, "rui session send --to '"+address+"'")
 		if (index < 2) != isSend || index == 2 && !strings.Contains(arguments.Cmd, "cat '/data/read fixture'") {
 			t.Fatalf("call %d = %q", index, arguments.Cmd)
 		}

@@ -1047,7 +1047,8 @@ func runScenario(binary, sqliteBinary, root string, value scenario, qualificatio
 		if err := os.WriteFile(textPath, []byte("classify raw provider calls"), 0o600); err != nil {
 			return result, err
 		}
-		if err := measure("cli-message", "message", []string{"session", "send", "--store", store, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--session", session, "--text", textPath}, accepted); err != nil {
+		address := `{"store":` + measurement.JSONString(store) + `,"session":` + measurement.JSONString(session) + `}`
+		if err := measure("cli-message", "message", []string{"session", "send", "--to", address, "--record", filepath.Join(directory, value.Name+".json"), "--key", value.Name, "--text", textPath}, accepted); err != nil {
 			return result, err
 		}
 		deadline = measurement.NewDeadline(2 * time.Minute)

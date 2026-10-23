@@ -36,13 +36,17 @@ type configurationCommand struct {
 	Configuration configurationFields `json:"configuration"`
 }
 type messageCommand struct {
-	Version string        `json:"version"`
-	Kind    string        `json:"kind"`
-	Store   string        `json:"store"`
-	Key     string        `json:"key"`
-	Session string        `json:"session"`
-	Sender  *string       `json:"sender"`
-	Text    optionalField `json:"text"`
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Store   string `json:"store"`
+	Key     string `json:"key"`
+	Session string `json:"session"`
+	Sender  *struct {
+		Store   string `json:"store"`
+		Session string `json:"session"`
+	} `json:"sender"`
+	SenderHandle *string       `json:"sender_handle"`
+	Text         optionalField `json:"text"`
 }
 type observeCommand struct {
 	Version string `json:"version"`

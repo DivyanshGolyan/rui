@@ -678,25 +678,59 @@ pub const MessageInput = struct {
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
-    // The sending Session from a tool process's RUI_ADDRESS. Its Store must
-    // be the destination Store; the capture records only its Session.
+    // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
+    sender_handle: ?[]const u8 = null,
 };
 
 /// A Session's address: its canonical Store selector and exact reference.
 pub const Address = struct {
-    store: []const u8,
+    store: ?[]const u8,
     session: []const u8,
+    pub const storage_bytes = protocol.content_window_bytes;
 
-    /// Decodes RUI_ADDRESS (`{"store":…,"session":…}`, no other members)
-    /// into caller-owned storage.
-    pub fn parse(text: []const u8, storage: *[2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8) !Address {
+    /// Decodes one address into caller-owned storage. Only a destination may
+    /// omit its Store; the CLI resolves it from the sender before HOME defaults.
+    pub fn parse(text: []const u8, storage: *[storage_bytes]u8) !Address {
         var fixed = std.heap.FixedBufferAllocator.init(storage);
-        const value = std.json.parseFromSliceLeaky(struct { store: []const u8, session: []const u8 }, fixed.allocator(), text, .{ .max_value_len = protocol.max_store_bytes }) catch return error.InvalidRuiAddress;
-        if (value.store.len == 0 or value.store.len > protocol.max_store_bytes or value.session.len == 0 or value.session.len > protocol.max_session_bytes) return error.InvalidRuiAddress;
-        return .{ .store = value.store, .session = value.session };
+        const value = std.json.parseFromSliceLeaky(std.json.Value, fixed.allocator(), text, .{ .max_value_len = protocol.max_store_bytes }) catch return error.InvalidRuiAddress;
+        if (value != .object) return error.InvalidRuiAddress;
+        const session = value.object.get("session") orelse return error.InvalidRuiAddress;
+        if (session != .string or session.string.len == 0 or session.string.len > protocol.max_session_bytes) return error.InvalidRuiAddress;
+        const store = if (value.object.get("store")) |field| blk: {
+            if (field != .string or field.string.len == 0 or field.string.len > protocol.max_store_bytes) return error.InvalidRuiAddress;
+            for (field.string) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
+            break :blk field.string;
+        } else null;
+        if (value.object.count() != @as(usize, if (store != null) 2 else 1)) return error.InvalidRuiAddress;
+        return .{ .store = store, .session = session.string };
     }
 };
+
+test "address JSON preserves exact references and distinguishes an omitted Store from invalid fields" {
+    var storage: [Address.storage_bytes]u8 = undefined;
+    const omitted = try Address.parse("{\"session\":\"peer/\\u0000雪\\\"\\\\\"}", &storage);
+    try std.testing.expect(omitted.store == null);
+    try std.testing.expectEqualStrings("peer/\x00雪\"\\", omitted.session);
+    for ([_][]const u8{
+        "{\"session\":\"\"}",
+        "{\"session\":null}",
+        "{\"session\":\"p\",\"store\":null}",
+        "{\"session\":\"p\",\"store\":\"\"}",
+        "{\"session\":\"p\",\"store\":\"/a\\u0000b\"}",
+        "{\"session\":\"p\",\"session\":\"q\"}",
+        "{\"session\":\"p\",\"session_hex\":\"70\"}",
+        "{\"session_hex\":\"70\"}",
+    }) |invalid| try std.testing.expectError(error.InvalidRuiAddress, Address.parse(invalid, &storage));
+    const store: [protocol.max_store_bytes]u8 = @splat('s');
+    const session: [protocol.max_session_bytes]u8 = @splat('p');
+    var text: [protocol.max_store_bytes + protocol.max_session_bytes + 64]u8 = undefined;
+    const maximum = try Address.parse(try std.fmt.bufPrint(&text, "{{\"store\":\"{s}\",\"session\":\"{s}\"}}", .{ store, session }), &storage);
+    try std.testing.expectEqualStrings(&store, maximum.store.?);
+    try std.testing.expectEqualStrings(&session, maximum.session);
+    try std.testing.expectError(error.InvalidRuiAddress, Address.parse(try std.fmt.bufPrint(&text, "{{\"session\":\"{s}p\"}}", .{session}), &storage));
+    try std.testing.expectError(error.InvalidRuiAddress, Address.parse(try std.fmt.bufPrint(&text, "{{\"store\":\"{s}s\",\"session\":\"p\"}}", .{store}), &storage));
+}
 
 pub const SessionStopInput = struct {
     store: []const u8,
@@ -2114,6 +2148,17 @@ fn JsonString(comptime limit: usize) type {
     };
 }
 
+const JsonAddress = struct {
+    store: JsonString(protocol.max_store_bytes),
+    session: JsonString(protocol.max_session_bytes),
+
+    fn address(self: JsonAddress) !protocol.Address {
+        const result: protocol.Address = .{ .store = self.store.value, .session = self.session.value };
+        try result.validate();
+        return result;
+    }
+};
+
 /// Pages carry exact peer identity; abbreviation belongs to presentation.
 const JsonPeer = struct {
     session: JsonString(protocol.max_session_bytes),
@@ -2694,7 +2739,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         session: ?JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
-        sender: ?JsonString(protocol.max_session_bytes) = null,
+        sender: ?JsonAddress = null,
+        sender_handle: ?JsonString(32) = null,
         text: ?struct { state: JsonString(8), value: CapturedText } = null,
         action: ?JsonString(20) = null,
         decision: ?JsonString(16) = null,
@@ -2724,6 +2770,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         .message => blk: {
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
+            if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
             break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest } };
         },
         .session_stop => .session_stop,
@@ -2737,7 +2784,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: Captured
         } },
     };
     if ((kind != .configure and (fields.configuration != null or fields.require_model != null)) or
-        (kind != .message and (fields.text != null or fields.sender != null)) or (kind != .model_interruption and fields.target != null) or
+        (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -2825,8 +2872,15 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    // A peer names itself only within its own Store; refuse before capture.
-    if (input.sender) |sender| if (!std.mem.eql(u8, sender.store, paths.store.slice())) return error.CrossStoreSend;
+    if (input.sender_handle) |handle| if (handle.len > 32) return error.InvalidSenderHandle;
+    // Validate the full sender before resolving or opening any capture.
+    // The Host authenticates admission, including legitimate self-sends.
+    if (input.sender) |sender| {
+        var address: protocol.Address = .{};
+        try address.store.set(sender.store orelse return error.InvalidRuiAddress);
+        try address.session.set(sender.session);
+        try address.validate();
+    }
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try validateIdentityInputs(location.key, input.session);
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -2839,7 +2893,15 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     try capture.write(",\"session\":");
     try capture.writeJsonString(input.session);
     try capture.write(",\"sender\":");
-    if (input.sender) |sender| try capture.writeJsonString(sender.session) else try capture.write("null");
+    if (input.sender) |sender| {
+        try capture.write("{\"store\":");
+        try capture.writeJsonString(sender.store.?);
+        try capture.write(",\"session\":");
+        try capture.writeJsonString(sender.session);
+        try capture.write("}");
+    } else try capture.write("null");
+    try capture.write(",\"sender_handle\":");
+    if (input.sender_handle) |handle| try capture.writeJsonString(handle) else try capture.write("null");
     try capture.write(",\"text\":{\"state\":\"value\",\"value\":");
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
@@ -4037,14 +4099,14 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectError(error.FileNotFound, retry(io, root, message_record, "message", &reply));
 }
 
-test "a peer send captures its sender including self and refuses another Store before capture" {
+test "a peer capture preserves the full sender including self and leaves foreign Store admission to the Host" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var storage: [2 * (protocol.max_store_bytes + protocol.max_session_bytes)]u8 = undefined;
+    var storage: [Address.storage_bytes]u8 = undefined;
     for ([_][]const u8{ "", "{}", "{\"store\":\"s\"}", "{\"store\":\"\",\"session\":\"p\"}", "{\"store\":\"s\",\"session\":\"p\",\"extra\":1}", "[]" }) |invalid|
         try std.testing.expectError(error.InvalidRuiAddress, Address.parse(invalid, &storage));
     var address_text: [1024]u8 = undefined;
@@ -4053,14 +4115,21 @@ test "a peer send captures its sender including self and refuses another Store b
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/record.json", .{root});
     const other: Address = .{ .store = "/elsewhere", .session = "peer" };
-    try std.testing.expectError(error.CrossStoreSend, captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = other }, .{ .explicit = .{ .record = path, .key = "k" } }));
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));
-    var captured = try captureMessage(io, .{ .store = root, .session = own.session, .text_path = "", .text = "x", .sender = own }, .{ .explicit = .{ .record = path, .key = "k" } });
+    var captured = try captureMessage(io, .{ .store = root, .session = "target", .text_path = "", .text = "x", .sender = own, .sender_handle = "0123456789abcdef0123456789abcdef" }, .{ .explicit = .{ .record = path, .key = "k" } });
     defer captured.close(io);
     var expected_buffer: [1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"k\",\"session\":\"peer/\\\"a\\\"\",\"sender\":\"peer/\\\"a\\\"\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{0s}\",\"key\":\"k\",\"session\":\"target\",\"sender\":{{\"store\":\"{0s}\",\"session\":\"peer/\\\"a\\\"\"}},\"sender_handle\":\"0123456789abcdef0123456789abcdef\",\"text\":{{\"state\":\"value\",\"value\":\"x\"}}}}", .{root});
     var bytes: [1024]u8 = undefined;
     try std.testing.expectEqualStrings(expected, bytes[0..try captured.file.readPositionalAll(io, &bytes, 0)]);
+    const remote_path = try std.fmt.bufPrint(&path_buffer, "{s}/remote.json", .{root});
+    var remote = try captureMessage(io, .{ .store = root, .session = other.session, .text_path = "", .text = "x", .sender = other }, .{ .explicit = .{ .record = remote_path, .key = "remote" } });
+    defer remote.close(io);
+    _ = try readCapturedBinding(io, &remote.file);
+    const self_path = try std.fmt.bufPrint(&path_buffer, "{s}/self.json", .{root});
+    var self = try captureMessage(io, .{ .store = root, .session = own.session, .text_path = "", .text = "x", .sender = own, .sender_handle = "0123456789abcdef0123456789abcdef" }, .{ .explicit = .{ .record = self_path, .key = "self" } });
+    defer self.close(io);
+    try std.testing.expectEqualStrings(own.session, self.identity().session.slice());
 }
 
 test "capture returns original identity before send and preserves empty explicit keys" {
@@ -4171,7 +4240,7 @@ test "capture retransmits complete original bytes after a lost reply" {
     var captured = try captureMessage(io, .{ .store = root, .session = "original/session", .text_path = "", .text = &text }, .{ .explicit = .{ .record = path, .key = "owned-key" } });
     defer captured.close(io);
     var expected_buffer: [text.len + 1024]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"sender\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"owned-key\",\"session\":\"original/session\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"{s}\"}}}}", .{ root, text });
     var vtable = io.vtable.*;
     vtable.netConnectUnix = Peer.connect;
     const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
@@ -4222,7 +4291,7 @@ test "capture publication transfers original inode across pathname replacement" 
     var captured = try captureMessage(replaced_io, .{ .store = root, .session = "original/session", .text_path = "", .text = "original\ntext" }, .{ .explicit = .{ .record = path, .key = "original-key" } });
     defer captured.close(io);
     var expected_buffer: [2048]u8 = undefined;
-    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"sender\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
+    const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"{s}\",\"key\":\"original-key\",\"session\":\"original/session\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"original\\ntext\"}}}}", .{root});
     var bytes: [2048]u8 = undefined;
     const count = try captured.file.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings(expected, bytes[0..count]);

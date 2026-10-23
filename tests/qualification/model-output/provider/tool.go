@@ -142,10 +142,11 @@ func (c ToolConfig) workloadCommand(index int) string {
 
 func (c ToolConfig) dispatchCommand(index int) string {
 	worker := ToolSession(c.Sessions, index)
-	return timed("rui session send --store " + shellQuote(c.Store) +
+	address := `{"store":` + measurement.JSONString(c.Store) + `,"session":` + measurement.JSONString(worker) + `}`
+	return timed("rui session send --to " + shellQuote(address) +
 		" --record " + shellQuote(filepath.Join(c.DispatchDir, fmt.Sprintf("dispatch-%03d.json", index))) +
 		" --key " + shellQuote(fmt.Sprintf("dispatch-%03d", index)) +
-		" --session " + shellQuote(worker) + " -- " + shellQuote("work "+worker))
+		" -- " + shellQuote("work "+worker))
 }
 
 type toolCall struct {

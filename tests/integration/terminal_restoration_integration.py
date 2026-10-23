@@ -1068,7 +1068,7 @@ def persistent_cases(state, library, home, store, host):
                 # PTY; an external caller's large content then keeps the
                 # frontend's actual activity reader writing into it.
                 (state / f"persistent-{case}" / "arm").touch()
-                human.run(home, "session", "send", "--store", store, "--session", "terminal/restoration", "z" * 50000)
+                human.run(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "terminal/restoration"}), "z" * 50000)
                 fixture.wait_for(lambda: log.exists() and "output-blocked" in log.read_text(), "actual terminal EAGAIN")
                 if case == "backpressure-command":
                     # Blocked output defers the command; it is no
@@ -1125,7 +1125,7 @@ def persistent_cases(state, library, home, store, host):
                 proxy.close()
                 proxy = None
             # Detachment never cancels or restarts the actual owning Host.
-            answer = human.admit(home, "session", "send", "--store", store, "--session", "terminal/restoration", f"valid after {case}")
+            answer = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "terminal/restoration"}), f"valid after {case}")
             assert answer["admission"]["answer"]["status"] == "accepted", answer
             print(f"persistent terminal: {case} passed", flush=True)
         finally:
@@ -1473,9 +1473,9 @@ def command_interruption_cases(state, library):
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         human.run(home, "session", "configure", "--store", store, "--session", "command/signals",
             "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
-        message = human.admit(home, "session", "send", "--store", store, "--session", "command/signals", "saved answer")
+        message = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "command/signals"}), "saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "saved command result")
-        human.admit(home, "session", "send", "--store", store, "--session", "command/signals", "propose tool")
+        human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "command/signals"}), "propose tool")
         records = home / ".config/rui/requests"
         for case, command, route, signal_number in (
                 ("requests", "/requests", "", signal.SIGINT),
@@ -2229,7 +2229,7 @@ def visible_stream_handoff_cases(state, library):
                 "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
             if phase not in ("activity", "permission", "interrupt", "completion"):
                 for i in range(len(responses)):
-                    admission = human.admit(home, "session", "send", "--store", store, "--session", "visible/stream", f"saved input {i}")
+                    admission = human.admit(home, "session", "send", "--to", json.dumps({"store": str(store), "session": "visible/stream"}), f"saved input {i}")
                     fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]), "saved stream content")
             if phase == "opening": arm.touch()
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), "visible/stream"],

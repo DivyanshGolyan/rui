@@ -716,7 +716,8 @@ if [ "$CHECK_OVERLAP" = 1 ]; then
             if [ "$TEST_PART" = parallel ]; then
                 peers="$peers native. admission_integration.sh.release dispatch_integration.py.release
                     bash_owner_integration.py.release bash_integration.py.release
-                    peer_integration.py.release bash_lifecycle_integration.py.release bash_recovery_integration.py.release
+                    peer_integration.py.release sender_identity_integration.py.release
+                    bash_lifecycle_integration.py.release bash_recovery_integration.py.release
                     codex_integration.py.release control_integration.py.release
                     descriptor_capacity_integration.py.release"
             fi
@@ -1090,7 +1091,8 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
         expected = {
             "admission_integration.sh release", "dispatch_integration.py release",
             "bash_owner_integration.py release", "bash_integration.py release",
-            "peer_integration.py release", "human_cli_integration.py release", "preference_policy_integration.py preferences",
+            "peer_integration.py release", "sender_identity_integration.py release",
+            "human_cli_integration.py release", "preference_policy_integration.py preferences",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
@@ -1127,6 +1129,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ]; then exit 42; fi
     def test_parallel_gate_drains_native_and_execution_peers(self):
         for peer in ("native", "admission_integration.sh", "dispatch_integration.py",
                      "bash_owner_integration.py", "bash_integration.py", "peer_integration.py",
+                     "sender_identity_integration.py",
                      "bash_lifecycle_integration.py", "bash_recovery_integration.py",
                      "codex_integration.py", "control_integration.py", "descriptor_capacity_integration.py"):
             with self.subTest(peer=peer):
