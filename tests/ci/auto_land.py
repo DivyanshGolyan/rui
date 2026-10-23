@@ -39,10 +39,26 @@ def latest(workflow, sha, branch):
     Main's Selected acceptance is stable qualification, not diagnostic dispatches.
     """
     repository = os.environ["GITHUB_REPOSITORY"]
-    rows = [row for event in ("push", "workflow_dispatch") for row in json.loads(gh(
-        "api", f"repos/{repository}/actions/workflows/{workflow}/runs"
-               f"?head_sha={sha}&branch={branch}&event={event}&per_page=100"))["workflow_runs"]]
-    rows = [row for row in rows if row["head_sha"] == sha and row["head_branch"] == branch
+    # Filtered workflow listings can temporarily omit existing runs. Read
+    # every unfiltered page; API/pagination failures must propagate, not dispatch.
+    pages = json.loads(gh("api", f"repos/{repository}/actions/workflows/{workflow}/runs?per_page=100",
+                         "--paginate", "--slurp"))
+    if not isinstance(pages, list) or not pages:
+        raise ValueError("workflow history must contain API pages")
+    rows = []
+    for page in pages:
+        if not isinstance(page, dict) or not isinstance(page.get("workflow_runs"), list):
+            raise ValueError("workflow history page must contain workflow_runs")
+        for row in page["workflow_runs"]:
+            if (not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] <= 0
+                    or any(not isinstance(row.get(key), str)
+                           for key in ("head_sha", "head_branch", "event", "display_title"))
+                    or not isinstance(row.get("head_repository"), dict)
+                    or not isinstance(row["head_repository"].get("full_name"), str)):
+                raise ValueError("workflow history run has invalid identity")
+            rows.append(row)
+    rows = [row for row in rows if row["event"] in ("push", "workflow_dispatch")
+            and row["head_sha"] == sha and row["head_branch"] == branch
             and row["head_repository"]["full_name"] == repository]
     if workflow == "check.yml" and branch == "main":
         rows = [row for row in rows if STABLE_BASE.fullmatch(row.get("display_title") or "")]

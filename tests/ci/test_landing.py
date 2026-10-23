@@ -106,33 +106,108 @@ class LandingTest(unittest.TestCase):
 
         def row(id, event, head=sha, branch='wip/land-1', repo='o/r', conclusion='success'):
             return dict(id=id, event=event, head_sha=head, head_branch=branch, conclusion=conclusion,
-                        head_repository=dict(full_name=repo))
-        rows = {'push': [row(1, 'push', conclusion='cancelled')],
-                'workflow_dispatch': [row(2, 'workflow_dispatch'), row(5, 'workflow_dispatch', head=other),
-                                      row(6, 'workflow_dispatch', branch='wip/land-2'),
-                                      row(7, 'workflow_dispatch', repo='fork/r')]}
-        requested_branch = 'wip/land-1'
+                        head_repository=dict(full_name=repo), display_title='Selected checks')
+        rows = [row(1, 'push', conclusion='cancelled'), row(2, 'workflow_dispatch'),
+                row(5, 'workflow_dispatch', head=other), row(6, 'workflow_dispatch', branch='wip/land-2'),
+                row(7, 'workflow_dispatch', repo='fork/r'), row(8, 'pull_request'), row(9, 'schedule')]
 
         def gh(*args):
-            event = args[1].rsplit('event=', 1)[1].split('&', 1)[0]
-            self.assertIn(f'head_sha={sha}&branch={requested_branch}', args[1])
-            return json.dumps(dict(workflow_runs=rows[event]))
+            # GitHub's branch and head_sha filters can each falsely omit exact runs.
+            if any(f'{field}=' in args[1] for field in ('head_sha', 'branch', 'event')):
+                return json.dumps(dict(workflow_runs=[]))
+            return json.dumps([dict(workflow_runs=rows)])
         with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), mock.patch.object(auto_land, 'gh', gh):
             # A dispatch replaces the cancelled push run; other commits, branches and forks never count.
-            self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 2)
-            rows['workflow_dispatch'] = rows['workflow_dispatch'][1:]
+            self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1'), rows[1])
+            rows.pop(1)
             self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'wip/land-1')['id'], 1)
             # Main's ordinary diagnostic Selected dispatch is not a stable run,
             # and must not hide an existing queued or failed stable qualification.
-            requested_branch = 'main'
-            rows = {'push': [], 'workflow_dispatch': [
+            rows = [
                 dict(row(10, 'workflow_dispatch', branch='main'), status='queued',
                      display_title='Stable qualification from base ' + other),
-                dict(row(11, 'workflow_dispatch', branch='main'), display_title='Selected checks')]}
+                dict(row(11, 'workflow_dispatch', branch='main'), display_title='Selected checks')]
             self.assertEqual(auto_land.latest('check.yml', sha, 'main')['id'], 10)
             self.assertEqual(auto_land.latest(auto_land.UPGRADE, sha, 'main')['id'], 11)
-            rows['workflow_dispatch'].pop(0)
+            rows.pop(0)
             self.assertIsNone(auto_land.latest('check.yml', sha, 'main'))
+
+    def test_qualification_discovers_all_pages_and_holds_dispatch_on_lookup_errors(self):
+        sha, base = 'a' * 40, 'b' * 40
+        existing = dict(id=2, event='workflow_dispatch', head_sha=sha, head_branch='main',
+                        head_repository=dict(full_name='o/r'), status='queued', conclusion=None,
+                        display_title='Stable qualification from base ' + base)
+        unrelated = dict(existing, id=3, head_sha=base)
+        pages = [dict(workflow_runs=[unrelated]), dict(workflow_runs=[existing])]
+        response = json.dumps(pages)
+        failure = None
+        failing_workflow = 'check.yml'
+        dispatches = []
+
+        def gh(*args):
+            if args[0] == 'workflow':
+                dispatches.append(args[2])
+                return ''
+            self.assertEqual(args[0], 'api')
+            self.assertIn('--paginate', args)
+            self.assertIn('--slurp', args)
+            name = args[1].split('/workflows/', 1)[1].split('/runs', 1)[0]
+            self.assertEqual(args[1], f'repos/o/r/actions/workflows/{name}/runs?per_page=100')
+            if name == failing_workflow:
+                if failure:
+                    raise failure
+                return response
+            return json.dumps(pages)
+
+        def git(*args):
+            if args[0] == 'fetch':
+                return ''
+            self.assertEqual(args[0], 'rev-parse')
+            return sha if args[1] == 'origin/main' else base
+
+        with mock.patch.dict(os.environ, GITHUB_REPOSITORY='o/r'), \
+                mock.patch.object(auto_land, 'gh', gh), mock.patch.object(auto_land, 'git', git), \
+                mock.patch.object(auto_land, 'contains', return_value=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # A matching run on a later page is never absence, regardless of outcome.
+            for status, conclusion in (('queued', None), ('in_progress', None),
+                                       ('completed', 'cancelled'), ('completed', 'failure'),
+                                       ('completed', 'skipped')):
+                existing.update(status=status, conclusion=conclusion)
+                response = json.dumps(pages)
+                auto_land.qualify_main()
+                self.assertEqual(dispatches, [])
+            # The highest matching ID wins even if a later page has a newer match.
+            pages[0]['workflow_runs'].append(dict(existing, id=1))
+            response = json.dumps(pages)
+            self.assertEqual(auto_land.latest('check.yml', sha, 'main')['id'], 2)
+            # Only complete, valid history with no exact match permits submission.
+            for failing_workflow in ('check.yml', auto_land.UPGRADE):
+                for absent in ([dict(workflow_runs=[unrelated]), dict(workflow_runs=[])],
+                               [dict(workflow_runs=[])]):
+                    response = json.dumps(absent)
+                    auto_land.qualify_main()
+                    self.assertEqual(dispatches, [failing_workflow])
+                    dispatches.clear()
+                # Initial API failures and failures after receiving a page both propagate.
+                for partial in ('', json.dumps(pages[:1])):
+                    failure = subprocess.CalledProcessError(1, ['gh', 'api'], output=partial,
+                                                            stderr='injected pagination failure')
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        auto_land.qualify_main()
+                    self.assertEqual(dispatches, [])
+                failure = None
+                for malformed in ('not JSON', '{}', '[]', '[{}]', '[{"workflow_runs": null}]',
+                                  '[{"workflow_runs": [null]}]',
+                                  json.dumps([dict(workflow_runs=[dict(existing, event=None)])]),
+                                  json.dumps([dict(workflow_runs=[dict(existing, id='2')])]),
+                                  json.dumps([dict(workflow_runs=[dict(existing, head_repository=None)])]),
+                                  json.dumps([dict(workflow_runs=[dict(existing, display_title=None)])]),
+                                  json.dumps([*pages, {}])):
+                    response = malformed
+                    with self.assertRaises(ValueError):
+                        auto_land.qualify_main()
+                    self.assertEqual(dispatches, [])
 
     def test_main_and_stable_advance_independently_on_exact_sha_evidence(self):
         with tempfile.TemporaryDirectory() as scratch, contextlib.chdir(scratch):
