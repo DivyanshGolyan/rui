@@ -110,7 +110,7 @@ PY
 
 run_case() {
     case "$group:$1" in
-        execution:callers|callers:execution|callers:isolated) return ;;
+        execution:callers|callers:execution|callers:isolated) return 0 ;;
     esac
     name=$2
     case_group=$1
