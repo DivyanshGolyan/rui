@@ -1850,7 +1850,8 @@ pub const CommandObservation = struct {
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
-        if (self.target == null or self.target.?.len == 0) return error.InvalidObservation;
+        if (self.target == null or (self.target.?.len == 0 and
+            (self.status != .rejected or kind != .configure))) return error.InvalidObservation;
         if ((self.status == .rejected) != (self.code != null)) return error.InvalidObservation;
         if (self.code) |code| if (code.len == 0) return error.InvalidObservation;
         const accepted = self.status == .accepted;
@@ -5316,6 +5317,20 @@ test "keyed observation validates all five operation shapes and binding" {
         try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
         // Missing operation-specific metadata must not turn into confirmation.
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
+        const empty = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ case[0] ++ "\",\"target\":\"\",\"status\":\"";
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "accepted\"" ++ case[1] ++ "}}" }, "k"));
+        if (!std.mem.eql(u8, case[0], "configure"))
+            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "rejected\",\"code\":\"invalid_session_reference\"" ++ case[2] ++ "}}" }, "k"));
+    }
+    const creation = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"configure\",\"status\":\"rejected\",\"code\":\"";
+    inline for (.{ "invalid_workspace", "model_capability_unavailable" }) |code| {
+        const body = creation ++ code ++ "\",\"target\":\"\"}}";
+        const rejected = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
+        try std.testing.expectEqual(.rejected, rejected.status);
+        try std.testing.expectEqualStrings("", rejected.target.?.slice());
+        try std.testing.expectEqualStrings(code, rejected.failureCode().?);
+        inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
+            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ code ++ "\"" ++ target ++ "}}" }, "k"));
     }
     const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"1\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
     const address = try MessageAddress.init("/store", "k7m2qx", "k");

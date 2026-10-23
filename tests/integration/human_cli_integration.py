@@ -2830,6 +2830,25 @@ def saved_capture_cases(state, store, workspace):
     preferences.write_text(f"version=1\nstore={state / 'missing-capture-store'}\n")
     assert json.loads(run(home, "request", "recover", handle))["answer"]["replayed"] is True
 
+    # Rejected creation has no allocated Session. It remains inspectable and
+    # recoverable, without hiding another Session's valid recovery handles.
+    sessions_before = run(home, "session", "list", "--store", store, "--all")
+    rejected = admit(home, "session", "configure", "--store", store,
+        "--workspace", state / "missing-workspace", "--provider", "codex", "--model", "gpt-6-sol", expect=1)
+    rejected_handle = rejected["request"]
+    rejected_answer = rejected["admission"]["answer"]
+    assert rejected_answer == {"status": "rejected", "replayed": False,
+        "session": "", "code": "invalid_workspace"}, rejected
+    rejected_record = records / f"{rejected_handle}.json"
+    rejected_bytes = rejected_record.read_bytes()
+    observed = json.loads(run(home, "request", "inspect", rejected_handle))["observation"]
+    assert observed == {"status": "rejected", "kind": "configure",
+        "target": "", "code": "invalid_workspace"}, observed
+    recovered = json.loads(run(home, "request", "recover", rejected_handle, success=False))
+    assert recovered["answer"] == {**rejected_answer, "replayed": True}, recovered
+    assert rejected_record.read_bytes() == rejected_bytes
+    assert run(home, "session", "list", "--store", store, "--all") == sessions_before
+
     # Later capture faults update that same allocated Session, so /requests
     # must retain all of its recoverable configuration handles together.
     args += ["--session", session]
@@ -2894,7 +2913,7 @@ int fsync(int fd) {
         read_terminal(master, "› ")
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
         assert handle in listing and failed_notice in listing and f"{stopped} (session_stop)" in listing, listing
-        assert invalid not in listing, listing
+        assert invalid not in listing and rejected_handle not in listing, listing
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
