@@ -165,7 +165,10 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
     self.overflow_height = if (!input.selected and input.total_calls > self.used) heading_height else 0;
     self.navigation_height = heading_height - self.overflow_height;
     const end: u16 = self.navigation_height + @as(u16, @intCast(self.document_rows));
-    const spacer = @intFromBool(self.document_rows != 0 and end + self.status_height + call_rows + self.overflow_height + self.draft_height < input.height);
+    // A trailing blank document line already separates content and footer.
+    const last = document.bottom(layout, 1).offset;
+    const blank = std.mem.trim(u8, document.text()[last..document.lineEnd(last)], " \t").len == 0;
+    const spacer = @intFromBool(self.document_rows != 0 and !blank and end + self.status_height + call_rows + self.overflow_height + self.draft_height < input.height);
     self.status_row = end + spacer;
     self.draft_top = self.status_row + self.status_height + call_rows + self.overflow_height;
     self.caret_row = self.draft_top + (caret.row - self.draft_first);
@@ -195,6 +198,41 @@ test "compact frame keeps exact-fit transcript and multiline caret without botto
     try frame.plan(&document, input);
     try std.testing.expectEqual(Position{ .offset = 4 }, frame.first);
     try std.testing.expectEqual(@as(u16, 23), frame.draft_top);
+}
+
+test "a transcript's final blank row already supplies the prompt spacer" {
+    var document: Viewport.Document = .{};
+    var frame: Self = undefined;
+    var input: Input = .{ .width = 80, .height = 24, .draft = "next\nline", .cursor = 9, .status = "", .approval = false, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
+    for ([_][]const u8{ "Done.", "Done.\n", "Done.\n\n", "Done.\n  \n", "Done.\n  " }) |text| {
+        document.clear();
+        try document.append(text);
+        for ([_]bool{ false, true }) |selected| {
+            input.selected = selected;
+            for ([_]u16{ 24, 8 }) |height| {
+                input.height = height;
+                try frame.plan(&document, input);
+                const heading: u16 = @intFromBool(selected);
+                try std.testing.expectEqual(Position{}, frame.first);
+                try std.testing.expectEqual(@as(u16, 2) + heading, frame.draft_top);
+                try std.testing.expectEqual(frame.draft_top + frame.draft_height - 1, frame.caret_row);
+            }
+        }
+    }
+    // A nonempty footer still needs separation; a blank in the document is
+    // already that separation, whether the footer has status or tool rows.
+    input.height = 24;
+    input.selected = false;
+    input.status = "Working…";
+    input.calls = &.{"• Inspect layout"};
+    input.total_calls = 1;
+    for ([_][]const u8{ "Done.\n", "Done.\n\n" }) |text| {
+        document.clear();
+        try document.append(text);
+        try frame.plan(&document, input);
+        try std.testing.expectEqual(@as(u16, 2), frame.status_row);
+        try std.testing.expectEqual(@as(u16, 4), frame.draft_top);
+    }
 }
 
 test "an exactly filled draft row puts the caret on the next row" {
