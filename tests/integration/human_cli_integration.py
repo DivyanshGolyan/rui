@@ -1946,7 +1946,7 @@ def persistent_input_cases():
 
 
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
-                               lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False):
+                               lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False, stdin=None):
     """Fresh inline choices retain draft custody and exact canonical targets."""
     import canonical_failure_integration as canonical
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-persistent-permission."))
@@ -1961,8 +1961,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         command = f"printf '%9000s' inspection-only-output; printf unsafe >> effect-count; exit {exit_code}"
     if timed_out:
         command = "printf inspection-only-output; printf unsafe >> effect-count; sleep 1"
+    if stdin is not None:
+        command = "cat > stdin-effect; " + command
     timeout_ms = 100 if timed_out else 30000
-    arguments = json.dumps({"cmd": command, "description": description, "timeout_ms": timeout_ms})
+    arguments = json.dumps({"cmd": command, "stdin": stdin, "description": description, "timeout_ms": timeout_ms})
     calls = [("bash", "persistent-call-id", arguments)]
     second_command = "printf distinct >> second-effect"
     if stale_target:
@@ -2030,6 +2032,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert_permission_workspace(shown, state, 100)
         assert shown.count(f"Time limit: {timeout_ms} ms") == 1, shown
         assert shown.count(json.loads(arguments)["cmd"]) == 1, shown
+        if stdin is not None:
+            assert "Standard input (literal; EOF after data):" in shown, shown
+            assert all(line in shown for line in stdin.splitlines()), shown
+        else:
+            assert "Standard input" not in shown, shown
         assert all(noise not in transcript for noise in ("You:", "Assistant:", "Rui:", "persistent-call-id")), transcript
         assert set(records.glob("*.json")) == before_choice, "queued chat created a record"
         assert not (state / "effect-count").exists(), "queued chat authorized an effect"
@@ -2176,6 +2183,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
         effect = state / "effect-count"
         assert effect.read_text() == "unsafe" if decision == "allow-action" else not effect.exists()
+        if stdin is not None:
+            input_effect = state / "stdin-effect"
+            assert input_effect.read_bytes() == stdin.encode() if decision == "allow-action" else not input_effect.exists()
         if "› next cafXaé!" not in settled:
             read_terminal(master, "› next cafXaé!")
         proxy.route = "/v1/message"
@@ -5031,8 +5041,8 @@ def main(selected="all"):
         persistent_pending_case()
         persistent_input_cases()
     if selected in ("all", "persistent-permission"):
-        persistent_permission_case()
-        persistent_permission_case("allow-action")
+        persistent_permission_case(stdin="`literal` $(data) 'single' \"double\"\nsecond line\n")
+        persistent_permission_case("allow-action", stdin="`literal` $(data) 'single' \"double\"\nsecond line\n")
         persistent_permission_case("allow-action", exit_code=7)
         persistent_permission_case("allow-action", signal_failure=True)
         persistent_permission_case("allow-action", signal_failure=True, timed_out=True)

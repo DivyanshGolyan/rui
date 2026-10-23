@@ -119,16 +119,16 @@ static int make_pipe(int fds[2]) {
 #endif
 }
 
-/* Launch Bash as the leader of a new process group with /dev/null stdin and
-   piped stdout/stderr. The child starts with an empty signal mask and every
+/* Launch Bash as the leader of a new process group with /dev/null stdin or
+   a supplied read-only file, and piped stdout/stderr. The child starts with an empty signal mask and every
    signal at its default action, whatever the Host thread blocked or the Host
    inherited as ignored; caught handlers never survive exec anyway. /dev/null
    is opened by the spawn itself, so the Host keeps no inheritable descriptor.
    Other descriptors keep their own close-on-exec flags. A path without '/'
    is searched on the Host's PATH. Returns 0 or errno; on success the parent
-   owns both read ends, close-on-exec. */
+   owns both read ends, close-on-exec. The input descriptor remains borrowed. */
 int rui_bash_spawn(const char *path, char *const argv[], char *const envp[], const char *cwd,
-                   pid_t *pid, int *stdout_read, int *stderr_read) {
+                   pid_t *pid, int *stdout_read, int *stderr_read, int stdin_read) {
     int out[2], err_pipe[2];
     int result = make_pipe(out);
     if (result != 0) return result;
@@ -147,7 +147,9 @@ int rui_bash_spawn(const char *path, char *const argv[], char *const envp[], con
     result = posix_spawn_file_actions_init(&actions);
     if (result == 0) have_actions = 1;
     if (result == 0) result = posix_spawn_file_actions_addchdir_np(&actions, cwd);
-    if (result == 0) result = posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDWR, 0);
+    if (result == 0) result = stdin_read < 0
+        ? posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDWR, 0)
+        : posix_spawn_file_actions_adddup2(&actions, stdin_read, 0);
     if (result == 0) result = posix_spawn_file_actions_adddup2(&actions, out[1], 1);
     if (result == 0) result = posix_spawn_file_actions_adddup2(&actions, err_pipe[1], 2);
     if (result == 0) result = posix_spawnattr_init(&attributes);

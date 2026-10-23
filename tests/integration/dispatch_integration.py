@@ -3083,12 +3083,16 @@ def main(mode="all", correlation_case="all"):
                 {
                     "type": "function",
                     "name": "bash",
-                    "description": "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.",
+                    "description": "Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.",
                     "strict": True,
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "cmd": {"type": "string"},
+                            "stdin": {
+                                "type": ["string", "null"],
+                                "description": "Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.",
+                            },
                             "description": {
                                 "type": "string",
                                 "description": "A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests",
@@ -3100,7 +3104,7 @@ def main(mode="all", correlation_case="all"):
                                 "maximum": 9223372036854775807,
                             },
                         },
-                        "required": ["cmd", "description", "timeout_ms"],
+                        "required": ["cmd", "stdin", "description", "timeout_ms"],
                         "additionalProperties": False,
                     },
                 },

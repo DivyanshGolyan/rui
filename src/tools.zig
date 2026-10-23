@@ -2,15 +2,17 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 
 pub const bash_definition_json =
-    "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed.\",\"strict\":true," ++
+    "{\"type\":\"function\",\"name\":\"bash\",\"description\":\"Run Bash on the local machine. Each call starts in the Session Workspace; relative paths resolve there, while absolute paths can access outside it. Start filesystem exploration there and broaden searches only as needed. Put text payloads in stdin, never inside cmd.\",\"strict\":true," ++
     "\"parameters\":{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\"}," ++
+    "\"stdin\":{\"type\":[\"string\",\"null\"],\"description\":\"Stdin is empty unless set. Supply literal UTF-8 text, at most 122880 decoded bytes, read exactly then EOF. Missing or null uses /dev/null.\"}," ++
     "\"description\":{\"type\":\"string\",\"description\":\"A short human-facing activity label: base verb + concrete target + useful scope, in sentence case with no trailing punctuation. Describe the intended work, not its status, success or safety. Required, nonblank, single-line valid UTF-8, at most 100 decoded UTF-8 bytes. Aim for 40–60 characters; use more only for useful scope. Example: Run parser regression tests\"}," ++
     "\"timeout_ms\":{\"type\":[\"integer\",\"null\"],\"description\":\"Use null for the Host default unless the work needs a different budget. A positive integer replaces it with a total elapsed execution budget in milliseconds from process start; output does not reset it. Allow enough time for searches, builds and tests. Expiry ends the call through process-group termination, not a background handle; partial effects may remain.\",\"minimum\":1,\"maximum\":9223372036854775807}}," ++
-    "\"required\":[\"cmd\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
+    "\"required\":[\"cmd\",\"stdin\",\"description\",\"timeout_ms\"],\"additionalProperties\":false}}";
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
     description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
+    stdin_present: bool = false,
 };
 
 pub const Tool = @typeInfo(@FieldType(protocol.ToolsField, "values")).array.child;
@@ -81,22 +83,28 @@ test "tool classification uses frozen availability before argument validity" {
 
 pub fn validBashArguments(source: anytype) !bool {
     var discard: Discard = .{};
-    return try parseBashArguments(source, &discard) != null;
+    return try parseBashArguments(source, &discard, &discard) != null;
 }
 
 pub fn inspectBashArguments(source: anytype) !?BashArguments {
     var discard: Discard = .{};
-    return parseBashArguments(source, &discard);
+    return parseBashArguments(source, &discard, &discard);
 }
 
 pub fn writeBashCommand(source: anytype, writer: anytype) !bool {
-    return try parseBashArguments(source, writer) != null;
+    var discard: Discard = .{};
+    return try parseBashArguments(source, writer, &discard) != null;
 }
 
-fn parseBashArguments(source: anytype, writer: anytype) !?BashArguments {
+pub fn writeBashStdin(source: anytype, writer: anytype) !bool {
+    var discard: Discard = .{};
+    return try parseBashArguments(source, &discard, writer) != null;
+}
+
+fn parseBashArguments(source: anytype, writer: anytype, input: anytype) !?BashArguments {
     var parser: BashParser = .{};
     while (true) {
-        const progress = parser.advance(source, writer, 4096) catch |err| {
+        const progress = parser.advance(source, writer, input, 4096) catch |err| {
             if (isBashDescriptorError(err)) return null;
             return err;
         };
@@ -131,8 +139,8 @@ pub const BashParser = struct {
         after_value,
         after_object,
     };
-    const StringTarget = enum { key, command, description };
-    const ValueTarget = enum { none, command, timeout, description };
+    const StringTarget = enum { key, command, description, stdin };
+    const ValueTarget = enum { none, command, timeout, description, stdin };
 
     phase: Phase = .object_start,
     string_target: StringTarget = .key,
@@ -142,13 +150,15 @@ pub const BashParser = struct {
     has_command: bool = false,
     has_timeout: bool = false,
     has_description: bool = false,
+    has_stdin: bool = false,
     timeout_value: u64 = 0,
     null_index: u3 = 0,
     unicode_value: u21 = 0,
     unicode_digits: u3 = 0,
     high_surrogate: u21 = 0,
+    stdin_utf8: protocol.Utf8State = .{},
 
-    pub fn advance(self: *BashParser, source: anytype, writer: anytype, maximum_bytes: usize) !BashParseProgress {
+    pub fn advance(self: *BashParser, source: anytype, writer: anytype, input: anytype, maximum_bytes: usize) !BashParseProgress {
         std.debug.assert(maximum_bytes != 0);
         var consumed: usize = 0;
         while (consumed < maximum_bytes) {
@@ -184,12 +194,20 @@ pub const BashParser = struct {
                                     .timeout
                                 else if (self.key.eql("description"))
                                     .description
+                                else if (self.key.eql("stdin"))
+                                    .stdin
                                 else
                                     return .invalid;
                                 self.phase = .colon;
                             },
                             .command => {
                                 self.has_command = true;
+                                self.phase = .after_value;
+                            },
+                            .stdin => {
+                                if (!self.stdin_utf8.complete()) return .invalid;
+                                self.has_stdin = true;
+                                self.result.stdin_present = true;
                                 self.phase = .after_value;
                             },
                             .description => {
@@ -203,7 +221,7 @@ pub const BashParser = struct {
                     } else if (next == '\\') {
                         self.phase = .escape;
                     } else {
-                        try self.emitString(writer, &.{next});
+                        try self.emitString(writer, input, &.{next});
                     }
                 },
                 .escape => {
@@ -220,7 +238,7 @@ pub const BashParser = struct {
                         else => return .invalid,
                     };
                     if (decoded) |byte| {
-                        try self.emitString(writer, &.{byte});
+                        try self.emitString(writer, input, &.{byte});
                         self.phase = .string;
                     } else {
                         self.unicode_value = 0;
@@ -237,7 +255,7 @@ pub const BashParser = struct {
                             self.phase = .surrogate_backslash;
                         } else {
                             if (self.unicode_value >= 0xdc00 and self.unicode_value <= 0xdfff) return .invalid;
-                            if (!(try self.emitScalar(writer, self.unicode_value))) return .invalid;
+                            if (!(try self.emitScalar(writer, input, self.unicode_value))) return .invalid;
                             self.phase = .string;
                         }
                     }
@@ -259,7 +277,7 @@ pub const BashParser = struct {
                         if (self.unicode_value < 0xdc00 or self.unicode_value > 0xdfff) return .invalid;
                         const scalar = 0x10000 + ((self.high_surrogate - 0xd800) << 10) +
                             (self.unicode_value - 0xdc00);
-                        if (!(try self.emitScalar(writer, scalar))) return .invalid;
+                        if (!(try self.emitScalar(writer, input, scalar))) return .invalid;
                         self.phase = .string;
                     }
                 },
@@ -281,6 +299,16 @@ pub const BashParser = struct {
                             if (self.has_description or next != '"') return .invalid;
                             self.string_target = .description;
                             self.phase = .string;
+                        },
+                        .stdin => {
+                            if (self.has_stdin) return .invalid;
+                            if (next == '"') {
+                                self.string_target = .stdin;
+                                self.phase = .string;
+                            } else if (next == 'n') {
+                                self.null_index = 1;
+                                self.phase = .timeout_null;
+                            } else return .invalid;
                         },
                         .timeout => {
                             if (self.has_timeout) return .invalid;
@@ -304,8 +332,12 @@ pub const BashParser = struct {
                     if (next != "null"[self.null_index]) return .invalid;
                     self.null_index += 1;
                     if (self.null_index == "null".len) {
-                        self.result.timeout_ms = null;
-                        self.has_timeout = true;
+                        if (self.value_target == .stdin) {
+                            self.has_stdin = true;
+                        } else {
+                            self.result.timeout_ms = null;
+                            self.has_timeout = true;
+                        }
                         self.phase = .after_value;
                     }
                 },
@@ -328,10 +360,14 @@ pub const BashParser = struct {
         return .{ .complete = self.result };
     }
 
-    fn emitString(self: *BashParser, writer: anytype, bytes: []const u8) !void {
+    fn emitString(self: *BashParser, writer: anytype, input: anytype, bytes: []const u8) !void {
         switch (self.string_target) {
             .key => try emit(&self.key, null, bytes),
             .command => try emit(null, writer, bytes),
+            .stdin => {
+                try self.stdin_utf8.feed(bytes);
+                try input.writeAll(bytes);
+            },
             .description => {
                 const label = &self.result.description;
                 if (bytes.len > label.bytes.len - label.len) return error.InvalidDescriptorShape;
@@ -341,11 +377,11 @@ pub const BashParser = struct {
         }
     }
 
-    fn emitScalar(self: *BashParser, writer: anytype, scalar: u21) !bool {
-        if (scalar == 0) return false;
+    fn emitScalar(self: *BashParser, writer: anytype, input: anytype, scalar: u21) !bool {
+        if (scalar == 0 and self.string_target != .stdin) return false;
         var encoded: [4]u8 = undefined;
         const count = std.unicode.utf8Encode(scalar, &encoded) catch return false;
-        try self.emitString(writer, encoded[0..count]);
+        try self.emitString(writer, input, encoded[0..count]);
         return true;
     }
 };
@@ -386,7 +422,7 @@ const Discard = struct {
 
 pub fn isBashDescriptorError(err: anyerror) bool {
     return switch (err) {
-        error.InvalidDescriptorShape => true,
+        error.InvalidDescriptorShape, error.InvalidUtf8 => true,
         else => false,
     };
 }
@@ -426,8 +462,9 @@ test "resumable Bash parser preserves state across every byte boundary" {
         .bytes = " \n{\"description\":\"Read \\u20ac\\ud83d\\ude00\",\"timeout_ms\":123,\"cmd\":\"a\\n\\u20ac\\ud83d\\ude00\\\\z\"}\t",
     };
     var writer: TestWriter = .{};
+    var input: TestWriter = .{};
     var parser: BashParser = .{};
-    while (true) switch (try parser.advance(&source, &writer, 1)) {
+    while (true) switch (try parser.advance(&source, &writer, &input, 1)) {
         .pending => {},
         .invalid => return error.TestUnexpectedInvalidDescriptor,
         .complete => |arguments| {
@@ -444,16 +481,53 @@ test "resumable Bash parser rejects malformed split values" {
         "{\"description\":\"Run command\",\"cmd\":\"\\ud83dX\",\"timeout_ms\":null}",
         "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":9223372036854775808}",
         "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":null,\"cmd\":\"again\"}",
+        "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":null,\"stdin\":null,\"stdin\":\"again\"}",
+        "{\"description\":\"Run command\",\"cmd\":\"ok\",\"timeout_ms\":null,\"stdin\":42}",
     };
     for (descriptors) |descriptor| {
         var source = TestSource{ .bytes = descriptor };
         var writer: TestWriter = .{};
+        var input: TestWriter = .{};
         var parser: BashParser = .{};
-        while (true) switch (try parser.advance(&source, &writer, 1)) {
+        while (true) switch (try parser.advance(&source, &writer, &input, 1)) {
             .pending => {},
             .invalid => break,
             .complete => return error.TestUnexpectedValidDescriptor,
         };
+    }
+}
+
+test "Bash stdin stays distinct from command across every decoded byte" {
+    const cases = [_]struct { field: []const u8, present: bool, expected: []const u8 }{
+        .{ .field = "", .present = false, .expected = "" },
+        .{ .field = ",\"stdin\":null", .present = false, .expected = "" },
+        .{ .field = ",\"stdin\":\"\"", .present = true, .expected = "" },
+        .{ .field = ",\"stdin\":\"`x` $(y) 'z' \\\"q\\\"\\n\\u0000\\u20ac\\ud83d\\ude00\"", .present = true, .expected = "`x` $(y) 'z' \"q\"\n\x00€😀" },
+    };
+    var buffer: [512]u8 = undefined;
+    for (cases) |case| {
+        var source: TestSource = .{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"Read input\",\"cmd\":\"cat\",\"timeout_ms\":null{s}}}", .{case.field}) };
+        var command: TestWriter = .{};
+        var input: TestWriter = .{};
+        var parser: BashParser = .{};
+        while (true) switch (try parser.advance(&source, &command, &input, 1)) {
+            .pending => {},
+            .invalid => return error.TestUnexpectedInvalidDescriptor,
+            .complete => |arguments| {
+                try std.testing.expectEqualStrings("cat", command.slice());
+                try std.testing.expectEqual(case.present, arguments.stdin_present);
+                try std.testing.expectEqualStrings(case.expected, input.slice());
+                break;
+            },
+        };
+    }
+}
+
+test "Bash stdin rejects invalid UTF-8 without coercion" {
+    for ([_][]const u8{ "\xff", "\xc0\xaf", "\xed\xa0\x80", "\xf4\x90\x80\x80", "\xe2\x82", "\x80", "\\ud800" }) |invalid| {
+        var buffer: [256]u8 = undefined;
+        var source = TestSource{ .bytes = try std.fmt.bufPrint(&buffer, "{{\"description\":\"Read input\",\"cmd\":\"cat\",\"stdin\":\"{s}\",\"timeout_ms\":null}}", .{invalid}) };
+        try std.testing.expect(!try validBashArguments(&source));
     }
 }
 

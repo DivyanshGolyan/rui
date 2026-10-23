@@ -888,6 +888,14 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
     if (!try tools.writeBashCommand(&source, &escaped)) return error.InvalidBashArguments;
     try escaped.finish();
     try command.finish();
+    if (arguments.stdin_present) {
+        try reader.seekTo(0);
+        try indented.feed("\nStandard input (literal; EOF after data):\n");
+        var input: Escaped(@TypeOf(&command)) = .{ .sink = &command, .text = .{ .mode = .multiline } };
+        if (!try tools.writeBashStdin(&source, &input)) return error.InvalidBashArguments;
+        try input.finish();
+        try command.finish();
+    }
     try indented.feed("\n");
     try indented.finish();
     var summary: ActionSummary = .{ .description = arguments.description, .timeout_ms = arguments.timeout_ms };

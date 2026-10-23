@@ -178,7 +178,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Model self-address, explicit parent address and report-back instructions, Bash send with its Host-recorded sender (`RUI_ADDRESS`, leading sender part and rule, capture recovery), parent waits for the saved incoming report without request polling, result or peer Conversation reads; one silent-peer diagnostic inspection | `peer_integration.py`, `human_cli_integration.py` | Scripted provider proves workflow and wording coverage, not future model compliance. Fixture-observer Session snapshots synchronize holds and audit saved outcomes, not agent waiting. Native Linux x86-64 and macOS arm64. Compaction, replacement Attempt, restart and maximum-length or NUL addresses: none located |
-| Peer self-send refused before explicit or generated capture and content reads, with no admission; canonical Store alias and hex Session selector; parent receives literal backticks and `$()` byte-exact through quoted-heredoc stdin and file sends without shell evaluation or login | `peer_integration.py` | No sender is inferred for human or script sends; original-capture recovery is unchanged |
+| Peer self-send refused before explicit or generated capture and content reads, with no admission; canonical Store alias and hex Session selector; parent receives literal backticks, `$()` and quotes byte-exact through Bash tool stdin and file sends without shell evaluation or login | `peer_integration.py` | No sender is inferred for human or script sends; original-capture recovery is unchanged |
 | 5 s reply inactivity | `'renews mutation inactivity'` | Intake independence, held credit, peer burst and native stall: none located |
 | Peer selection progress and Host stop | `'skipped continuation'`, `host-stop-integration` | Peer input: none located. Iterated stops are not group cancellation |
 
@@ -242,6 +242,10 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
+| Optional literal stdin: exact 122,880-byte decoded boundary, strict UTF-8 without coercion, Unicode/NUL/trailing bytes, large stdout and stderr before reading, EOF, early close and unread-input timeout; missing/null retain `/dev/null` | `bash_integration.py`, `'Bash stdin'`, `'resumable Bash parser'` | Private unlinked read-only offset-zero file, charged to shared scratch; no stdin pipe |
+| Exact Action input through pending restart, continuation and uncertain-attempt recovery without replay | `bash_integration.py`, `bash_recovery_integration.py` | Existing Action JSON format; no Store-format change |
+| Approval renders supplied literal input and denial launches nothing | `human_cli_integration.py persistent-permission` | Terminal-escaped preview; explicit nullable schema and independent provider/request goldens remain exact |
+| Empty `session send -` from empty/null tool stdin refuses without a published capture or Message admission; stop and infrastructure shutdown retire charged input with the original group | `bash_integration.py`, `bash_lifecycle_integration.py` | No change to peer routing policy |
 | Expired Bash budget: exact budget, partial output and retry guidance in the saved result | `bash_owner_integration.py` | Successful commands omit timeout guidance |
 | Stop during descriptor decoding launches nothing | none located | None |
 | Original group does not retire naturally | `bash_lifecycle_integration.py` | Retirement facts precede reuse |

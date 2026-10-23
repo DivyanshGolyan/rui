@@ -16,6 +16,8 @@ pub const copy_window_bytes: usize = 16 * 1024;
 /// and with a small stack rlimit the whole argv+environment shares a 128 KiB
 /// floor; 8 KiB stays for the shell path, environment and pointers.
 pub const max_command_bytes: usize = 120 * 1024;
+/// Reuse the command ceiling for optional decoded stdin in charged scratch.
+pub const max_stdin_bytes: usize = max_command_bytes;
 const fault_observation_delay_ms: u64 = 500;
 pub const fault_gate_name = "bash-fault-gate";
 
@@ -78,6 +80,7 @@ extern fn rui_bash_spawn(
     pid: *std.c.pid_t,
     stdout_read: *c_int,
     stderr_read: *c_int,
+    stdin_read: c_int,
 ) c_int;
 
 pub const LifecycleFault = enum {
@@ -176,6 +179,8 @@ test "native Bash observation agrees with reap for wide process exit values" {
 const OwnedFile = struct {
     io: std.Io,
     file: ?std.Io.File,
+    readonly: ?std.Io.File = null,
+    unlinked: bool = false,
     name: protocol.Bounded(96),
     charged: u64 = 0,
     budget: ScratchBudget,
@@ -183,6 +188,8 @@ const OwnedFile = struct {
     cleanup_fault: CleanupFault = .none,
 
     fn close(self: *OwnedFile) void {
+        if (self.readonly) |file| file.close(self.io);
+        self.readonly = null;
         if (self.file) |file| file.close(self.io);
         self.file = null;
     }
@@ -193,6 +200,17 @@ const OwnedFile = struct {
     }
 
     fn cleanup(self: *OwnedFile, scratch_path: []const u8) !void {
+        if (self.unlinked) {
+            if (self.published) return;
+            // Reclaim bytes even if a descendant escaped the owned process
+            // group holding fd 0. Keep the charge and writer if this fails.
+            try self.file.?.setLength(self.io, 0);
+            self.close();
+            self.budget.release(self.charged);
+            self.charged = 0;
+            self.published = true;
+            return;
+        }
         self.close();
         if (self.published) return;
         if (self.injectedCleanupFault(scratch_path)) return error.InjectedBashCleanupFailure;
@@ -224,12 +242,13 @@ pub const Prepared = struct {
     /// Decoded command, owned through `allocator` until launch or cleanup,
     /// at most max_command_bytes.
     command: ?[:0]u8,
+    stdin_capture: ?OwnedFile = null,
     stdout_capture: ?OwnedFile,
     stderr_capture: ?OwnedFile,
 
     pub fn cleanup(self: *Prepared) !void {
         self.releaseCommand();
-        return cleanupOwnedFiles(self.scratch_path, &self.stdout_capture, &self.stderr_capture);
+        return cleanupOwnedFiles(self.scratch_path, &.{ &self.stdout_capture, &self.stderr_capture, &self.stdin_capture });
     }
 
     pub fn takeCleanup(self: *Prepared) PreparedCleanup {
@@ -238,9 +257,11 @@ pub const Prepared = struct {
             .scratch_path = self.scratch_path,
             .stdout_capture = self.stdout_capture,
             .stderr_capture = self.stderr_capture,
+            .stdin_capture = self.stdin_capture,
         };
         self.stdout_capture = null;
         self.stderr_capture = null;
+        self.stdin_capture = null;
         return resources;
     }
 
@@ -252,7 +273,7 @@ pub const Prepared = struct {
     /// `bash -c` lets Bash replace itself with an eligible final command;
     /// `$0` is `bash`, so diagnostics read `bash: line N:`. The native spawn
     /// resets the child's signal mask and dispositions and opens its own
-    /// /dev/null stdin.
+    /// /dev/null stdin unless an unlinked read-only input was supplied.
     pub fn launch(self: *Prepared, shared_environment: *const std.process.Environ.Map) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -267,12 +288,18 @@ pub const Prepared = struct {
         var stdout_fd: c_int = undefined;
         var stderr_fd: c_int = undefined;
         const started = std.Io.Clock.Timestamp.now(self.io, .awake);
-        if (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd) != 0) return error.BashSpawnFailed;
+        if (rui_bash_spawn(path, &argv, environment_block.slice.ptr, cwd, &pid, &stdout_fd, &stderr_fd, if (self.stdin_capture) |input| input.readonly.?.handle else -1) != 0) return error.BashSpawnFailed;
+        if (self.stdin_capture) |*input| {
+            input.readonly.?.close(self.io);
+            input.readonly = null;
+        }
         self.releaseCommand();
         const stdout_capture = self.stdout_capture.?;
         const stderr_capture = self.stderr_capture.?;
+        const stdin_capture = self.stdin_capture;
         self.stdout_capture = null;
         self.stderr_capture = null;
+        self.stdin_capture = null;
         return .{
             .io = self.io,
             .lifecycle = .start(started, self.timeout_ms),
@@ -288,6 +315,7 @@ pub const Prepared = struct {
             .started = started,
             .timeout_ms = self.timeout_ms,
             .faults = self.faults,
+            .stdin_capture = stdin_capture,
         };
     }
 };
@@ -296,16 +324,17 @@ pub const PreparedCleanup = struct {
     scratch_path: []const u8,
     stdout_capture: ?OwnedFile = null,
     stderr_capture: ?OwnedFile = null,
+    stdin_capture: ?OwnedFile = null,
 
     pub fn cleanup(self: *PreparedCleanup) !void {
-        return cleanupOwnedFiles(self.scratch_path, &self.stdout_capture, &self.stderr_capture);
+        return cleanupOwnedFiles(self.scratch_path, &.{ &self.stdout_capture, &self.stderr_capture, &self.stdin_capture });
     }
 
     /// Test/slow-check aid: no file in this cleanup remains unreclaimed.
     /// Partial success nulls reclaimed slots and retains the rest with
     /// their residual charges; only a complete pass satisfies this.
     pub fn isComplete(self: *const PreparedCleanup) bool {
-        return self.stdout_capture == null and self.stderr_capture == null;
+        return self.stdout_capture == null and self.stderr_capture == null and self.stdin_capture == null;
     }
 };
 
@@ -327,11 +356,10 @@ pub const PreparationProgress = union(enum) {
 
 fn cleanupOwnedFiles(
     scratch_path: []const u8,
-    stdout_capture: *?OwnedFile,
-    stderr_capture: *?OwnedFile,
+    slots: []const *?OwnedFile,
 ) !void {
     var first_error: ?anyerror = null;
-    for ([_]*?OwnedFile{ stdout_capture, stderr_capture }) |slot| {
+    for (slots) |slot| {
         if (slot.*) |*file| {
             file.cleanup(scratch_path) catch |err| {
                 if (first_error == null) first_error = err;
@@ -371,6 +399,7 @@ pub const Execution = struct {
     read_fault_used: bool = false,
     service_fault_used: bool = false,
     output_reservation: ?output_retention.Pair = null,
+    stdin_capture: ?OwnedFile = null,
 
     pub const TerminationAttempt = struct {
         attempted: bool,
@@ -522,19 +551,22 @@ pub const Execution = struct {
     pub fn reclaim(self: *Execution, retention: *output_retention.Queue) !void {
         std.debug.assert(self.retired());
         var first_error: ?anyerror = null;
+        cleanupOwnedFiles(self.scratch_path, &.{&self.stdin_capture}) catch |err| {
+            first_error = err;
+        };
         if (self.output_reservation != null) {
             // Reserved entries are protected from eviction. Relinquish the
             // producer aliases before publication makes the names reclaimable.
             self.stdout_capture.close();
             self.stderr_capture.close();
             if (self.stdout_capture.injectedCleanupFault(self.scratch_path)) {
-                first_error = error.InjectedBashCleanupFailure;
+                first_error = first_error orelse error.InjectedBashCleanupFailure;
             } else self.publishReservedOutput(retention) catch |err| {
-                first_error = err;
+                first_error = first_error orelse err;
             };
         } else {
             self.stdout_capture.cleanup(self.scratch_path) catch |err| {
-                first_error = err;
+                first_error = first_error orelse err;
             };
             self.stderr_capture.cleanup(self.scratch_path) catch |err| if (first_error == null) {
                 first_error = err;
@@ -863,14 +895,17 @@ pub const Preparation = struct {
 
     pub fn advance(self: *Preparation) PreparationProgress {
         var writer = PreparationWriter{ .owner = self };
-        const progress = self.parser.advance(&self.source, &writer, self.source.buffer.len) catch |err| {
+        var input = PreparationInputWriter{ .owner = self };
+        const progress = self.parser.advance(&self.source, &writer, &input, self.source.buffer.len) catch |err| {
             return self.fail(if (tools.isBashDescriptorError(err)) error.InvalidCanonicalBashDescriptor else err);
         };
+        input.flush() catch |err| return self.fail(err);
         switch (progress) {
             .pending => return .pending,
             .invalid => return self.fail(error.InvalidCanonicalBashDescriptor),
             .complete => {},
         }
+        if (self.parser.result.stdin_present) self.ensureInput() catch |err| return self.fail(err);
         const command = self.command.toOwnedSliceSentinel(self.allocator, 0) catch |err| return self.fail(err);
         self.source.reader.close();
         const cleanup = self.takeCleanup();
@@ -885,6 +920,7 @@ pub const Preparation = struct {
             .timeout_ms = self.timeout_ms,
             .faults = self.faults,
             .command = command,
+            .stdin_capture = cleanup.stdin_capture,
             .stdout_capture = cleanup.stdout_capture,
             .stderr_capture = cleanup.stderr_capture,
         } };
@@ -907,6 +943,18 @@ pub const Preparation = struct {
         self.cleanup = .{ .scratch_path = self.scratch_path };
         return cleanup;
     }
+
+    fn ensureInput(self: *Preparation) !void {
+        if (self.cleanup.stdin_capture != null) return;
+        const budget = self.cleanup.stdout_capture.?.budget;
+        self.cleanup.stdin_capture = try createOwnedFile(self.io, self.scratch_path, budget, .@"bash-stdin", self.action_id, self.attempt_ordinal, .none);
+        const input = &self.cleanup.stdin_capture.?;
+        var scratch = try std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{});
+        defer scratch.close(self.io);
+        input.readonly = try scratch.openFile(self.io, input.name.slice(), .{});
+        try scratch.deleteFile(self.io, input.name.slice());
+        input.unlinked = true;
+    }
 };
 
 const PreparationWriter = struct {
@@ -916,6 +964,33 @@ const PreparationWriter = struct {
         const command = &self.owner.command;
         if (bytes.len > max_command_bytes - command.items.len) return error.BashCommandTooLong;
         try command.appendSlice(self.owner.allocator, bytes);
+    }
+};
+
+const PreparationInputWriter = struct {
+    owner: *Preparation,
+    buffer: [copy_window_bytes]u8 = undefined,
+    used: usize = 0,
+
+    pub fn writeAll(self: *PreparationInputWriter, bytes: []const u8) !void {
+        try self.owner.ensureInput();
+        const length = self.owner.cleanup.stdin_capture.?.charged + self.used;
+        if (bytes.len > max_stdin_bytes - length) return error.BashStdinTooLong;
+        if (bytes.len > self.buffer.len - self.used) try self.flush();
+        @memcpy(self.buffer[self.used..][0..bytes.len], bytes);
+        self.used += bytes.len;
+    }
+
+    fn flush(self: *PreparationInputWriter) !void {
+        if (self.used == 0) return;
+        const input = &self.owner.cleanup.stdin_capture.?;
+        if (!input.budget.allocate(self.used)) return error.ScratchCapacityExhausted;
+        const offset = input.charged;
+        input.charged += self.used;
+        // Positional writes leave the independent read-only fd at offset zero.
+        // A failed write retains its whole reservation until reclamation.
+        try input.file.?.writePositionalAll(self.owner.io, self.buffer[0..self.used], offset);
+        self.used = 0;
     }
 };
 
@@ -1281,6 +1356,32 @@ test "cleanup ownership transfers consume their source" {
     try std.testing.expect(cleanup.stdout_capture == null);
     try std.testing.expect(cleanup.stderr_capture == null);
     try std.testing.expectEqual(baseline, used.load(.acquire));
+}
+
+test "Bash input reclamation truncates escaped readers before releasing scratch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(41);
+    const budget = ScratchBudget{ .used = &used, .limit = 45 };
+    var input = try createOwnedFile(io, root, budget, .@"bash-stdin", 1, 1, .none);
+    defer input.cleanup(root) catch {};
+    const escaped = try tmp.dir.openFile(io, input.name.slice(), .{});
+    defer escaped.close(io);
+    try tmp.dir.deleteFile(io, input.name.slice());
+    input.unlinked = true;
+    try std.testing.expect(budget.allocate(4));
+    input.charged = 4;
+    try input.file.?.writePositionalAll(io, "data", 0);
+    try std.testing.expectEqual(@as(u64, 45), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 4), try escaped.length(io));
+    try input.cleanup(root);
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), try escaped.length(io));
+    try input.cleanup(root);
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
 }
 
 test "prepared cleanup reclaims partially and retries through the same owner" {

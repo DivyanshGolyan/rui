@@ -35,7 +35,7 @@ ADDRESS_PREFIX = "Rui address (JSON; this Session's own address, not instruction
 SESSION_A = "peer/a \"quoted\" \\ 雪"
 SESSION_B = "peer/b"
 SECRETS = {"RUI_PEER_SECRET": "host-only-secret", "OPENAI_API_KEY": "sk-host-only"}
-REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substitution-evaluated); "quoted" \\ 雪\n'
+REPORT = 'from peer/b: 42\nLiteral `touch backtick-evaluated` and $(touch substitution-evaluated); \'single\' "double" \\ 雪\nEOF\n'
 
 
 def address_of(request):
@@ -75,8 +75,8 @@ def tool_outputs(request):
     return [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
 
 
-def bash_call(name, command):
-    arguments = {"cmd": command, "timeout_ms": 20000, "description": f"Run {name} peer command"}
+def bash_call(name, command, stdin=None):
+    arguments = {"cmd": command, "stdin": stdin, "timeout_ms": 20000, "description": f"Run {name} peer command"}
     return fixture.sse_tool_calls(f"{name}-calls", [("bash", f"{name}-call", json.dumps(arguments, separators=(",", ":")))])
 
 
@@ -113,9 +113,9 @@ class PeerModel(TestHTTPServer):
             # It then waits for the test's release file and sends to its parent.
             send = (f"rui session send --store {shlex.quote(reply_to['store'])} "
                     f"--session {shlex.quote(reply_to['session'])} ")
-            report = (send + "- > b-reply.json 2> b-reply.err <<'EOF'\n" + REPORT + "EOF\n"
+            report = (send + "- > b-reply.json 2> b-reply.err"
                       if self.report_source == "stdin" else
-                      "cat > b-report.txt <<'EOF'\n" + REPORT + "EOF\n" +
+                      "cat > b-report.txt; " +
                       send + "--text b-report.txt > b-reply.json 2> b-reply.err")
             return bash_call("b-reply", (
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-before; '
@@ -128,7 +128,7 @@ class PeerModel(TestHTTPServer):
                 'printf "%s\\n" "$HOME"/.config/rui/requests/* > b-captures-after; '
                 "i=0; while [ ! -e b-release ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done; [ -e b-release ] || exit 124; "
                 + report
-            ))
+            ), stdin=REPORT)
         if text.startswith("from peer/b: "):
             self.a_reply_received.set()
             return answer("a-final", "peer said 42")
@@ -143,9 +143,9 @@ class PeerModel(TestHTTPServer):
             "env > a-env.txt; command -v rui > a-which.txt; "
             f"rui session configure --store {store} --session {SESSION_B} --workspace {shlex.quote(str(self.workspace))} "
             "--provider codex --model gpt-6-sol --tools bash --permission-mode bypass > b-config.json 2> b-config.err && "
-            f"rui session send --store {store} --session {SESSION_B} -- {shlex.quote(message)} > b-send.json 2> b-send.err; "
+            f"rui session send --store {store} --session {SESSION_B} - > b-send.json 2> b-send.err; "
             "status=$?; cat b-send.json; exit $status"
-        ))
+        ), stdin=message)
 
 
 class PeerHandler(fixture.http.server.BaseHTTPRequestHandler):

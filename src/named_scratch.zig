@@ -8,6 +8,7 @@ pub const NumericName = enum {
     @"response-metadata",
     @"bash-stdout",
     @"bash-stderr",
+    @"bash-stdin",
     report,
 
     pub fn format(kind: NumericName, buffer: []u8, number: u64, ordinal: u64) ![]const u8 {

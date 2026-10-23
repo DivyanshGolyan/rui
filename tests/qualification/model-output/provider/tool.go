@@ -168,10 +168,11 @@ func toolCallsSSE(responseID string, calls []toolCall) string {
 	items := make([]any, len(calls))
 	for index, candidate := range calls {
 		arguments, _ := json.Marshal(struct {
-			Description string `json:"description"`
-			Cmd         string `json:"cmd"`
-			TimeoutMS   *int   `json:"timeout_ms"`
-		}{candidate.Description, candidate.Command, nil})
+			Description string  `json:"description"`
+			Cmd         string  `json:"cmd"`
+			Stdin       *string `json:"stdin"`
+			TimeoutMS   *int    `json:"timeout_ms"`
+		}{candidate.Description, candidate.Command, nil, nil})
 		item := map[string]any{"type": "function_call", "id": fmt.Sprintf("%s-item-%03d", responseID, index), "status": "completed", "name": "bash", "call_id": candidate.ID, "arguments": string(arguments)}
 		items[index] = item
 		writeSSE(&output, map[string]any{"type": "response.output_item.added", "output_index": index, "item": map[string]any{"type": "function_call", "id": item["id"]}})

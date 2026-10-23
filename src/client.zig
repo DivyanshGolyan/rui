@@ -2902,6 +2902,8 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) !C
     if (input.text) |value| {
         if (value.len > protocol.max_sqlite_content_bytes) return error.ContentTooLarge;
         try capture.writeJsonString(value);
+    } else if (std.mem.eql(u8, input.text_path, "-")) {
+        try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
     try capture.write("}}");
     return finishCapture(io, &capture, paths.store.slice(), location.key, input.session, .message);
@@ -3126,10 +3128,10 @@ const Capture = struct {
     }
 
     fn writeJsonFile(self: *Capture, path: []const u8) !void {
-        return self.writeJsonFileBounded(path, protocol.max_sqlite_content_bytes);
+        return self.writeJsonFileBounded(path, protocol.max_sqlite_content_bytes, false);
     }
 
-    fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64) !void {
+    fn writeJsonFileBounded(self: *Capture, path: []const u8, limit: u64, require_text: bool) !void {
         var file = if (std.mem.eql(u8, path, "-"))
             std.Io.File.stdin()
         else
@@ -3155,6 +3157,7 @@ const Capture = struct {
                 return self.writer.err orelse error.WriteFailed;
         }
         if (!validator.complete()) return error.InvalidUtf8;
+        if (require_text and decoded_bytes == 0) return error.EmptyMessageInput;
         try self.write("\"");
     }
 
@@ -4540,11 +4543,11 @@ test "capture bounds decoded bytes and preserves record ownership" {
     var capture = try Capture.open(io, path, &buffer);
     defer capture.abort();
     try std.testing.expectError(error.RecordCaptureBusy, Capture.open(io, path, &other_buffer));
-    try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded(source_path, 4));
+    try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded(source_path, 4, false));
     capture.abort();
     try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
     capture = try Capture.open(io, path, &buffer);
-    try capture.writeJsonFileBounded(source_path, 5);
+    try capture.writeJsonFileBounded(source_path, 5, false);
     try capture.commit();
     try std.testing.expectError(error.RecordAlreadyExists, Capture.open(io, path, &other_buffer));
     const saved = try tmp.dir.openFile(io, "record", .{});
@@ -4584,11 +4587,11 @@ test "stdin capture uses the same decoded bound before publication" {
         var capture = try Capture.open(input_io, path, &buffer);
         defer capture.abort();
         if (limit == 2) {
-            try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded("-", limit));
+            try std.testing.expectError(error.ContentTooLarge, capture.writeJsonFileBounded("-", limit, false));
             capture.abort();
             try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "record", .{}));
         } else {
-            try capture.writeJsonFileBounded("-", limit);
+            try capture.writeJsonFileBounded("-", limit, false);
             try capture.commit();
             const saved = try tmp.dir.openFile(io, "record", .{});
             defer saved.close(io);

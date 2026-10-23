@@ -40,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.SelfSend) {
             @import("stderr.zig").print("recipient is this Session; send to the parent address from your task.\n", .{});
+        } else if (err == error.EmptyMessageInput) {
+            @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
         } else TerminalText.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -113,8 +115,8 @@ fn run(init: std.process.Init) !void {
             return err;
         }
         // Model rejection already names the ID, supported IDs and repair;
-        // self-send has one boundary diagnostic, with no recovery handle.
-        if (err == error.UnsupportedModel or err == error.SelfSend) return err;
+        // Pre-admission refusals have one diagnostic, with no recovery handle.
+        if (err == error.UnsupportedModel or err == error.SelfSend or err == error.EmptyMessageInput) return err;
         TerminalText.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };

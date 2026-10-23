@@ -77,9 +77,9 @@ def prove_pid_publication(root):
     print(json.dumps({"bash_pid_publication": "passed"}, sort_keys=True))
 
 
-def endpoint_for(name, command):
+def endpoint_for(name, command, stdin=None):
     responses = []
-    bash_fixture.add_exchange(responses, name, command)
+    bash_fixture.add_exchange(responses, name, command, stdin=stdin)
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -322,6 +322,7 @@ def main():
         endpoint, thread, endpoint_url = endpoint_for(
             name,
             f"{bash_fixture.publish_pid(bash_pid_path)} && trap '' TERM && sleep 30",
+            stdin="x" * 122880,
         )
         host = None
         try:

@@ -76,9 +76,9 @@ def resolution_after_stop(store, session):
         database.close()
 
 
-def stage_action(state, store, name, command):
+def stage_action(state, store, name, command, stdin=None):
     responses = []
-    bash_fixture.add_exchange(responses, name, command)
+    bash_fixture.add_exchange(responses, name, command, stdin=stdin)
     endpoint = fixture.SuccessEndpoint(responses)
     endpoint_thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     host = None
@@ -212,12 +212,13 @@ def main():
         assert resolution_after_stop(store, "direct/preparation-failure") == "spawn_failed"
         assert resolution_after_stop(store, "direct/slot-reuse") == "succeeded"
 
-        for name, command, expected in (
-            ("exact-budget", "printf %05d 0", "succeeded"),
-            ("crossing-budget", "printf %06d 0", "storage_failed"),
+        for name, command, stdin, expected in (
+            ("exact-budget", "printf %05d 0", None, "succeeded"),
+            ("crossing-budget", "printf %06d 0", None, "storage_failed"),
+            ("input-budget", f"touch {root / 'forbidden-input-budget'}", "123456", "storage_failed"),
         ):
             isolated_store = root / f"{name}-store"
-            action = stage_action(state, isolated_store, name, command)
+            action = stage_action(state, isolated_store, name, command, stdin=stdin)
             endpoint, endpoint_thread, continuations = continuation_endpoint((name,))
             host = fixture.start_host(
                 isolated_store,
@@ -242,6 +243,7 @@ def main():
             dispose_owner_case(None, endpoint, endpoint_thread)
             endpoint = endpoint_thread = None
             assert resolution_after_stop(isolated_store, f"direct/{name}") == expected
+            assert not (root / "forbidden-input-budget").exists(), "uncharged stdin launched"
 
         retention_store = root / "retention-store"
         retention_actions = {

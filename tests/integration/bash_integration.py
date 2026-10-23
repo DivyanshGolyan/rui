@@ -16,7 +16,7 @@ import time
 from collections import Counter
 
 import model_fixture as fixture
-from host_process import HostDiagnostics, ReleaseGate, retain_failure_state
+from host_process import HostDiagnostics, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
 
 
 def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
@@ -202,8 +202,10 @@ def result_text(store, session):
     return actions[0]["result"]["text"]
 
 
-def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
+def add_exchange(responses, name, command, answer="continued", timeout_ms=None, stdin=None):
     arguments = {"cmd": command, "timeout_ms": timeout_ms, "description": f"Run {name} command"}
+    if stdin is not None:
+        arguments["stdin"] = stdin
     responses.append(
         fixture.sse_tool_calls(
             f"{name}-calls",
@@ -211,6 +213,124 @@ def add_exchange(responses, name, command, answer="continued", timeout_ms=None):
         )
     )
     responses.append(fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", answer)[0])
+
+
+def prove_stdin(state):
+    """Canonical descriptors, real bidirectional pressure and restart identity."""
+    store = state / "stdin-store"
+    workspace = state / "stdin-workspace"
+    workspace.mkdir()
+    limit = 122880
+    prefix = "`touch evaluated` $(touch substituted) 'single' \"double\"\n\x00\r\n"
+    large = prefix + "x" * (limit - len(prefix.encode()) - 2) + "é"
+    assert len(large.encode()) == limit
+    program = (
+        "import fcntl,os,pathlib,stat,sys; "
+        "s=os.fstat(0); assert stat.S_ISREG(s.st_mode) and s.st_nlink==0 and stat.S_IMODE(s.st_mode)==0o600; "
+        "assert fcntl.fcntl(0,fcntl.F_GETFL)&os.O_ACCMODE==os.O_RDONLY; assert os.lseek(0,0,os.SEEK_CUR)==0; "
+        "sys.stdout.buffer.write(b'o'*262144); sys.stdout.flush(); "
+        "sys.stderr.buffer.write(b'e'*262144); sys.stderr.flush(); "
+        "pathlib.Path('input.bin').write_bytes(sys.stdin.buffer.read())"
+    )
+    probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
+    empty_send_error = "Standard input was empty; provide Message text. Nothing was sent.\n"
+    retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
+                             "closed": 6, "timeout": 0, "empty-send": len(empty_send_error), "null-send": len(empty_send_error)}
+    cases = [
+        ("large", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(program)}", "stdin": large}, "succeeded"),
+        ("over", {"cmd": "touch forbidden-over-limit", "stdin": large + "z"}, "spawn_failed"),
+        ("null", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}", "stdin": None}, "succeeded"),
+        ("missing", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}"}, "succeeded"),
+        ("empty", {"cmd": f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}", "stdin": ""}, "succeeded"),
+        ("closed", {"cmd": "exec 0<&-; printf closed; sleep 0.1", "stdin": large}, "succeeded"),
+        ("timeout", {"cmd": "sleep 30", "stdin": large, "timeout_ms": 100}, "timed_out"),
+    ]
+    for name, input_text in (("empty-send", ""), ("null-send", None)):
+        command = shlex.join([str(fixture.RUI), "session", "send", "--store", str(store), "--session", "stdin/recipient",
+                              "--record", str(state / f"{name}.json"), "--key", name,
+                              *(["--text", "-"] if name == "null-send" else ["-"])])
+        cases.append((name, {"cmd": command, "stdin": input_text}, "failed"))
+    responses = []
+    descriptors = {}
+    for name, arguments, _ in cases:
+        arguments.setdefault("description", f"Read {name} input")
+        arguments.setdefault("timeout_ms", 10000)
+        descriptors[name] = json.dumps(arguments, ensure_ascii=True, separators=(",", ":"))
+        responses.append(fixture.sse_tool_calls(f"stdin-{name}", [("bash", f"stdin-{name}", descriptors[name])]))
+        responses.append(fixture.sse_answer(f"stdin-{name}-answer", f"stdin-{name}-reason", f"stdin-{name}-message", "input complete")[0])
+    endpoint = fixture.SuccessEndpoint(responses)
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    host = None
+    try:
+        host = fixture.start_host(store, url, active_capacity=2)
+        configure(state, store, "stdin-recipient-config", "stdin/recipient", workspace=workspace)
+        for name, arguments, expected in cases:
+            session = f"stdin/{name}"
+            configure(state, store, f"stdin-{name}-config", session, workspace=workspace)
+            fixture.message(state, store, f"stdin-{name}-request", session, "read the input")
+            action = fixture.wait_for(lambda: action_for(store, session), f"{name} Action")
+
+            def saved_arguments():
+                return fixture.read_action(store, session, action["action"], "arguments")
+
+            assert saved_arguments() == descriptors[name].encode(), name
+            if name == "large":
+                # No Attempt yet: restart must execute this same admitted input,
+                # not a fresh proposal or a reconstructed command string.
+                fixture.stop_host(host)
+                host = None
+                host = fixture.start_host(store, url, active_capacity=2)
+                assert saved_arguments() == descriptors[name].encode(), "restarted Action changed input"
+            fixture.wait_for(lambda: execution_custody_idle(store, session), f"{name} model custody release")
+            baseline = int(fixture.command("session", "inspect", "--store", store, "--session", session)
+                           ["execution"]["scratch_used_bytes"])
+            allow(state, store, f"stdin-{name}-allow", session, action["action"])
+            fixture.wait_for(lambda: fixture.completed_observation(store, f"stdin-{name}-request"), f"{name} continuation")
+            assert resolution(store, session) == expected, (name, result_text(store, session))
+            result = result_text(store, session)
+            if name == "large":
+                assert (workspace / "input.bin").read_bytes() == large.encode(), "large input changed or stopped before EOF"
+                assert "[earlier output omitted]" in result and "Full stdout:" in result and "Full stderr:" in result, result
+                assert not (workspace / "evaluated").exists() and not (workspace / "substituted").exists()
+            elif name == "over":
+                assert result == "Bash was not started: decoded stdin exceeds 122880 bytes. Split the input across smaller calls or read an existing file.", result
+                assert not (workspace / "forbidden-over-limit").exists(), "over-limit input launched"
+            elif name in ("null", "missing", "empty"):
+                expected_kind = "file" if name == "empty" else "null"
+                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{expected_kind}\n0\n", result
+            elif name == "closed":
+                assert "closed" in result, result
+            elif name in ("empty-send", "null-send"):
+                assert result == "Bash failed. Exit code: 1.\nstderr tail:\n" + empty_send_error, result
+                assert not (state / f"{name}.json").exists(), "empty input published a capture"
+                assert fixture.command("request", "inspect", "--store", store, "--key", name)["observation"]["status"] == "absent"
+            fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)
+                             ["execution"]["custody_occupied"] == "0", f"{name} custody release")
+            used = int(fixture.command("session", "inspect", "--store", store, "--session", session)
+                       ["execution"]["scratch_used_bytes"])
+            assert used == baseline + retained_output_bytes[name], (name, baseline, used, "input charge leaked")
+            continuation = json.loads(endpoint.requests[-1])
+            call = next(item for item in continuation["input"] if item.get("type") == "function_call")
+            assert call["arguments"] == descriptors[name], (name, "continuation changed canonical input")
+            assert [item["output"] for item in continuation["input"] if item.get("type") == "function_call_output"] == [result]
+        fixture.stop_host(host)
+        host = None
+        host = fixture.start_host(store, url, active_capacity=2)
+        assert (workspace / "input.bin").read_bytes() == large.encode()
+        assert len(endpoint.requests) == len(cases) * 2, "recovery replayed a settled command"
+        print("Bash stdin passed: decoded exact-limit bytes including NUL/Unicode, output-before-input pressure, EOF, "
+              "durable Action/restart/continuation identity, explicit prelaunch over-limit refusal, null/missing /dev/null, "
+              "private unlinked read-only offset-zero file, empty EOF, early close and unread-input timeout; custody released")
+    except BaseException:
+        retain_failure_state("Bash stdin failure state", state)
+        raise
+    finally:
+        dispose_all(
+            (lambda: fixture.stop_host(host)) if host is not None else lambda: None,
+            endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
+        )
 
 
 def prove_reused_session(state):
@@ -851,7 +971,8 @@ def walkthrough():
 
 
 def main():
-    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-bash."))
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-bash."))
+    prove_stdin(state)
     prove_reused_session(state)
     responses = []
     success_workspace = state / "success-workspace"
@@ -905,17 +1026,18 @@ def main():
     responses.append(
         fixture.sse_tool_calls(
             "prelaunch-stop-calls",
-            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "timeout_ms": None, "description": "Append prelaunch stop marker"}))],
+            [("bash", "prelaunch-stop-call", json.dumps({"cmd": f"printf x >> {prelaunch_stop_marker}", "stdin": "x" * 122880, "timeout_ms": None, "description": "Append prelaunch stop marker"}))],
         )
     )
     before_launch_marker = state / "before-launch-marker"
     add_exchange(responses, "before-launch", f"printf x >> {before_launch_marker}")
     changed_marker = state / "changed-marker"
     add_exchange(responses, "changed", f"printf x >> {changed_marker}; sleep 30")
+    stop_pid = state / "stop-pid"
     responses.append(
         fixture.sse_tool_calls(
             "stop-calls",
-            [("bash", "stop-call", json.dumps({"cmd": "trap '' TERM; sleep 30", "timeout_ms": None, "description": "Wait through termination signal"}, separators=(",", ":")))],
+            [("bash", "stop-call", json.dumps({"cmd": f"{publish_pid(stop_pid)}; trap '' TERM; sleep 30", "stdin": "x" * 122880, "timeout_ms": None, "description": "Wait through termination signal"}, separators=(",", ":")))],
         )
     )
     responses.append(
@@ -1446,7 +1568,11 @@ def main():
         configure(state, store, "stop-config", "direct/stop")
         fixture.message(state, store, "stop-message", "direct/stop", "execute")
         stop_action = fixture.wait_for(lambda: action_for(store, "direct/stop"), "stoppable Bash Action")
+        fixture.wait_for(lambda: execution_custody_idle(store, "direct/stop"), "stop proposal custody release")
+        stop_baseline = int(fixture.command("session", "inspect", "--store", store, "--session", "direct/stop")
+                            ["execution"]["scratch_used_bytes"])
         allow(state, store, "stop-allow", "direct/stop", stop_action["action"])
+        fixture.wait_for(stop_pid.exists, "stoppable Bash with supplied stdin launched")
         fixture.wait_for(
             lambda: int(
                 fixture.command(
@@ -1459,6 +1585,8 @@ def main():
         active_resources = fixture.command(
             "session", "inspect", "--store", store, "--session", "direct/stop"
         )["execution"]
+        assert int(active_resources["scratch_used_bytes"]) == stop_baseline + 122880, active_resources
+        assert not list((store / "scratch").glob("bash-stdin-*.tmp")), "input name remained linked after launch"
         resource_samples.append(
             {
                 "phase": "active-descendant-pipes",
@@ -1481,6 +1609,9 @@ def main():
         assert stopped["answer"]["status"] == "accepted", stopped
         assert stopped["completion"]["status"] == "pending", stopped
         fixture.wait_for(lambda: resolution(store, "direct/stop") == "cancelled", "cancelled Bash")
+        fixture.wait_for(lambda: execution_custody_idle(store, "direct/stop"), "cancelled stdin custody release")
+        assert int(fixture.command("session", "inspect", "--store", store, "--session", "direct/stop")
+                   ["execution"]["scratch_used_bytes"]) == stop_baseline
         fixture.stop_host(host)
         assert rows(store, "SELECT outcome_code FROM turn WHERE session_ref=?", ("direct/stop",)) == [
             ("cancelled",)

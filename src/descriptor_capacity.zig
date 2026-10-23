@@ -73,10 +73,10 @@ pub fn calculate(
 
     // A model slot owns one request file, two response aliases, and at most
     // two Happy Eyeballs transport sockets: five. A running Bash slot owns its
-    // two capture files and two parent pipe ends: four. Only
+    // two capture files, two parent pipe ends and optional stdin file: five. Only
     // one serial preparation/spawn/cleanup transition exists. Its budgeted
-    // excess of five covers Bash spawn, which holds only the two child pipe
-    // ends in the Host: posix_spawn opens the child's /dev/null itself and
+    // excess of five covers Bash spawn, including both stdin aliases and two child pipe
+    // ends in the Host: posix_spawn opens /dev/null for absent stdin and
     // reports exec failure directly. Model preparation (two files
     // plus a directory), cleanup (three files plus a directory), failed-
     // response retention beside its occupied slot (one file plus a
@@ -127,13 +127,15 @@ fn executionPopulation(active_capacity: usize) !ExecutionPopulation {
         .maximum = 0,
     };
     const model_slot = try add(1, try add(2, 2));
-    const bash_slot = try add(2, 2);
+    const bash_slot = try add(2, 3);
     const occupied_slot = @max(model_slot, bash_slot);
     const other_slots = try multiply(active_capacity - 1, occupied_slot);
     const model_full = try multiply(active_capacity, model_slot);
     const bash_full = try multiply(active_capacity, bash_slot);
     const model_preparation = try add(other_slots, 3);
-    const bash_preparation = try add(other_slots, 3);
+    // Two captures, canonical reader, stdin writer and read-only alias, and
+    // their temporary directory handle while creating/unlinking stdin.
+    const bash_preparation = try add(other_slots, 6);
     const cleanup = try add(other_slots, 4);
     const bash_spawn = try add(other_slots, 10);
     return .{
@@ -198,9 +200,9 @@ test "zero execution capacity has no unreachable preparation or spawn population
 test "execution population compares exclusive steady and shared transition overlaps" {
     const population = try executionPopulation(2);
     try std.testing.expectEqual(@as(usize, 10), population.model_full);
-    try std.testing.expectEqual(@as(usize, 8), population.bash_full);
+    try std.testing.expectEqual(@as(usize, 10), population.bash_full);
     try std.testing.expectEqual(@as(usize, 8), population.model_preparation);
-    try std.testing.expectEqual(@as(usize, 8), population.bash_preparation);
+    try std.testing.expectEqual(@as(usize, 11), population.bash_preparation);
     try std.testing.expectEqual(@as(usize, 9), population.cleanup);
     try std.testing.expectEqual(@as(usize, 15), population.bash_spawn);
     try std.testing.expectEqual(@as(usize, 15), population.maximum);

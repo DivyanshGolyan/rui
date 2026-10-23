@@ -919,6 +919,11 @@ fn finishBashPreparationFailure(
             "Bash was not started: the decoded command exceeds {d} bytes. Split long content across several smaller commands.",
             .{bash.max_command_bytes},
         ));
+    } else if (failure.cause == error.BashStdinTooLong) {
+        settleActionFailure(host, token, binding, .spawn_failed, std.fmt.comptimePrint(
+            "Bash was not started: decoded stdin exceeds {d} bytes. Split the input across smaller calls or read an existing file.",
+            .{bash.max_stdin_bytes},
+        ));
     } else if (!canonical_failure) {
         settleActionFailure(host, token, binding, .storage_failed, "Bash preparation failed.");
     }

@@ -25,13 +25,13 @@ def open_gate(path):
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
 
-def start_case(state, name, transition, command):
+def start_case(state, name, transition, command, stdin="x"):
     store = state / f"{name}-store"
     marker = state / f"{name}-effect"
     if callable(command):
         command = command(marker)
     responses = []
-    bash.add_exchange(responses, name, command, answer=f"{name} completed")
+    bash.add_exchange(responses, name, command, answer=f"{name} completed", stdin=stdin)
     endpoint = fixture.SuccessEndpoint(responses)
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
@@ -53,12 +53,13 @@ def start_case(state, name, transition, command):
     return store, marker, endpoint, thread, keeper, host, diagnostics, session
 
 
-def assert_continuation(endpoint, name, result):
+def assert_continuation(endpoint, name, result, stdin="x"):
     assert len(endpoint.requests) == 2, endpoint.requests
     first, continuation = map(json.loads, endpoint.requests)
     assert [item["content"][0]["text"] for item in first["input"] if item.get("role") == "user"] == ["run"]
     calls = [item for item in continuation["input"] if item.get("type") == "function_call"]
     assert len(calls) == 1 and calls[0]["call_id"] == f"{name}-call", calls
+    assert json.loads(calls[0]["arguments"])["stdin"] == stdin, "recovery changed the canonical input"
     outputs = [item for item in continuation["input"] if item.get("type") == "function_call_output"]
     assert outputs == [{"type": "function_call_output", "call_id": f"{name}-call", "output": result}], outputs
     assert [item["content"][0]["text"] for item in continuation["input"] if item.get("role") == "user"] == ["run"]
@@ -88,7 +89,7 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
         state,
         "attempt-before-launch",
         "action_attempt_admitted",
-        lambda marker: f"printf x >> {marker}",
+        lambda marker: f"cat >> {marker}",
     )
     store, marker, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
@@ -108,7 +109,7 @@ def prove_lost_bash_permit_becomes_indeterminate(state):
 
 def prove_effect_without_result_becomes_indeterminate(state):
     marker = state / "effect-before-result-effect"
-    case = start_case(state, "effect-before-result", "action_result_ready", f"printf x >> {marker}")
+    case = start_case(state, "effect-before-result", "action_result_ready", f"cat >> {marker}")
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     continuation_release = threading.Event()
@@ -143,7 +144,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
 
 def prove_committed_bash_result_survives_restart(state):
     marker = state / "result-after-commit-effect"
-    case = start_case(state, "result-after-commit", "action_result_committed", f"printf x >> {marker}")
+    case = start_case(state, "result-after-commit", "action_result_committed", f"cat >> {marker}")
     store, _, endpoint, thread, keeper, original_host, original_diagnostics, session = case
     recovered_host = None
     try:

@@ -1691,12 +1691,12 @@ const ContentSink = struct {
     }
 };
 
-const Utf8State = struct {
+pub const Utf8State = struct {
     bytes: [4]u8 = undefined,
     used: u3 = 0,
     expected: u3 = 0,
 
-    fn feed(self: *Utf8State, input: []const u8) !void {
+    pub fn feed(self: *Utf8State, input: []const u8) !void {
         for (input) |byte| {
             if (self.used == 0) {
                 if (byte < 0x80) continue;
@@ -1712,7 +1712,7 @@ const Utf8State = struct {
         }
     }
 
-    fn complete(self: *const Utf8State) bool {
+    pub fn complete(self: *const Utf8State) bool {
         return self.used == 0;
     }
 };

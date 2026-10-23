@@ -78,7 +78,6 @@ func ModelInstructions(workspace, store, session string) string {
 		"Bash runs `rui`; see `rui --help` and `rui RESOURCE COMMAND --help`; --store-hex and --session-hex carry NUL. " +
 		"When creating a peer, omit --model to use the default, or pick an ID listed in rui session configure --help. " +
 		"Give peers your Rui address as their parent address in the task. Send findings to that PARENT address, not your own Rui address. " +
-		"Use `rui session send` with stdin `- <<'EOF'` (EOF alone ends the quoted heredoc) or `--text FILE`; NEVER inline double quotes. " +
 		"After admission, end your turn and wait for incoming messages; no request polling, `rui request read-result` or peer Conversation reads. " +
 		"`rui request inspect` is only for silent peers. Recover uncertain mutations with the original request; never resend." +
 		"\n\nSession instructions:\n"
