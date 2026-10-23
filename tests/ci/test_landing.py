@@ -56,10 +56,12 @@ class LandingTest(unittest.TestCase):
     def test_strict_patterns_match_like_github_path_filters(self):
         self.assertEqual(strict([
             'src/store.zig', 'src/server.zig', 'src/execution_turn.zig', 'build.zig', 'build.zig.zon',
+            'src/server_execution.zig', 'src/server_host.zig',
             'install.sh', 'tests/integration/bash_integration.py', 'tests/integration/bash_recovery_integration.py',
             'src/cli.zig', 'src/store/nested.zig', 'tests/integration/host_process.py', 'build.zig.bak',
             'docs/install.sh']), [
             'build.zig', 'build.zig.zon', 'install.sh', 'src/execution_turn.zig', 'src/server.zig',
+            'src/server_execution.zig', 'src/server_host.zig',
             'src/store.zig', 'tests/integration/bash_integration.py',
             'tests/integration/bash_recovery_integration.py'])
 
