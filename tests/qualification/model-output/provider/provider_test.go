@@ -21,7 +21,7 @@ import (
 
 // Share context prose; envelope fields and history expectations stay independent.
 func testRequestEnvelope(session string) string {
-	return `{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` +
+	return `{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` +
 		measurement.JSONString(measurement.ModelInstructions("/workspace", session)) + `,"tools":[],"text":{"verbosity":"low"},`
 }
 
@@ -107,6 +107,10 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 	for name, mutate := range map[string]func(map[string]any){
 		"parallel calls enabled": func(body map[string]any) { body["parallel_tool_calls"] = true },
 		"parallel calls string":  func(body map[string]any) { body["parallel_tool_calls"] = "false" },
+		"wrong catalog effort":   func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = "low" },
+		"missing effort":         func(body map[string]any) { delete(body["reasoning"].(map[string]any), "effort") },
+		"null effort":            func(body map[string]any) { body["reasoning"].(map[string]any)["effort"] = nil },
+		"reasoning scalar":       func(body map[string]any) { body["reasoning"] = "medium" },
 		"wrong verbosity": func(body map[string]any) {
 			body["text"].(map[string]any)["verbosity"] = "medium"
 		},
@@ -143,7 +147,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			}
 		})
 	}
-	for _, field := range []string{"model", "parallel_tool_calls", "store", "stream", "include", "instructions", "tools", "text"} {
+	for _, field := range []string{"model", "parallel_tool_calls", "store", "stream", "include", "reasoning", "instructions", "tools", "text"} {
 		var mutated map[string]json.RawMessage
 		if err := json.Unmarshal(valid, &mutated); err != nil {
 			t.Fatal(err)

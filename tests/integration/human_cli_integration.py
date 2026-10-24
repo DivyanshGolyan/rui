@@ -333,26 +333,28 @@ def compaction_settings_case(home, store, workspace, socket_path):
         read_terminal(master, "› ")
         status = flat(status_frame(master, session))
         assert "244800 tokens (model default)" in status, status
+        assert "Reasoning effort: medium (catalog default)" in status, status
         assert "Extra compaction headroom: 0 tokens (model default); not a guaranteed output budget" in status, status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
         assert "Unknown models have no automatic threshold" in usage, usage
         assert "Changes apply to new model requests." in usage, usage
         assert "Requests already accepted keep their original settings, even when retried." in usage, usage
-        for flags, trigger, headroom in (
-            ("--compaction-trigger 12345 --output-reservation 234", "12345 tokens (Session override)", "234 tokens (Session override)"),
-            ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)"),
-            ("--compaction-trigger default --output-reservation default", "244800 tokens (model default)", "0 tokens (model default)"),
+        for flags, trigger, headroom, effort in (
+            ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12345 tokens (Session override)", "234 tokens (Session override)", "high (Session override)"),
+            ("--permission-mode ask", "12345 tokens (Session override)", "234 tokens (Session override)", "high (Session override)"),
+            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244800 tokens (model default)", "0 tokens (model default)", "medium (catalog default)"),
         ):
             configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
             status = flat(status_frame(master, session))
             assert trigger in status and "Extra compaction headroom: " + headroom in status, status
+            assert "Reasoning effort: " + effort in status, status
             assert "Output reservation:" not in status and "source unknown" not in status, status
             assert "not a guaranteed output budget" in status, status
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
     records = set((home / ".config/rui/requests").glob("*.json"))
-    for flag in ("--compaction-trigger", "--output-reservation"):
+    for flag in ("--compaction-trigger", "--output-reservation", "--reasoning-effort"):
         run(home, "session", "configure", "--store", store, "--session", session,
             flag, "10", flag, "20", success=False)
         assert set((home / ".config/rui/requests").glob("*.json")) == records
@@ -375,6 +377,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         read_terminal(master, "› ")
         status = flat(terminal_step(master, "/status", "Work: ", composer=True))
         assert "no automatic threshold (model default)" in status, status
+        assert "Reasoning effort: unknown (no catalog value; reasoning omitted)" in status, status
         assert "Use /configure --compaction-trigger TOKENS to enable a threshold." in status, status
         assert "Provider context-overflow recovery still applies." in status, status
         terminal_step(master, "/exit", "Detached.")

@@ -158,6 +158,13 @@ def run():
         action = fixture.wait_for(lambda: bash.action_for(store, session), "managed Bash proposal")
         assert fixture.read_action(store, session, action["action"], "call-id") == b"managed-call"
         assert json.loads(fixture.read_action(store, session, action["action"], "arguments"))["cmd"] == command
+        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "medium"}
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", state / "effort-high.json", "--key", "effort-high",
+            "--reasoning-effort", "high",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
         bash.allow(state, store, "allow", session, action["action"])
         fixture.wait_for(lambda: fixture.completed_observation(store, "message"), "managed answer")
         # The 12-byte tool stdout is optionally retained; custody, not the
@@ -172,6 +179,7 @@ def run():
         assert ACCESS not in public_report
         assert len(endpoint.requests) == 2
         continuation = json.loads(endpoint.requests[1])
+        assert continuation["reasoning"] == {"effort": "high"}, continuation
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" and "tool-witness" in item["output"] for item in continuation["input"])
         assert any(item.get("type") == "reasoning" and item.get("encrypted_content") for item in continuation["input"])
         assert all(item.get("role") != "system" for item in continuation["input"])
@@ -185,11 +193,29 @@ def run():
         assert fixture.retry_message(state, store, "message")["answer"]["replayed"] is True
         assert fixture.read_result(store, "message") == b"managed answer"
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
+        settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+        assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
+        for effort in ("none", "ultra"):
+            rejected = fixture.command(
+                "session", "configure", "--store", store, "--session", session,
+                "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
+                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=1,
+            )
+            assert rejected["answer"]["status"] == "rejected", rejected
+            unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+            assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", state / "effort-default.json", "--key", "effort-default",
+            "--reasoning-effort", "default",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
         fixture.message(state, store, "later", session, "new message")
         fixture.wait_for(lambda: fixture.completed_observation(store, "later"), "post-restart answer")
         assert fixture.read_result(store, "later") == b"later answer"
         assert len(endpoint.requests) == 3 and proof.read_text() == "once\n"
         later = json.loads(endpoint.requests[2])
+        assert later["reasoning"] == {"effort": "medium"}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
         with endpoint.lock:
             endpoint.responses.append(fixture.ResponseSpec(b"authentication rejected", {}, 401))
@@ -293,9 +319,11 @@ def run():
         # and public effective settings rather than capability helpers alone.
         expected_agent = expected_user_agent()
         mismatches = []
-        for index, model in enumerate((
-            "gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
-            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+        for index, (model, effort) in enumerate((
+            ("gpt-6-luna", "medium"), ("gpt-6.1-sol", "low"),
+            ("gpt-6-sol", "medium"), ("gpt-6-astra", "low"),
+            ("gpt-5.6-sol", "low"), ("gpt-5.6-terra", "medium"),
+            ("gpt-5.6-luna", "medium"), ("gpt-5.5", "medium"),
         )):
             key = f"envelope-{index}"
             with endpoint.lock:
@@ -308,6 +336,14 @@ def run():
             assert configured["answer"]["status"] == "accepted", configured
             selected = configured["answer"]["session"]
             settings = fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"]
+            if model == "gpt-5.5":
+                rejected = fixture.command(
+                    "session", "configure", "--store", stop_store, "--session", selected,
+                    "--record", state / "effort-unsupported-max.json", "--key", "effort-unsupported-max",
+                    "--reasoning-effort", "max", expect=1,
+                )
+                assert rejected["answer"]["status"] == "rejected", rejected
+                assert fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"] == settings
             fixture.message(state, stop_store, key, selected, key)
             observation, answer, _ = fixture.wait_for_result_release(stop_store, key, selected, time.monotonic() + 20)
             assert observation["result"]["status"] == "completed" and answer == key.encode(), observation
@@ -315,6 +351,10 @@ def run():
             assert request["model"] == model, request
             if settings["compaction_trigger"] != "244800" or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
+            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
+                mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
+            if request.get("reasoning") != {"effort": effort}:
+                mismatches.append((model, "reasoning", request.get("reasoning")))
             if request.get("text") != {"verbosity": "low"}:
                 mismatches.append((model, "text", request.get("text")))
             # Codex suppresses parallel calls on Responses-lite bindings even
@@ -325,7 +365,7 @@ def run():
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
         assert len(endpoint.requests) == 12, endpoint.requests
         assert not mismatches, mismatches
-        print(f"codex request envelopes passed: eight exact model IDs, 244800/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        print(f"codex request envelopes passed: eight exact model IDs, catalog effort defaults, 244800/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:

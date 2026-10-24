@@ -3471,6 +3471,7 @@ def main(mode="all", correlation_case="all"):
             "stream": True,
             "parallel_tool_calls": False,
             "include": ["reasoning.encrypted_content"],
+            "reasoning": {"effort": "medium"},
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
             "input": [
                 {

@@ -216,7 +216,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Frozen request inputs](ARCHITECTURE.md#operations-and-frozen-requests) | `'selection freezes its'`, `'request preparation'` | Sizes are qualification workloads |
-| Reasoning effort and `rui models` | `'Current facts'` | Client parse only. Effort wire bytes and the catalog: none located |
+| [Reasoning effort](ARCHITECTURE.md#selecting-current-settings), exact catalog defaults and supported overrides | `'reasoning effort uses exact catalog'`, `'configuration token heuristics and effort'`, `'capture configure requests'`, `'Current settings'`, `'request preparation emits catalog or explicit effort'` | Synthetic request bytes, sealed length and scratch release, including compaction. Catalog support is not live backend qualification |
 
 ### Provider validation and output ownership
 

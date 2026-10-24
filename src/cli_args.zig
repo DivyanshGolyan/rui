@@ -78,7 +78,15 @@ pub const compaction_policy =
     \\Unknown models have no automatic threshold.
 ;
 
-const compaction_help = compaction_policy ++
+pub const reasoning_help =
+    \\--reasoning-effort VALUE selects a model-supported effort; default clears the Session override.
+    \\Omission preserves an existing choice. New Sessions and resets use the model's catalog default.
+    \\Supported efforts are low, medium, high, xhigh and max (except gpt-5.5). No listed model supports none.
+    \\The setting applies to new model requests, including compaction; retries keep their frozen effort.
+    \\
+;
+
+const compaction_help = reasoning_help ++ compaction_policy ++
     \\ Inspect settings with rui session inspect.
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
@@ -124,10 +132,11 @@ const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash|none"),                   value("permission-mode", "bypass|ask"),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
+    value("workspace", "PATH"),                                          value("instructions", "-"), value("tools", "bash|none"),                   value("permission-mode", "bypass|ask"),
+    value("output-schema", "FILE|-"),                                    flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"),
+    value("reasoning-effort", "none|low|medium|high|xhigh|max|default"),
 };
-const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7] };
+const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8] };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 const endpoint_conflicts = &[_][2][]const u8{
@@ -531,6 +540,13 @@ test "live /configure and /setup share the one-shot grammar" {
     for (live_configure.options) |option| {
         const shared = Command.session_configure.definition().optionNamed(option.name).?;
         try std.testing.expectEqual(option.argument == null, shared.argument == null);
+    }
+    for ([_][]const u8{ "default", "none", "low", "medium", "high", "xhigh", "max" }) |effort| {
+        var argument_storage: [256]u8 = undefined;
+        const parsed = try testParse(live_configure, &.{ "--reasoning-effort", effort }, &argument_storage);
+        try std.testing.expectEqualStrings(effort, parsed.get("reasoning-effort").?);
+        const one_shot = try testParse(Command.session_configure.definition(), &.{ "--reasoning-effort", effort }, &argument_storage);
+        try std.testing.expectEqualStrings(effort, one_shot.get("reasoning-effort").?);
     }
     for (live_setup.options) |option| try std.testing.expect(Command.defaults_configure.definition().optionNamed(option.name) != null);
     var storage: [256]u8 = undefined;

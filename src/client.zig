@@ -682,6 +682,7 @@ pub const ConfigureInput = struct {
     output_schema: OptionalFile = .{},
     compaction_trigger: OptionalPolicy = .{},
     output_reservation: OptionalPolicy = .{},
+    reasoning_effort: OptionalPolicy = .{},
 };
 
 pub const MessageInput = struct {
@@ -1067,8 +1068,8 @@ pub const Current = struct {
         output_reservation: PolicyNumber(true),
         compaction_trigger_override: ?PolicyNumber(false),
         output_reservation_override: ?PolicyNumber(true),
-        // Omission is not evidence of provider default on older producers.
-        reasoning_effort: OmittableJson(?JsonEnum(enum { none, low, medium, high, xhigh, max })) = .{},
+        reasoning_effort: ?JsonEnum(protocol.ReasoningEffort),
+        reasoning_effort_override: ?JsonEnum(protocol.ReasoningEffort),
 
         pub fn jsonStringify(self: Settings, jw: anytype) !void {
             try writeObject(self, jw);
@@ -3150,6 +3151,8 @@ const Capture = struct {
         try self.writeOptionalPolicy(input.compaction_trigger);
         try self.write(",\"output_reservation\":");
         try self.writeOptionalPolicy(input.output_reservation);
+        try self.write(",\"reasoning_effort\":");
+        try self.writeOptionalPolicy(input.reasoning_effort);
         try self.write("}");
     }
 
@@ -4126,13 +4129,19 @@ test "capture configure requests a Store allocated Session and retains model adm
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    for ([_]?[]const u8{ "100000", null }) |trigger| {
+    for ([_]struct { trigger: ?[]const u8, effort: OptionalPolicy }{
+        .{ .trigger = "100000", .effort = .{ .present = true, .value = "high" } },
+        .{ .trigger = null, .effort = .{ .present = true } },
+        .{ .trigger = null, .effort = .{} },
+    }) |case| {
+        const trigger = case.trigger;
         var captured = try captureConfigure(io, .{
             .store = root,
             .session = .create,
             .require_model = true,
             .compaction_trigger = .{ .present = true, .value = trigger },
             .output_reservation = .{ .present = true, .value = if (trigger != null) "16384" else null },
+            .reasoning_effort = case.effort,
         }, .{ .generated = root });
         const saved = captured.identity().*;
         var bytes: [2048]u8 = undefined;
@@ -4150,6 +4159,10 @@ test "capture configure requests a Store allocated Session and retains model adm
         try std.testing.expectEqualStrings("", parsed.value.object.get("session").?.string);
         try std.testing.expect(parsed.value.object.get("require_model").?.bool);
         const settings = parsed.value.object.get("configuration").?.object;
+        try std.testing.expect(settings.contains("reasoning_effort"));
+        const effort = settings.get("reasoning_effort").?.object;
+        try std.testing.expectEqualStrings(if (!case.effort.present) "omitted" else if (case.effort.value == null) "null" else "value", effort.get("state").?.string);
+        if (case.effort.value) |_| try std.testing.expectEqualStrings("high", effort.get("value").?.string);
         if (trigger != null) {
             try std.testing.expectEqualStrings("100000", settings.get("compaction_trigger").?.object.get("value").?.string);
             try std.testing.expectEqualStrings("16384", settings.get("output_reservation").?.object.get("value").?.string);
@@ -5469,17 +5482,38 @@ test "Current settings preserve decimal token heuristics in projections" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
-    const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
+    const wire = "{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null}";
     const report = "{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"status\":\"idle\",\"latest_outcome\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqualStrings("100000", reply.current.settings.compaction_trigger.?.slice());
     try std.testing.expectEqualStrings("16384", reply.current.settings.output_reservation.slice());
+    try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort.?.value);
+    try std.testing.expectEqual(protocol.ReasoningEffort.high, reply.current.settings.reasoning_effort_override.?.value);
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try reply.current.writeJson(io, file, &writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"compaction_trigger\":\"100000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"output_reservation\":\"16384\"") != null);
+    const effort_start = std.mem.indexOf(u8, report, ",\"reasoning_effort\"").?;
+    const effort_end = std.mem.indexOf(u8, report, ",\"compaction_trigger\"").?;
+    for ([_]struct { fields: []const u8, valid: bool }{
+        .{ .fields = ",\"reasoning_effort\":\"low\",\"reasoning_effort_override\":null", .valid = true },
+        .{ .fields = ",\"reasoning_effort\":null,\"reasoning_effort_override\":null", .valid = true },
+        .{ .fields = "", .valid = false },
+        .{ .fields = ",\"reasoning_effort\":null", .valid = false },
+        .{ .fields = ",\"reasoning_effort_override\":null", .valid = false },
+        .{ .fields = ",\"reasoning_effort\":\"ultra\",\"reasoning_effort_override\":null", .valid = false },
+        .{ .fields = ",\"reasoning_effort\":\"medium\",\"reasoning_effort_override\":\"default\"", .valid = false },
+    }) |case| {
+        var changed_buffer: [4096]u8 = undefined;
+        const changed = try std.fmt.bufPrint(&changed_buffer, "{s}{s}{s}", .{ report[0..effort_start], case.fields, report[effort_end..] });
+        try file.writePositionalAll(io, changed, 0);
+        const decoded = CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = changed.len } });
+        if (case.valid) {
+            try std.testing.expect((try decoded).current.settings.reasoning_effort_override == null);
+        } else try std.testing.expectError(error.InvalidObservation, decoded);
+    }
     const prefix = wire[0..std.mem.indexOf(u8, wire, ",\"compaction_trigger\"").?];
     const cases = [_]struct { suffix: []const u8, valid: bool }{
         .{ .suffix = "}", .valid = false },
@@ -5524,7 +5558,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"2\",\"work\":{\"status\":\"runnable\",\"turn\":\"37\",\"operation\":\"91\",\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -5538,7 +5572,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
     try std.testing.expect(!facts.settings.tools.bash);
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
-    try std.testing.expect(facts.settings.reasoning_effort.value == null and facts.selected_message != null);
+    try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
     try std.testing.expectEqual(@as(u64, 91), facts.work.operation.value.?.value);
     try std.testing.expectEqual(@as(usize, 10), facts.recent_count);
@@ -5548,7 +5582,8 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var json = std.Io.Writer.fixed(&rendered);
     try facts.writeJson(io, file, &json);
     try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"revision\":\"17\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "reasoning_effort") == null);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"reasoning_effort\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"reasoning_effort_override\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.buffered(), "\"selected_message\":\"\"") != null);
     try file.writePositionalAll(io, "x", 0);
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
@@ -5566,7 +5601,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"1\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null},\"pending_messages\":\"0\",\"work\":{\"status\":\"waiting_for_permission\",\"turn\":\"7\",\"operation\":\"19\",\"latest_outcome\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
@@ -5599,7 +5634,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try std.testing.expectEqual(@as(u64, 257), facts.actionable_count);
     try std.testing.expectEqual(@as(u64, 257), facts.indeterminate_count);
     try std.testing.expectEqual(@as(u64, 1001), facts.first_indeterminate.?);
-    try std.testing.expect(facts.settings.reasoning_effort.value != null and facts.settings.reasoning_effort.value.? == null);
+    try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null);
     const Sink = struct {
         counts: [4]usize = @splat(0),
         pub fn visit(self: *@This(), attention: Current.Attention) !void {

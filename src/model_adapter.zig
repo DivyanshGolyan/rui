@@ -776,6 +776,8 @@ pub const Preparation = struct {
         model_prefix,
         model,
         envelope,
+        reasoning,
+        instructions_prefix,
         runtime_instructions,
         workspace,
         address_prefix,
@@ -922,9 +924,15 @@ pub const Preparation = struct {
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
                 .envelope => self.emitFixed(if (@import("model_capability.zig").parallelToolCalls(self.settings.?.model.slice()))
-                    "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\""
+                    "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]"
                 else
-                    "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .runtime_instructions),
+                    "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"]", .reasoning),
+                .reasoning => {
+                    if (self.settings.?.reasoning_effort) |effort| switch (effort) {
+                        inline else => |value| self.emitFixed(",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}", .instructions_prefix),
+                    } else self.phase = .instructions_prefix;
+                },
+                .instructions_prefix => self.emitFixed(",\"instructions\":\"", .runtime_instructions),
                 .runtime_instructions => self.emitJsonBytes(context_parts[0], .workspace),
                 .workspace => {
                     self.emitJsonBytes(self.settings.?.workspace.slice(), .address_prefix);
@@ -2291,6 +2299,84 @@ test "request preparation frozen selection excludes later messages" {
     try std.testing.expectEqual(@as(usize, 1), input.len);
     try std.testing.expectEqualStrings("first", input[0].object.get("content").?.array.items[0].object.get("text").?.string);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation emits catalog or explicit effort through sealed custody and compaction" {
+    for ([_]struct { model: []const u8, override: ?[]const u8 = null, expected: ?[]const u8 }{
+        .{ .model = "gpt-6-luna", .expected = "medium" },
+        .{ .model = "gpt-6-astra", .expected = "low" },
+        .{ .model = "gpt-5.5", .override = "high", .expected = "high" },
+        .{ .model = "model-a", .expected = null },
+    }) |case| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        var command: protocol.ConfigureCommand = .{};
+        try command.key.set("effort-config");
+        command.configuration.workspace.state = .value;
+        try command.configuration.workspace.value.set(setup.workspace);
+        command.configuration.provider.state = .value;
+        try command.configuration.provider.value.set("codex");
+        command.configuration.model.state = .value;
+        try command.configuration.model.value.set(case.model);
+        if (case.override) |effort| {
+            command.configuration.reasoning_effort.state = .value;
+            try command.configuration.reasoning_effort.value.set(effort);
+        }
+        const configured = setup.storage.configure(&command, true, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try setup.submit("effort-message", "effort-message", session.slice(), "keep this exact input");
+        // Ordinary and compaction envelopes must use their admitted effort.
+        for (0..2) |purpose| {
+            var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+            const binding = try admitted.permit.consume();
+            if (case.override != null and purpose == 0) {
+                // A later setting must not rewrite the already admitted
+                // envelope; the following compaction is a new Operation.
+                var update: protocol.ConfigureCommand = .{};
+                try update.key.set("effort-later");
+                update.session = session;
+                update.configuration.reasoning_effort.state = .value;
+                try update.configuration.reasoning_effort.value.set("low");
+                try std.testing.expect(setup.storage.configure(&update, true, .{}) == .accepted);
+            }
+            var used: std.atomic.Value(u64) = .init(0);
+            var retained: ?named_scratch.Owner = null;
+            var preparation: Preparation = undefined;
+            try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+            defer if (preparation.active) preparation.cancel();
+            var sealed = try drainLivePreparation(&preparation, 1, 1, 32768);
+            var owned = true;
+            defer if (owned) sealed.deinit();
+            var buffer: [8192]u8 = undefined;
+            const count = try sealed.file.readPositionalAll(sealed.io, &buffer, 0);
+            const bytes = buffer[0..count];
+            try std.testing.expectEqual(sealed.length, count);
+            try std.testing.expectEqual(sealed.length, try sealed.file.length(sealed.io));
+            try std.testing.expectEqual(sealed.length, used.load(.acquire));
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            const request = parsed.value.object;
+            const expected = if (case.override != null and purpose != 0) "low" else case.expected;
+            if (expected) |effort| {
+                try std.testing.expectEqual(true, request.contains("reasoning"));
+                const reasoning = request.get("reasoning").?.object;
+                try std.testing.expectEqual(@as(usize, 1), reasoning.count());
+                try std.testing.expectEqualStrings(effort, reasoning.get("effort").?.string);
+            } else try std.testing.expect(!request.contains("reasoning"));
+            try std.testing.expectEqualStrings(case.model, request.get("model").?.string);
+            try std.testing.expectEqualStrings("low", request.get("text").?.object.get("verbosity").?.string);
+            try std.testing.expectEqual(std.mem.eql(u8, case.model, "gpt-5.5"), request.get("parallel_tool_calls").?.bool);
+            try std.testing.expectEqualStrings("keep this exact input", request.get("input").?.array.items[0].object.get("content").?.array.items[0].object.get("text").?.string);
+            try std.testing.expectEqual(@as(usize, purpose), std.mem.count(u8, bytes, "compaction_trigger"));
+            sealed.deinit();
+            owned = false;
+            try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+            try std.testing.expect(retained == null);
+            try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_context_overflow" }, .context_overflow, .{});
+        }
+    }
 }
 
 test "request preparation freezes settings at admission" {

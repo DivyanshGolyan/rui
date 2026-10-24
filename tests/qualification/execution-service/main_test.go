@@ -20,8 +20,8 @@ func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *test
 		bytes     int
 		digest    string
 	}{
-		{"/workspace", 724, "42b49ad352b565869c3fefd5414a8c22fc95df8b338bcd50feb551c70bf69b21"},
-		{"/tmp/a \"project\"\\tree\n<&雪\u2028", 755, "73810913bbc756e3c296008330a0b7d4d478b179edc4ce6b8cdab80620167260"},
+		{"/workspace", 756, "4528ed3bab68871c9b3c9e330ddcd9c47c9cbdbef2e4c547deef82d54a9b574a"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", 787, "9d053960205513aef1f6430369a221afa2b08c1ed42602405ce6882d18455a8b"},
 	} {
 		body := wireRequest(test.workspace, "k7m2qx", [][]byte{userItem("capacity-1-0")})
 		if len(body) != test.bytes || fmt.Sprintf("%x", sha256.Sum256(body)) != test.digest {

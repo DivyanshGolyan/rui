@@ -1291,6 +1291,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
     if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
     if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
+    if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
     var binding: new_session_selection.Binding = .{};
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
@@ -1448,6 +1449,14 @@ pub fn writeSessionStatus(io: std.Io, store: []const u8, session_ref: []const u8
     try writeSafeFieldTo(out, "Workspace (Bash cwd): ", work.settings.workspace.slice());
     try writeSafeFieldTo(out, "Provider: ", @tagName(work.settings.provider.value));
     try writeSafeFieldTo(out, "Model: ", work.settings.model.slice());
+    {
+        var buffer: [80]u8 = undefined;
+        const effort = if (work.settings.reasoning_effort) |value|
+            try std.fmt.bufPrint(&buffer, "{s} ({s})", .{ @tagName(value.value), if (work.settings.reasoning_effort_override != null) "Session override" else "catalog default" })
+        else
+            "unknown (no catalog value; reasoning omitted)";
+        try writeSafeFieldTo(out, "Reasoning effort: ", effort);
+    }
     // The bypass default is stated where it is inspected, without alert weight.
     try writeSafeFieldTo(out, "Permission: ", switch (work.settings.permission_mode.value) {
         .bypass => "bypass (Bash runs without asking)",
@@ -2549,7 +2558,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] (settings for this Session only)\n" ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:

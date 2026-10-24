@@ -254,7 +254,7 @@ func userItem(text string) []byte {
 	return []byte(`{"role":"user","content":[{"type":"input_text","text":` + string(marshal(text)) + `}]}`)
 }
 func wireRequest(workspace, session string, input [][]byte) []byte {
-	prefix := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, session)) + `,"input":[`)
+	prefix := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium"},"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, session)) + `,"input":[`)
 	for index, item := range input {
 		if index > 0 {
 			prefix = append(prefix, ',')
