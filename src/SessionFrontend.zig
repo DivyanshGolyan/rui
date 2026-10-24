@@ -1274,6 +1274,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
         for (1..6) |fail_at| {
             var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .scratch = undefined, .command = undefined, .terminal = undefined, .colour = false, .read_phase = phase };
             self.init.io = std.testing.io;
+            self.input.init();
             try self.reader.start(std.testing.io, &self, Worker.fail);
             try self.settleReader(); // Preparation is recoverable, not fatal.
             try std.testing.expect(self.pending_diagnostic != null);
