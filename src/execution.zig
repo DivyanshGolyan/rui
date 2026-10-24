@@ -88,6 +88,26 @@ pub fn transferDecision(
     } };
 }
 
+/// Only the model endpoint's own HTTP 401 answer may spend an Operation's
+/// one forced credential refresh. Transport authentication failures and
+/// every other status settle as they are.
+pub fn rejectsCredential(failure: TransferFailure) bool {
+    return failure.answered and failure.code == .http and failure.code.http == 401;
+}
+
+test "only an answered model 401 can claim a forced credential refresh" {
+    const finished = struct {
+        fn outcome(disposition: transport_policy.Disposition, status: u16) TransferOutcome {
+            return .{ .transport_finished = .{ .disposition = disposition, .http_status = status } };
+        }
+    }.outcome;
+    try std.testing.expect(rejectsCredential(transferDecision(finished(.permanent_http, 401), .ordinary).fail));
+    try std.testing.expect(!rejectsCredential(transferDecision(finished(.permanent_http, 403), .ordinary).fail));
+    try std.testing.expect(!rejectsCredential(transferDecision(finished(.authentication_failure, 0), .ordinary).fail));
+    try std.testing.expect(!rejectsCredential(transferDecision(finished(.permanent_http, 401), .{ .unreadable = error.TestUnreadable }).fail));
+    try std.testing.expect(!rejectsCredential(transferDecision(finished(.temporary_http, 503), .ordinary).fail));
+}
+
 const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .unreadable = error.TestUnreadable } };
 
 test "HTTP quota refusal overrides rate limit retry evidence and retains reset detail" {

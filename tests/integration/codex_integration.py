@@ -52,14 +52,19 @@ class ManagedHandler(fixture.SuccessHandler):
         super().do_POST()
 
 
-def credentials(path, *, state="ready", access=ACCESS, fedramp=False):
+def credentials(path, *, state="ready", access=ACCESS, fedramp=False, generation=1):
     path.write_text(
-        "version=3\ngeneration=1\naccount_id=" + ACCOUNT +
+        "version=3\ngeneration=" + str(generation) + "\naccount_id=" + ACCOUNT +
         "\nfedramp=" + str(int(fedramp)) + "\nid_token=" + (FEDRAMP_ID if fedramp else ID) +
         "\naccess_token=" + access + "\nrefresh_token=synthetic-not-real\n"
         "expires_at=4102444800\nrefreshed_at=1750000000\nstate=" + state + "\n"
     )
     path.chmod(0o600)
+
+
+def credential_facts(path):
+    facts = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    return facts["generation"], facts["state"]
 
 
 def lock_available(lock):
@@ -217,9 +222,16 @@ def run():
         later = json.loads(endpoint.requests[2])
         assert later["reasoning"] == {"effort": "medium"}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
+        # Another owner commits a newer credential generation while this
+        # Attempt is in flight: the rejected lease is not refreshed and the
+        # Operation fails as before, with no replacement request.
+        rejected_release = threading.Event()
         with endpoint.lock:
-            endpoint.responses.append(fixture.ResponseSpec(b"authentication rejected", {}, 401))
+            endpoint.responses.append((fixture.ResponseSpec(b"authentication rejected", {}, 401), rejected_release))
         fixture.message(state, store, "rejected", session, "no hidden resend")
+        fixture.wait_for(lambda: len(endpoint.requests) == 4, "rejected managed request")
+        credentials(credential_file, generation=2)
+        rejected_release.set()
         failure = fixture.wait_for(
             lambda: (value := fixture.observe(store, "rejected")).get("result", {}).get("code") and value,
             "managed authentication rejection",
@@ -227,6 +239,7 @@ def run():
         assert failure["result"]["code"] == "provider_http_401", failure
         time.sleep(0.4)
         assert len(endpoint.requests) == 4, "managed authentication rejection resent a model request"
+        assert credential_facts(credential_file) == ("2", "ready"), "an advanced generation was refreshed again"
         assert len(endpoint.header_observations) == 4
         session_ids = {row[3] for row in endpoint.header_observations}
         assert len(session_ids) == 1 and re.fullmatch(r"[0-9a-f]{32}", next(iter(session_ids)))
@@ -501,6 +514,101 @@ def turn_state_journey():
             raise errors[0]
 
 
+def forced_refresh_journey():
+    """A managed model 401 claims its Operation's one forced refresh at the
+    rejected lease's unchanged generation and makes one replacement Attempt.
+    A second 401 and a refresh that requires login fail without resend."""
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-refresh.")).resolve()
+    credential_dir = state / "private"
+    credential_dir.mkdir(mode=0o700)
+    credential_file = credential_dir / "codex.json"
+    os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential_file)
+    credentials(credential_file)
+    endpoint = fixture.SuccessEndpoint([
+        fixture.ResponseSpec(b"stale token", {"X-Request-Id": "stale-1"}, 401),
+        fixture.sse_answer("refreshed", "refreshed-r", "refreshed-m", "refreshed answer")[0],
+        fixture.ResponseSpec(b"stale token", {"X-Request-Id": "stale-2"}, 401),
+        fixture.ResponseSpec(b"still rejected", {"X-Request-Id": "stale-3"}, 401),
+    ])
+    endpoint.RequestHandlerClass = ManagedHandler
+    endpoint.header_observations = []
+    endpoint.user_agents = []
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    store = state / "store"
+    host = None
+    complete = False
+    try:
+        host = start(store, url)
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--record", state / "configure.json",
+            "--key", "configure", "--workspace", fixture.ROOT,
+            "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["answer"]["session"]
+
+        # One stale-token 401: one forced refresh, one replacement Attempt.
+        fixture.message(state, store, "stale", session, "refresh a stale token")
+        answered = fixture.wait_for(lambda: fixture.completed_observation(store, "stale"), "answer after forced refresh")
+        assert answered["processing"]["attempt"] == "2", answered
+        assert fixture.read_result(store, "stale") == b"refreshed answer"
+        assert len(endpoint.requests) == 2
+        assert endpoint.requests[0] == endpoint.requests[1], "replacement changed the model request"
+        assert credential_facts(credential_file) == ("2", "ready")
+
+        # The refreshed credential is rejected again: the Operation has spent
+        # its refresh, so it fails with the provider's answer and no resend.
+        fixture.message(state, store, "rejected-twice", session, "reject twice")
+        failure = fixture.wait_for(
+            lambda: (value := fixture.observe(store, "rejected-twice")).get("result", {}).get("code") and value,
+            "second rejection after forced refresh",
+        )
+        assert failure["result"]["code"] == "provider_http_401", failure
+        time.sleep(0.4)
+        assert len(endpoint.requests) == 4, "a second 401 refreshed or resent again"
+        assert credential_facts(credential_file) == ("3", "ready"), "one Operation refreshed more than once"
+
+        # A refresh that requires login fails as authentication, distinct
+        # from the provider's 401, and sends no replacement.
+        pending_release = threading.Event()
+        with endpoint.lock:
+            endpoint.responses.append((fixture.ResponseSpec(b"stale token", {}, 401), pending_release))
+        fixture.message(state, store, "login-required", session, "login required")
+        fixture.wait_for(lambda: len(endpoint.requests) == 5, "request before pending refresh")
+        credentials(credential_file, state="refresh_pending", generation=3)
+        pending_release.set()
+        failure = fixture.wait_for(
+            lambda: (value := fixture.observe(store, "login-required")).get("result", {}).get("code") and value,
+            "authentication failure after pending refresh",
+        )
+        assert failure["result"]["code"] == "provider_authentication_failed", failure
+        time.sleep(0.4)
+        assert len(endpoint.requests) == 5, "a login-required refresh resent a model request"
+        assert credential_facts(credential_file) == ("3", "refresh_pending")
+        assert all(bearer == "Bearer " + ACCESS and account == ACCOUNT
+                   for _, bearer, account, _, _ in endpoint.header_observations)
+        print("codex forced refresh passed: one refresh and replacement per stale-token Operation, second 401 and login-required refresh fail without resend")
+        complete = True
+    finally:
+        incoming_error = sys.exc_info()[1]
+        errors = []
+        for dispose in (lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if complete and incoming_error is None and not errors:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("Codex forced refresh failure state", state)
+        if errors and incoming_error is None:
+            raise errors[0]
+
+
 if __name__ == "__main__":
     run()
     turn_state_journey()
+    forced_refresh_journey()

@@ -50,6 +50,8 @@ const ProviderSlot = struct {
     owner: AttemptOwner,
     /// The managed routing epoch selected when this transfer was launched.
     turn_epoch: ?u64 = null,
+    /// The leased credential generation a managed transfer presented.
+    credential_generation: ?u64 = null,
     transfer: provider.Transfer = undefined,
 };
 
@@ -90,6 +92,18 @@ const ModelPreparingSlot = struct {
 const ModelAuthenticatingSlot = struct {
     owner: ModelPreparingSlot,
     request: provider.PreparedRequest,
+    /// The shared worker accepted this slot's lease job.
+    requested: bool = false,
+    cancelled: bool = false,
+};
+
+/// A managed Attempt answered 401 whose Operation durably claimed its one
+/// forced refresh. The Attempt stays uncertain until the refresh settles it.
+const ModelRefreshingSlot = struct {
+    owner: AttemptOwner,
+    rejected_generation: u64,
+    request_id: protocol.Bounded(256),
+    requested: bool = false,
     cancelled: bool = false,
 };
 
@@ -97,6 +111,7 @@ pub const ExecutionSlot = union(enum) {
     free,
     model_preparing: ModelPreparingSlot,
     model_authenticating: ModelAuthenticatingSlot,
+    model_refreshing: ModelRefreshingSlot,
     provider: ProviderSlot,
     bash_preparing: BashPreparingSlot,
     bash: BashSlot,
@@ -117,6 +132,7 @@ fn slotToken(slot: *const ExecutionSlot) ?execution.CustodyToken {
         .free => null,
         .model_preparing => |*active| active.token,
         .model_authenticating => |*active| active.owner.token,
+        .model_refreshing => |*active| active.owner.token,
         .provider => |*active| active.owner.token,
         .bash_preparing => |*active| active.token,
         .bash => |*active| active.token,
@@ -132,6 +148,7 @@ fn checkSlotCustodyAgreement(slots: []const ExecutionSlot, custody: *execution.C
             .free => {},
             .model_preparing => |*active| try custody.checkAttachedModel(active.token, active.binding),
             .model_authenticating => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
+            .model_refreshing => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
             .provider => |*active| try custody.checkAttachedModel(active.owner.token, active.owner.binding),
             .bash_preparing => |*active| try custody.checkAttachedAction(active.token, active.binding),
             // Delivery closure detaches custody while the .bash payload is
@@ -713,6 +730,17 @@ fn cancelSupersededTransfers(
                 active.cancelled = true;
             }
         },
+        .model_refreshing => |*active| {
+            if (active.cancelled) continue;
+            const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
+                fenceDispatch(host, "refresh control reconciliation", err);
+                return;
+            };
+            if (superseded) |control| {
+                traceOperationControl(host, "effect_stop_requested", control.command_key.slice(), active.owner.binding);
+                active.cancelled = true;
+            }
+        },
         .provider => |*active| {
             if (active.transfer.isDiscarded()) continue;
             const superseded = host.store.operationSupersededByControl(active.owner.binding) catch |err| {
@@ -751,6 +779,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
         .provider => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .model_preparing => |value| if (value.binding.operation_id == operation_id) return true,
         .model_authenticating => |value| if (value.owner.binding.operation_id == operation_id) return true,
+        .model_refreshing => |value| if (value.owner.binding.operation_id == operation_id) return true,
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
     return false;
@@ -1303,9 +1332,9 @@ fn advanceModelPreparation(
     byte_allowance: usize,
     item_allowance: usize,
 ) bool {
-    if (host.auth_worker != null) {
-        for (slots) |*slot| if (slot.* == .model_authenticating)
-            return advanceAuthentication(host, reactor.?, slot);
+    if (host.auth_worker) |worker| {
+        if (advanceCredentialWork(host, reactor.?, slots, worker)) return true;
+        for (slots) |*slot| if (slot.* == .model_authenticating) return false;
     }
     const slot = for (slots) |*candidate| switch (candidate.*) {
         .model_preparing => break candidate,
@@ -1340,13 +1369,86 @@ fn advanceModelPreparation(
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = host.auth_worker != null } })) {
                 .authenticate => {
                     slot.* = .{ .model_authenticating = .{ .owner = owner, .request = request } };
-                    host.auth_worker.?.request();
+                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?);
                 },
                 .launch => launchPreparedRequest(host, reactor.?, slot, owner, &request, null),
                 else => unreachable,
             }
         },
     }
+    return true;
+}
+
+/// The one worker serves one job at a time: first the slot whose job it
+/// holds, then, once idle, the next waiting lease or refresh job.
+fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker) bool {
+    for (slots) |*slot| switch (slot.*) {
+        .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot),
+        .model_refreshing => |*active| if (active.requested) return advanceRefresh(host, slot),
+        else => {},
+    };
+    if (!worker.idle()) return false;
+    for (slots) |*slot| switch (slot.*) {
+        .model_authenticating => |*active| {
+            if (active.cancelled) {
+                active.request.deinit();
+                finishCustodyNow(host, slot, active.owner.token);
+            } else {
+                active.requested = true;
+                worker.request();
+            }
+            return true;
+        },
+        .model_refreshing => |*active| {
+            if (active.cancelled) {
+                finishCustodyNow(host, slot, active.owner.token);
+            } else {
+                active.requested = true;
+                worker.requestRefresh(active.rejected_generation);
+            }
+            return true;
+        },
+        else => {},
+    };
+    return false;
+}
+
+/// Settles the claimed Attempt from its refresh: a committed refresh grants
+/// the immediate replacement, an advanced generation fails as answered, and
+/// a refresh failure keeps its own authentication code. A stop discards it.
+fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
+    const result = host.auth_worker.?.take() orelse return false;
+    const active = slot.model_refreshing;
+    if (!active.cancelled) {
+        const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id } };
+        switch (result) {
+            .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
+            .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, model_adapter.authenticationFailureCode(err), .ordinary),
+            .ready => unreachable,
+        }
+    }
+    finishCustodyNow(host, slot, active.owner.token);
+    return true;
+}
+
+/// Durably claims the Operation's one forced refresh for a managed 401.
+/// Returns false when the claim is unavailable and the answer settles as
+/// before; otherwise this owner has disposed the transfer.
+fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, rejected_generation: u64) bool {
+    const owner = answered.owner;
+    const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
+        if (err != error.SupersededByControl) fenceDispatch(host, "credential refresh claim", err);
+        slot.provider.transfer.deinit();
+        finishCustodyNow(host, slot, owner.token);
+        return true;
+    };
+    if (!claimed) return false;
+    slot.provider.transfer.deinit();
+    slot.* = .{ .model_refreshing = .{
+        .owner = owner,
+        .rejected_generation = rejected_generation,
+        .request_id = answered.request_id,
+    } };
     return true;
 }
 
@@ -1446,6 +1548,7 @@ fn launchPreparedRequest(
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
         .turn_epoch = turn_epoch,
+        .credential_generation = if (credential) |value| value.record.generation else null,
         .transfer = undefined,
     } };
     const active = &slot.provider;
@@ -1609,6 +1712,9 @@ fn completeTransfer(
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
+                if (execution.rejectsCredential(failure)) if (active.credential_generation) |generation| {
+                    if (beginForcedRefresh(host, slot, &answered, generation)) return;
+                };
                 if (diagnostic) |detail| {
                     answered.reject(code, detail, disposition);
                 } else {
@@ -1835,6 +1941,9 @@ fn shutdownExecution(
             active.request.deinit();
             finishCustodyNow(host, slot, active.owner.token);
         },
+        // Shutdown saves no failure: the claimed Attempt stays uncertain
+        // and its spent claim forbids another refresh after restart.
+        .model_refreshing => |active| finishCustodyNow(host, slot, active.owner.token),
         .bash_preparing => |active| {
             const cleanup = preparation.*.?.cancel();
             preparation.* = null;

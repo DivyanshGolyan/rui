@@ -364,6 +364,12 @@ pub fn acquireCredentialInto(io: std.Io, authentication: Authentication, destina
     return codex_auth.acquireInto(io, authentication.path, authentication.fixture, destination);
 }
 
+/// After a model 401 on a lease of `rejected_generation`: false when another
+/// owner already committed a newer credential, so no refresh ran.
+pub fn forceCredentialRefresh(io: std.Io, authentication: Authentication, rejected_generation: u64) !bool {
+    return codex_auth.forceRefresh(io, authentication.path, authentication.fixture, rejected_generation);
+}
+
 pub fn authenticationFailureCode(err: anyerror) []const u8 {
     return codex_auth.failureCode(err);
 }

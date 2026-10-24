@@ -162,26 +162,47 @@ pub const Host = struct {
     }
 };
 
-// One Host-wide authentication I/O job. Canonical custody remains in the
-// execution slot while file locks, refresh TLS and persistence run here.
+// One Host-wide authentication I/O job: a launch lease, or one forced
+// refresh after a model 401. Canonical custody remains in the execution slot
+// while file locks, refresh TLS and persistence run here.
 pub const AuthWorker = struct {
     io: std.Io,
     authentication: model_adapter.Authentication,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
-    state: enum { idle, requested, ready, in_use, failed } = .idle,
+    state: enum { idle, requested, ready, in_use, refreshed, failed } = .idle,
     // Only .ready/.in_use own this final storage. The execution thread borrows
     // it through launch; the worker never publishes a value copy of the lease.
     credential: model_adapter.Credential = undefined,
     failure: ?anyerror = null,
+    /// Set with .requested for a forced refresh at this rejected generation.
+    refresh_generation: ?u64 = null,
+    refresh_result: bool = false,
     stopping: bool = false,
 
-    const Result = union(enum) { ready: *const model_adapter.Credential, failed: anyerror };
+    const Result = union(enum) { ready: *const model_adapter.Credential, refreshed: bool, failed: anyerror };
+
+    /// Only the execution thread requests and takes, so an idle worker stays
+    /// idle until that thread's next request.
+    pub fn idle(self: *AuthWorker) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.state == .idle;
+    }
 
     pub fn request(self: *AuthWorker) void {
+        self.requestJob(null);
+    }
+
+    pub fn requestRefresh(self: *AuthWorker, generation: u64) void {
+        self.requestJob(generation);
+    }
+
+    fn requestJob(self: *AuthWorker, refresh_generation: ?u64) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         std.debug.assert(self.state == .idle);
+        self.refresh_generation = refresh_generation;
         self.state = .requested;
         self.condition.broadcast(self.io);
     }
@@ -194,6 +215,10 @@ pub const AuthWorker = struct {
             .ready => result: {
                 self.state = .in_use;
                 break :result .{ .ready = &self.credential };
+            },
+            .refreshed => result: {
+                self.state = .idle;
+                break :result .{ .refreshed = self.refresh_result };
             },
             .failed => result: {
                 const err = self.failure.?;
@@ -231,20 +256,37 @@ pub const AuthWorker = struct {
                 self.mutex.unlock(self.io);
                 return;
             }
+            const refresh_generation = self.refresh_generation;
+            self.refresh_generation = null;
             self.mutex.unlock(self.io);
-            model_adapter.acquireCredentialInto(self.io, self.authentication, &self.credential) catch |err| {
-                self.mutex.lockUncancelable(self.io);
-                self.failure = err;
-                self.state = .failed;
-                self.condition.broadcast(self.io);
-                self.mutex.unlock(self.io);
-                continue;
+            const refreshed: ?bool = if (refresh_generation) |generation|
+                model_adapter.forceCredentialRefresh(self.io, self.authentication, generation) catch |err| {
+                    self.publishFailure(err);
+                    continue;
+                }
+            else refreshed: {
+                model_adapter.acquireCredentialInto(self.io, self.authentication, &self.credential) catch |err| {
+                    self.publishFailure(err);
+                    continue;
+                };
+                break :refreshed null;
             };
             self.mutex.lockUncancelable(self.io);
-            self.state = .ready;
+            if (refreshed) |value| {
+                self.refresh_result = value;
+                self.state = .refreshed;
+            } else self.state = .ready;
             self.condition.broadcast(self.io);
             self.mutex.unlock(self.io);
         }
+    }
+
+    fn publishFailure(self: *AuthWorker, err: anyerror) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.failure = err;
+        self.state = .failed;
+        self.condition.broadcast(self.io);
     }
 };
 

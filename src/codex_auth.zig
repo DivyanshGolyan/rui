@@ -37,21 +37,87 @@ pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, destination: *cr
     var record: credentials.Record = undefined;
     try credentials.loadInto(path, &record);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
-    if (try policy.select(&record, fixture, nowSeconds(io)) == .refresh) {
-        const Context = struct { io: std.Io, fixture: bool };
-        _ = try credentials.exchangeRefresh(path, record.generation, Context{ .io = io, .fixture = fixture }, struct {
-            fn exchange(context: Context, current: *const credentials.Record) !credentials.Record {
-                try policy.validateSelected(current, context.fixture);
-                var replacement: credentials.Record = undefined;
-                defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
-                try refresh(context.io, current, &replacement);
-                return replacement;
-            }
-        }.exchange);
-    }
+    if (try policy.select(&record, fixture, nowSeconds(io)) == .refresh)
+        _ = try exchangeAt(io, path, fixture, record.generation);
     try credentials.leaseInto(path, destination);
     errdefer destination.release();
     try policy.launchCheck(&destination.record, fixture, nowSeconds(io));
+}
+
+/// After a model 401, refreshes once if the committed credential generation
+/// still equals the rejected lease's. Returns false when another Host or a
+/// login already advanced the generation; the caller then fails as before.
+pub fn forceRefresh(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
+    return exchangeAt(io, path, fixture, expected_generation);
+}
+
+/// One refresh claim at `expected_generation` under the exclusive credential
+/// lock. The synthetic fixture credential cannot reach the real issuer, so
+/// its exchange republishes the same tokens; generation, claim and
+/// replacement admission still follow the production owner.
+fn exchangeAt(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
+    const Context = struct { io: std.Io, fixture: bool };
+    return credentials.exchangeRefresh(path, expected_generation, Context{ .io = io, .fixture = fixture }, struct {
+        fn exchange(context: Context, current: *const credentials.Record) !credentials.Record {
+            try policy.validateSelected(current, context.fixture);
+            var replacement: credentials.Record = undefined;
+            defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
+            if (context.fixture) {
+                replacement = current.*;
+                replacement.state = .ready;
+                replacement.refreshed_at = nowSeconds(context.io);
+            } else try refresh(context.io, current, &replacement);
+            return replacement;
+        }
+    }.exchange);
+}
+
+test "a forced refresh runs only for the rejected lease's unchanged generation" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/codex.json", .{root[0..root_len]});
+    var record: credentials.Record = .{
+        .generation = 0,
+        .account_id = .{},
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 4_102_444_800,
+        .refreshed_at = 100,
+    };
+    try record.account_id.set(fixture_account_id);
+    try record.id_token.set(fixture_id_token);
+    try record.access_token.set(fixture_access_token);
+    try record.refresh_token.set("synthetic-refresh");
+    try credentials.install(path, &record, null);
+    try std.testing.expectEqual(@as(u64, 1), (try credentials.load(path)).generation);
+
+    // Unchanged generation: one exchange advances it and leaves it ready.
+    try std.testing.expect(try forceRefresh(io, path, true, 1));
+    const refreshed = try credentials.load(path);
+    try std.testing.expectEqual(@as(u64, 2), refreshed.generation);
+    try std.testing.expectEqual(policy.State.ready, refreshed.state);
+    try std.testing.expectEqualStrings(fixture_account_id, refreshed.account_id.slice());
+    // A second Host holding the same stale lease sees the advanced
+    // generation and performs no exchange.
+    try std.testing.expect(!try forceRefresh(io, path, true, 1));
+    try std.testing.expectEqual(@as(u64, 2), (try credentials.load(path)).generation);
+
+    // A pending record requires login and is not exchanged again.
+    record.generation = 2;
+    record.state = .refresh_pending;
+    var pending_file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    var serialized: [policy.max_file_bytes]u8 = undefined;
+    try pending_file.writeStreamingAll(io, try policy.encode(&record, &serialized));
+    pending_file.close(io);
+    try std.testing.expectError(error.RefreshRequiresLogin, forceRefresh(io, path, true, 2));
+    try std.testing.expectEqualStrings("provider_authentication_failed", failureCode(error.RefreshRequiresLogin));
 }
 
 const Response = struct {
