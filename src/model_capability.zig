@@ -19,6 +19,29 @@ pub fn parallelToolCalls(model: []const u8) bool {
     return std.mem.eql(u8, model, "gpt-5.5");
 }
 
+/// Exact defaults from Codex 970111f6 models-manager/models.json, not backend
+/// effective effort or entitlement. Unknown bindings have no inferred default.
+pub fn defaultReasoningEffort(model: []const u8) ?protocol.ReasoningEffort {
+    const std = @import("std");
+    for ([_][]const u8{ "gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol" }) |known|
+        if (std.mem.eql(u8, model, known)) return .low;
+    for ([_][]const u8{ "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |known|
+        if (std.mem.eql(u8, model, known)) return .medium;
+    return null;
+}
+
+/// Configuration admission intersects Rui's closed grammar with the pinned
+/// model's advertised values. Frozen Operations do not consult this again.
+pub fn supportsReasoningEffort(model: []const u8, effort: protocol.ReasoningEffort) bool {
+    const std = @import("std");
+    if (defaultReasoningEffort(model) == null) return false;
+    return switch (effort) {
+        .none => false,
+        .max => !std.mem.eql(u8, model, "gpt-5.5"),
+        .low, .medium, .high, .xhigh => true,
+    };
+}
+
 /// The pinned catalog gives all release-supported IDs a 272000-token window.
 /// No alias inference, account entitlement or live qualification is implied.
 /// Reservation is extra heuristic headroom, never a provider output limit.
@@ -57,4 +80,30 @@ test "supported model compaction defaults and exact identifier boundary" {
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other|
         try std.testing.expectEqual(@as(?u64, null), compactionPolicy(other, null, null).compaction_trigger);
     try std.testing.expectEqual(@as(?u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
+}
+
+test "reasoning effort uses exact catalog defaults and model support without expanding grammar" {
+    const std = @import("std");
+    for ([_]struct { model: []const u8, default: protocol.ReasoningEffort, max: bool }{
+        .{ .model = "gpt-6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-6.1-sol", .default = .low, .max = true },
+        .{ .model = "gpt-6-sol", .default = .medium, .max = true },
+        .{ .model = "gpt-6-astra", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-sol", .default = .low, .max = true },
+        .{ .model = "gpt-5.6-terra", .default = .medium, .max = true },
+        .{ .model = "gpt-5.6-luna", .default = .medium, .max = true },
+        .{ .model = "gpt-5.5", .default = .medium, .max = false },
+    }) |case| {
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, case.default), defaultReasoningEffort(case.model));
+        for ([_]protocol.ReasoningEffort{ .low, .medium, .high, .xhigh }) |effort|
+            try std.testing.expect(supportsReasoningEffort(case.model, effort));
+        try std.testing.expectEqual(case.max, supportsReasoningEffort(case.model, .max));
+        try std.testing.expect(!supportsReasoningEffort(case.model, .none));
+    }
+    for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |unknown| {
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), defaultReasoningEffort(unknown));
+        inline for (std.meta.tags(protocol.ReasoningEffort)) |effort|
+            try std.testing.expect(!supportsReasoningEffort(unknown, effort));
+    }
+    try std.testing.expect(std.meta.stringToEnum(protocol.ReasoningEffort, "ultra") == null);
 }

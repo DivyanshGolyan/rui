@@ -13,6 +13,7 @@ pub const max_workspace_bytes = 4096;
 pub const max_model_bytes = 256;
 pub const max_tool_description_bytes = 100;
 pub const Provider = enum { codex };
+pub const ReasoningEffort = enum { none, low, medium, high, xhigh, max };
 // Like permission-mode selectors, retain bounded unsupported names so admission
 // can save their rejection. This is an ingress bound, not a provider registry.
 pub const max_provider_bytes = 16;
@@ -91,6 +92,7 @@ pub const Configuration = struct {
     output_schema: ContentField = .{},
     compaction_trigger: OptionalBounded(20) = .{},
     output_reservation: OptionalBounded(20) = .{},
+    reasoning_effort: OptionalBounded(16) = .{},
 };
 
 pub const Kind = enum {
@@ -152,6 +154,7 @@ pub const ConfigureCommand = struct {
         hashContent(&hash, &self.configuration.output_schema);
         hashOptional(&hash, &self.configuration.compaction_trigger);
         hashOptional(&hash, &self.configuration.output_reservation);
+        hashOptional(&hash, &self.configuration.reasoning_effort);
         hash.update(&.{@intFromBool(self.require_model)});
         return hash.finalResult();
     }
@@ -1046,6 +1049,7 @@ const Parser = struct {
         try self.readContent(&request.configuration.output_schema, true, allow_content);
         var trigger_seen = false;
         var reservation_seen = false;
+        var effort_seen = false;
         while (try self.consumeIf(',')) {
             var key: Bounded(32) = .{};
             try self.readSmallString(&key);
@@ -1056,6 +1060,9 @@ const Parser = struct {
             } else if (key.eql("output_reservation") and !reservation_seen) {
                 reservation_seen = true;
                 try self.readOptionalPolicy(&request.configuration.output_reservation);
+            } else if (key.eql("reasoning_effort") and !effort_seen) {
+                effort_seen = true;
+                try self.readOptionalSmallNullable(16, &request.configuration.reasoning_effort, true);
             } else return error.UnexpectedField;
         }
         try self.expectByte('}');
@@ -2023,6 +2030,16 @@ test "semantic digest distinguishes omission, null, and value" {
     value_schema.configuration.output_schema.digest = @splat(1);
     try std.testing.expect(!std.mem.eql(u8, &omitted.semanticDigest(), &null_schema.semanticDigest()));
     try std.testing.expect(!std.mem.eql(u8, &null_schema.semanticDigest(), &value_schema.semanticDigest()));
+    var efforts: [4]ConfigureCommand = @splat(omitted);
+    efforts[1].configuration.reasoning_effort.state = .explicit_null;
+    efforts[2].configuration.reasoning_effort.state = .value;
+    try efforts[2].configuration.reasoning_effort.value.set("none");
+    efforts[3].configuration.reasoning_effort.state = .value;
+    try efforts[3].configuration.reasoning_effort.value.set("high");
+    for (efforts, 0..) |command, index| {
+        for (efforts[0..index]) |previous|
+            try std.testing.expect(!std.mem.eql(u8, &command.semanticDigest(), &previous.semanticDigest()));
+    }
 }
 
 test "Request Store borrow remains in its active union payload" {
@@ -2362,7 +2379,7 @@ test "conversation cursor parser rejects unfixed and malformed continuations" {
     }
 }
 
-test "configuration token heuristics parse sparsely and bind idempotency" {
+test "configuration token heuristics and effort parse sparsely and bind idempotency" {
     const cases = [_]struct { suffix: []const u8, trigger: ?[]const u8 = null, reservation: ?[]const u8 = null, failure: ?anyerror = null }{
         .{ .suffix = "" },
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}" },
@@ -2377,6 +2394,11 @@ test "configuration token heuristics parse sparsely and bind idempotency" {
         .{ .suffix = ",\"compaction_trigger\":{\"state\":\"value\",\"value\":\"123456789012345678901\"}", .failure = error.ValueTooLong },
         .{ .suffix = ",\"context_capacity\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
         .{ .suffix = ",\"output_reservation\":{\"state\":\"omitted\"},\"output_reservation\":{\"state\":\"omitted\"}", .failure = error.UnexpectedField },
+        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"high\"}" },
+        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"none\"}" },
+        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"}" },
+        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"value\",\"value\":\"ultra\"}" },
+        .{ .suffix = ",\"reasoning_effort\":{\"state\":\"null\"},\"reasoning_effort\":{\"state\":\"null\"}", .failure = error.UnexpectedField },
     };
     var omitted_digest: [32]u8 = undefined;
     for (cases, 0..) |case, index| {
@@ -2399,6 +2421,8 @@ test "configuration token heuristics parse sparsely and bind idempotency" {
         if (std.mem.indexOf(u8, case.suffix, "\"state\":\"null\"") != null) {
             const state = if (std.mem.indexOf(u8, case.suffix, "compaction_trigger") != null)
                 command.configuration.compaction_trigger.state
+            else if (std.mem.indexOf(u8, case.suffix, "reasoning_effort") != null)
+                command.configuration.reasoning_effort.state
             else
                 command.configuration.output_reservation.state;
             try std.testing.expectEqual(FieldState.explicit_null, state);
