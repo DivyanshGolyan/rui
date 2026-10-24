@@ -227,7 +227,7 @@ def run():
         # Operation fails as before, with no replacement request.
         rejected_release = threading.Event()
         with endpoint.lock:
-            endpoint.responses.append((fixture.ResponseSpec(b"authentication rejected", {}, 401), rejected_release))
+            endpoint.responses.append((fixture.ResponseSpec(b"authentication rejected", {"X-Request-Id": "newer-ready"}, 401), rejected_release))
         fixture.message(state, store, "rejected", session, "no hidden resend")
         fixture.wait_for(lambda: len(endpoint.requests) == 4, "rejected managed request")
         credentials(credential_file, generation=2)
@@ -237,6 +237,9 @@ def run():
             "managed authentication rejection",
         )
         assert failure["result"]["code"] == "provider_http_401", failure
+        operation = fixture.command("session", "inspect", "--store", store, "--session", session,
+                                    "--profile", "full")["full"]["model_operations"][-1]
+        assert operation["request_id"] == "newer-ready", operation
         time.sleep(0.4)
         assert len(endpoint.requests) == 4, "managed authentication rejection resent a model request"
         assert credential_facts(credential_file) == ("2", "ready"), "an advanced generation was refreshed again"
@@ -587,9 +590,37 @@ def forced_refresh_journey():
         time.sleep(0.4)
         assert len(endpoint.requests) == 5, "a login-required refresh resent a model request"
         assert credential_facts(credential_file) == ("3", "refresh_pending")
+
+        # A different owner advances the generation and then leaves it
+        # pending. Preserve this Attempt's answered 401 and correlation,
+        # rather than replacing them with that owner's login failure.
+        with open(credential_dir / ".codex.json.lock", "r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            credentials(credential_file, generation=4)
+        newer_release = threading.Event()
+        with endpoint.lock:
+            endpoint.responses.append((fixture.ResponseSpec(b"stale token", {"X-Request-Id": "newer-pending"}, 401), newer_release))
+        fixture.message(state, store, "newer-pending", session, "another owner claimed refresh")
+        fixture.wait_for(lambda: len(endpoint.requests) == 6, "request before newer pending generation")
+        with open(credential_dir / ".codex.json.lock", "r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            credentials(credential_file, state="refresh_pending", generation=5)
+            newer_record = credential_file.read_bytes()
+        newer_release.set()
+        failure = fixture.wait_for(
+            lambda: (value := fixture.observe(store, "newer-pending")).get("result", {}).get("code") and value,
+            "answered rejection with newer pending generation",
+        )
+        assert failure["result"]["code"] == "provider_http_401", failure
+        operation = fixture.command("session", "inspect", "--store", store, "--session", session,
+                                    "--profile", "full")["full"]["model_operations"][-1]
+        assert operation["request_id"] == "newer-pending", operation
+        time.sleep(0.4)
+        assert len(endpoint.requests) == 6, "a newer pending generation resent a model request"
+        assert credential_file.read_bytes() == newer_record, "a stale claimant changed the newer credentials"
         assert all(bearer == "Bearer " + ACCESS and account == ACCOUNT
                    for _, bearer, account, _, _ in endpoint.header_observations)
-        print("codex forced refresh passed: one refresh and replacement per stale-token Operation, second 401 and login-required refresh fail without resend")
+        print("codex forced refresh passed: one refresh and replacement, second 401 and login-required refresh fail without resend; newer pending generation preserves answered 401/correlation and credentials")
         complete = True
     finally:
         incoming_error = sys.exc_info()[1]

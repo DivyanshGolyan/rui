@@ -184,8 +184,8 @@ pub const Claim = enum { claimed, superseded };
 /// Another claimant that already advanced the generation supersedes this one;
 /// a pending record requires explicit login rather than another exchange.
 pub fn claimRefresh(record: *Record, expected_generation: u64) !Claim {
-    try requireReady(record);
     if (record.generation != expected_generation) return .superseded;
+    try requireReady(record);
     record.state = .refresh_pending;
     return .claimed;
 }
@@ -544,6 +544,12 @@ test "a refresh claim marks the current generation pending once" {
     try std.testing.expectEqual(State.refresh_pending, record.state);
     try std.testing.expectEqual(@as(u64, 5), record.generation);
     try std.testing.expectError(error.RefreshRequiresLogin, claimRefresh(&record, 5));
+    // A different generation supersedes this claimant even when its owner
+    // left it pending. It must not become this claimant's login failure.
+    try std.testing.expectEqual(Claim.superseded, try claimRefresh(&record, 4));
+    try std.testing.expectEqual(Claim.superseded, try claimRefresh(&record, 6));
+    try std.testing.expectEqual(State.refresh_pending, record.state);
+    try std.testing.expectEqual(@as(u64, 5), record.generation);
 }
 
 test "replacement admission advances generations and preserves refresh routing" {
