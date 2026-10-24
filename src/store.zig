@@ -14,7 +14,7 @@ const turn_policy = @import("turn_policy.zig");
 const c = @import("sqlite");
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 34;
+pub const schema_version: u32 = 35;
 pub const sqlite_heap_bytes: u64 = 16 * 1024 * 1024;
 pub const ModelAdmissionKind = enum { message, tool_continuation };
 
@@ -7444,9 +7444,9 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ usage_tokens INTEGER CHECK(usage_tokens IS NULL OR (usage_tokens>=0 AND usage_content_id IS NOT NULL)),
         \\ interrupted_by_command_key TEXT REFERENCES core_command(command_key),
         \\ FOREIGN KEY(session_ref,settings_revision) REFERENCES session_revision(session_ref,revision),
-        \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms=0) OR (uncertain=0 AND retry_due_at_ms>0))) OR
+        \\ CHECK((resolution_code IS NULL AND ((uncertain=1 AND retry_due_at_ms IS 0) OR (uncertain=0 AND retry_due_at_ms IS NOT NULL AND retry_due_at_ms>0))) OR
         \\       (resolution_code IS NOT NULL AND uncertain=0 AND retry_due_at_ms IS NULL)),
-        \\ CHECK((resolution_code='interrupted' AND interrupted_by_command_key IS NOT NULL) OR
+        \\ CHECK((resolution_code IS 'interrupted' AND interrupted_by_command_key IS NOT NULL) OR
         \\       (coalesce(resolution_code,'')!='interrupted' AND interrupted_by_command_key IS NULL)),
         \\ UNIQUE(operation_id,session_ref)
         \\) STRICT;
@@ -7503,7 +7503,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ UNIQUE(operation_id,item_ordinal),
         \\ UNIQUE(operation_id,call_id_content_id),
         \\ UNIQUE(operation_id,call_ordinal,action_kind),
-        \\ CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND action_kind=1) OR
+        \\ CHECK((rejection_code IS NULL AND rejection_content_id IS NULL AND acceptance_position IS NULL AND action_kind IS 1) OR
         \\       (rejection_code IS NOT NULL AND rejection_content_id IS NOT NULL AND acceptance_position IS NOT NULL AND action_kind IS NULL))
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE action_operation(
@@ -7525,7 +7525,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ FOREIGN KEY(parent_operation_id,session_ref) REFERENCES model_operation(operation_id,session_ref),
         \\ FOREIGN KEY(parent_operation_id,call_ordinal,tool_kind) REFERENCES model_tool_call(operation_id,call_ordinal,action_kind),
         \\ FOREIGN KEY(session_ref,permission_revision) REFERENCES session_revision(session_ref,revision),
-        \\ CHECK((permission_state=2 AND resolution_code='denied' AND attempt_ordinal=0) OR
+        \\ CHECK((permission_state=2 AND resolution_code IS 'denied' AND attempt_ordinal=0) OR
         \\       (permission_state IN (0,1) AND (resolution_code IS NULL OR resolution_code!='denied'))),
         \\ CHECK((attempt_ordinal=0 AND bash_timeout_ms IS NULL) OR
         \\       (attempt_ordinal=1 AND bash_timeout_ms IS NOT NULL)),
@@ -9723,14 +9723,6 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
         try bindText(rejected_action, 2, allocated_session_0.slice());
         try std.testing.expectError(error.StatementFailed, expectDone(rejected_action));
     }
-    {
-        const invalid_denial = try prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,permission_state,resolution_code) VALUES(998,?1,0,?2,1,1,2,NULL)");
-        defer _ = c.sqlite3_finalize(invalid_denial);
-        try bindU64(invalid_denial, 1, binding.operation_id);
-        try bindText(invalid_denial, 2, allocated_session_0.slice());
-        try std.testing.expectError(error.StatementFailed, expectDone(invalid_denial));
-    }
-
     var observation = try storage.inspectSession(allocated_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), observation.action_count);
     try std.testing.expectEqual(@as(u64, 5), observation.rejected_call_count);
@@ -9850,6 +9842,70 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(usize, 1), recovered_report.value.actions.unresolved.len);
     try std.testing.expectEqualStrings("6", recovered_report.value.actions.unresolved[0].call_ordinal);
     try std.testing.expectEqual(@as(usize, 5), recovered_report.value.rejected_calls.items.len);
+}
+
+const ConstraintProbe = enum { accepted, check_violation, other_failure };
+
+/// Runs one write inside a rolled-back savepoint and reports whether SQLite
+/// accepted it or rejected it on a CHECK rather than another constraint.
+fn probeConstraint(database: *c.sqlite3, sql: [:0]const u8) !ConstraintProbe {
+    try exec(database, "SAVEPOINT constraint_probe");
+    defer exec(database, "ROLLBACK TO constraint_probe; RELEASE constraint_probe") catch unreachable;
+    const statement = try prepare(database, sql);
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) == c.SQLITE_DONE) return .accepted;
+    return if (c.sqlite3_extended_errcode(database) == c.SQLITE_CONSTRAINT_CHECK) .check_violation else .other_failure;
+}
+
+test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itself" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const session = try configureTestSessionAsk(&storage, "check-config");
+    try submitTestMessage(&storage, &tmp, "check-message", "check-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\",\\\"timeout_ms\\\":null}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\",\"timeout_ms\":null}" },
+        .{ .item_id = "item-2", .name = "other", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND permission_state=0 AND resolution_code IS NULL AND attempt_ordinal=0"));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool'"));
+
+    // Each pair changes only the null-valued field. The valid witness shows the
+    // row satisfies every unrelated constraint, so the invalid write can only
+    // fail on the lifecycle CHECK.
+    const Case = struct { valid: [:0]const u8, invalid: [:0]const u8 };
+    const cases = [_]Case{
+        // An unresolved uncertain Operation needs the zero retry sentinel.
+        .{
+            .valid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=0",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=NULL",
+        },
+        // Interruption linkage requires the interrupted Resolution.
+        .{
+            .valid = "UPDATE model_operation SET resolution_code='interrupted',uncertain=0,retry_due_at_ms=NULL,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
+            .invalid = "UPDATE model_operation SET resolution_code=NULL,resolution_content_id=NULL,uncertain=1,retry_due_at_ms=0,interrupted_by_command_key=(SELECT min(command_key) FROM core_command)",
+        },
+        // A call without rejection fields must be an Action call.
+        .{
+            .valid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=1 WHERE call_ordinal=1",
+            .invalid = "UPDATE model_tool_call SET rejection_code=NULL,rejection_content_id=NULL,acceptance_position=NULL,action_kind=NULL WHERE call_ordinal=1",
+        },
+        // A denied permission state requires the denied Resolution.
+        .{
+            .valid = "UPDATE action_operation SET permission_state=1,resolution_code=NULL WHERE call_ordinal=0",
+            .invalid = "UPDATE action_operation SET permission_state=2,resolution_code=NULL WHERE call_ordinal=0",
+        },
+    };
+    var outcomes: [cases.len]ConstraintProbe = undefined;
+    for (cases, &outcomes) |case, *outcome| {
+        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, case.valid));
+        outcome.* = try probeConstraint(storage.database, case.invalid);
+    }
+    try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
 }
 
 test "complete call outcomes continue once in call order ahead of pending input" {
