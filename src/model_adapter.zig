@@ -89,13 +89,9 @@ pub fn interpretOutput(
             else => .permanent,
         },
     } };
-    if (!modelObservationsAgree(validated.evidence.served_model.slice(), models)) return .{ .rejected = .{
-        .reason = error.ContradictoryProviderOutput,
-        .code = "contradictory_provider_output",
-        .location = .{ .stage = .response, .byte_offset = source_length },
-    } };
     // Opaque certificate v1: body, OpenAI header, alternate header. Preserve
-    // source absence; agreement never substitutes the requested model.
+    // each source independently, including absence and disagreement. Never
+    // substitute the requested model for reported evidence.
     var certificate: protocol.Bounded(775) = .{};
     certificate.bytes[0] = 1;
     certificate.len = 1;
@@ -107,18 +103,6 @@ pub fn interpretOutput(
         certificate.len += value.len;
     }
     return .{ .accepted = .{ .output = validated, .model_evidence = certificate } };
-}
-
-fn modelObservationsAgree(body: []const u8, models: ModelObservations) bool {
-    const values = [_][]const u8{ body, models.openai, models.alternate };
-    var observed: ?[]const u8 = null;
-    for (values) |value| {
-        if (value.len == 0) continue;
-        if (observed) |prior| {
-            if (!std.mem.eql(u8, prior, value)) return false;
-        } else observed = value;
-    }
-    return true;
 }
 
 pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16) execution.ErrorResponse {
@@ -187,7 +171,7 @@ test "HTTP 429 quota authority requires an exact valid code but not reset metada
     }
 }
 
-test "provider interpretation preserves accepted bytes and rejects every model disagreement" {
+test "provider interpretation preserves independently reported model evidence" {
     const item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}";
     const prefix = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}\n\n";
     const model_255 = @as([254]u8, @splat('m')) ++ "z";
@@ -197,14 +181,18 @@ test "provider interpretation preserves accepted bytes and rejects every model d
         .{ .body = ",\"model\":null", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x07\x00model-a" },
         .{ .body = "", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
-        .{ .body = "", .models = .{ .openai = "model-a", .alternate = "model-b" }, .accepted = false },
+        .{ .body = "", .models = .{ .openai = "model-a", .alternate = "model-b" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x07\x00model-b" },
         .{ .body = ",\"model\":\"model-a\"", .models = .{}, .accepted = true, .certificate = "\x01\x07\x00model-a\x00\x00\x00\x00" },
         .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-a", .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x07\x00model-a\x07\x00model-a\x07\x00model-a" },
         .{ .body = ",\"model\":\"m-λ\"", .models = .{ .alternate = "m-λ" }, .accepted = true, .certificate = "\x01\x04\x00m-λ\x00\x00\x04\x00m-λ" },
         .{ .body = ",\"model\":\"" ++ model_255 ++ "\"", .models = .{ .openai = model_255, .alternate = model_255 }, .accepted = true, .certificate = "\x01\xff\x00" ++ model_255 ++ "\xff\x00" ++ model_255 ++ "\xff\x00" ++ model_255 },
         .{ .body = ",\"model\":\"" ++ model_256 ++ "\"", .models = .{ .openai = model_256, .alternate = model_256 }, .accepted = true, .certificate = "\x01\x00\x01" ++ model_256 ++ "\x00\x01" ++ model_256 ++ "\x00\x01" ++ model_256 },
-        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-b" }, .accepted = false },
-        .{ .body = ",\"model\":\"model-a\"", .models = .{ .alternate = "model-a-extra" }, .accepted = false },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .openai = "model-b" }, .accepted = true, .certificate = "\x01\x07\x00model-a\x07\x00model-b\x00\x00" },
+        .{ .body = ",\"model\":\"model-a\"", .models = .{ .alternate = "model-a-extra" }, .accepted = true, .certificate = "\x01\x07\x00model-a\x00\x00\x0d\x00model-a-extra" },
+        .{ .body = ",\"model\":\"m-λ\"", .models = .{ .openai = "model-b", .alternate = "model-c" }, .accepted = true, .certificate = "\x01\x04\x00m-λ\x07\x00model-b\x07\x00model-c" },
+        .{ .body = ",\"model\":\"\"", .models = .{ .openai = "valid-header" }, .accepted = false },
+        .{ .body = ",\"model\":123", .models = .{ .alternate = "valid-header" }, .accepted = false },
+        .{ .body = ",\"model\":null,\"model\":\"other\"", .models = .{}, .accepted = false },
     };
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -239,12 +227,11 @@ test "provider interpretation preserves accepted bytes and rejects every model d
             try std.testing.expectEqual(@as(?u64, 11), pressure);
         } else {
             try std.testing.expect(interpreted == .rejected);
-            try std.testing.expectEqualStrings("contradictory_provider_output", interpreted.rejected.code);
-            try std.testing.expectEqual(bytes.len, interpreted.rejected.location.byte_offset);
+            try std.testing.expectEqualStrings("malformed_provider_output", interpreted.rejected.code);
             try std.testing.expectEqual(.response, interpreted.rejected.location.stage);
         }
         // Interpretation neither closes its borrowed source nor releases the
-        // caller's metadata charge, even on cross-response rejection.
+        // caller's metadata charge, even on malformed response rejection.
         try std.testing.expect(used.load(.acquire) > 0);
         var first: [1]u8 = undefined;
         try std.testing.expectEqual(@as(usize, 1), try file.readPositionalAll(std.testing.io, &first, 0));

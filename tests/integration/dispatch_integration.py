@@ -2406,6 +2406,18 @@ def main(mode="all", correlation_case="all"):
                 ),
             ),
             ("absent", None, {}, (None, None, None, None)),
+            (
+                "headers-disagree",
+                None,
+                {"OpenAI-Model": "header-a", "X-OpenAI-Model": "header-b"},
+                (None, "header-a", "header-b", None),
+            ),
+            (
+                "body-header-disagree",
+                "model-body",
+                {"OpenAI-Model": "header-a"},
+                ("model-body", "header-a", None, None),
+            ),
         )
         evidence_endpoint = SuccessEndpoint(
             [
@@ -2458,11 +2470,11 @@ def main(mode="all", correlation_case="all"):
             assert actual_evidence == expected_evidence, (name, actual_evidence, expected_evidence)
         stop_endpoint(evidence_endpoint, endpoints)
 
-        contradictory_sse, _, _ = sse_answer(
+        contradictory_sse, contradictory_reasoning, contradictory_item = sse_answer(
             "contradictory-response",
             "contradictory-reasoning",
             "contradictory-message",
-            "must not publish",
+            "preserved model evidence",
             served_model="model-body",
         )
         contradictory_request_id = 'contradictory-"quoted"\\path'
@@ -2503,38 +2515,44 @@ def main(mode="all", correlation_case="all"):
             contradictory_evidence_session,
             "contradictory evidence",
         )
-        contradictory_failure = wait_for(
-            lambda: (
-                value := observe(contradictory_store, "contradictory-message")
-            ).get("result", {}).get("code")
-            and value,
-            "contradictory model evidence failure",
+        contradictory_result = wait_for(
+            lambda: (value := observe(contradictory_store, "contradictory-message")).get("result") and value,
+            "differing model evidence completion",
         )
-        assert contradictory_failure["queue"]["status"] == "failed", contradictory_failure
-        assert (
-            contradictory_failure["result"]["code"] == "contradictory_provider_output"
-        ), contradictory_failure
+        assert contradictory_result["queue"]["status"] == "completed", contradictory_result
+        domain = b"rui/content/v1"
+        assert contradictory_result["result"] == {
+            "status": "completed",
+            "text": {"type": "text", "bytes": "24", "sha256": hashlib.sha256(
+                len(domain).to_bytes(8, "big") + domain + b"preserved model evidence"
+            ).hexdigest()},
+        }, contradictory_result
+        assert read_result(contradictory_store, "contradictory-message") == b"preserved model evidence"
         assert len(contradictory_endpoint.requests) == 1
         stop_host(contradictory_host)
         processes.remove(contradictory_host)
         database = sqlite3.connect(contradictory_store / "rui.sqlite3")
-        assert database.execute(
+        saved = database.execute(
             "SELECT uncertain,resolution_code,response_id,model_evidence,request_id FROM model_operation"
-        ).fetchone() == (0, "contradictory_provider_output", None, None, contradictory_request_id)
-        assert database.execute("SELECT count(*) FROM model_output_item").fetchone()[0] == 0
+        ).fetchone()
+        assert (*saved[:3], decode_model_evidence(saved[3]), saved[4]) == (
+            0, "answer", "contradictory-response",
+            ("model-body", "model-openai-header", "model-x-openai-header"), contradictory_request_id,
+        ), saved
+        raw_items = database.execute(
+            "SELECT c.payload FROM model_output_item i JOIN content c ON c.content_id=i.content_id ORDER BY i.item_ordinal"
+        ).fetchall()
+        assert raw_items == [(json.dumps(item, separators=(",", ":")).encode(),)
+                             for item in (contradictory_reasoning, contradictory_item)], raw_items
         assert database.execute(
             "SELECT count(*) FROM conversation_entry WHERE entry_kind=3"
-        ).fetchone()[0] == 0
-        assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is None
+        ).fetchone()[0] == 1
+        assert database.execute("SELECT outcome_content_id FROM turn").fetchone()[0] is not None
         database.close()
         contradictory_reopened = start_host(contradictory_store, None)
         processes.append(contradictory_reopened)
-        restarted_failure = observe(contradictory_store, "contradictory-message")
-        assert restarted_failure["queue"]["status"] == "failed", restarted_failure
-        assert restarted_failure["result"] == {
-            "status": "failed",
-            "code": "contradictory_provider_output",
-        }, restarted_failure
+        assert observe(contradictory_store, "contradictory-message")["result"] == contradictory_result["result"]
+        assert read_result(contradictory_store, "contradictory-message") == b"preserved model evidence"
         report = command(
             "session", "inspect", "--store", contradictory_store,
             "--session", contradictory_evidence_session, "--profile", "full",
@@ -2542,29 +2560,18 @@ def main(mode="all", correlation_case="all"):
         operation = report["full"]["model_operations"][0]
         assert operation["request_id"] == contradictory_request_id, operation
         resolution = operation["resolution"]
-        assert resolution["content"] is not None, resolution
-        assert json.loads(resolution["content"]["text"]) == {
-            "reason": "ContradictoryProviderOutput", "stage": "response",
-            "byte_offset": str(len(contradictory_sse)), "output_index": None,
-        }, resolution
-        assert len(resolution["content"]["text"].encode()) <= 512
-        assert "must not publish" not in json.dumps(report), report
-        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
-        unreadable_result = subprocess.run(
-            [
-                str(RUI),
-                "request", "read-result",
-                "--store",
-                str(contradictory_store),
-                "--key",
-                "contradictory-message",
-            ],
-            capture_output=True,
-            timeout=15,
-        )
-        assert unreadable_result.returncode != 0, unreadable_result.stdout
+        assert resolution["code"] == "answer", resolution
+        assert resolution["content"]["text"] == "preserved model evidence", resolution
+        assert report["session"]["model"] == "gpt-6-sol", report
+        assert report["full"]["turns"][0]["outcome"]["code"] == "completed", report
+        assert failed_response_records(contradictory_store) == []
         stop_host(contradictory_reopened)
         processes.remove(contradictory_reopened)
+        with sqlite3.connect(contradictory_store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT uncertain,resolution_code,response_id,model_evidence,request_id FROM model_operation"
+            ).fetchone() == saved, "restart changed source evidence"
+        assert len(contradictory_endpoint.requests) == 1
         stop_endpoint(contradictory_endpoint, endpoints)
 
         # Input committed after the first request's cutoff is selected at the
