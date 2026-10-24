@@ -10,25 +10,21 @@ pub const CompactionPolicy = struct {
     output_reservation: u64,
 };
 
-const KnownModel = struct { name: []const u8, context_tokens: u64 };
-
-/// Exact requested model names with known context windows. This is not a
-/// catalog, qualification or entitlement; other valid identifiers still run.
-const known_models = [_]KnownModel{
-    // Codex metadata 21c16161191ff965031d1ac41fe9046011610743.
-    .{ .name = "gpt-6-luna", .context_tokens = 272000 },
-};
-
-fn knownModel(model: []const u8) ?KnownModel {
+/// Codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97 models-manager/models.json
+/// advertises parallel support for all eight IDs, but client.rs
+/// disables it for Responses-lite models. Only gpt-5.5 is not lite. This is
+/// the effective request policy, not a claim that Rui uses the lite route.
+pub fn parallelToolCalls(model: []const u8) bool {
     const std = @import("std");
-    for (known_models) |known| if (std.mem.eql(u8, known.name, model)) return known;
-    return null;
+    return std.mem.eql(u8, model, "gpt-5.5");
 }
 
+/// The pinned catalog gives all release-supported IDs a 272000-token window.
+/// No alias inference, account entitlement or live qualification is implied.
 /// Reservation is extra heuristic headroom, never a provider output limit.
 pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
-    const automatic: ?u64 = if (knownModel(model)) |known|
-        known.context_tokens * product_defaults.compaction_trigger_percent / 100
+    const automatic: ?u64 = if (product_defaults.supportsModel(model))
+        272000 * product_defaults.compaction_trigger_percent / 100
     else
         null;
     return .{
@@ -48,15 +44,17 @@ pub fn capability(readiness: provider_selection.Readiness) provider_selection.Ca
     return .{ .name = provider_label, .recommended_model = product_defaults.recommended_model, .valid_model = validModel, .readiness = readiness };
 }
 
-test "the recommended model has an automatic compaction threshold; other models do not" {
+test "supported model compaction defaults and exact identifier boundary" {
     const std = @import("std");
-    const recommended = compactionPolicy(product_defaults.recommended_model, null, null);
-    try std.testing.expectEqual(@as(?u64, 244800), recommended.compaction_trigger);
-    try std.testing.expectEqual(@as(u64, 0), recommended.output_reservation);
+    for (product_defaults.supported_models) |model| {
+        const policy = compactionPolicy(model, null, null);
+        try std.testing.expectEqual(@as(?u64, 244800), policy.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
+        const overridden = compactionPolicy(model, 7, 3);
+        try std.testing.expectEqual(@as(?u64, 7), overridden.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
+    }
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other|
         try std.testing.expectEqual(@as(?u64, null), compactionPolicy(other, null, null).compaction_trigger);
-    const explicit = compactionPolicy(product_defaults.recommended_model, 7, 3);
-    try std.testing.expectEqual(@as(?u64, 7), explicit.compaction_trigger);
-    try std.testing.expectEqual(@as(u64, 3), explicit.output_reservation);
     try std.testing.expectEqual(@as(?u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }

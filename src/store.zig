@@ -16833,7 +16833,7 @@ test "compaction success retains host inputs and ordered anchor suffix across re
 }
 
 test "compaction defaults nullable overrides and frozen retry survive reopen" {
-    for ([_][]const u8{ "gpt-6-luna", "model-a", "gpt-6-luna-alias" }) |model| {
+    for (product_defaults.supported_models ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage = try testingStore(&tmp, std.testing.io);
@@ -16844,7 +16844,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
         const created_session_0_reply = storage.configure(&configure, true, .{});
         try std.testing.expect(created_session_0_reply == .accepted);
         const created_session_0 = created_session_0_reply.accepted.session;
-        const expected: ?u64 = if (std.mem.eql(u8, model, "gpt-6-luna")) 244800 else null;
+        const expected: ?u64 = if (model_index < product_defaults.supported_models.len) 244800 else null;
         const initial = try storage.inspectSession(created_session_0.slice());
         try std.testing.expectEqual(expected, initial.compaction_trigger);
         try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);

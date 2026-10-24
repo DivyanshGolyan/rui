@@ -399,7 +399,7 @@ pub const Headers = struct {
     bearer: [codex_credentials.max_token_bytes + 32:0]u8 = undefined,
     account: [codex_credentials.max_account_id_bytes + 32:0]u8 = undefined,
     session: [48:0]u8 = undefined,
-    entries: [6][:0]const u8 = undefined,
+    entries: [7][:0]const u8 = undefined,
     length: usize = 0,
 
     /// Initialize in final stack storage. The entries are borrowed only until
@@ -421,8 +421,8 @@ pub const Headers = struct {
         const account = try std.fmt.bufPrintSentinel(&self.account, "ChatGPT-Account-ID: {s}", .{account_id}, 0);
         const session_id = std.fmt.bytesToHex(affinity, .lower);
         const session = try std.fmt.bufPrintSentinel(&self.session, "session-id: {s}", .{&session_id}, 0);
-        self.entries = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "X-OpenAI-Fedramp: true" };
-        self.length = if (credential.record.fedramp) 6 else 5;
+        self.entries = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "User-Agent: rui/" ++ @import("transport_options").revision, "X-OpenAI-Fedramp: true" };
+        self.length = if (credential.record.fedramp) 7 else 6;
     }
 
     pub fn slice(self: *const Headers) []const [:0]const u8 {
@@ -710,7 +710,10 @@ pub const Preparation = struct {
                 },
                 .model_prefix => self.emitFixed("{\"model\":\"", .model),
                 .model => self.emitJsonBytes(self.settings.?.model.slice(), .envelope),
-                .envelope => self.emitFixed("\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .runtime_instructions),
+                .envelope => self.emitFixed(if (@import("model_capability.zig").parallelToolCalls(self.settings.?.model.slice()))
+                    "\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\""
+                else
+                    "\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"", .runtime_instructions),
                 .runtime_instructions => self.emitJsonBytes(context_parts[0], .workspace),
                 .workspace => {
                     self.emitJsonBytes(self.settings.?.workspace.slice(), .address_prefix);
@@ -848,9 +851,9 @@ pub const Preparation = struct {
                     } else self.phase = .tools_suffix;
                 },
                 .tools_suffix => {
-                    if (self.settings.?.output_schema != null) self.emitFixed("]", .schema_prefix) else self.emitFixed("]", .request_suffix);
+                    if (self.settings.?.output_schema != null) self.emitFixed("]", .schema_prefix) else self.emitFixed("],\"text\":{\"verbosity\":\"low\"}", .request_suffix);
                 },
-                .schema_prefix => self.emitFixed(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":", .schema),
+                .schema_prefix => self.emitFixed(",\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":", .schema),
                 .schema => {
                     const reader = self.view.openContent(self.settings.?.output_schema.?) catch |err| return .{ .failed = err };
                     self.emitRawReader(reader, .schema_suffix);
@@ -1714,7 +1717,7 @@ const composed_replayed_call_a = "{\"type\":\"function_call\",\"id\":\"order-ite
 const composed_replayed_call_b = "{\"type\":\"function_call\",\"id\":\"order-item-b\",\"status\":\"completed\",\"name\":\"bash\",\"call_id\":\"order-call-b\",\"arguments\":\"{\\\"cmd\\\":\\\"true\\\",\\\"description\\\":\\\"Run no-op command\\\",\\\"timeout_ms\\\":null}\"}";
 
 const composed_expected =
-    "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
+    "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[" ++
     "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"do work\"}]}," ++
     composed_replayed ++ "," ++
     composed_replayed_call_a ++ "," ++
@@ -1722,7 +1725,7 @@ const composed_expected =
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-a\",\"output\":\"Permission denied.\"}," ++
     "{\"type\":\"function_call_output\",\"call_id\":\"order-call-b\",\"output\":\"Permission denied.\"}]," ++
     "\"tools\":[" ++ bash_tool_json ++ "]," ++
-    "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
+    "\"text\":{\"verbosity\":\"low\",\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
 test "scratch namespaces admit a Message while matching provider scratch exists" {
     try proveScratchNamespaceIsolation(true);
@@ -1828,7 +1831,7 @@ test "request preparation minimal golden is exact across schedules" {
     defer workspace_dir.close(std.testing.io);
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = workspace_buffer[0..try workspace_dir.realPath(std.testing.io, &workspace_buffer)];
-    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]";
     const schedules = [_][2]usize{ .{ 16, 2 }, .{ 1, 1 }, .{ 16384, 64 }, .{ 7, 3 } };
     var first_bytes: ?[]u8 = null;
     defer if (first_bytes) |bytes| std.testing.allocator.free(bytes);
@@ -1840,7 +1843,7 @@ test "request preparation minimal golden is exact across schedules" {
         defer setup.close();
         setup.workspace = workspace;
         const golden_session = try setup.configure("prep-golden-config");
-        const full_expected = try requestGolden(setup.workspace, golden_session.slice(), expected ++ ",\"tools\":[]}");
+        const full_expected = try requestGolden(setup.workspace, golden_session.slice(), expected ++ ",\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
         defer std.testing.allocator.free(full_expected);
         // Explicit empty tool list selects no tools for an exact small envelope.
         {
@@ -1904,7 +1907,7 @@ test "request preparation retains the allocated ID across reopen and replacement
     try setup.submit("prep-replacement-input", "prep-replacement-message", session.slice(), "same input");
     var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
     const original = try admitted.permit.consume();
-    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ bash_tool_json ++ "]}");
+    const expected = try requestGolden(setup.workspace, session.slice(), "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"same input\"}]}],\"tools\":[" ++ bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}");
     defer std.testing.allocator.free(expected);
     var binding = original;
     for (0..2) |index| {
@@ -2105,8 +2108,8 @@ test "request preparation freezes settings at admission" {
     try preparation.init(std.testing.io, view, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, .{}, &retained);
     const result = try drainPreparation(&preparation, 3, 2, 8192);
     defer std.testing.allocator.free(result.bytes);
-    const expected = "{\"model\":\"model-a\",\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
-        bash_tool_json ++ "]}";
+    const expected = "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}],\"tools\":[" ++
+        bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}";
     const full_expected = try requestGolden(setup.workspace, session.slice(), expected);
     defer std.testing.allocator.free(full_expected);
     try std.testing.expectEqualStrings(full_expected, result.bytes);

@@ -8,6 +8,7 @@ import pathlib
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -24,6 +25,20 @@ FEDRAMP_ID = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW
 ACCOUNT = "rui-test-account"
 
 
+def expected_user_agent():
+    if not (fixture.ROOT / ".git").exists() or shutil.which("git") is None:
+        return "rui/unknown"
+    identity = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=fixture.ROOT,
+        capture_output=True, text=True,
+    )
+    lines = identity.stdout.splitlines()
+    revision = lines[1] if (identity.returncode == 0 and len(lines) == 2
+                           and pathlib.Path(lines[0]).resolve() == fixture.ROOT
+                           and re.fullmatch(r"[0-9a-f]{40}", lines[1])) else "unknown"
+    return "rui/" + revision
+
+
 class ManagedHandler(fixture.SuccessHandler):
     def do_POST(self):
         with self.server.lock:
@@ -31,6 +46,7 @@ class ManagedHandler(fixture.SuccessHandler):
                 (self.path, self.headers.get("Authorization"), self.headers.get("ChatGPT-Account-ID"),
                  self.headers.get("session-id"), self.headers.get("originator"))
             )
+            self.server.user_agents.append(self.headers.get("User-Agent"))
         super().do_POST()
 
 
@@ -95,6 +111,7 @@ def run():
     endpoint = fixture.SuccessEndpoint(responses)
     endpoint.RequestHandlerClass = ManagedHandler
     endpoint.header_observations = []
+    endpoint.user_agents = []
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{endpoint.server_port}/responses"
@@ -267,6 +284,46 @@ def run():
         )
         assert rejected["result"]["code"] == "unsupported_codex_configuration", rejected
         assert len(endpoint.requests) == 4
+        fixture.stop_host(host)
+        host = start(stop_store, url)
+        diagnostics = None
+        # Independent catalog expectations, exercised through real managed POSTs
+        # and public effective settings rather than capability helpers alone.
+        expected_agent = expected_user_agent()
+        mismatches = []
+        for index, model in enumerate((
+            "gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
+        )):
+            key = f"envelope-{index}"
+            with endpoint.lock:
+                endpoint.responses.append(fixture.sse_answer(key, key + "-r", key + "-m", key)[0])
+            configured = fixture.command(
+                "session", "configure", "--store", stop_store, "--record", state / f"{key}-config.json",
+                "--key", key + "-config", "--workspace", fixture.ROOT,
+                "--provider", "codex", "--model", model, "--tools", "bash" if index % 2 else "none",
+            )
+            assert configured["answer"]["status"] == "accepted", configured
+            selected = configured["answer"]["session"]
+            settings = fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"]
+            fixture.message(state, stop_store, key, selected, key)
+            observation, answer, _ = fixture.wait_for_result_release(stop_store, key, selected, time.monotonic() + 20)
+            assert observation["result"]["status"] == "completed" and answer == key.encode(), observation
+            request = json.loads(endpoint.requests[4 + index])
+            assert request["model"] == model, request
+            if settings["compaction_trigger"] != "244800" or settings["output_reservation"] != "0":
+                mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
+            if request.get("text") != {"verbosity": "low"}:
+                mismatches.append((model, "text", request.get("text")))
+            # Codex suppresses parallel calls on Responses-lite bindings even
+            # when the catalog advertises supports_parallel_tool_calls=true.
+            if request.get("parallel_tool_calls") is not (model == "gpt-5.5"):
+                mismatches.append((model, "parallel_tool_calls", request.get("parallel_tool_calls")))
+            if endpoint.user_agents[4 + index] != expected_agent:
+                mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
+        assert len(endpoint.requests) == 12, endpoint.requests
+        assert not mismatches, mismatches
+        print(f"codex request envelopes passed: eight exact model IDs, 244800/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:

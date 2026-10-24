@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic managed transfer through native TLS/HTTP2 with observed reuse."""
 
+import json
 import os
 import pathlib
 import re
@@ -128,6 +129,12 @@ def run(*, observed=False, intake=100):
             assert answer == expected.encode(), answer
         assert len(endpoint.streams) == 3 and len(endpoint.connections) == 1
         assert len({stream for _, stream, _, _ in endpoint.streams}) == 3
+        expected_agent = codex.expected_user_agent().encode()
+        for headers, (_, _, _, body) in zip(endpoint.request_headers, endpoint.streams, strict=True):
+            assert headers[b"user-agent"] == expected_agent, headers
+            request = json.loads(body)
+            assert request["text"] == {"verbosity": "low"}, request
+            assert request["parallel_tool_calls"] is False, request
         session_ids = {headers[b"session-id"] for headers in endpoint.request_headers}
         assert len(session_ids) == 1 and re.fullmatch(rb"[0-9a-f]{32}", next(iter(session_ids)))
         for headers in endpoint.request_headers[:2]:

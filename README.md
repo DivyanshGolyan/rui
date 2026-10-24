@@ -111,7 +111,7 @@ If Host startup warns that a saved model default is unsupported, run `"$RUI" def
 
 ## Configure compaction
 
-Rui compacts model context without deleting saved conversation history. Codex with exact model `gpt-6-luna` defaults to an estimated 244,800-token threshold. Other model names have no automatic threshold unless you set one. Provider-reported context overflow can still start compaction.
+Rui compacts model context without deleting saved conversation history. All eight release-supported Codex model IDs default to an estimated 244,800-token threshold. Unknown model names have no automatic threshold unless you set one. Provider-reported context overflow can still start compaction.
 
 To change the current Session, enter:
 

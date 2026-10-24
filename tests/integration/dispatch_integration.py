@@ -392,7 +392,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         session = configure(state, store, f"{route}-config", None, "gpt-6-sol", instructions="baseline")
         settings = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert settings["compaction_trigger"] is None and settings["output_reservation"] == "0", settings
+        assert settings["compaction_trigger"] == "244800" and settings["output_reservation"] == "0", settings
         message(state, store, f"{route}-first", session, "covered user input")
         wait_for(lambda: len(endpoint.requests) == 2, "overflow followed by explicit compaction")
         compaction = json.loads(endpoint.requests[1])
@@ -403,6 +403,8 @@ def compaction_cases(state, processes, endpoints, releases):
         assert [json.loads(request)["instructions"] for request in endpoint.requests[:2]] == [address, address], endpoint.requests[:2]
         assert compaction["store"] is False and compaction["stream"] is True, compaction
         assert compaction["include"] == ["reasoning.encrypted_content"], compaction
+        assert compaction["text"] == {"verbosity": "low"}, compaction
+        assert compaction["parallel_tool_calls"] is False, compaction
         assert user_texts(compaction) == ["covered user input"], compaction
         # Admission fixes coverage. Later settings and messages cannot enter it.
         patch(store, session, f"{route}-policy", "--compaction-trigger", "1", "--output-reservation", "0")
@@ -442,7 +444,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert current["compaction_trigger"] is None and current["compaction_trigger_override"] is None, current
+        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] is None, current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
