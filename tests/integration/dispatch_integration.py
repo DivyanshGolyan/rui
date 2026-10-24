@@ -224,7 +224,10 @@ def empty_response_retention_case(state, processes, endpoints, status):
     body = b'{"error":"nonempty retention control"}'
     empty = ResponseSpec(b"", {"X-Request-Id": label}, status=status)
     nonempty = ResponseSpec(body, {"X-Request-Id": "nonempty-control"}, status=400)
-    endpoint = SuccessEndpoint([empty, nonempty, empty, nonempty])
+    # A clean HTTP 200 close retries through the four-Attempt allowance;
+    # every empty capture must still leave the retention FIFO unchanged.
+    empty_attempts = 1 if status == 400 else 4
+    endpoint = SuccessEndpoint([*[empty] * empty_attempts, nonempty, *[empty] * empty_attempts, nonempty])
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoints[endpoint] = thread
     thread.start()
@@ -237,7 +240,7 @@ def empty_response_retention_case(state, processes, endpoints, status):
         result = wait_for(lambda: (value := observe(store, key)).get("result") and value, key)
         assert result["result"]["code"] == code, result
 
-    code = "provider_http_400" if status == 400 else "malformed_provider_output"
+    code = "provider_http_400" if status == 400 else "retry_exhausted"
     root = store / "diagnostics" / "failed-responses"
     fail(label + "-fresh", code)
     assert not root.exists(), f"{label} created diagnostics without response bytes"
@@ -260,7 +263,7 @@ def empty_response_retention_case(state, processes, endpoints, status):
     fail(label + "-full", code)
     after = {path.name: path.read_bytes() for path in root.iterdir()}
     assert after == before, f"{label} changed the full retention FIFO"
-    assert len(endpoint.requests) == 3, len(endpoint.requests)
+    assert len(endpoint.requests) == 2 * empty_attempts + 1, len(endpoint.requests)
 
     # A later nonempty failure still evicts exactly the oldest record and
     # takes sequence 257, with no sequence or FIFO cost for either empty body.
@@ -274,7 +277,7 @@ def empty_response_retention_case(state, processes, endpoints, status):
             assert not (root / name).exists(), name
         else:
             assert (root / name).read_bytes() == data, name
-    assert len(endpoint.requests) == 4, len(endpoint.requests)
+    assert len(endpoint.requests) == 2 * empty_attempts + 2, len(endpoint.requests)
     stop_host(host)
     processes.remove(host)
     stop_endpoint(endpoint, endpoints)
@@ -675,6 +678,74 @@ def empty_answer_cases(state, processes, endpoints):
     print("empty answers: phased/unphased empty and Unicode whitespace complete; exact nonblank bytes; inspect/read-result and restart replay passed")
 
 
+def stream_failure_cases(state, processes, endpoints):
+    """Sealed SSE failures retry only when their parsed meaning permits it."""
+    answer = sse_answer("retry-answer", "reasoning", "answer", "recovered")[0]
+    partial = encode_sse([{"type": "response.output_item.done", "output_index": 0,
+                           "item": {"type": "message", "id": "partial", "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "not accepted"}]}}], done=False)
+    cases = []
+    for event_type in ("error", "response.failed"):
+        for code, temporary in (("server_is_overloaded", True), ("rate_limit_exceeded", True),
+                                ("future_error", True), ("insufficient_quota", False), ("bio_policy", False)):
+            event = {"type": event_type, "code": code} if event_type == "error" else {
+                "type": event_type, "response": {"status": "failed", "error": {"code": code}}}
+            body = partial + encode_sse([event])
+            cases.append((event_type + "-" + code, [body, answer] if temporary else [body],
+                          "completed" if temporary else "provider_permanent_error", 2 if temporary else 1))
+    overloaded = encode_sse([{"type": "response.failed", "response": {
+        "status": "failed", "error": {"code": "server_is_overloaded"}}}])
+    nullable = answer.replace(b'"model":"model-a-served"', b'"model":null').replace(
+        b'"usage":{"input_tokens":7,"output_tokens":11,"total_tokens":18}', b'"usage":null')
+    assert b'"usage":null' in nullable and b'"model":null' in nullable
+    cases += [
+        ("clean-close", [partial, answer], "completed", 2),
+        ("exhausted", [overloaded] * 4, "retry_exhausted", 4),
+        ("incomplete", [encode_sse([{"type": "response.incomplete", "response": {
+            "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}}])], "malformed_provider_output", 1),
+        ("malformed-code", [encode_sse([{"type": "error", "code": 17}])], "malformed_provider_output", 1),
+        ("malformed-framing", [b'data: {"type":"response.created"}\n'], "malformed_provider_output", 1),
+        ("nullable-evidence", [nullable], "completed", 1),
+    ]
+    for label, bodies, code, attempts in cases:
+        endpoint = SuccessEndpoint(bodies)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / ("stream-" + label)
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        processes.append(host)
+        session = configure(state, store, "stream-" + label + "-config", None, "gpt-6-sol")
+        key = "stream-" + label
+        message(state, store, key, session, "input")
+        result = wait_for(lambda: (value := observe(store, key)).get("result") and value, label)
+        assert result["processing"]["attempt"] == str(attempts), (label, result)
+        if code == "completed":
+            assert result["result"]["status"] == "completed", (label, result)
+            assert read_result(store, key) == b"recovered", (label, result)
+        else:
+            assert result["result"] == {"status": "failed", "code": code}, (label, result)
+        operation = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
+        assert operation["request_id"] == f"request-{attempts}", (label, operation)
+        if label == "exhausted":
+            detail = json.loads(operation["resolution"]["content"]["text"])
+            assert detail == {"reason": "TemporaryProviderFailure", "stage": "event", "byte_offset": "6", "output_index": None}, detail
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute("SELECT count(*) FROM action_operation").fetchone() == (0,)
+            assert database.execute("SELECT count(*) FROM model_output_item").fetchone() == (2 if code == "completed" else 0,)
+        reopened = start_host(store, None)
+        processes.append(reopened)
+        assert command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0] == operation
+        assert observe(store, key)["result"] == result["result"]
+        stop_host(reopened)
+        processes.remove(reopened)
+        assert len(endpoint.requests) == attempts, (label, endpoint.requests)
+        stop_endpoint(endpoint, endpoints)
+    print("Stream failures: retry, permanent controls, exhaustion provenance, nullable evidence and reopen passed")
+
+
 def phased_message_cases(state, processes, endpoints):
     """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
     def text_item(identity, text, phase):
@@ -845,6 +916,11 @@ def main(mode="all", correlation_case="all"):
             failure_correlation_cases(state, processes, endpoints, correlation_case)
             completed = True
             return
+        if mode in ("all", "stream-failures"):
+            stream_failure_cases(state, processes, endpoints)
+            if mode == "stream-failures":
+                completed = True
+                return
         if mode in ("all", "empty-answers"):
             empty_answer_cases(state, processes, endpoints)
             if mode == "empty-answers":
@@ -2465,8 +2541,11 @@ def main(mode="all", correlation_case="all"):
             [
                 {"type": "response.output_item.done", "output_index": 0, "item": invalid_reasoning},
                 {"type": "response.output_item.done", "output_index": 1, "item": duplicate_message},
+                {"type": "response.completed", "response": {
+                    "id": "duplicate-identity", "status": "completed",
+                    "output": [invalid_reasoning, duplicate_message],
+                }},
             ],
-            done=False,
         )
         incomplete_tool = encode_sse(
             [
@@ -2474,9 +2553,11 @@ def main(mode="all", correlation_case="all"):
                     "type": "response.output_item.added",
                     "output_index": 0,
                     "item": {"type": "function_call", "id": "tool-1"},
-                }
+                },
+                {"type": "response.completed", "response": {
+                    "id": "unfinished-tool", "status": "completed", "output": [],
+                }},
             ],
-            done=False,
         )
         late_malformed = first_sse.replace(
             b"data: [DONE]\n\n", b"data: {malformed\n\ndata: [DONE]\n\n"
@@ -2530,7 +2611,7 @@ def main(mode="all", correlation_case="all"):
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "malformed_provider_output",
-                "malformed_provider_output",
+                "contradictory_provider_output",
                 "malformed_provider_output",
                 "malformed_provider_output",
                 "malformed_provider_output",
@@ -2566,6 +2647,7 @@ def main(mode="all", correlation_case="all"):
                 f"invalid output {index}",
             )
             assert rejected["result"]["code"] == expected_code, rejected
+            assert rejected["processing"]["attempt"] == "1", rejected
             expected_request_id = None if index == 0 else f"request-{index + 1}"
             before_operation = command(
                 "session", "inspect", "--store", invalid_store,
@@ -2608,6 +2690,10 @@ def main(mode="all", correlation_case="all"):
                 code=expected_code, http_status=200, request_id=expected_request_id,
                 diagnostic=resolution["content"]["text"],
             )
+            if index == 3:
+                assert detail["reason"] == "InvalidProviderEnvelope", detail
+            if index == 5:
+                assert detail["reason"] == "UnfinishedProviderOutputItem", detail
             if index == 13:
                 assert detail["reason"] == "UnsupportedMessagePhase", detail
                 assert detail["stage"] == "item" and detail["output_index"] == 0, detail
@@ -2631,7 +2717,9 @@ def main(mode="all", correlation_case="all"):
             return encode_sse([{
                 "type": "response.output_item.added", "output_index": 0,
                 "item": {"type": "function_call", "id": f"{label}-{'z' * padding}"},
-            }], done=False)
+            }, {"type": "response.completed", "response": {
+                "id": label, "status": "completed", "output": [],
+            }}])
 
         concurrent_release = threading.Event()
         # One body crosses the 64 KiB copy window; lengths all differ.
@@ -5304,8 +5392,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|empty-answers|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|stream-failures|empty-answers|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

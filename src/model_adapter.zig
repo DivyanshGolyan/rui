@@ -82,7 +82,11 @@ pub fn interpretOutput(
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
-        .kind = if (err == error.ContextOverflow) .context_overflow else .permanent,
+        .kind = switch (err) {
+            error.ContextOverflow => .context_overflow,
+            error.TemporaryProviderFailure, error.ProviderConnectionClosed => .temporary,
+            else => .permanent,
+        },
     } };
     if (!modelObservationsAgree(validated.evidence.served_model.slice(), models)) return .{ .rejected = .{
         .reason = error.ContradictoryProviderOutput,
@@ -128,6 +132,7 @@ test "provider interpretation preserves accepted bytes and rejects every model d
     const model_256 = @as([255]u8, @splat('m')) ++ "z";
     const cases = [_]struct { body: []const u8, models: ModelObservations, accepted: bool, certificate: []const u8 = "" }{
         .{ .body = "", .models = .{}, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x00\x00" },
+        .{ .body = ",\"model\":null", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .alternate = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x00\x00\x07\x00model-a" },
         .{ .body = "", .models = .{ .openai = "model-a" }, .accepted = true, .certificate = "\x01\x00\x00\x07\x00model-a\x00\x00" },
         .{ .body = "", .models = .{ .openai = "model-a", .alternate = "model-b" }, .accepted = false },
@@ -221,6 +226,66 @@ test "provider interpretation closes failure variants without granting settlemen
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
     }
+}
+
+fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []const u8) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const source = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
+    defer source.close(std.testing.io);
+    try source.writeStreamingAll(std.testing.io, bytes);
+    var root: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root);
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained: ?named_scratch.Owner = null;
+    var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+    defer metadata.deinit();
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, .assistant_response, .{}, .{});
+    try std.testing.expect(result == .rejected);
+    try std.testing.expectEqual(kind, result.rejected.kind);
+    try std.testing.expectEqualStrings(code, result.rejected.code);
+}
+
+test "provider interpretation retries overloaded stream errors" {
+    try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"server_is_overloaded\"}\n\n", .temporary, "provider_temporary_error");
+    try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_is_overloaded\"}}}\n\n", .temporary, "provider_temporary_error");
+}
+
+test "provider interpretation retries response failed and nested error envelopes" {
+    try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"future_error\"}}}\n\n", .temporary, "provider_temporary_error");
+    try expectStreamFailure("data: {\"type\":\"error\",\"error\":{\"code\":\"insufficient_quota\"}}\n\n", .permanent, "provider_permanent_error");
+    try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":null}}\n\n", .temporary, "provider_temporary_error");
+    try expectStreamFailure("data: {\"type\":\"error\",\"code\":null}\n\n", .temporary, "provider_temporary_error");
+}
+
+test "provider interpretation retries rate limit stream failures" {
+    inline for (.{ "rate_limit_exceeded", "slow_down" }) |code| {
+        try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"" ++ code ++ "\"}\n\n", .temporary, "provider_temporary_error");
+        try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"" ++ code ++ "\"}}}\n\n", .temporary, "provider_temporary_error");
+    }
+}
+
+test "provider interpretation retries unknown stream failures without inferring from messages" {
+    inline for (.{ "future_error", "context_length_exceeded_extra" }) |code| {
+        try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"" ++ code ++ "\",\"message\":\"insufficient_quota\"}\n\n", .temporary, "provider_temporary_error");
+        try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"" ++ code ++ "\"}}}\n\n", .temporary, "provider_temporary_error");
+    }
+}
+
+test "provider interpretation keeps quota and policy stream failures permanent" {
+    inline for (.{ "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included", "usage_limit_reached", "cyber_policy", "bio_policy", "misalignment_policy_violation", "invalid_prompt" }) |code| {
+        try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"" ++ code ++ "\"}\n\n", .permanent, "provider_permanent_error");
+        try expectStreamFailure("data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"" ++ code ++ "\"}}}\n\n", .permanent, "provider_permanent_error");
+    }
+}
+
+test "provider interpretation retries clean close but not incomplete framing or generation" {
+    try expectStreamFailure(": keepalive\n\n", .temporary, "provider_transport_failure");
+    try expectStreamFailure("data: {\"type\":\"response.created\"}\n\n", .temporary, "provider_transport_failure");
+    try expectStreamFailure("data: {\"type\":\"response.created\"}\n", .permanent, "malformed_provider_output");
+    try expectStreamFailure("data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n", .permanent, "malformed_provider_output");
+    try expectStreamFailure("data: {\"type\":\"error\",\"code\":123}\n\n", .permanent, "malformed_provider_output");
+    try expectStreamFailure("data: {\"type\":\"error\",\"code\":\"slow_down\",\"code\":\"future\"}\n\n", .permanent, "malformed_provider_output");
 }
 
 pub const Authentication = struct { path: []const u8, fixture: bool = false };

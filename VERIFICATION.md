@@ -241,6 +241,7 @@ These rows target the accepted [peer composition](ARCHITECTURE.md#agent-identity
 | Canonical settlement cannot publish a result | `canonical-failure-integration`, `'Host fences'` | None |
 | One sibling settles while another is unresolved | `dispatch_integration.py` | Edit sibling: none located |
 | [Retries and timeouts](ARCHITECTURE.md#retries-and-timeouts): 1 + 3 Attempts, 2, 4 and 8 s waits, 5 min timeouts | `'model retry decision'`, `'Retry-After'`, `'inactivity defaults'`, `bash_owner_integration.py` | Retries may duplicate billing. Bash 5 min default: none located |
+| SSE failure classification, clean close and nullable evidence | `'provider interpretation'`, `'provider completion treats null'`, `'retryable stream rejections'`, `dispatch_integration.py stream-failures` in `dispatch-integration` | Synthetic `error` and `response.failed` retries, permanent quota and policy controls, malformed framing and code controls, four-Attempt exhaustion, exact final diagnostic and correlation through reopen, and no accepted failed prefix. No live provider evidence |
 
 #### Runnable Bash caller acceptance audit
 

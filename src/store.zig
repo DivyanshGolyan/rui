@@ -5843,8 +5843,6 @@ pub const Store = struct {
         if (code.len == 0 or code.len > 96 or !std.unicode.utf8ValidateSlice(code)) {
             return error.InvalidFailureCode;
         }
-        // A rejected response is final; only transport and HTTP status retry.
-        if (failure == .rejected) std.debug.assert(disposition != .retryable);
         if (failure.diagnostic()) |detail| {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
@@ -5922,9 +5920,13 @@ pub const Store = struct {
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 },
                 .exhausted => {
+                    const diagnostic_id = if (failure.diagnostic()) |detail|
+                        try self.importBytesContent(detail, false, faults.content_import)
+                    else
+                        null;
                     const update = try prepare(
                         self.database,
-                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4 " ++
+                        "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,last_failure_code=?2,resolution_code='retry_exhausted',request_id=?4,resolution_content_id=?5 " ++
                             "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?3",
                     );
                     defer _ = c.sqlite3_finalize(update);
@@ -5933,6 +5935,7 @@ pub const Store = struct {
                     try bindU64(update, 3, binding.attempt_ordinal);
                     // The settling Attempt's correlation, like a terminal failure.
                     try bindOptionalText(update, 4, failure.requestId());
+                    try bindNullableI64(update, 5, diagnostic_id);
                     try expectDone(update);
                     if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
 
@@ -15630,6 +15633,46 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     const terminal = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelAttemptFailure(terminal, .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } }, .ordinary, .{});
     try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE request_id IS NULL AND resolution_code='provider_http_401'"));
+}
+
+test "retryable stream rejections retain only the settling Attempt diagnostic through reopen" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const diagnostic = "{\"reason\":\"TemporaryProviderFailure\",\"stage\":\"event\",\"byte_offset\":\"6\",\"output_index\":null}";
+    var session: protocol.Bounded(protocol.max_session_bytes) = undefined;
+    {
+        var storage = try testingStore(&tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        session = try configureTestSession(&storage, "stream-retry-config");
+        try submitTestMessage(&storage, &tmp, "stream-input", "stream-message", session.slice(), "retry");
+        var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        for (1..5) |ordinal| {
+            try std.testing.expectEqual(@as(u64, ordinal), binding.attempt_ordinal);
+            var request_id: protocol.Bounded(256) = .{};
+            try request_id.set(if (ordinal == 4) "last-request" else "earlier-request");
+            try storage.settleModelAttemptFailure(binding, .{ .rejected = .{
+                .code = "provider_temporary_error",
+                .diagnostic = if (ordinal == 4) diagnostic else "earlier diagnostic",
+                .request_id = request_id,
+            } }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+            if (ordinal < 4) {
+                try std.testing.expectEqual(@as(u64, 0), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_content_id IS NOT NULL OR request_id IS NOT NULL"));
+                try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE retry_due_at_ms IS NOT NULL");
+                binding = (try admitRetryForTesting(&storage)).?.permit.binding;
+            }
+        }
+    }
+    var reopened = try testingStore(&tmp, std.testing.io);
+    defer reopened.close() catch unreachable;
+    const bytes = try testingSessionReportWithProfile(&reopened, &tmp, session.slice(), 64 * 1024, .full);
+    defer std.testing.allocator.free(bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    const operation = parsed.value.object.get("full").?.object.get("model_operations").?.array.items[0].object;
+    try std.testing.expectEqualStrings("last-request", operation.get("request_id").?.string);
+    const resolution = operation.get("resolution").?.object;
+    try std.testing.expectEqualStrings("retry_exhausted", resolution.get("code").?.string);
+    try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
 }
 
 test "temporary model failures conserve allowance and exhaust after four Attempts" {

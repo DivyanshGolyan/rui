@@ -415,22 +415,50 @@ pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: 
     return errorOverflow(io, file, failure) catch |err| malformedOverflow(err);
 }
 
-fn eventOverflow(io: std.Io, file: std.Io.File, event: Range, kind: []const u8) !bool {
-    if (std.mem.eql(u8, kind, "error")) return errorOverflow(io, file, event);
+fn streamError(io: std.Io, file: std.Io.File, event: Range, failed_response: bool) !void {
+    var failure = event;
+    if (failed_response) {
+        const fields = try readFields(io, file, event, &.{"response"});
+        const response = try readFields(io, file, try fields.required("response"), &.{ "status", "error" });
+        var status: protocol.Bounded(max_evidence_bytes) = .{};
+        _ = try readString(io, file, try response.required("status"), &status);
+        if (!status.eql("failed")) return error.IncompleteProviderOutput;
+        failure = try response.get("error") orelse return error.TemporaryProviderFailure;
+    } else {
+        const fields = try readFields(io, file, event, &.{ "code", "error" });
+        // Preserve the top-level Responses error code when supplied. Some
+        // error events instead carry the provider error in a nested object.
+        if (try fields.get("code") == null) {
+            if (try fields.get("error")) |nested| failure = nested;
+        }
+    }
+    if (try rangeEquals(io, file, failure, "null")) return error.TemporaryProviderFailure;
+    const fields = try readFields(io, file, failure, &.{"code"});
+    var code: protocol.Bounded(max_evidence_bytes) = .{};
+    if (try fields.get("code")) |value| {
+        if (!try rangeEquals(io, file, value, "null")) _ = try readString(io, file, value, &code);
+    }
+    if (code.eql("context_length_exceeded")) return error.ContextOverflow;
+    // Codex 970111f6 codex-api/src/sse/responses_error.rs. Known terminal
+    // quota/request/policy codes do not become retryable unknown failures.
+    for ([_][]const u8{ "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included", "usage_limit_reached", "cyber_policy", "bio_policy", "misalignment_policy_violation", "invalid_prompt", "model_not_found" }) |permanent| {
+        if (code.eql(permanent)) return error.PermanentProviderFailure;
+    }
+    return error.TemporaryProviderFailure;
+}
+
+fn incompleteOverflow(io: std.Io, file: std.Io.File, event: Range) !bool {
     const fields = try readFields(io, file, event, &.{"response"});
     const response = try readFields(io, file, try fields.required("response"), &.{ "status", "error", "incomplete_details" });
     var status: protocol.Bounded(max_evidence_bytes) = .{};
     _ = try readString(io, file, try response.required("status"), &status);
-    const incomplete = std.mem.eql(u8, kind, "response.incomplete");
-    if (!status.eql(if (incomplete) "incomplete" else "failed")) return false;
+    if (!status.eql("incomplete")) return false;
     if (try response.get("error")) |failure| {
         if (!try rangeEquals(io, file, failure, "null") and try errorOverflow(io, file, failure)) return true;
     }
-    if (incomplete) {
-        if (try response.get("incomplete_details")) |details| {
-            const reason = try readFields(io, file, details, &.{"reason"});
-            return exactOverflowCode(io, file, try reason.get("reason"));
-        }
+    if (try response.get("incomplete_details")) |details| {
+        const reason = try readFields(io, file, details, &.{"reason"});
+        return exactOverflowCode(io, file, try reason.get("reason"));
     }
     return false;
 }
@@ -1442,10 +1470,12 @@ fn validateCompleted(
     _ = try readString(io, file, try fields.required("id"), &evidence.response_id);
     if (evidence.response_id.len == 0) return error.EmptyProviderIdentity;
     if (try fields.get("model")) |model| {
-        var wide: protocol.Bounded(max_evidence_bytes) = .{};
-        _ = try readString(io, file, model, &wide);
-        if (wide.len == 0) return error.EmptyProviderIdentity;
-        try evidence.served_model.set(wide.slice());
+        if (!try rangeEquals(io, file, model, "null")) {
+            var wide: protocol.Bounded(max_evidence_bytes) = .{};
+            _ = try readString(io, file, model, &wide);
+            if (wide.len == 0) return error.EmptyProviderIdentity;
+            try evidence.served_model.set(wide.slice());
+        }
     }
     const output = try fields.required("output");
     var array = try Array.init(io, file, output);
@@ -1465,6 +1495,7 @@ fn validateCompleted(
     if (index != 0 and (index != expected_items or try reader.nextItem() != null))
         return error.ContradictoryProviderOutput;
     if (try fields.get("usage")) |usage| {
+        if (try rangeEquals(io, file, usage, "null")) return;
         const usage_fields = try readFields(io, file, usage, &.{"total_tokens"});
         _ = try usage_fields.get("total_tokens");
         try metadata.append(.{
@@ -1600,8 +1631,9 @@ fn processEvent(
         completed.* = true;
         return;
     }
-    if (kind.eql("error") or kind.eql("response.failed") or kind.eql("response.incomplete")) {
-        if (eventOverflow(io, file, event, kind.slice()) catch |err| try malformedOverflow(err)) return error.ContextOverflow;
+    if (kind.eql("error") or kind.eql("response.failed")) return streamError(io, file, event, kind.eql("response.failed"));
+    if (kind.eql("response.incomplete")) {
+        if (incompleteOverflow(io, file, event) catch |err| try malformedOverflow(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
     }
     if (!knownNonterminal(kind.slice())) return error.UnsupportedEventType;
@@ -1716,7 +1748,7 @@ pub fn validate(
         }
     }
     if (data != null) return error.IncompleteSseEvent;
-    if (!completed) return error.IncompleteProviderOutput;
+    if (!completed) return error.ProviderConnectionClosed;
     return .{
         .item_count = item_count,
         .call_count = call_count,
@@ -1730,6 +1762,9 @@ pub fn validate(
 pub fn failureCode(err: anyerror) []const u8 {
     return switch (err) {
         error.ContextOverflow => "provider_context_overflow",
+        error.TemporaryProviderFailure => "provider_temporary_error",
+        error.PermanentProviderFailure => "provider_permanent_error",
+        error.ProviderConnectionClosed => "provider_transport_failure",
         error.UnsupportedProviderOutput,
         error.UnsupportedItemStatus,
         error.UnsupportedAsyncCall,
@@ -2017,6 +2052,26 @@ test "completion gate saves which requirement failed at the completed event" {
     }
 }
 
+test "provider completion treats null usage as absent and rejects malformed optional evidence" {
+    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
+    const terminal = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const absent = try validateTestingSse(&tmp, done ++ terminal ++ "}}\n\n", 4096);
+    const nullable = try validateTestingSse(&tmp, done ++ terminal ++ ",\"usage\":null}}\n\n", 4096);
+    try std.testing.expectEqual(absent.metadata_bytes, nullable.metadata_bytes);
+    try std.testing.expectEqual(@as(u64, 2), nullable.output.answer_length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &nullable.output.answer_digest);
+    inline for (.{ ",\"usage\":[]", ",\"usage\":123", ",\"model\":123", ",\"model\":null,\"model\":\"other\"", ",\"usage\":null,\"usage\":{}" }) |suffix| {
+        const bytes = done ++ terminal ++ suffix ++ "}}\n\n";
+        if (validateTestingSse(&tmp, bytes, 4096)) |_| {
+            return error.TestExpectedError;
+        } else |err| {
+            try std.testing.expectEqualStrings("malformed_provider_output", failureCode(err));
+        }
+    }
+}
+
 test "context overflow requires exact valid provider code over HTTP and SSE" {
     const cases = .{
         .{ "{\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"too long\"}}", true },
@@ -2047,19 +2102,19 @@ test "context overflow requires exact valid provider code over HTTP and SSE" {
         defer std.testing.allocator.free(sse);
         try std.testing.expectError(error.ContextOverflow, validateTestingSse(&tmp, sse, 4096));
     }
-    const lookalikes = [_][]const u8{
-        "{\"type\":\"error\",\"code\":\"context_length_exceeded_extra\"}",
-        "{\"type\":\"error\",\"message\":\"context_length_exceeded\"}",
-        "{\"type\":\"error\",\"code\":\"other\",\"error\":{\"code\":\"context_length_exceeded\"}}",
-        "{\"type\":\"response.failed\",\"response\":{\"status\":\"completed\",\"error\":{\"code\":\"context_length_exceeded\"}}}",
-        "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"context_length_exceeded\"}}}",
-        "{\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}",
-        "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"code\":\"other\"}",
+    const lookalikes = [_]struct { anyerror, []const u8 }{
+        .{ error.TemporaryProviderFailure, "{\"type\":\"error\",\"code\":\"context_length_exceeded_extra\"}" },
+        .{ error.TemporaryProviderFailure, "{\"type\":\"error\",\"message\":\"context_length_exceeded\"}" },
+        .{ error.TemporaryProviderFailure, "{\"type\":\"error\",\"code\":\"other\",\"error\":{\"code\":\"context_length_exceeded\"}}" },
+        .{ error.IncompleteProviderOutput, "{\"type\":\"response.failed\",\"response\":{\"status\":\"completed\",\"error\":{\"code\":\"context_length_exceeded\"}}}" },
+        .{ error.TemporaryProviderFailure, "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"context_length_exceeded\"}}}" },
+        .{ error.IncompleteProviderOutput, "{\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}" },
+        .{ error.DuplicateJsonField, "{\"type\":\"error\",\"code\":\"context_length_exceeded\",\"code\":\"other\"}" },
     };
-    for (lookalikes) |failure| {
-        const sse = try std.testing.allocator.print("data: {s}\n\n", .{failure});
+    for (lookalikes) |case| {
+        const sse = try std.testing.allocator.print("data: {s}\n\n", .{case[1]});
         defer std.testing.allocator.free(sse);
-        try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, sse, 4096));
+        try std.testing.expectError(case[0], validateTestingSse(&tmp, sse, 4096));
     }
 }
 
@@ -2330,7 +2385,7 @@ test "metadata notification is not output or completion authority" {
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, notification, 4096));
+    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, notification, 4096));
     try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&tmp, notification ++ terminal, 4096));
     try std.testing.expectError(error.LateProviderOutput, validateTestingSse(&tmp, done ++ terminal ++ notification, 4096));
     try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.metadata.future\"}\n\n" ++ done ++ terminal, 4096));
