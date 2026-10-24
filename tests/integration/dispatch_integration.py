@@ -3374,6 +3374,7 @@ def main(mode="all", correlation_case="all"):
             "model": "gpt-6-sol",
             "store": False,
             "stream": True,
+            "parallel_tool_calls": False,
             "include": ["reasoning.encrypted_content"],
             "instructions": model_instructions(ROOT, "A", store=store, session=main_session),
             "input": [
@@ -3416,6 +3417,7 @@ def main(mode="all", correlation_case="all"):
                 },
             ],
             "text": {
+                "verbosity": "low",
                 "format": {
                     "type": "json_schema",
                     "name": "rui_output",
@@ -3451,7 +3453,7 @@ def main(mode="all", correlation_case="all"):
         assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session), successor
         assert successor["model"] == "gpt-6-sol", successor
         assert successor["tools"] == [], successor
-        assert "text" not in successor, successor
+        assert successor["text"] == {"verbosity": "low"}, successor
 
         # A restarted Host reconstructs the same projection from the Store
         # alone and dispatches the queued Message after it.
@@ -3465,7 +3467,7 @@ def main(mode="all", correlation_case="all"):
         assert restarted["instructions"] == successor["instructions"], restarted
         assert restarted["model"] == "gpt-6-sol", restarted
         assert restarted["tools"] == [], restarted
-        assert "text" not in restarted, restarted
+        assert restarted["text"] == {"verbosity": "low"}, restarted
         wait_for(lambda: observe(store, "message-c").get("result", {}).get("code") == "provider_http_422", "post-restart successor failure")
         assert len(endpoint.requests) == 3, "a permit launched more than once"
         stop_host(host)

@@ -254,14 +254,14 @@ func userItem(text string) []byte {
 	return []byte(`{"role":"user","content":[{"type":"input_text","text":` + string(marshal(text)) + `}]}`)
 }
 func wireRequest(workspace, session string, input [][]byte) []byte {
-	prefix := []byte(`{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, session)) + `,"input":[`)
+	prefix := []byte(`{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` + measurement.JSONString(measurement.ModelInstructions(workspace, session)) + `,"input":[`)
 	for index, item := range input {
 		if index > 0 {
 			prefix = append(prefix, ',')
 		}
 		prefix = append(prefix, item...)
 	}
-	return append(prefix, []byte(`],"tools":[]}`)...)
+	return append(prefix, []byte(`],"tools":[],"text":{"verbosity":"low"}}`)...)
 }
 func answerSSE(name, answer string, retained, discarded int) ([]byte, [][]byte) {
 	reason := map[string]any{"type": "reasoning", "id": "r-" + name, "status": "completed", "summary": []any{}, "encrypted_content": strings.Repeat("r", retained), "created_by": strings.Repeat("d", discarded)}

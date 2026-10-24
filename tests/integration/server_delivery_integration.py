@@ -81,6 +81,12 @@ def checkpoint_readers(repetitions=12_000, *, chunk_sizes=None):
             peers = PeerCensus(HostDiagnostics(host))
             sock = ready["socket"]
             session = peers.call("configure", lambda: model.configure(state, store, "config", None, "gpt-6-sol"))
+            # These large payloads exercise WAL readers, not compaction.
+            policy = peers.call("configure", lambda: model.command(
+                "session", "configure", "--store", store, "--session", session,
+                "--record", state / "checkpoint-policy.json", "--key", "checkpoint-policy",
+                "--compaction-trigger", "10000000"))
+            assert policy["answer"]["status"] == "accepted", policy
             peers.call("message", lambda: model.message(state, store, "message", session, user_text))
             model.wait_for(lambda: peers.call("observe", lambda: model.observe(store, "message"))
                            .get("result", {}).get("status") == "completed", "checkpoint saved answer")

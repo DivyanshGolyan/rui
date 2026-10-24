@@ -13,13 +13,27 @@ import (
 )
 
 func TestWireRequestIncludesAllocatedIdentityAndNoSyntheticSystemMessage(t *testing.T) {
-	// Independently derived with model_fixture.py, not the Go encoder.
-	body := wireRequest("/workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})
-	if len(body) != 572 || fmt.Sprintf("%x", sha256.Sum256(body)) != "e39ef5ed113775d5db73aee09e134e14c8a41694f73edda4d2936c9f37bf9d8b" {
-		t.Fatalf("request differs from independent oracle: %s", body)
+	// Independently derived with Python json.dumps(ensure_ascii=False,
+	// separators=(",", ":")), sharing only src/model_instructions.txt prose.
+	for _, test := range []struct {
+		workspace string
+		bytes     int
+		digest    string
+	}{
+		{"/workspace", 724, "42b49ad352b565869c3fefd5414a8c22fc95df8b338bcd50feb551c70bf69b21"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", 755, "73810913bbc756e3c296008330a0b7d4d478b179edc4ce6b8cdab80620167260"},
+	} {
+		body := wireRequest(test.workspace, "k7m2qx", [][]byte{userItem("capacity-1-0")})
+		if len(body) != test.bytes || fmt.Sprintf("%x", sha256.Sum256(body)) != test.digest {
+			t.Fatalf("request differs from independent oracle: %s", body)
+		}
 	}
+	body := wireRequest("/workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})
 	if bytes.Equal(body, wireRequest("/workspace", "k7m2qy", [][]byte{userItem("capacity-1-0")})) {
 		t.Fatal("request oracle ignored the configuration's allocated identity")
+	}
+	if bytes.Equal(body, wireRequest("/other-workspace", "k7m2qx", [][]byte{userItem("capacity-1-0")})) {
+		t.Fatal("request oracle ignored the configuration's Workspace")
 	}
 }
 

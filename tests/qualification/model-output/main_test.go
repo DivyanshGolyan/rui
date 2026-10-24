@@ -160,19 +160,33 @@ func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
 }
 
 func TestExpectedCapacityRequestDigest(t *testing.T) {
-	// Digests come from tests/integration/model_fixture.py model_instructions.
+	// Independently derived with Python json.dumps(ensure_ascii=False,
+	// separators=(",", ":")), sharing only src/model_instructions.txt prose.
+	// The set digest hashes the body SHA-256 hex followed by a newline.
 	for _, test := range []struct {
 		workspace string
 		store     string
 		bytes     int
 		digest    string
 	}{
-		{"/workspace", "/store", 572, "b4fc386179f36fa382bccea0a1d39ac8382cde1d327426ba1c30067f7a125f03"},
-		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 603, "95dd472ec04e3c688d7488434a3d91b10394206927bd07fa6d082758a6520d99"},
+		{"/workspace", "/store", 724, "a099e756279a3cbbda4e4cf3c88a0db85ce99736af67766287d5af65153b4cc1"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01", 755, "8d68868a3edf86055f222c51fc69bba483b35e4f10db0538897ad38cdb526369"},
 	} {
 		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, test.workspace, test.store)
 		if bytes != test.bytes || digest != test.digest {
 			t.Fatalf("unexpected independent request oracle for %q %q: %d %s", test.workspace, test.store, bytes, digest)
+		}
+		otherBytes, otherDigest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, test.workspace, "/other-store")
+		if otherBytes != bytes || otherDigest != digest {
+			t.Fatal("Store path became a model fact")
+		}
+		_, otherDigest = expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qy"}, test.workspace, test.store)
+		if otherDigest == digest {
+			t.Fatal("request oracle ignored the configuration's allocated identity")
+		}
+		_, otherDigest = expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, "/other-workspace", test.store)
+		if otherDigest == digest {
+			t.Fatal("request oracle ignored the configuration's Workspace")
 		}
 	}
 }

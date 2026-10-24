@@ -194,10 +194,12 @@ class ManagedDescriptorTests(unittest.TestCase):
                     clock = [0.0]
                     launches = []
                     headers = {b":path": b"/responses", b"authorization": ("Bearer " + codex_h2.codex.ACCESS).encode(),
-                               b"chatgpt-account-id": codex_h2.codex.ACCOUNT.encode(), b"originator": b"rui", b"session-id": b"a" * 32}
+                               b"chatgpt-account-id": codex_h2.codex.ACCOUNT.encode(), b"originator": b"rui", b"session-id": b"a" * 32,
+                               b"user-agent": b"rui/test-revision"}
+                    body = json.dumps({"text": {"verbosity": "low"}, "parallel_tool_calls": False}).encode()
                     endpoint = SimpleNamespace(server_address=("localhost", 1), serve_forever=lambda: None,
                         shutdown=lambda: None, server_close=lambda: None,
-                        streams=[("connection", index, None, b"") for index in (1, 3, 5)], connections=["connection"],
+                        streams=[("connection", index, None, body) for index in (1, 3, 5)], connections=["connection"],
                         request_headers=[headers, headers, {**headers, b"x-openai-fedramp": b"true"}])
                     identities = [dict(turn=str(7 + index), operation=str(11 + index), attempt="2") for index in range(3)]
                     transfers = [{"rui_test_phase": "codex_transfer", "operation": identities[index]["operation"],
@@ -282,6 +284,7 @@ class ManagedDescriptorTests(unittest.TestCase):
                         stack.enter_context(patch.object(codex_h2.fixture, "command", side_effect=command))
                         stack.enter_context(patch.object(codex_h2.fixture, "message"))
                         stack.enter_context(patch.object(codex_h2.fixture, "stop_host"))
+                        stack.enter_context(patch.object(codex_h2.codex, "expected_user_agent", return_value="rui/test-revision"))
                         stack.enter_context(patch.object(codex_h2.subprocess, "run", side_effect=process))
                         if late is None or (not observed and late not in ("read", "release")):
                             codex_h2.run(observed=observed, intake=intake)

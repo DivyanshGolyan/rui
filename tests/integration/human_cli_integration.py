@@ -321,7 +321,9 @@ def compiled_model_cases():
             lambda: shutil.rmtree(root) if completed else retain_failure_state("compiled model CLI failure state", root))
 
 
-def compaction_settings_case(home, store, workspace):
+def compaction_settings_case(home, store, workspace, socket_path):
+    from control_integration import raw_request
+
     # Pages word-wrap; phrases are checked across their soft breaks.
     flat = lambda text: " ".join(text.split())
     session = create_session(home, "--store", store,
@@ -356,8 +358,18 @@ def compaction_settings_case(home, store, workspace):
         assert set((home / ".config/rui/requests").glob("*.json")) == records
     report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
-    unknown = create_session(home, "--store", store,
-        "--workspace", workspace, "--provider", "codex", "--model", "gpt-5.6-terra")
+    # CLI creation accepts only release-supported models; the Host preserves
+    # exact bindings outside that list without inferring a context window.
+    body = {"version": "1", "kind": "configure", "store": str(store),
+            "key": "unknown-compaction-policy", "session": "", "configuration": {
+                **{name: {"state": "value", "value": value} for name, value in
+                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
+                **{name: {"state": "omitted"} for name in
+                   ("instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation")}}}
+    head, answer = raw_request(socket_path, "/v1/configure", json.dumps(body).encode())
+    reply = json.loads(answer)
+    assert b" 200 " in head and reply["answer"]["status"] == "accepted" and reply["answer"]["created"], (head, reply)
+    unknown = reply["answer"]["session"]
     with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store),
         "--", unknown], env={**os.environ, "HOME": str(home)}) as (entered, master):
         read_terminal(master, "› ")
@@ -5269,7 +5281,7 @@ def main(selected="all"):
         host = fixture.start_host(store, url)
         defaults(home, "--store", store)
         if selected in ("all", "compaction-settings"):
-            compaction_settings_case(home, store, workspace)
+            compaction_settings_case(home, store, workspace, host.rui_ready_fields["socket"])
         if selected == "compaction-settings":
             completed = True
             print("compaction settings and scoped help passed (partial human CLI suite)")

@@ -21,8 +21,8 @@ import (
 
 // Share context prose; envelope fields and history expectations stay independent.
 func testRequestEnvelope(session string) string {
-	return `{"model":"gpt-6-luna","store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` +
-		measurement.JSONString(measurement.ModelInstructions("/workspace", session)) + `,"tools":[],`
+	return `{"model":"gpt-6-luna","parallel_tool_calls":false,"store":false,"stream":true,"include":["reasoning.encrypted_content"],"instructions":` +
+		measurement.JSONString(measurement.ModelInstructions("/workspace", session)) + `,"tools":[],"text":{"verbosity":"low"},`
 }
 
 func TestRequestIDSelectsLatestUserTurnFromGrowingHistory(t *testing.T) {
@@ -105,6 +105,13 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 		t.Fatal("wrong Session address was accepted")
 	}
 	for name, mutate := range map[string]func(map[string]any){
+		"parallel calls enabled": func(body map[string]any) { body["parallel_tool_calls"] = true },
+		"parallel calls string":  func(body map[string]any) { body["parallel_tool_calls"] = "false" },
+		"wrong verbosity": func(body map[string]any) {
+			body["text"].(map[string]any)["verbosity"] = "medium"
+		},
+		"missing verbosity":      func(body map[string]any) { delete(body["text"].(map[string]any), "verbosity") },
+		"null verbosity":         func(body map[string]any) { body["text"].(map[string]any)["verbosity"] = nil },
 		"empty instructions":     func(body map[string]any) { body["instructions"] = "" },
 		"missing assistant type": func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "type") },
 		"missing assistant id":   func(body map[string]any) { delete(body["input"].([]any)[1].(map[string]any), "id") },
@@ -136,7 +143,7 @@ func TestRequestHistoryOracleRejectsMissingPriorTurnAndWrongCurrentInput(t *test
 			}
 		})
 	}
-	for _, field := range []string{"model", "store", "stream", "include", "instructions", "tools"} {
+	for _, field := range []string{"model", "parallel_tool_calls", "store", "stream", "include", "instructions", "tools", "text"} {
 		var mutated map[string]json.RawMessage
 		if err := json.Unmarshal(valid, &mutated); err != nil {
 			t.Fatal(err)

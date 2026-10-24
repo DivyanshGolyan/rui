@@ -538,9 +538,9 @@ func requestHistoryValid(body []byte, current, workspace, session string) bool {
 		})
 	}
 	expected := map[string]any{
-		"model": "gpt-6-luna", "store": false, "stream": true,
+		"model": "gpt-6-luna", "parallel_tool_calls": false, "store": false, "stream": true,
 		"include": []any{"reasoning.encrypted_content"}, "instructions": measurement.ModelInstructions(workspace, session), "tools": []any{},
-		"input": expectedInput,
+		"input": expectedInput, "text": map[string]any{"verbosity": "low"},
 	}
 	var observed any
 	return json.Unmarshal(body, &observed) == nil && reflect.DeepEqual(observed, expected)
