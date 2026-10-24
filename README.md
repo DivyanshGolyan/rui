@@ -16,11 +16,26 @@ Before using Rui on a project:
 - If a crash leaves a command's outcome unknown, Rui reports it as indeterminate and does not automatically repeat it. OS-crash and power-loss recovery are not guaranteed.
 - Full tool output is temporary. Saved results and excerpts remain available after that output is evicted or removed on restart.
 
+## Install
+
+Install the latest release on macOS 15 or newer on Apple Silicon, or on Linux x86-64 with glibc 2.34 or newer (for example Ubuntu 22.04, Debian 12 or RHEL 9):
+
+```sh
+curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation). Run the same command to update.
+
+Each [release](https://github.com/DivyanshGolyan/rui/releases) is a `stable` commit, the newest main commit that passed Mac and upgrade qualification. Its version is `0.S.N`: `S` is the Store format and `N` counts releases with that format. Updating within `0.S` keeps your Stores usable; a release with a different `S` needs a [fresh Store](#start-fresh-after-a-store-format-change). `rui --version` prints the version and source revision.
+
+The release installer checks the downloaded archive against the digest recorded in that release's `install.sh`, validates the command and then switches `~/.local/bin/rui` exactly as the source installer does. It needs only `curl`, `tar` and `sha256sum` or `shasum`.
+
 ## Install from source
 
 Requires Zig 0.17.0, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
 
-Install from `stable`, the newest main commit that passed Mac and upgrade qualification. From a clean checkout, run:
+Build from `stable` for the qualified source. From a clean checkout, run:
 
 ```sh
 git fetch origin stable
@@ -28,8 +43,6 @@ git switch --detach origin/stable
 ./install.sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
-
-To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation).
 
 Repeat the fetch, switch and install commands to update from `stable`. The installer builds the current checkout, including local changes; it does not fetch or switch branches. `main` receives Linux-green changes before Mac and upgrade qualification, so it may be ahead of `stable`. The installer prepares the selected Zig cache, validates the built command, and replaces `~/.local/bin/rui` and its evaluator with links to a complete build under `~/.local/lib/rui`. Failed builds leave the previous installation unchanged. Earlier installed builds remain available because running processes may still use them.
 
@@ -215,7 +228,7 @@ Rui does not migrate or reset incompatible Stores. A Host startup error names th
 
 You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
 
-Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. Each `install.*` directory has a `revision` file identifying its build. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
+Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`; run each one with `--version` to identify it. Source installations also record a `revision` file. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
 
 To back up the old Store, close other clients. Once the Host has stopped, run no Rui command other than `host status` against that Store until the copy finishes. Bare `rui` and `rui resume` can start a Host. Set `STORE` to the exact path printed in the error:
 

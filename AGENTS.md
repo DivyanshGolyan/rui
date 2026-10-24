@@ -55,7 +55,7 @@ Standing grant: land each small, coherent green change without further stage app
 - Run independent design and complecting reviews on `main` after landing under [Review](CODING_STANDARDS.md#review); they do not block green changes.
 - Mac and upgrade qualification run after main advances; daily full runs remain backstops. Fix Mac reds forward on main; revert only if the fix is slow. Keep the previous stable until a newer main SHA qualifies.
 - After ready, at most one rerun per item. New coherent green items may join the open stack; fixes for red CI retain the failure evidence.
-- Install from `stable`, the last exact-SHA Mac-and-upgrade-qualified main commit.
+- Install from `stable`, the last exact-SHA Mac-and-upgrade-qualified main commit. Each promotion dispatches [Release](.github/workflows/release.yml), which publishes that SHA as version `0.S.N` with prebuilt archives.
 
 After an authorized workflow-file bootstrap, or a diagnosed interruption that left current main's qualification absent, the shared-ref owner runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`. It fills only absent runs; repeated calls preserve existing attempts and do nothing when main already equals stable. Keep this direct recovery serialized with shared-ref writes. A later Auto-land completion performs the same recovery in its serialized writer job; after a runner failure, rerun that diagnosed Auto-land job, not the native qualification workflows.
 

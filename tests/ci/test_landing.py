@@ -337,6 +337,8 @@ class LandingTest(unittest.TestCase):
                     display_title='Stable qualification from base ' + base)
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (tip, tip))
+                self.assertEqual(dispatches[-1][1], ('workflow', 'run', auto_land.RELEASE, '--ref', 'main',
+                                                     '-f', f'sha={tip}'))
 
                 # A changed main cannot be overwritten using an earlier coverage decision.
                 late = commit('src/cli.zig', tip)
@@ -371,10 +373,14 @@ class LandingTest(unittest.TestCase):
                 runs[(auto_land.UPGRADE, ahead, 'main')] = green
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (ahead, ahead))
+                # Only the promoted SHA is released, not the skipped older candidate.
+                self.assertEqual(dispatches[-1][1][-1], f'sha={ahead}')
                 # Replayed/older completions and repeated promotion are harmless no-ops.
+                before = len(dispatches)
                 auto_land.promote_stable()
                 auto_land.promote_stable()
                 self.assertEqual(refs(), (ahead, ahead))
+                self.assertEqual(len(dispatches), before, 'an unchanged stable is not released again')
                 # Stable advanced since the dispatch base: ancestor identity alone
                 # cannot cover a changed-then-reverted strict path hidden by that base.
                 git('push', '-q', 'origin', f'{restored}:refs/heads/main')

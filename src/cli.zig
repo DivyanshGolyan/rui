@@ -54,6 +54,9 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
         return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
+        return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
+    }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return newSession(init, args[1..]);
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
@@ -2570,6 +2573,8 @@ const usage_text =
     \\    Resources: session, request, action, host, defaults, auth.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
+    \\  rui --version
+    \\    Print the release version and source revision.
     \\
     \\For agents and scripts, session start creates a Session with its first Message;
     \\session send addresses an existing ID. Both read exact Message text from stdin
@@ -2585,6 +2590,8 @@ const usage_text =
     \\to retain a pre-known identity even if every notice and receipt is lost.
     \\
 ;
+
+const version_text = "rui " ++ @import("transport_options").version ++ " (" ++ @import("transport_options").revision ++ ")\n";
 
 /// Set while a resource operation runs; its failure names that operation's
 /// help instead of printing the root summary.

@@ -3,7 +3,8 @@
 
 Runs from trusted main code. Main and stable writes share one serialized
 workflow and are non-force. Landing dispatches the existing qualification
-workflows explicitly because GITHUB_TOKEN pushes do not emit push workflows.
+workflows, and promotion the release workflow, explicitly because
+GITHUB_TOKEN pushes do not emit push workflows.
 Missing or failed Mac qualification holds stable, never main.
 """
 import argparse
@@ -16,6 +17,7 @@ from select_tests import changed_paths
 
 BRANCH = re.compile(r"wip/land-[0-9]+")
 UPGRADE = "previous-release-upgrade.yml"
+RELEASE = "release.yml"
 # check.yml's run-name for a dispatch; the base it selected from.
 DISPATCH_BASE = re.compile(r"Selected checks from base ([0-9a-f]{40})")
 STABLE_BASE = re.compile(r"Stable qualification from base ([0-9a-f]{40})")
@@ -260,6 +262,10 @@ def promote_stable():
         git("push", "origin", f"{sha}:refs/heads/stable")
         print(f"Promoted stable from {stable_sha} to {sha}\n"
               f"Mac: {selected['html_url']}\nUpgrade: {upgrade['html_url']}")
+        # The stable push emits no workflows; a lost dispatch leaves this SHA
+        # unreleased until a manual dispatch or the next promotion.
+        gh("workflow", "run", RELEASE, "--ref", "main", "-f", f"sha={sha}")
+        print(f"Dispatched release of {sha}")
         return
     print(f"No newer exact-SHA Mac-and-upgrade-green main commit; stable remains {stable_sha}")
 

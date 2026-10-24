@@ -949,14 +949,27 @@ fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTra
 }
 
 fn buildRevision(b: *std.Build) []const u8 {
+    return gitHead(b, &.{ "rev-parse", "HEAD" }) orelse "unknown";
+}
+
+/// The release version from a `vMAJOR.MINOR.PATCH` tag on the built commit.
+/// Release publication tags the commit before building it.
+fn buildVersion(b: *std.Build) []const u8 {
+    const tag = gitHead(b, &.{ "describe", "--tags", "--exact-match", "--match", "v[0-9]*.[0-9]*.[0-9]*", "HEAD" }) orelse
+        return "unreleased";
+    return tag[1..];
+}
+
+fn gitHead(b: *std.Build, query: []const []const u8) ?[]const u8 {
     // Git refs can change without any build input changing.
     b.graph.poisonCache();
     // An archive nested in another checkout must not inherit that checkout's revision.
-    _ = b.root.statFile(b.graph.io, ".git") catch return "unknown";
+    _ = b.root.statFile(b.graph.io, ".git") catch return null;
     const root = b.root.toString(b.allocator) catch @panic("OOM");
-    return switch (b.runFallible(&.{ "git", "-C", root, "rev-parse", "HEAD" }, .{ .stderr_behavior = .ignore })) {
+    const argv = std.mem.concat(b.allocator, []const u8, &.{ &.{ "git", "-C", root }, query }) catch @panic("OOM");
+    return switch (b.runFallible(argv, .{ .stderr_behavior = .ignore })) {
         .success => |stdout| std.mem.trim(u8, stdout, "\r\n"),
-        else => "unknown",
+        else => null,
     };
 }
 
@@ -971,6 +984,7 @@ fn configureTransport(
     const options = b.addOptions();
     options.addOption(bool, "enabled", enabled);
     options.addOption([]const u8, "revision", buildRevision(b));
+    options.addOption([]const u8, "version", buildVersion(b));
     compile.root_module.addOptions("transport_options", options);
     const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
     bindings.addIncludePath(if (enabled)

@@ -1,0 +1,132 @@
+name: Release
+# Publish each promoted stable SHA as a versioned GitHub Release.
+# Auto-land dispatches this after it advances stable; see tests/ci/release.py.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Stable commit to release
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+# Released bytes come from cold builds; the release publishes no caches.
+cache-mode: read
+
+concurrency:
+  # Versions are numbered from existing tags; plan and publish one at a time.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: ${{ github.ref == 'refs/heads/main' && !github.event.repository.private }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/release.py plan "$SHA" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --verify "$SHA^{commit}")" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    if: ${{ needs.plan.outputs.version != '' }}
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Portable targets: baseline CPUs and the oldest libc each build links.
+          # host_launch.c needs closefrom from glibc 2.34; Zig's macOS minimum is 15.
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            target: x86_64-linux-gnu.2.34
+          - os: macos-15
+            platform: darwin-arm64
+            target: aarch64-macos
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          # Released bytes never come from shared build caches.
+          cold: 'true'
+      - name: Build and check the tagged release
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # build.zig reads the version from this local tag.
+          git tag "v$VERSION"
+          name="rui-$VERSION-$PLATFORM"
+          zig build -Doptimize=ReleaseSafe "-Dtarget=$TARGET" --prefix "$RUNNER_TEMP/$name" --summary all
+          test "$("$RUNNER_TEMP/$name/bin/rui" --version)" = "rui $VERSION ($SHA)"
+          test -x "$RUNNER_TEMP/$name/bin/rui-evaluator"
+          if [ "$(uname -s)" = Darwin ]; then otool -L "$RUNNER_TEMP/$name/bin/rui"; else ldd "$RUNNER_TEMP/$name/bin/rui"; fi
+          mkdir dist
+          tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rui-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+  publish:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Create the tagged release with archives, digests and installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'rui-*' --dir "$RUNNER_TEMP/artifacts"
+          mkdir dist
+          find "$RUNNER_TEMP/artifacts" -name "rui-$VERSION-*.tar.gz" -exec mv {} dist/ \;
+          (cd dist && sha256sum rui-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          python3 -B tests/ci/release.py installer "$VERSION" dist/SHA256SUMS dist/install.sh
+          schema=$(echo "$VERSION" | cut -d . -f 2)
+          {
+            echo "Rui $VERSION from stable commit $SHA (Store schema $schema)."
+            echo
+            echo "Install or update on macOS Apple Silicon or Linux x86-64:"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh | sh"
+            echo '```'
+            echo
+            echo "Releases 0.$schema.x open the same Stores. A different middle number needs a fresh Store."
+          } > notes.md
+          gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$SHA" \
+            --title "Rui $VERSION" --notes-file notes.md --latest dist/*

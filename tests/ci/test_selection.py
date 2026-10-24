@@ -541,7 +541,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_requested_ref_cannot_publish_shared_caches(self):
         # The server's scoped token, not requested-ref setup code, owns access.
-        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml'):
+        for name in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
             with self.subTest(workflow=name):
                 workflow = Path('.github/workflows', name).read_text()
                 self.assertRegex(workflow, r'(?m)^cache-mode: read$')
