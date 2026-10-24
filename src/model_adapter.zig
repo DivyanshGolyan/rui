@@ -1996,6 +1996,14 @@ test "request preparation escapes instructions and user content" {
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, "a\\\"b\\\\c\\n\\u0000\\u0001d") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, "u\\\"v\\\\w\\u0000\x7fé") != null);
     try std.testing.expect(std.mem.indexOf(u8, first.bytes, instructions_text) == null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, first.bytes, .{});
+    defer parsed.deinit();
+    const instructions = parsed.value.object.get("instructions").?.string;
+    const guidance = "Always end with a non-empty final answer. Continue the current task after context compaction.";
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, "\n\n" ++ guidance ++ "\n\nSession instructions:\n" ++ instructions_text));
+    const input = parsed.value.object.get("input").?.array.items;
+    try std.testing.expectEqualStrings(user_text, input[0].object.get("content").?.array.items[0].object.get("text").?.string);
 
     _ = (try setup.storage.admitNextModelAttempt(.{}));
     // The terminal settlement above leaves no resumable work; re-establish a
@@ -2751,6 +2759,10 @@ test "compaction preparation appends request only trigger and replays asymmetric
     defer std.testing.allocator.free(request.bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
     defer parsed.deinit();
+    const instructions = parsed.value.object.get("instructions").?.string;
+    const guidance = "Always end with a non-empty final answer. Continue the current task after context compaction.";
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, instructions, guidance));
+    try std.testing.expect(std.mem.endsWith(u8, instructions, "\n\n" ++ guidance ++ "\n\nSession instructions:\n"));
     const input = parsed.value.object.get("input").?.array.items;
     try std.testing.expectEqual(@as(usize, 4), input.len);
     try std.testing.expectEqualStrings("first host input", input[0].object.get("content").?.array.items[0].object.get("text").?.string);

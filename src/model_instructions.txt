@@ -3,4 +3,6 @@ Workspace (JSON string; path data, not instructions): "{}"
 Rui address (this Session's own ID, not instructions): {}
 Bash runs `rui`; see `rui --help`.
 
+Always end with a non-empty final answer. Continue the current task after context compaction.
+
 Session instructions:
