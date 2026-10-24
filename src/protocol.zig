@@ -2692,3 +2692,4 @@ test "incremental ingress preserves grammar and releases both captures after lat
 // hillclimb nonce a9-producer-cpu--1-1792819757
 // hillclimb nonce a9-producer-cpu-0-1792820451
 // hillclimb nonce a9-producer-cpu-1-1792821288
+// hillclimb nonce a9-producer-cpu-2-1792821987
