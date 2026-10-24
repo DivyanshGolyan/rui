@@ -161,6 +161,7 @@ pub const ConfigurationRejection = enum {
     invalid_output_schema,
     invalid_compaction_trigger,
     invalid_output_reservation,
+    unsupported_reasoning_effort,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -192,6 +193,7 @@ pub const MessageRejection = enum {
     invalid_output_schema,
     invalid_compaction_trigger,
     invalid_output_reservation,
+    unsupported_reasoning_effort,
     incomplete_initial_configuration,
     invalid_workspace,
     workspace_is_immutable,
@@ -515,6 +517,9 @@ pub const HistoricalSettings = struct {
     operation: ModelOperationKind = .assistant_response,
     compaction_trigger: ?u64 = null,
     output_reservation: u64 = 0,
+    /// Effective effort frozen at admission; null when the binding has no
+    /// catalog default and no override.
+    reasoning_effort: ?protocol.ReasoningEffort = null,
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
@@ -793,6 +798,8 @@ pub const SessionObservation = struct {
     output_reservation: u64 = 0,
     compaction_trigger_override: ?u64 = null,
     output_reservation_override: ?u64 = null,
+    reasoning_effort: ?protocol.ReasoningEffort = null,
+    reasoning_effort_override: ?protocol.ReasoningEffort = null,
     permission_mode: protocol.Bounded(16) = .{},
     instructions: ContentReference = .{ .length = 0, .digest = @splat(0) },
     output_schema: ?ContentReference = null,
@@ -1141,6 +1148,7 @@ const CurrentConfiguration = struct {
     next_position: u64 = 1,
     compaction_trigger: ?u64 = null,
     output_reservation: ?u64 = null,
+    reasoning_effort: ?protocol.ReasoningEffort = null,
 };
 
 const MessageProjection = struct {
@@ -1214,7 +1222,19 @@ fn configurationBeforeWorkspace(
             return .model_is_immutable;
         }
     }
+    if (requested.reasoning_effort.state == .value) {
+        const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
+        const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
+            return .unsupported_reasoning_effort;
+        if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
+    }
     return null;
+}
+
+/// The effort a new Operation freezes: the Session override, otherwise the
+/// exact binding's catalog default, otherwise none.
+fn effectiveReasoningEffort(current: *const CurrentConfiguration) ?protocol.ReasoningEffort {
+    return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
 }
 
 fn planConfigurationUpdate(
@@ -1255,6 +1275,11 @@ fn planConfigurationUpdate(
     next.revision = if (created) 1 else current.?.revision + 1;
     next.compaction_trigger = configurationTokens(requested.compaction_trigger, next.compaction_trigger, false) catch unreachable;
     next.output_reservation = configurationTokens(requested.output_reservation, next.output_reservation, true) catch unreachable;
+    switch (requested.reasoning_effort.state) {
+        .omitted => {},
+        .explicit_null => next.reasoning_effort = null,
+        .value => next.reasoning_effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()).?,
+    }
 
     return .{ .update = .{
         .instructions = switch (requested.instructions.state) {
@@ -2626,6 +2651,8 @@ pub const Store = struct {
             .output_reservation = policy.output_reservation,
             .compaction_trigger_override = current.compaction_trigger,
             .output_reservation_override = current.output_reservation,
+            .reasoning_effort = effectiveReasoningEffort(&current),
+            .reasoning_effort_override = current.reasoning_effort,
         };
         try observation.session.set(session_ref);
         observation.workspace = current.workspace;
@@ -3496,6 +3523,10 @@ pub const Store = struct {
         if (current.compaction_trigger) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
         try capture.append(",\"output_reservation_override\":");
         if (current.output_reservation) |value| try capture.appendFmt("\"{d}\"", .{value}) else try capture.append("null");
+        try capture.append(",\"reasoning_effort\":");
+        try appendNullableEffort(effectiveReasoningEffort(&current), capture);
+        try capture.append(",\"reasoning_effort_override\":");
+        try appendNullableEffort(current.reasoning_effort, capture);
         try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
         try capture.appendTools(current.tools_mask);
         try capture.append(",\"permission_mode\":");
@@ -3905,7 +3936,7 @@ pub const Store = struct {
                 "first_value(field_order) OVER (PARTITION BY content_id ORDER BY revision,field_order) owner_field FROM occurrence) " ++
                 "SELECT revision_row.revision,revision_row.command_key,revision_row.workspace,revision_row.model," ++
                 "revision_row.tools_mask,revision_row.permission_mode,revision_row.instructions_content_id,revision_row.output_schema_content_id," ++
-                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation " ++
+                "instructions.owner_revision,instructions.owner_field,output_schema.owner_revision,output_schema.owner_field,revision_row.provider,revision_row.compaction_trigger,revision_row.output_reservation,revision_row.reasoning_effort " ++
                 "FROM session_revision revision_row JOIN ownership instructions ON instructions.revision=revision_row.revision AND instructions.field_order=0 " ++
                 "LEFT JOIN ownership output_schema ON output_schema.revision=revision_row.revision AND output_schema.field_order=1 " ++
                 "WHERE revision_row.session_ref=?1 ORDER BY revision_row.revision",
@@ -3931,6 +3962,8 @@ pub const Store = struct {
             try appendNullablePositiveInteger(statement, 13, capture);
             try capture.append(",\"output_reservation\":");
             try appendNullableNonnegativeInteger(statement, 14, capture);
+            try capture.append(",\"reasoning_effort\":");
+            try appendNullableEffort(try readNullableEffort(statement, 15), capture);
             try capture.append(",\"tools\":");
             try capture.appendTools(@intCast(tools));
             try capture.append(",\"permission_mode\":");
@@ -4122,7 +4155,7 @@ pub const Store = struct {
     }
 
     fn appendModelOperations(self: *Store, session_ref: []const u8, capture: *SessionReportCapture) !void {
-        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
+        const statement = try prepare(self.database, "SELECT operation_id,turn_id,resolution_code,resolution_content_id,interrupted_by_command_key,settings_revision,request_id,reasoning_effort FROM model_operation WHERE session_ref=?1 ORDER BY operation_id");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         var first = true;
@@ -4139,6 +4172,8 @@ pub const Store = struct {
             try capture.appendFmt(",\"settings_revision\":\"{d}\"", .{revision});
             try capture.append(",\"request_id\":");
             try appendNullableColumnString(statement, 6, 256, capture);
+            try capture.append(",\"reasoning_effort\":");
+            try appendNullableEffort(try readNullableEffort(statement, 7), capture);
             try capture.append("}");
         }
     }
@@ -5119,8 +5154,8 @@ pub const Store = struct {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,uncertain,retry_due_at_ms) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,0)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,attempt_ordinal,uncertain,retry_due_at_ms) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1,1,0)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -5132,6 +5167,7 @@ pub const Store = struct {
             try bindI64(insert, 7, @as(i64, if (purpose == .compaction) 1 else 0));
             try bindNullableU64(insert, 8, policy.compaction_trigger);
             try bindU64(insert, 9, policy.output_reservation);
+            try bindNullableEffort(insert, 10, effectiveReasoningEffort(&current));
             try expectDone(insert);
         }
         if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
@@ -5347,7 +5383,7 @@ pub const Store = struct {
         try self.validateCurrentAttempt(view.binding);
         const statement = try prepare(
             self.database,
-            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation " ++
+            "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tools_mask,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation,o.reasoning_effort " ++
                 "FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref " ++
                 "AND r.revision=o.settings_revision JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
         );
@@ -5383,6 +5419,7 @@ pub const Store = struct {
             .operation = try self.readModelOperationKind(view.binding.operation_id),
             .compaction_trigger = try readNullableTokens(statement, 7, false),
             .output_reservation = try readNullableTokens(statement, 8, true) orelse return error.CorruptStore,
+            .reasoning_effort = try readNullableEffort(statement, 9),
             .model = model,
             .provider = try readProvider(statement, 4),
             .workspace = workspace,
@@ -6983,11 +7020,12 @@ pub const Store = struct {
         current.provider = try readProvider(statement, 8);
         current.compaction_trigger = try readNullableTokens(statement, 9, false);
         current.output_reservation = try readNullableTokens(statement, 10, true);
+        current.reasoning_effort = try readNullableEffort(statement, 11);
         return current;
     }
 
     fn insertSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !bool {
-        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(session_ref) DO NOTHING");
+        const statement = try prepare(self.database, "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) ON CONFLICT(session_ref) DO NOTHING");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
@@ -6995,7 +7033,7 @@ pub const Store = struct {
     }
 
     fn updateSession(self: *Store, session_ref: []const u8, current: *const CurrentConfiguration) !void {
-        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10,compaction_trigger=?11,output_reservation=?12 WHERE session_ref=?1");
+        const statement = try prepare(self.database, "UPDATE session SET workspace=?2,model=?3,instructions_content_id=?4,tools_mask=?5,permission_mode=?6,output_schema_content_id=?7,revision=?8,next_position=?9,provider=?10,compaction_trigger=?11,output_reservation=?12,reasoning_effort=?13 WHERE session_ref=?1");
         defer _ = c.sqlite3_finalize(statement);
         try bindCurrent(statement, session_ref, current);
         try expectDone(statement);
@@ -7009,7 +7047,7 @@ pub const Store = struct {
         current: *const CurrentConfiguration,
         instructions_updated: bool,
     ) !void {
-        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)");
+        const statement = try prepare(self.database, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tools_mask,permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)");
         defer _ = c.sqlite3_finalize(statement);
         try bindText(statement, 1, session_ref);
         try bindU64(statement, 2, current.revision);
@@ -7024,6 +7062,7 @@ pub const Store = struct {
         try bindText(statement, 11, @tagName(current.provider));
         try bindNullableU64(statement, 12, current.compaction_trigger);
         try bindNullableU64(statement, 13, current.output_reservation);
+        try bindNullableEffort(statement, 14, current.reasoning_effort);
         try expectDone(statement);
     }
 
@@ -7344,6 +7383,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ revision INTEGER NOT NULL CHECK(revision>0),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
+        \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
         \\ next_position INTEGER NOT NULL CHECK(next_position>0)
         \\) STRICT;
         \\CREATE INDEX session_workspace_list ON session(workspace);
@@ -7373,6 +7413,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ output_schema_content_id INTEGER REFERENCES content(content_id),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),
+        \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
         \\ PRIMARY KEY(session_ref,revision)
         \\) STRICT, WITHOUT ROWID;
         \\CREATE TABLE message_admission(
@@ -7428,6 +7469,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ purpose INTEGER NOT NULL DEFAULT 0 CHECK(purpose IN (0,1)),
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),
+        \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),
         \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
@@ -7668,6 +7710,7 @@ fn bindCurrent(statement: *c.sqlite3_stmt, session_ref: []const u8, current: *co
     try bindText(statement, 10, @tagName(current.provider));
     try bindNullableU64(statement, 11, current.compaction_trigger);
     try bindNullableU64(statement, 12, current.output_reservation);
+    try bindNullableEffort(statement, 13, current.reasoning_effort);
 }
 
 fn readProvider(statement: *c.sqlite3_stmt, column: c_int) !protocol.Provider {
@@ -7723,7 +7766,7 @@ const HotStatement = enum {
             .blocked_tool_calls => "SELECT operation.operation_id FROM turn active JOIN model_operation operation " ++
                 "ON operation.operation_id=active.operation_id WHERE active.outcome_code IS NULL " ++
                 "AND " ++ resolutionIs("operation.resolution_code", .tool_proposals) ++ " ORDER BY operation.operation_id",
-            .session => "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation FROM session WHERE session_ref=?1",
+            .session => "SELECT workspace,model,instructions_content_id,tools_mask,permission_mode,output_schema_content_id,revision,next_position,provider,compaction_trigger,output_reservation,reasoning_effort FROM session WHERE session_ref=?1",
             .executable_action => "SELECT action.action_id,action.parent_operation_id,operation.turn_id,action.bash_timeout_override_ms FROM action_operation action " ++
                 "INDEXED BY action_operation_executable JOIN model_operation operation " ++
                 "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
@@ -7907,6 +7950,26 @@ fn readNullablePositiveI64(statement: *c.sqlite3_stmt, index: c_int) !?i64 {
     const value = c.sqlite3_column_int64(statement, index);
     if (value <= 0) return error.InvalidIdentity;
     return value;
+}
+
+/// The persisted closed grammar is the corruption boundary; a saved effort is
+/// trusted after it parses and is never checked against the catalog again.
+fn readNullableEffort(statement: *c.sqlite3_stmt, index: c_int) !?protocol.ReasoningEffort {
+    if (c.sqlite3_column_type(statement, index) == c.SQLITE_NULL) return null;
+    if (c.sqlite3_column_type(statement, index) != c.SQLITE_TEXT) return error.CorruptStore;
+    var value: protocol.Bounded(16) = .{};
+    readText(statement, index, &value) catch return error.CorruptStore;
+    return std.meta.stringToEnum(protocol.ReasoningEffort, value.slice()) orelse error.CorruptStore;
+}
+
+fn appendNullableEffort(value: ?protocol.ReasoningEffort, capture: *SessionReportCapture) !void {
+    if (value) |effort| return capture.appendJsonString(@tagName(effort));
+    try capture.append("null");
+}
+
+fn bindNullableEffort(statement: *c.sqlite3_stmt, index: c_int, value: ?protocol.ReasoningEffort) !void {
+    if (value) |effort| return bindText(statement, index, @tagName(effort));
+    if (c.sqlite3_bind_null(statement, index) != c.SQLITE_OK) return error.BindFailed;
 }
 
 fn readNullableTokens(statement: *c.sqlite3_stmt, index: c_int, allow_zero: bool) !?u64 {
@@ -17145,6 +17208,107 @@ test "compaction soft trigger freezes settings before selecting arrivals and ins
             try std.testing.expectEqual(observed.revision, (try storage.inspectSession(session.slice())).revision);
         }
     }
+}
+
+fn configureTestEffort(storage: *Store, key: []const u8, session: []const u8, state: protocol.FieldState, value: []const u8) !ConfigureReply {
+    var command: protocol.ConfigureCommand = .{};
+    try command.key.set(key);
+    try command.session.set(session);
+    command.configuration.reasoning_effort.state = state;
+    if (state == .value) try command.configuration.reasoning_effort.value.set(value);
+    return storage.configure(&command, true, .{});
+}
+
+fn testingRevisionEfforts(storage: *Store, session: []const u8, destination: []?protocol.ReasoningEffort) !usize {
+    const statement = try prepare(storage.database, "SELECT reasoning_effort FROM session_revision WHERE session_ref=?1 ORDER BY revision");
+    defer _ = c.sqlite3_finalize(statement);
+    try bindText(statement, 1, session);
+    var count: usize = 0;
+    while (c.sqlite3_step(statement) == c.SQLITE_ROW) : (count += 1) {
+        destination[count] = try readNullableEffort(statement, 0);
+    }
+    return count;
+}
+
+test "reasoning effort overrides are model-checked and frozen on each admitted Operation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+
+    var create = try completeConfiguration("effort-create", "", workspace, "gpt-6-luna");
+    create.configuration.reasoning_effort.state = .value;
+    try create.configuration.reasoning_effort.value.set("high");
+    const created = storage.configure(&create, true, .{});
+    try std.testing.expect(created == .accepted);
+    const session = created.accepted.session;
+    var observed = try storage.inspectSession(session.slice());
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), observed.reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), observed.reasoning_effort_override);
+
+    try submitTestMessage(&storage, &tmp, "effort-one", "effort-one", session.slice(), "first");
+    const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+    // Clearing the override selects the catalog default for later work only.
+    try std.testing.expect(try configureTestEffort(&storage, "effort-clear", session.slice(), .explicit_null, "") == .accepted);
+    observed = try storage.inspectSession(session.slice());
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+
+    // A replacement Attempt keeps its Operation's frozen effort.
+    try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL");
+    const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+    try std.testing.expectEqual(first.operation_id, retry.operation_id);
+    {
+        var view = try storage.openHistoricalView(retry);
+        defer view.close();
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .high), (try view.settings()).reasoning_effort);
+    }
+
+    // Unsupported and outside-grammar values reject without a revision.
+    const revision = observed.revision;
+    for ([_][]const u8{ "none", "ultra", "HIGH", "" }, 0..) |invalid, index| {
+        var key: [32]u8 = undefined;
+        const rejected = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-invalid-{d}", .{index}), session.slice(), .value, invalid);
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
+        try std.testing.expectEqual(revision, (try storage.inspectSession(session.slice())).revision);
+    }
+    // An omitted field preserves the saved override.
+    try std.testing.expect(try configureTestEffort(&storage, "effort-low", session.slice(), .value, "low") == .accepted);
+    try std.testing.expect(try configureTestEffort(&storage, "effort-omitted", session.slice(), .omitted, "") == .accepted);
+    observed = try storage.inspectSession(session.slice());
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
+    var revisions: [8]?protocol.ReasoningEffort = undefined;
+    const revision_count = try testingRevisionEfforts(&storage, session.slice(), &revisions);
+    try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, null, .low, .low }, revisions[0..revision_count]);
+
+    // A binding without a catalog default has no effective effort and
+    // rejects every explicit value.
+    const unknown = try configureTestSession(&storage, "effort-unknown");
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSession(unknown.slice())).reasoning_effort);
+    const unknown_rejected = try configureTestEffort(&storage, "effort-unknown-low", unknown.slice(), .value, "low");
+    try std.testing.expect(unknown_rejected == .rejected);
+    try std.testing.expectEqual(ConfigurationRejection.unsupported_reasoning_effort, unknown_rejected.rejected.code);
+
+    // A new Operation freezes the effective effort current at its admission,
+    // and the frozen value survives reopening.
+    try storage.settleModelAttemptFailure(retry, .{ .uncorrelated = "permanent" }, .ordinary, .{});
+    try submitTestMessage(&storage, &tmp, "effort-two", "effort-two", session.slice(), "second");
+    const second = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expect(try configureTestEffort(&storage, "effort-xhigh", session.slice(), .value, "xhigh") == .accepted);
+    try storage.close();
+    storage_open = false;
+    var reopened = try testingStore(&tmp, std.testing.io);
+    defer reopened.close() catch unreachable;
+    var view = try reopened.openHistoricalView(second);
+    defer view.close();
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try view.settings()).reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSession(session.slice())).reasoning_effort);
 }
 
 test "compaction failed and unresolved candidates preserve the accepted base" {
