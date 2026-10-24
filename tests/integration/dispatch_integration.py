@@ -895,6 +895,8 @@ def refusal_cases(state, processes, endpoints):
 
 def sse_framing_cases(state, processes, endpoints):
     """Spec framing, exact decoded replay, and immutable raw failure evidence."""
+    state = state / "sse-framing-cases"
+    state.mkdir(mode=0o700)
     # Replay rebuilds top-level separators; nested value spelling is verbatim.
     reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
     item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
