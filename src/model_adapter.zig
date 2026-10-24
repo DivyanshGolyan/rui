@@ -450,17 +450,24 @@ pub const Headers = struct {
 /// Turn ever sends it. Process memory only: a fresh Host starts each Turn
 /// without it, and the Store never holds it. Each value belongs to the
 /// account binding that received it. Refresh keeps that binding; another
-/// account or FedRAMP binding drops the value. The table is bounded by
+/// account or FedRAMP binding drops every value and retires outstanding
+/// captures from the previous binding epoch. The table is bounded by
 /// execution capacity and replaces the least recently used Turn; a dropped
 /// value only loses stickiness, since every request carries full input.
 pub const TurnStates = struct {
     entries: []Entry = &.{},
+    account: ?Owner = null,
+    epoch: u64 = 0,
     uses: u64 = 0,
 
     pub const Owner = [32]u8;
+    pub const Replay = struct {
+        epoch: u64,
+        /// Borrowed until the next mutation of this TurnStates owner.
+        value: []const u8,
+    };
     pub const Entry = struct {
         turn_id: ?u64 = null,
-        owner: Owner = undefined,
         value: protocol.Bounded(provider.max_turn_state_bytes) = .{},
         used: u64 = 0,
     };
@@ -472,21 +479,26 @@ pub const TurnStates = struct {
         return hash.finalResult();
     }
 
-    /// The value to send for this Turn, or empty at Turn start.
-    pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) []const u8 {
-        const entry = self.find(turn_id) orelse return "";
-        if (!std.mem.eql(u8, &entry.owner, &account)) {
-            entry.* = .{};
-            return "";
+    /// Select the launch binding and return this Turn's value and capture
+    /// epoch. An observed account change invalidates every cached Turn.
+    pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) Replay {
+        if (self.account == null or !std.mem.eql(u8, &self.account.?, &account)) {
+            for (self.entries) |*entry| entry.* = .{};
+            self.account = account;
+            self.epoch += 1;
+            self.uses = 0;
         }
+        const entry = self.find(turn_id) orelse return .{ .epoch = self.epoch, .value = "" };
         self.uses += 1;
         entry.used = self.uses;
-        return entry.value.slice();
+        return .{ .epoch = self.epoch, .value = entry.value.slice() };
     }
 
-    /// Record a transport-validated value; the Turn's first one wins.
-    pub fn capture(self: *TurnStates, turn_id: u64, account: Owner, value: []const u8) void {
-        if (value.len == 0 or self.entries.len == 0) return;
+    /// Record a transport-validated value from the selected launch epoch;
+    /// the Turn's first one wins. A late completion cannot revive old state,
+    /// including after the same account has returned in a new epoch.
+    pub fn capture(self: *TurnStates, turn_id: u64, epoch: u64, value: []const u8) void {
+        if (epoch != self.epoch or self.account == null or value.len == 0 or self.entries.len == 0) return;
         const target = self.find(turn_id) orelse lru: {
             var oldest = &self.entries[0];
             for (self.entries) |*entry| if (entry.used < oldest.used) {
@@ -494,9 +506,9 @@ pub const TurnStates = struct {
             };
             break :lru oldest;
         };
-        if (target.turn_id != null and target.turn_id.? == turn_id and std.mem.eql(u8, &target.owner, &account)) return;
+        if (target.turn_id != null and target.turn_id.? == turn_id) return;
         self.uses += 1;
-        target.* = .{ .turn_id = turn_id, .owner = account, .used = self.uses };
+        target.* = .{ .turn_id = turn_id, .used = self.uses };
         target.value.set(value) catch unreachable;
     }
 
@@ -529,42 +541,80 @@ test "Codex turn state replays one Turn's first value and never another Turn's" 
     // A refresh changes token and generation, not the account binding.
     const refreshed = TurnStates.owner(&try testRecord("acct", false, "token-2", 2));
     try std.testing.expectEqualSlices(u8, &account, &refreshed);
-    try std.testing.expectEqualStrings("", states.replay(7, account));
-    states.capture(7, account, "");
-    try std.testing.expectEqualStrings("", states.replay(7, account));
-    states.capture(7, account, "first");
-    states.capture(7, refreshed, "second");
-    try std.testing.expectEqualStrings("first", states.replay(7, refreshed));
-    try std.testing.expectEqualStrings("first", states.replay(7, account));
-    try std.testing.expectEqualStrings("", states.replay(8, account));
-    states.capture(8, account, "eight");
-    try std.testing.expectEqualStrings("eight", states.replay(8, account));
-    try std.testing.expectEqualStrings("first", states.replay(7, account));
+    const launch = states.replay(7, account);
+    try std.testing.expectEqualStrings("", launch.value);
+    states.capture(7, launch.epoch, "");
+    try std.testing.expectEqualStrings("", states.replay(7, account).value);
+    states.capture(7, launch.epoch, "first");
+    const refresh = states.replay(7, refreshed);
+    try std.testing.expectEqual(launch.epoch, refresh.epoch);
+    states.capture(7, refresh.epoch, "second");
+    try std.testing.expectEqualStrings("first", states.replay(7, refreshed).value);
+    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
+    try std.testing.expectEqualStrings("", states.replay(8, account).value);
+    states.capture(8, launch.epoch, "eight");
+    try std.testing.expectEqualStrings("eight", states.replay(8, account).value);
+    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
 
     // Turn 8 is least recently used, so Turn 9 replaces it, not Turn 7.
-    states.capture(9, account, "nine");
-    try std.testing.expectEqualStrings("", states.replay(8, account));
-    try std.testing.expectEqualStrings("first", states.replay(7, account));
-    try std.testing.expectEqualStrings("nine", states.replay(9, account));
+    states.capture(9, launch.epoch, "nine");
+    try std.testing.expectEqualStrings("", states.replay(8, account).value);
+    try std.testing.expectEqualStrings("first", states.replay(7, account).value);
+    try std.testing.expectEqualStrings("nine", states.replay(9, account).value);
 
     // Another account or FedRAMP binding never receives the value, and the
     // original account does not regain it after the change.
     for ([_]codex_credentials.Record{ try testRecord("other", false, "token-1", 3), try testRecord("acct", true, "token-1", 3) }) |record| {
         var owned: [1]TurnStates.Entry = @splat(.{});
         var isolated: TurnStates = .{ .entries = &owned };
-        isolated.capture(5, account, "acct-value");
+        const original = isolated.replay(5, account);
+        isolated.capture(5, original.epoch, "acct-value");
         const changed = TurnStates.owner(&record);
         try std.testing.expect(!std.mem.eql(u8, &account, &changed));
-        try std.testing.expectEqualStrings("", isolated.replay(5, changed));
-        try std.testing.expectEqualStrings("", isolated.replay(5, account));
-        isolated.capture(5, changed, "changed-value");
-        try std.testing.expectEqualStrings("changed-value", isolated.replay(5, changed));
-        try std.testing.expectEqualStrings("", isolated.replay(5, account));
+        try std.testing.expectEqualStrings("", isolated.replay(5, changed).value);
+        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
+        const replacement = isolated.replay(5, changed);
+        isolated.capture(5, replacement.epoch, "changed-value");
+        try std.testing.expectEqualStrings("changed-value", isolated.replay(5, changed).value);
+        try std.testing.expectEqualStrings("", isolated.replay(5, account).value);
     }
 
     var unused: TurnStates = .{};
-    unused.capture(1, account, "value");
-    try std.testing.expectEqualStrings("", unused.replay(1, account));
+    const ignored = unused.replay(1, account);
+    unused.capture(1, ignored.epoch, "value");
+    try std.testing.expectEqualStrings("", unused.replay(1, account).value);
+}
+
+test "Codex turn state owner changes invalidate paused Turns and stale completions" {
+    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
+    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-2", 2), try testRecord("acct", true, "token-3", 3) }) |record| {
+        const changed = TurnStates.owner(&record);
+        for ([_]bool{ false, true }) |late_completion| {
+            var storage: [2]TurnStates.Entry = @splat(.{});
+            var states: TurnStates = .{ .entries = &storage };
+            const original = states.replay(1, account);
+            try std.testing.expectEqualStrings("", original.value);
+            if (!late_completion) states.capture(1, original.epoch, "paused-a");
+            try std.testing.expectEqualStrings("", states.replay(2, account).value);
+            states.capture(2, original.epoch, "active-a");
+            const replacement = states.replay(2, changed);
+            try std.testing.expectEqualStrings("", replacement.value);
+            states.capture(2, replacement.epoch, "active-b");
+            if (late_completion) states.capture(1, original.epoch, "late-a");
+            // A Turn untouched during A -> B must not resurrect A's hint
+            // when A returns, including an A completion delivered under B.
+            const returned = states.replay(1, account);
+            try std.testing.expectEqualStrings("", returned.value);
+            // A completion from the original A epoch is stale even after
+            // another request has observed B -> A.
+            states.capture(1, original.epoch, "late-original-a");
+            states.capture(2, replacement.epoch, "late-b");
+            try std.testing.expectEqualStrings("", states.replay(1, account).value);
+            try std.testing.expectEqualStrings("", states.replay(2, account).value);
+            states.capture(1, returned.epoch, "fresh-a");
+            try std.testing.expectEqualStrings("fresh-a", states.replay(1, account).value);
+        }
+    }
 }
 
 test "Codex headers carry turn state only when the Turn has one" {

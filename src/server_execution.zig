@@ -48,8 +48,8 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
-    /// The managed account binding this transfer was launched with.
-    turn_account: ?model_adapter.TurnStates.Owner = null,
+    /// The managed routing epoch selected when this transfer was launched.
+    turn_epoch: ?u64 = null,
     transfer: provider.Transfer = undefined,
 };
 
@@ -1429,11 +1429,12 @@ fn launchPreparedRequest(
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
-    var turn_account: ?model_adapter.TurnStates.Owner = null;
+    var turn_epoch: ?u64 = null;
     if (credential) |value| {
-        turn_account = model_adapter.TurnStates.owner(&value.record);
-        const turn_state = host.turn_states.replay(binding.turn_id, turn_account.?);
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, turn_state) catch |err| {
+        const account = model_adapter.TurnStates.owner(&value.record);
+        const turn_state = host.turn_states.replay(binding.turn_id, account);
+        turn_epoch = turn_state.epoch;
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, turn_state.value) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
@@ -1444,7 +1445,7 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
-        .turn_account = turn_account,
+        .turn_epoch = turn_epoch,
         .transfer = undefined,
     } };
     const active = &slot.provider;
@@ -1535,7 +1536,7 @@ fn completeTransfer(
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
     // Transport observes only a successful response's value, so routing
     // state survives a later body failure and an error answer sets none.
-    if (active.turn_account) |account| host.turn_states.capture(owner.binding.turn_id, account, active.transfer.observedTurnState());
+    if (active.turn_epoch) |epoch| host.turn_states.capture(owner.binding.turn_id, epoch, active.transfer.observedTurnState());
     if (host.authentication != null and host.faults.test_phase_trace) {
         var publication = beginTestObservation(host, "codex_transfer", null);
         defer if (publication) |*value| value.finish();
