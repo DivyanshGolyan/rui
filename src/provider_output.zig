@@ -2,6 +2,7 @@ const std = @import("std");
 const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const output_format = @import("output_format.zig");
+const transport_policy = @import("transport_policy.zig");
 
 pub const max_evidence_bytes = 256;
 
@@ -384,7 +385,7 @@ fn errorOverflow(io: std.Io, file: std.Io.File, range: Range) !bool {
     return exactOverflowCode(io, file, try fields.get("code"));
 }
 
-fn malformedOverflow(err: anyerror) !bool {
+fn malformedEnvelope(err: anyerror) !bool {
     return switch (err) {
         error.UnexpectedJsonEnd,
         error.TrailingJson,
@@ -410,9 +411,37 @@ fn malformedOverflow(err: anyerror) !bool {
 /// Syntax failures are negative evidence, never permission to drop context.
 pub fn contextOverflow(io: std.Io, file: std.Io.File, length: u64, http_status: u32) !bool {
     if (http_status < 400 or http_status >= 600) return false;
-    const fields = readFields(io, file, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedOverflow(err);
+    const fields = readFields(io, file, .{ .start = 0, .length = length }, &.{"error"}) catch |err| return malformedEnvelope(err);
     const failure = (fields.get("error") catch return false) orelse return false;
-    return errorOverflow(io, file, failure) catch |err| malformedOverflow(err);
+    return errorOverflow(io, file, failure) catch |err| malformedEnvelope(err);
+}
+
+/// Only an exact code in a valid HTTP 429 error envelope establishes a quota
+/// refusal. Reset metadata is optional and cannot make that refusal retryable.
+pub fn httpQuota(io: std.Io, file: std.Io.File, length: u64, http_status: u16) !?transport_policy.Quota {
+    if (http_status != 429) return null;
+    return quotaEnvelope(io, file, .{ .start = 0, .length = length }) catch |err| {
+        _ = try malformedEnvelope(err);
+        return null;
+    };
+}
+
+fn quotaEnvelope(io: std.Io, file: std.Io.File, range: Range) !?transport_policy.Quota {
+    const fields = try readFields(io, file, range, &.{"error"});
+    const failure = try fields.required("error");
+    const detail = try readFields(io, file, failure, &.{ "code", "resets_at" });
+    var code: protocol.Bounded(max_evidence_bytes) = .{};
+    _ = try readString(io, file, try detail.required("code"), &code);
+    var quota = transport_policy.Quota{
+        .code = std.meta.stringToEnum(transport_policy.Quota.Code, code.slice()) orelse return null,
+    };
+    if (detail.get("resets_at") catch null) |reset| {
+        quota.resets_at = readIndex(io, file, reset) catch |err| switch (err) {
+            error.InvalidProviderIndex, error.Overflow, error.TrailingJson => null,
+            else => return err,
+        };
+    }
+    return quota;
 }
 
 fn streamError(io: std.Io, file: std.Io.File, event: Range, failed_response: bool) !void {
@@ -1644,7 +1673,7 @@ fn processEvent(
     }
     if (kind.eql("error") or kind.eql("response.failed")) return streamError(io, file, event, kind.eql("response.failed"));
     if (kind.eql("response.incomplete")) {
-        if (incompleteOverflow(io, file, event) catch |err| try malformedOverflow(err)) return error.ContextOverflow;
+        if (incompleteOverflow(io, file, event) catch |err| try malformedEnvelope(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
     }
     if (!knownNonterminal(kind.slice())) return error.UnsupportedEventType;

@@ -39,6 +39,29 @@ pub const Evidence = struct {
     retry_after_deadline_ms: ?i64 = null,
 };
 
+/// Recognized HTTP 429 refusals, not temporary rate limits. Only this closed
+/// code and a valid reset timestamp may enter the saved diagnostic.
+pub const Quota = struct {
+    code: Code,
+    resets_at: ?u64 = null,
+
+    pub const Code = enum { usage_limit_reached, insufficient_quota, usage_not_included };
+
+    pub fn failureCode(self: Quota) []const u8 {
+        return switch (self.code) {
+            .usage_limit_reached => "provider_usage_limit_reached",
+            .insufficient_quota => "provider_insufficient_quota",
+            .usage_not_included => "provider_usage_not_included",
+        };
+    }
+
+    pub fn format(self: Quota, buffer: *[512]u8) []const u8 {
+        return std.fmt.bufPrint(buffer, "{{\"provider_code\":\"{s}\",\"resets_at\":{?d}}}", .{
+            @tagName(self.code), self.resets_at,
+        }) catch unreachable;
+    }
+};
+
 pub const CaptureFailure = enum { scratch_exhausted, write_failed, seal_failed };
 
 pub const TransferOutcome = union(enum) {

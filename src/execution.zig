@@ -9,7 +9,7 @@ const TransferOutcome = transport_policy.TransferOutcome;
 pub const FailureKind = enum { permanent, temporary, context_overflow };
 
 /// A sealed HTTP error answer, interpreted before settlement.
-pub const ErrorResponse = union(enum) { ordinary, context_overflow, unreadable: anyerror };
+pub const ErrorResponse = union(enum) { ordinary, context_overflow, quota: transport_policy.Quota, unreadable: anyerror };
 
 pub const TransferFailure = struct {
     code: union(enum) { named: []const u8, http: u16, temporary_http: u16 },
@@ -17,6 +17,7 @@ pub const TransferFailure = struct {
     kind: FailureKind = .permanent,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
+    quota: ?transport_policy.Quota = null,
 
     pub fn codeText(self: TransferFailure, buffer: *[96]u8) []const u8 {
         return switch (self.code) {
@@ -56,6 +57,11 @@ pub fn transferDecision(
             .answered = true,
             .kind = .context_overflow,
         } },
+        .quota => |quota| return .{ .fail = .{
+            .code = .{ .named = quota.failureCode() },
+            .answered = true,
+            .quota = quota,
+        } },
         .unreadable => return .{ .fail = .{
             .code = .{ .named = "response_read_failed" },
             .answered = true,
@@ -83,6 +89,41 @@ pub fn transferDecision(
 }
 
 const testing_error_responses = [_]ErrorResponse{ .ordinary, .context_overflow, .{ .unreadable = error.TestUnreadable } };
+
+test "HTTP quota refusal overrides rate limit retry evidence and retains reset detail" {
+    const codes = [_][]const u8{ "provider_usage_limit_reached", "provider_insufficient_quota", "provider_usage_not_included" };
+    const details = [_][]const u8{
+        "{\"provider_code\":\"usage_limit_reached\",\"resets_at\":1800000123}",
+        "{\"provider_code\":\"insufficient_quota\",\"resets_at\":1800000123}",
+        "{\"provider_code\":\"usage_not_included\",\"resets_at\":1800000123}",
+    };
+    for (std.enums.values(transport_policy.Quota.Code), codes, details) |code, expected, detail| {
+        const quota: transport_policy.Quota = .{ .code = code, .resets_at = 1_800_000_123 };
+        const refusal: ErrorResponse = .{ .quota = quota };
+        const decision = transferDecision(.{ .transport_finished = .{
+            .disposition = .temporary_http,
+            .http_status = 429,
+            .retry_after_ms = 12_000,
+            .retry_after_deadline_ms = 99_000,
+        } }, refusal);
+        var buffer: [96]u8 = undefined;
+        var diagnostic: [512]u8 = undefined;
+        try std.testing.expectEqualStrings(expected, decision.fail.codeText(&buffer));
+        try std.testing.expectEqual(.permanent, decision.fail.kind);
+        try std.testing.expect(decision.fail.answered);
+        try std.testing.expect(decision.fail.retry_after_ms == null);
+        try std.testing.expect(decision.fail.retry_after_deadline_ms == null);
+        try std.testing.expectEqualStrings(detail, decision.fail.quota.?.format(&diagnostic));
+        // A body cannot override a failed transport or a successful status.
+        try std.testing.expect(transferDecision(.{ .transport_finished = .{ .disposition = .success } }, refusal) == .interpret_output);
+        const connection = transferDecision(.{ .transport_finished = .{ .disposition = .temporary_connection } }, refusal).fail;
+        try std.testing.expectEqual(.temporary, connection.kind);
+        try std.testing.expect(connection.quota == null);
+    }
+    var diagnostic: [512]u8 = undefined;
+    const absent: transport_policy.Quota = .{ .code = .usage_limit_reached };
+    try std.testing.expectEqualStrings("{\"provider_code\":\"usage_limit_reached\",\"resets_at\":null}", absent.format(&diagnostic));
+}
 
 test "transfer decisions exhaust transport dispositions and error response precedence" {
     const cases = [_]struct {

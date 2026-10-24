@@ -1554,10 +1554,16 @@ fn completeTransfer(
     }
     const decision = execution.transferDecision(completion.outcome, error_response);
     var code_buffer: [96]u8 = undefined;
+    var diagnostic_buffer: [512]u8 = undefined;
+    const diagnostic = if (decision == .fail and decision.fail.quota != null)
+        decision.fail.quota.?.format(&diagnostic_buffer)
+    else
+        null;
     if (answered_response) |*response| {
         retainFailedResponse(host, .{ .file = response.file, .length = response.length, .transfer = .complete }, .{
             .binding = owner.binding,
             .code = decision.fail.codeText(&code_buffer),
+            .diagnostic = diagnostic,
             .http_status = http_status,
             .request_id = active.transfer.requestId(),
         });
@@ -1583,7 +1589,11 @@ fn completeTransfer(
             const disposition = failureClass(host, failure.kind, failure.retry_after_ms, failure.retry_after_deadline_ms);
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
-                answered.fail(code, disposition);
+                if (diagnostic) |detail| {
+                    answered.reject(code, detail, disposition);
+                } else {
+                    answered.fail(code, disposition);
+                }
             } else {
                 // The writer has drained, so the unsealed capture holds every
                 // byte accepted before the transfer or capture failed.

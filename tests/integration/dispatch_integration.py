@@ -545,6 +545,77 @@ def compaction_cases(state, processes, endpoints, releases):
     stop_endpoint(endpoint, endpoints)
 
 
+def http_quota_cases(state, processes, endpoints):
+    """A quota refusal settles once and keeps its code/reset through reopen."""
+    for index, provider_code in enumerate(("usage_limit_reached", "insufficient_quota", "usage_not_included")):
+        reset = 1_800_000_123 + index
+        body = json.dumps({"error": {"code": provider_code, "resets_at": reset,
+                                    "message": "private provider prose must not be copied"}}).encode()
+        request_id = f"quota-request-{index}"
+        endpoint = SuccessEndpoint([
+            ResponseSpec(body, {"X-Request-Id": request_id, "Retry-After": "0"}, 429)
+            for _ in range(4)
+        ])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / provider_code
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                          "--test-retry-waits-ms", "1,1,1")
+        processes.append(host)
+        session = configure(state, store, provider_code + "-config", None, "gpt-6-sol")
+        key = provider_code + "-message"
+        message(state, store, key, session, "do not retry quota failures")
+        result = wait_for(lambda: (value := observe(store, key)).get("result") and value,
+                          "permanent HTTP quota failure")
+        code = "provider_" + provider_code
+        assert result["result"]["code"] == code, result
+        assert result["processing"]["attempt"] == "1", result
+        stop_host(host)
+        processes.remove(host)
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            assert database.execute(
+                "SELECT allowance_used,retry_due_at_ms,resolution_code FROM model_operation"
+            ).fetchone() == (1, None, code)
+        reopened = start_host(store, None)
+        processes.append(reopened)
+        report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+        operation = report["full"]["model_operations"][0]
+        assert operation["request_id"] == request_id, operation
+        assert operation["resolution"]["code"] == code, operation
+        diagnostic = operation["resolution"]["content"]["text"]
+        assert json.loads(diagnostic) == {"provider_code": provider_code, "resets_at": reset}, diagnostic
+        assert observe(store, key)["result"] == result["result"]
+        stop_host(reopened)
+        processes.remove(reopened)
+        assert len(endpoint.requests) == 1, endpoint.requests
+        assert_complete_failed_response(store, body, operation=operation["operation"], code=code,
+                                        http_status=429, request_id=request_id, diagnostic=diagnostic)
+        stop_endpoint(endpoint, endpoints)
+    answer = sse_answer("rate-response", "rate-reasoning", "rate-message", "rate limit recovered")[0]
+    endpoint = SuccessEndpoint([
+        ResponseSpec(b'{"error":{"code":"rate_limit_exceeded","resets_at":1800000123}}', {}, 429),
+        answer,
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints[endpoint] = thread
+    thread.start()
+    store = state / "rate-limit-control"
+    host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                      "--test-retry-waits-ms", "1,1,1")
+    processes.append(host)
+    session = configure(state, store, "rate-config", None, "gpt-6-sol")
+    message(state, store, "rate-message", session, "retry a temporary rate limit")
+    result = wait_for(lambda: completed_observation(store, "rate-message"), "rate limit recovery")
+    assert result["processing"]["attempt"] == "2", result
+    assert read_result(store, "rate-message") == b"rate limit recovered"
+    stop_host(host)
+    processes.remove(host)
+    assert len(endpoint.requests) == 2, endpoint.requests
+    stop_endpoint(endpoint, endpoints)
+    print("HTTP 429 quota: distinct permanent codes, one Attempt and exact resets_at through reopen")
+
+
 def failure_correlation_cases(state, processes, endpoints, selected="all"):
     """Bounded Debug coverage for inline failure provenance through SQLite."""
     for label, status, schema, code, request_id in (
@@ -986,6 +1057,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "http-quota"):
+            http_quota_cases(state, processes, endpoints)
+            if mode == "http-quota":
+                completed = True
+                return
         if mode == "failure-correlation":
             failure_correlation_cases(state, processes, endpoints, correlation_case)
             completed = True
@@ -5471,8 +5547,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|http-quota|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

@@ -121,8 +121,69 @@ fn modelObservationsAgree(body: []const u8, models: ModelObservations) bool {
 }
 
 pub fn interpretErrorResponse(io: std.Io, source: std.Io.File, length: u64, status: u16) execution.ErrorResponse {
+    if (Output.httpQuota(io, source, length, status) catch |err| return .{ .unreadable = err }) |quota| return .{ .quota = quota };
     const overflow = Output.contextOverflow(io, source, length, status) catch |err| return .{ .unreadable = err };
     return if (overflow) .context_overflow else .ordinary;
+}
+
+test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "usage_limit_reached", "insufficient_quota", "usage_not_included" }) |code| {
+        const bytes = try std.testing.allocator.print("{{\"error\":{{\"code\":\"{s}\",\"resets_at\":1800000123}}}}", .{code});
+        defer std.testing.allocator.free(bytes);
+        const file = try tmp.dir.createFile(std.testing.io, "quota", .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, bytes);
+        const response = interpretErrorResponse(std.testing.io, file, bytes.len, 429);
+        const decision = execution.transferDecision(.{ .transport_finished = .{
+            .disposition = .temporary_http,
+            .http_status = 429,
+            .retry_after_ms = 9_000,
+        } }, response);
+        try std.testing.expectEqual(execution.FailureKind.permanent, decision.fail.kind);
+        var actual: [96]u8 = undefined;
+        var expected: [96]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "provider_{s}", .{code}), decision.fail.codeText(&actual));
+        try std.testing.expect(decision.fail.answered);
+        try std.testing.expect(decision.fail.retry_after_ms == null);
+    }
+}
+
+test "HTTP 429 quota authority requires an exact valid code but not reset metadata" {
+    const cases = [_]struct { bytes: []const u8, permanent: bool, reset: ?u64 = null }{
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\"}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":null}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":-1}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":\"123\"}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1.5}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":18446744073709551616}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"resets_at\":1,\"resets_at\":2}}", .permanent = true },
+        .{ .bytes = "{\"error\":{\"co\\u0064e\":\"usage_limit_reached\",\"resets_at\":1800000123}}", .permanent = true, .reset = 1_800_000_123 },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached_extra\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"rate_limit_exceeded\",\"resets_at\":1800000123}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"unknown\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"message\":\"usage_limit_reached\"}}", .permanent = false },
+        .{ .bytes = "{\"code\":\"usage_limit_reached\"}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"nested\":{\"code\":\"usage_limit_reached\"}}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\",\"co\\u0064e\":\"rate_limit_exceeded\"}}", .permanent = false },
+        .{ .bytes = "{\"error\":{\"code\":\"usage_limit_reached\"},\"late\":[1,]}", .permanent = false },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        const file = try tmp.dir.createFile(std.testing.io, "quota-authority", .{ .read = true });
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, case.bytes);
+        const response = interpretErrorResponse(std.testing.io, file, case.bytes.len, 429);
+        const failure = execution.transferDecision(.{ .transport_finished = .{
+            .disposition = .temporary_http,
+            .http_status = 429,
+        } }, response).fail;
+        try std.testing.expectEqual(case.permanent, failure.kind == .permanent);
+        if (case.permanent) try std.testing.expectEqual(case.reset, failure.quota.?.resets_at);
+        try std.testing.expect(interpretErrorResponse(std.testing.io, file, case.bytes.len, 200) == .ordinary);
+    }
 }
 
 test "provider interpretation preserves accepted bytes and rejects every model disagreement" {

@@ -5859,6 +5859,8 @@ pub const Store = struct {
         faults: Faults,
     ) !void {
         const code = failure.code();
+        var retry_random: u64 = 0;
+        if (disposition == .retryable) self.io.random(std.mem.asBytes(&retry_random));
         try exec(self.database, "BEGIN IMMEDIATE");
         try self.validateCurrentAttempt(binding);
         switch (disposition) {
@@ -5904,7 +5906,7 @@ pub const Store = struct {
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 try self.recordTurnOutcomePosition(binding.turn_id);
             },
-            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io))) {
+            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io), retry_random)) {
                 .schedule_at_ms => |due_at_ms| {
                     const update = try prepare(
                         self.database,
@@ -15673,6 +15675,37 @@ test "retryable stream rejections retain only the settling Attempt diagnostic th
     const resolution = operation.get("resolution").?.object;
     try std.testing.expectEqualStrings("retry_exhausted", resolution.get("code").?.string);
     try std.testing.expectEqualStrings(diagnostic, resolution.get("content").?.object.get("text").?.string);
+}
+
+test "retry settlement adds actual entropy after the provider deadline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "jitter-config");
+    try submitTestMessage(&storage, &tmp, "jitter-input", "jitter-message", session.slice(), "retry");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const Fixed = struct {
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = 31_000_000_000 };
+        }
+        fn random(_: ?*anyopaque, bytes: []u8) void {
+            const draw: u64 = 499;
+            @memcpy(bytes, std.mem.asBytes(&draw));
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Fixed.now;
+    vtable.random = Fixed.random;
+    storage.io.vtable = &vtable;
+    defer storage.io = std.testing.io;
+    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_429" }, .{ .retryable = .{
+        .waits_ms = retry_policy.default_waits_ms,
+        .retry_after_ms = 7_000,
+        .retry_after_deadline_ms = 40_000,
+    } }, .{});
+    try std.testing.expectEqual(@as(u64, 40_500), try queryU64(storage.database, "SELECT retry_due_at_ms FROM model_operation"));
+    try std.testing.expect((try admitRetryForTesting(&storage)) == null);
 }
 
 test "temporary model failures conserve allowance and exhaust after four Attempts" {
