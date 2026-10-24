@@ -16,7 +16,7 @@ pub const max_file_bytes = 64 * 1024;
 /// Runtime refreshes a compact token this long before its encoded expiry so
 /// an acquired lease is not already stale at launch. Local status reports
 /// renewal only once the token has expired.
-pub const launch_refresh_margin_seconds: i64 = 60;
+pub const launch_refresh_margin_seconds: i64 = 300;
 /// Opaque access tokens carry no expiry; refresh this long after the last
 /// successful exchange.
 pub const opaque_refresh_seconds: i64 = 8 * 24 * 60 * 60;
@@ -163,6 +163,12 @@ pub fn localStatus(record: *const Record, now_seconds: i64) !LocalStatus {
 /// Credential failures the user can resolve by logging in again are
 /// authentication failures; everything else is a backend failure.
 pub fn failureCode(err: anyerror) []const u8 {
+    switch (err) {
+        error.RefreshTokenExpired => return "provider_refresh_token_expired",
+        error.RefreshTokenReused => return "provider_refresh_token_reused",
+        error.RefreshTokenInvalidated => return "provider_refresh_token_invalidated",
+        else => {},
+    }
     inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
         if (err == @field(anyerror, name)) return "provider_authentication_failed";
     }
@@ -170,7 +176,7 @@ pub fn failureCode(err: anyerror) []const u8 {
 }
 
 /// Credential failures that only a new login resolves.
-pub const LoginRequired = error{ RefreshRejected, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry };
+pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry };
 
 pub const Claim = enum { claimed, superseded };
 
@@ -449,8 +455,8 @@ test "refresh is due at the expiry margin or eight days after an opaque exchange
     var record: Record = undefined;
     record.expires_at = 1_000;
     record.refreshed_at = 100;
-    try std.testing.expect(!refreshDue(&record, 939, launch_refresh_margin_seconds));
-    try std.testing.expect(refreshDue(&record, 940, launch_refresh_margin_seconds));
+    try std.testing.expect(!refreshDue(&record, 699, launch_refresh_margin_seconds));
+    try std.testing.expect(refreshDue(&record, 700, launch_refresh_margin_seconds));
     try std.testing.expect(!refreshDue(&record, 999, 0));
     try std.testing.expect(refreshDue(&record, 1_000, 0));
     // The margin saturates rather than overflowing at the end of time.
@@ -466,8 +472,8 @@ test "refresh is due at the expiry margin or eight days after an opaque exchange
 test "selection refreshes inside the launch margin and rejects unusable records" {
     var record: Record = undefined;
     try fixtureRecord(&record);
-    try std.testing.expectEqual(Selection.use, try select(&record, true, fixture_expires_at - 61));
-    try std.testing.expectEqual(Selection.refresh, try select(&record, true, fixture_expires_at - 60));
+    try std.testing.expectEqual(Selection.use, try select(&record, true, fixture_expires_at - 301));
+    try std.testing.expectEqual(Selection.refresh, try select(&record, true, fixture_expires_at - 300));
     try std.testing.expectEqual(Selection.use, try select(&record, false, 0));
 
     // A refresh left pending by a crashed claimant requires login.

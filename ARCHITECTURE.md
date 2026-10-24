@@ -429,13 +429,15 @@ The V1 model adapter owns Codex request grammar, output interpretation, managed-
 
 `rui auth login codex` uses the pinned device-code flow and installs one global account in an owner-only `~/.config/rui/codex.json`, or an absolute path selected by `RUI_CODEX_CREDENTIAL_FILE`. `rui host serve --codex` activates the fixed HTTPS subscription endpoint; it cannot be combined with a development endpoint or private CA. Configuration and saved-result inspection need no credential. The credential file and stable lock live in the same private directory, reject symlinks, wrong ownership and permissive modes, and carry a closed versioned format. There is no Session account binding or Codex CLI credential fallback.
 
-The credential owner serializes mutations across Hosts and login processes. Login advances a generation. A compact access token with `exp` refreshes near expiry; otherwise Rui refreshes eight days after the last successful exchange. The ID token does not determine expiry.
+The credential owner serializes mutations across Hosts and login processes. Login advances a generation. A compact access token with `exp` refreshes at or within 300 seconds of expiry; otherwise Rui refreshes eight days after the last successful exchange. The ID token does not determine expiry.
 
 Refresh follows these steps under one stable exclusive lock:
 
 1. Durably replace `ready` with `refresh_pending`.
 2. Perform the remote exchange.
 3. Verify the same account ID and FedRAMP routing claim, then durably install the replacement. A changed claim leaves the record pending and requires explicit login.
+
+If request preparation fails before curl runs, or curl reports a pre-send URL, resolution, connection or TLS failure with a successful zero-request-byte query, restore `ready` at the same generation under that lock. The failed acquisition still returns an error; a later acquisition can refresh. A zero counter alone is insufficient because curl counts successful writes. Send errors, timeouts, unavailable byte evidence and received rejection bodies leave the record pending. Refresh error bodies distinguish `refresh_token_expired`, `refresh_token_reused` and `refresh_token_invalidated` as `provider_refresh_token_expired`, `provider_refresh_token_reused` and `provider_refresh_token_invalidated`. Unknown bodies retain the generic authentication failure. No response text enters these codes.
 
 A competing Host waits outside Store/Host launch locks, then reads the committed generation. A claimant crash releases the lock but leaves `refresh_pending`. Explicit login is required rather than retrying a possibly consumed token. Remote rotation and local replacement are not one transaction.
 

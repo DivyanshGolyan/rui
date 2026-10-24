@@ -157,7 +157,7 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record) !void {
     replacement.* = current.*;
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
-    if (status < 200 or status >= 300) return error.RefreshRejected;
+    if (status < 200 or status >= 300) return refreshRejection(json);
     var wire: OwnedWire = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&wire));
     try parseWire(json, &wire);
@@ -173,6 +173,33 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     try deriveClaims(replacement);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
+}
+
+fn refreshRejection(json: []const u8) error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated } {
+    if (json.len > response_limit) return error.RefreshRejected;
+    var arena: [48 * 1024]u8 = undefined;
+    defer std.crypto.secureZero(u8, &arena);
+    var fixed = std.heap.FixedBufferAllocator.init(&arena);
+    const parsed = std.json.parseFromSlice(std.json.Value, fixed.allocator(), json, .{}) catch return error.RefreshRejected;
+    if (parsed.value != .object) return error.RefreshRejected;
+    var code: ?[]const u8 = null;
+    if (parsed.value.object.get("error")) |value| {
+        if (value == .string) code = value.string else if (value == .object) {
+            if (value.object.get("code")) |nested| {
+                if (nested == .string) code = nested.string;
+            }
+        }
+    }
+    if (code == null or std.mem.trim(u8, code.?, " \r\n\t").len == 0) {
+        if (parsed.value.object.get("code")) |value| {
+            if (value == .string) code = value.string;
+        }
+    }
+    const name = code orelse return error.RefreshRejected;
+    if (std.ascii.eqlIgnoreCase(name, "refresh_token_expired")) return error.RefreshTokenExpired;
+    if (std.ascii.eqlIgnoreCase(name, "refresh_token_reused")) return error.RefreshTokenReused;
+    if (std.ascii.eqlIgnoreCase(name, "refresh_token_invalidated")) return error.RefreshTokenInvalidated;
+    return error.RefreshRejected;
 }
 
 const TokenWire = struct {
@@ -282,6 +309,36 @@ test "refresh preserves omitted fields and refuses account replacement" {
         try parseRefreshResponse(&current, 200, "{}", 79, &updated);
         try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, status, "{}", 79, &updated));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&updated), 0));
+    }
+}
+
+test "refresh rejection bodies preserve distinct safe failure codes" {
+    var current: policy.Record = undefined;
+    try claimedRecord(policy.fixture_id_token, policy.fixture_access_token, &current);
+    var replacement: policy.Record = undefined;
+    inline for (.{
+        .{ "refresh_token_expired", error.RefreshTokenExpired, "provider_refresh_token_expired" },
+        .{ "refresh_token_reused", error.RefreshTokenReused, "provider_refresh_token_reused" },
+        .{ "refresh_token_invalidated", error.RefreshTokenInvalidated, "provider_refresh_token_invalidated" },
+    }) |case| {
+        inline for (.{
+            "{\"error\":\"" ++ case[0] ++ "\"}",
+            "{\"error\":{\"code\":\"" ++ case[0] ++ "\",\"message\":\"private echoed credential\"}}",
+            "{\"code\":\"" ++ case[0] ++ "\"}",
+        }) |body| {
+            try std.testing.expectError(case[1], parseRefreshResponse(&current, 401, body, 77, &replacement));
+            try std.testing.expectEqualStrings(case[2], policy.failureCode(case[1]));
+            try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
+        }
+    }
+    try std.testing.expectError(error.RefreshTokenExpired, parseRefreshResponse(&current, 400, "{\"error\":\"REFRESH_TOKEN_EXPIRED\"}", 77, &replacement));
+    for ([_][]const u8{
+        "not json",                                                   "{}",                                                  "{\"error\":\"invalid_grant\"}",
+        "{\"error\":\"unknown\",\"code\":\"refresh_token_expired\"}", "{\"error\":{\"message\":\"refresh_token_expired\"}}", "{\"error\":{\"code\":12}}",
+        "{\"code\":\"refresh_token_expired suffix\"}",
+    }) |body| {
+        try std.testing.expectError(error.RefreshRejected, parseRefreshResponse(&current, 401, body, 77, &replacement));
+        try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
     }
 }
 
@@ -445,6 +502,13 @@ test "authentication failure classes name errors their producers raise" {
     // producer error would silently become a backend failure.
     inline for (@typeInfo(policy.LoginRequired).error_set.error_names.?) |name| {
         try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
-        try std.testing.expectEqualStrings("provider_authentication_failed", policy.failureCode(@field(anyerror, name)));
+        const failure: anyerror = @field(anyerror, name);
+        const expected = switch (failure) {
+            error.RefreshTokenExpired => "provider_refresh_token_expired",
+            error.RefreshTokenReused => "provider_refresh_token_reused",
+            error.RefreshTokenInvalidated => "provider_refresh_token_invalidated",
+            else => "provider_authentication_failed",
+        };
+        try std.testing.expectEqualStrings(expected, policy.failureCode(failure));
     }
 }

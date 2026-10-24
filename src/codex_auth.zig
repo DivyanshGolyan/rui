@@ -58,7 +58,26 @@ const Response = struct {
     bytes: [response_limit]u8 = undefined,
     len: usize = 0,
     overflow: bool = false,
+    request_not_sent: bool = true,
 };
+
+// Curl credits only successful writes. A zero count alone cannot prove that
+// a failed send or timeout did not transmit part of the refresh request.
+fn requestNotSent(result: c.CURLcode, request_size: ?c_long) bool {
+    return request_size == 0 and switch (result) {
+        c.CURLE_UNSUPPORTED_PROTOCOL,
+        c.CURLE_URL_MALFORMAT,
+        c.CURLE_COULDNT_RESOLVE_PROXY,
+        c.CURLE_COULDNT_RESOLVE_HOST,
+        c.CURLE_COULDNT_CONNECT,
+        c.CURLE_SSL_CONNECT_ERROR,
+        c.CURLE_PEER_FAILED_VERIFICATION,
+        c.CURLE_SSL_CERTPROBLEM,
+        c.CURLE_SSL_CACERT_BADFILE,
+        => true,
+        else => false,
+    };
+}
 
 fn writeCallback(data: [*c]u8, size: usize, count: usize, context: ?*anyopaque) callconv(.c) usize {
     const length = std.math.mul(usize, size, count) catch return 0;
@@ -73,10 +92,10 @@ fn writeCallback(data: [*c]u8, size: usize, count: usize, context: ?*anyopaque) 
 }
 
 fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () bool) !u16 {
+    response.* = .{};
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
     const easy = c.curl_easy_init() orelse return error.TransportInitializationFailed;
     defer c.curl_easy_cleanup(easy);
-    response.* = .{};
     var headers: ?*c.curl_slist = null;
     headers = c.curl_slist_append(headers, request.content_type) orelse return error.TransportInitializationFailed;
     defer c.curl_slist_free_all(headers);
@@ -101,7 +120,11 @@ fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () boo
         try opt(easy, c.CURLOPT_XFERINFOFUNCTION, loginProgress);
         try opt(easy, c.CURLOPT_XFERINFODATA, &cancelled);
     }
+    response.request_not_sent = false;
     const result = c.curl_easy_perform(easy);
+    var request_size: c_long = -1;
+    const size_known = c.curl_easy_getinfo(easy, c.CURLINFO_REQUEST_SIZE, &request_size) == c.CURLE_OK;
+    response.request_not_sent = requestNotSent(result, if (size_known) request_size else null);
     if (cancelled) |check| if (check()) return error.LoginInterrupted;
     if (result != c.CURLE_OK) return if (response.overflow) error.ResponseTooLong else error.TransportFailed;
     var status: c_long = 0;
@@ -113,6 +136,59 @@ fn post(request: wire.Request, response: *Response, cancelled: ?*const fn () boo
 fn loginProgress(context: ?*anyopaque, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t, _: c.curl_off_t) callconv(.c) c_int {
     const cancelled: *const ?*const fn () bool = @ptrCast(@alignCast(context orelse return 1));
     return if (cancelled.*) |check| @intFromBool(check()) else 0;
+}
+
+test "refresh transport requires positive evidence that no request was sent" {
+    var answer: Response = .{};
+    try std.testing.expectError(error.TransportFailed, post(.{ .url = "://", .content_type = "Content-Type: application/json", .body = "synthetic" }, &answer, null));
+    try std.testing.expect(answer.request_not_sent);
+    for ([_]?c_long{ null, -1, 1 }) |size| {
+        try std.testing.expect(!requestNotSent(c.CURLE_COULDNT_CONNECT, size));
+    }
+    for ([_]c.CURLcode{ c.CURLE_COULDNT_CONNECT, c.CURLE_COULDNT_RESOLVE_HOST, c.CURLE_SSL_CONNECT_ERROR, c.CURLE_PEER_FAILED_VERIFICATION }) |result| {
+        try std.testing.expect(requestNotSent(result, 0));
+    }
+    for ([_]c.CURLcode{ c.CURLE_OK, c.CURLE_SEND_ERROR, c.CURLE_RECV_ERROR, c.CURLE_OPERATION_TIMEDOUT, c.CURLE_HTTP2_STREAM }) |result| {
+        try std.testing.expect(!requestNotSent(result, 0));
+    }
+}
+
+test "refresh transport retains sent evidence when the peer loses its reply" {
+    const io = std.testing.io;
+    var listener = try (try std.Io.net.IpAddress.parseLiteral("127.0.0.1:0")).listen(io, .{});
+    defer listener.deinit(io);
+    const Peer = struct {
+        server: *std.Io.net.Server,
+        complete_request: bool = false,
+
+        fn run(self: *@This()) void {
+            const peer = self.server.accept(std.testing.io) catch return;
+            defer peer.close(std.testing.io);
+            var received: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (used < received.len) {
+                const count = std.posix.read(peer.socket.handle, received[used..]) catch return;
+                if (count == 0) return;
+                used += count;
+                if (std.mem.indexOf(u8, received[0..used], "\r\n\r\nsynthetic")) |_| {
+                    self.complete_request = true;
+                    return;
+                }
+            }
+        }
+    };
+    var url: [128]u8 = undefined;
+    const endpoint = try std.fmt.bufPrintSentinel(&url, "http://127.0.0.1:{d}/", .{listener.socket.address.getPort()}, 0);
+    var peer: Peer = .{ .server = &listener };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var answer: Response = .{};
+    const outcome = post(.{ .url = endpoint, .content_type = "Content-Type: application/json", .body = "synthetic" }, &answer, null);
+    const shutdown = std.c.shutdown(listener.socket.handle, std.c.SHUT.RDWR);
+    thread.join();
+    try std.testing.expectEqual(@as(c_int, 0), shutdown);
+    try std.testing.expect(peer.complete_request);
+    try std.testing.expectError(error.TransportFailed, outcome);
+    try std.testing.expect(!answer.request_not_sent);
 }
 
 test "device login cancellation rejects before a provider request" {
@@ -181,6 +257,10 @@ fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credent
     defer std.crypto.secureZero(u8, &body);
     var answer: Response = .{};
     defer std.crypto.secureZero(u8, std.mem.asBytes(&answer));
-    const status = try post(try wire.refreshRequest(current, &body), &answer, null);
+    const request = wire.refreshRequest(current, &body) catch return error.RefreshRequestNotSent;
+    const status = post(request, &answer, null) catch |err| {
+        if (answer.request_not_sent) return error.RefreshRequestNotSent;
+        return err;
+    };
     try wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement);
 }

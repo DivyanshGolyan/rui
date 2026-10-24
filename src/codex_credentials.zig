@@ -112,7 +112,13 @@ pub fn exchangeRefresh(path: []const u8, expected_generation: u64, context: anyt
     defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
     if (try policy.claimRefresh(&record, expected_generation) == .superseded) return false;
     try owner.publish(&record);
-    var replacement = try exchange(context, &record);
+    var replacement = exchange(context, &record) catch |err| {
+        if (err == error.RefreshRequestNotSent) {
+            record.state = .ready;
+            try owner.publish(&record);
+        }
+        return err;
+    };
     defer std.crypto.secureZero(u8, std.mem.asBytes(&replacement));
     replacement.generation = try policy.admitReplacement(&record, &replacement, expected_generation);
     try owner.publish(&replacement);
@@ -414,6 +420,60 @@ test "a rejected refresh replacement leaves the claim pending until login" {
     defer selected.release();
     try std.testing.expectEqual(@as(u64, 2), selected.record.generation);
     try std.testing.expect(selected.record.fedramp);
+}
+
+test "only a refresh proven not sent restores ready and permits a later exchange" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try testPath(&tmp, "auth", &path_buffer);
+    var original = try testRecord("acct", 0);
+    try install(path, &original, null);
+    try std.testing.expectError(error.RefreshRequestNotSent, exchangeRefresh(path, 1, {}, struct {
+        fn fail(_: void, _: *const Record) !Record {
+            return error.RefreshRequestNotSent;
+        }
+    }.fail));
+    const recovered = try load(path);
+    try std.testing.expectEqual(State.ready, recovered.state);
+    var ready = try lease(path);
+    try std.testing.expectEqual(@as(u64, 1), ready.record.generation);
+    try std.testing.expectEqualStrings(original.refresh_token.slice(), ready.record.refresh_token.slice());
+    ready.release();
+    try std.testing.expect(try exchangeRefresh(path, 1, {}, struct {
+        fn succeed(_: void, current: *const Record) !Record {
+            var replacement = current.*;
+            replacement.state = .ready;
+            try replacement.refresh_token.set("rotated");
+            return replacement;
+        }
+    }.succeed));
+    var rotated = try lease(path);
+    defer rotated.release();
+    try std.testing.expectEqual(@as(u64, 2), rotated.record.generation);
+    try std.testing.expectEqualStrings("rotated", rotated.record.refresh_token.slice());
+}
+
+test "sent or uncertain refresh failures retain pending and refuse another exchange" {
+    inline for (.{ error.TransportFailed, error.ResponseTooLong, error.RefreshTokenReused, error.InvalidTokenResponse }) |failure| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try testPath(&tmp, "auth", &path_buffer);
+        var original = try testRecord("acct", 0);
+        try install(path, &original, null);
+        const Exchange = struct {
+            fn fail(_: void, _: *const Record) !Record {
+                return failure;
+            }
+        };
+        try std.testing.expectError(failure, exchangeRefresh(path, 1, {}, Exchange.fail));
+        try std.testing.expectError(error.RefreshRequiresLogin, lease(path));
+        try std.testing.expectError(error.RefreshRequiresLogin, exchangeRefresh(path, 1, {}, Exchange.fail));
+        const pending = try load(path);
+        try std.testing.expectEqual(State.refresh_pending, pending.state);
+        try std.testing.expectEqual(@as(u64, 1), pending.generation);
+    }
 }
 
 test "unsafe paths and credential aliases fail closed" {
