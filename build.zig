@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
-    const gate_optimize = b.option(std.builtin.OptimizeMode, "gate-optimize", "Optimization for gate tests and checked CLIs (default ReleaseSafe)") orelse .ReleaseSafe;
+    const gate_optimize = b.option(std.builtin.OptimizeMode, "gate-optimize", "Optimization for gate tests and checked CLIs (default safe)") orelse .safe;
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{

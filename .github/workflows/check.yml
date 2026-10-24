@@ -24,7 +24,7 @@ on:
 
 env:
   # Hillclimb experiment: landing gate compiles tests and checked CLIs in Debug.
-  RUI_GATE_OPTIMIZE: Debug
+  RUI_GATE_OPTIMIZE: debug
 
 permissions:
   contents: read
