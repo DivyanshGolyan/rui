@@ -742,13 +742,13 @@ def queued_h1_inactivity(root):
         stop_h1_case(host, endpoint, thread, stop_before_release=True)
     with sqlite3.connect(store / "rui.sqlite3") as database:
         rows = database.execute(
-            "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code "
+            "SELECT attempt_ordinal,uncertain,retry_due_at_ms,last_failure_code "
             "FROM model_operation ORDER BY operation_id"
         ).fetchall()
-        assert rows[queued][:3] == (1, 1, 0) and rows[queued][3] > 0, rows
-        assert rows[queued][4] == "provider_transport_failure", rows
+        assert rows[queued][:2] == (1, 0) and rows[queued][2] > 0, rows
+        assert rows[queued][3] == "provider_transport_failure", rows
     print(json.dumps({"case": "queued_h1_inactivity", "received_requests": 1,
-                      "queued_attempt_failure": rows[queued][4]}), flush=True)
+                      "queued_attempt_failure": rows[queued][3]}), flush=True)
 
 
 def stalled_capture(root, endpoint, after_progress=False):
@@ -880,8 +880,8 @@ def paused_capture_inactivity(root, endpoint):
         })
     try:
         with sqlite3.connect(store / "rui.sqlite3") as database:
-            attempts = database.execute("SELECT attempt_ordinal,allowance_used FROM model_operation").fetchall()
-            assert attempts == [(1, 1)] * 20, attempts
+            attempts = database.execute("SELECT attempt_ordinal FROM model_operation").fetchall()
+            assert attempts == [(1,)] * 20, attempts
     except BaseException:
         diagnostics.snapshot_failure(lambda: {"case": "paused_capture_attempts", "capture_released": released})
         diagnostics.observations.preserve_failure(getattr(host, "rui_failure_snapshot", None))
@@ -979,9 +979,9 @@ def refused_stream(root, endpoint, phase):
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             attempts = database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation"
+                "SELECT attempt_ordinal FROM model_operation"
             ).fetchone()
-            assert attempts == (1, 1), attempts
+            assert attempts == (1,), attempts
         print(json.dumps({
             "case": f"refused_{phase}", "attempts": 1,
             "observed_streams": len(endpoint.streams), "connections": len(endpoint.connections),
@@ -1013,9 +1013,9 @@ def dead_reused_connection(root, endpoint):
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation "
+                "SELECT attempt_ordinal FROM model_operation "
                 "WHERE session_ref=?", (session,)
-            ).fetchone() == (2, 2)
+            ).fetchone() == (2,)
         print(json.dumps({
             "case": "dead_reuse", "attempts_for_dead": 2,
             "observed_streams": len(endpoint.streams), "connections": len(endpoint.connections),
@@ -1109,8 +1109,8 @@ def isolated_terminal_stream(root, endpoint, mode):
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
-            ).fetchall() == [(1, 1), (1, 1)]
+                "SELECT attempt_ordinal FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(1,), (1,)]
             if mode == "cancel":
                 assert database.execute(
                     "SELECT interrupted_by_command_key FROM model_operation WHERE session_ref=?", (sessions["target"],)
@@ -1159,8 +1159,8 @@ def connection_failure(root, endpoint):
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation ORDER BY operation_id"
-            ).fetchall() == [(2, 2), (2, 2)]
+                "SELECT attempt_ordinal FROM model_operation ORDER BY operation_id"
+            ).fetchall() == [(2,), (2,)]
         print(json.dumps({"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}), flush=True)
     except BaseException:
         retain_connection_failure(store, host, diagnostics, endpoint, observed, sessions)
@@ -1206,7 +1206,7 @@ def _retain_connection_failure(store, host, diagnostics, endpoint, observed, ses
             dropped = endpoint.dropped
         with sqlite3.connect(store / "rui.sqlite3") as database:
             operations = database.execute(
-                "SELECT operation_id,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,"
+                "SELECT operation_id,attempt_ordinal,uncertain,retry_due_at_ms,"
                 "last_failure_code,resolution_code FROM model_operation ORDER BY operation_id"
             ).fetchall()
         records = diagnostics.records if diagnostics else []
@@ -1254,9 +1254,9 @@ def unsupported_https(root):
         dispatch.stop_host(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             attempts = database.execute(
-                "SELECT attempt_ordinal,allowance_used FROM model_operation"
+                "SELECT attempt_ordinal FROM model_operation"
             ).fetchone()
-            assert attempts == (1, 1), attempts
+            assert attempts == (1,), attempts
         print(json.dumps({"case": "non_h2_https", "result": result["code"],
                           "posts": 0, "attempts": attempts[0]}), flush=True)
     finally:
@@ -1287,9 +1287,9 @@ def negotiated_h2_early_error(root, endpoint):
         dispatch.stop_host(host)
     with sqlite3.connect(store / "rui.sqlite3") as database:
         attempts = database.execute(
-            "SELECT attempt_ordinal,allowance_used FROM model_operation"
+            "SELECT attempt_ordinal FROM model_operation"
         ).fetchone()
-        assert attempts == (4, 4), attempts
+        assert attempts == (4,), attempts
     print(json.dumps({"case": "negotiated_h2_early_error", "posts": len(endpoint.streams),
                       "result": result["code"]}), flush=True)
 

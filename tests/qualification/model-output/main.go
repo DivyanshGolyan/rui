@@ -979,7 +979,6 @@ type capacityAuditRow struct {
 	TurnOutcome          string  `json:"turn_outcome"`
 	OperationSession     string  `json:"operation_session"`
 	AttemptOrdinal       int     `json:"attempt_ordinal"`
-	AllowanceUsed        int     `json:"allowance_used"`
 	Uncertain            int     `json:"uncertain"`
 	ResolutionCode       string  `json:"resolution_code"`
 	ResponseID           string  `json:"response_id"`
@@ -1060,7 +1059,7 @@ func capacityAuditRowsValid(rows []capacityAuditRow, keys, sessions []string) bo
 		if err != nil || sources[0] == nil || *sources[0] != "model-a-served" || sources[1] == nil || *sources[1] != "model-a-served" || sources[2] != nil {
 			return false
 		}
-		if row.Key != key || row.Session != sessions[index] || row.InputText != key || row.TurnOutcome != "completed" || row.OperationSession != sessions[index] || row.AttemptOrdinal != 1 || row.AllowanceUsed != 1 || row.Uncertain != 0 || row.ResolutionCode != "answer" || row.ResponseID != "capacity-response-"+key || row.RequestID != "capacity-"+key || row.OutputItems != 1 || row.PrivateOutputItems != 1 || row.AssistantProjections != 1 || row.LastFailureCode != nil {
+		if row.Key != key || row.Session != sessions[index] || row.InputText != key || row.TurnOutcome != "completed" || row.OperationSession != sessions[index] || row.AttemptOrdinal != 1 || row.Uncertain != 0 || row.ResolutionCode != "answer" || row.ResponseID != "capacity-response-"+key || row.RequestID != "capacity-"+key || row.OutputItems != 1 || row.PrivateOutputItems != 1 || row.AssistantProjections != 1 || row.LastFailureCode != nil {
 			return false
 		}
 	}
@@ -1074,7 +1073,7 @@ func auditCapacity(deadline measurement.Deadline, store string, keys, sessions [
 	prefixEnd := strings.LastIndex(keys[0], "-") + 1
 	prefix := strings.ReplaceAll(keys[0][:prefixEnd], "'", "''")
 	query := "SELECT ma.command_key AS key,ma.session_ref AS session,CAST(c.payload AS TEXT) AS input_text," +
-		"t.outcome_code AS turn_outcome,mo.session_ref AS operation_session,mo.attempt_ordinal,mo.allowance_used,mo.uncertain," +
+		"t.outcome_code AS turn_outcome,mo.session_ref AS operation_session,mo.attempt_ordinal,mo.uncertain," +
 		"mo.resolution_code,mo.response_id,hex(mo.model_evidence) AS model_evidence,mo.request_id,mo.last_failure_code," +
 		"(SELECT count(*) FROM model_output_item oi WHERE oi.operation_id=mo.operation_id) AS output_items," +
 		"(SELECT count(*) FROM model_output_item oi JOIN content private_content ON private_content.content_id=oi.content_id WHERE oi.operation_id=mo.operation_id AND private_content.private=1) AS private_output_items," +

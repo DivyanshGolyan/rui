@@ -98,9 +98,9 @@ const session_stop_cutoff_sql =
 const pending_message_count_sql =
     "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND turn_id IS NULL AND admission_id>?2";
 /// Matches the partial retry indexes' text, which the schema fixes.
-const retry_allowance_open_sql = std.fmt.comptimePrint("allowance_used<{d}", .{retry_policy.maximum_attempts});
+const retry_allowance_open_sql = std.fmt.comptimePrint("attempt_ordinal<{d}", .{retry_policy.maximum_attempts});
 const retry_admission_select_sql =
-    "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
+    "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
     "INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL AND " ++ retry_allowance_open_sql ++ " " ++
     "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
 
@@ -5119,8 +5119,8 @@ pub const Store = struct {
             const insert = try prepare(
                 self.database,
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms) " ++
-                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,1,0)",
+                    "admission_position,purpose,compaction_trigger,output_reservation,attempt_ordinal,uncertain,retry_due_at_ms) " ++
+                    "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,1,0)",
             );
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, operation_id);
@@ -5181,10 +5181,9 @@ pub const Store = struct {
             const turn_id = c.sqlite3_column_int64(select, 0);
             const operation_id = c.sqlite3_column_int64(select, 1);
             const attempt_ordinal = c.sqlite3_column_int64(select, 2);
-            const allowance_used = c.sqlite3_column_int64(select, 3);
-            const due_at_ms = c.sqlite3_column_int64(select, 4);
+            const due_at_ms = c.sqlite3_column_int64(select, 3);
             if (turn_id <= 0 or operation_id <= 0 or attempt_ordinal <= 0 or
-                allowance_used != attempt_ordinal or allowance_used >= retry_policy.maximum_attempts or
+                attempt_ordinal >= retry_policy.maximum_attempts or
                 due_at_ms < 0 or due_at_ms > snapshot_ms)
             {
                 return error.CorruptStore;
@@ -5210,9 +5209,9 @@ pub const Store = struct {
         const replacement_ordinal = current.attempt_ordinal + 1;
         const update = try prepare(
             self.database,
-            "UPDATE model_operation SET attempt_ordinal=?2,allowance_used=?2,uncertain=1,retry_due_at_ms=0 " ++
+            "UPDATE model_operation SET attempt_ordinal=?2,uncertain=1,retry_due_at_ms=0 " ++
                 "WHERE operation_id=?1 AND turn_id=?3 AND resolution_code IS NULL " ++
-                "AND attempt_ordinal=?4 AND allowance_used=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
+                "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
         );
         defer _ = c.sqlite3_finalize(update);
         try bindU64(update, 1, current.operation_id);
@@ -5981,7 +5980,7 @@ pub const Store = struct {
         const select = try prepare(
             self.database,
             "SELECT turn_id,operation_id FROM model_operation INDEXED BY model_operation_retry_exhausted " ++
-                "WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 " ++
+                "WHERE resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=4 AND retry_due_at_ms=0 " ++
                 "ORDER BY operation_id LIMIT ?1",
         );
         var select_open = true;
@@ -6014,7 +6013,7 @@ pub const Store = struct {
             const update_operation = try prepare(
                 self.database,
                 "UPDATE model_operation SET uncertain=0,retry_due_at_ms=NULL,resolution_code='retry_exhausted' " ++
-                    "WHERE operation_id=?1 AND resolution_code IS NULL AND uncertain=1 AND allowance_used=?2",
+                    "WHERE operation_id=?1 AND resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=?2",
             );
             defer _ = c.sqlite3_finalize(update_operation);
             try bindI64(update_operation, 1, binding.operation_id);
@@ -7430,8 +7429,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),
         \\ output_reservation INTEGER NOT NULL CHECK(output_reservation>=0),
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
-        \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal>0),
-        \\ allowance_used INTEGER NOT NULL CHECK(allowance_used BETWEEN 1 AND 4),
+        \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),
         \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
         \\ retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),
         \\ last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),
@@ -7560,7 +7558,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\
     ++ "CREATE INDEX model_operation_retry_due ON model_operation(retry_due_at_ms,operation_id) WHERE resolution_code IS NULL AND " ++
         retry_allowance_open_sql ++ ";\n" ++
-        std.fmt.comptimePrint("CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND allowance_used={d} AND retry_due_at_ms=0;\n", .{retry_policy.maximum_attempts}) ++
+        std.fmt.comptimePrint("CREATE INDEX model_operation_retry_exhausted ON model_operation(operation_id) WHERE resolution_code IS NULL AND uncertain=1 AND attempt_ordinal={d} AND retry_due_at_ms=0;\n", .{retry_policy.maximum_attempts}) ++
         \\CREATE INDEX model_operation_session_history ON model_operation(session_ref,operation_id);
         \\CREATE INDEX model_operation_turn_history ON model_operation(turn_id,operation_id);
         \\
@@ -10984,9 +10982,9 @@ test "historical accepted output selection work excludes failed Operation popula
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-                "attempt_ordinal,output_reservation,allowance_used,uncertain,resolution_code) " ++
+                "attempt_ordinal,output_reservation,uncertain,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-                "1,0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "1,0,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -15601,7 +15599,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         {
             const force_exhausted = try prepare(
                 storage.database,
-                "UPDATE model_operation SET attempt_ordinal=4,allowance_used=4 WHERE operation_id=?1",
+                "UPDATE model_operation SET attempt_ordinal=4 WHERE operation_id=?1",
             );
             defer _ = c.sqlite3_finalize(force_exhausted);
             try bindU64(force_exhausted, 1, replacement_binding.operation_id);
@@ -15871,21 +15869,20 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try prepare(
         storage.database,
-        "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code " ++
+        "SELECT attempt_ordinal,uncertain,retry_due_at_ms,last_failure_code,resolution_code " ++
             "FROM model_operation WHERE operation_id=?1",
     );
     defer _ = c.sqlite3_finalize(statement);
     try bindU64(statement, 1, first.operation_id);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
     try std.testing.expectEqual(@as(i64, 4), c.sqlite3_column_int64(statement, 0));
-    try std.testing.expectEqual(@as(i64, 4), c.sqlite3_column_int64(statement, 1));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 2));
-    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 3));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_column_int(statement, 1));
+    try std.testing.expectEqual(c.SQLITE_NULL, c.sqlite3_column_type(statement, 2));
     var last_failure: protocol.Bounded(96) = .{};
-    try readText(statement, 4, &last_failure);
+    try readText(statement, 3, &last_failure);
     try std.testing.expectEqualStrings("provider_transport_failure", last_failure.slice());
     var resolution: protocol.Bounded(96) = .{};
-    try readText(statement, 5, &resolution);
+    try readText(statement, 4, &resolution);
     try std.testing.expectEqualStrings("retry_exhausted", resolution.slice());
 }
 
@@ -16140,16 +16137,16 @@ test "retry admission and exhausted recovery use their selection indexes" {
 
     const queries = [_]struct { sql: [:0]const u8, index: []const u8, no_temporary_sort: bool }{
         .{
-            .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms " ++
+            .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms " ++
                 "FROM model_operation INDEXED BY model_operation_retry_due WHERE resolution_code IS NULL " ++
-                "AND allowance_used<4 AND retry_due_at_ms<=99 ORDER BY operation_id LIMIT 64",
+                "AND attempt_ordinal<4 AND retry_due_at_ms<=99 ORDER BY operation_id LIMIT 64",
             .index = "model_operation_retry_due",
             .no_temporary_sort = false,
         },
         .{
             .sql = "EXPLAIN QUERY PLAN SELECT turn_id,operation_id FROM model_operation " ++
                 "INDEXED BY model_operation_retry_exhausted WHERE resolution_code IS NULL " ++
-                "AND uncertain=1 AND allowance_used=4 AND retry_due_at_ms=0 " ++
+                "AND uncertain=1 AND attempt_ordinal=4 AND retry_due_at_ms=0 " ++
                 "ORDER BY operation_id LIMIT 64",
             .index = "model_operation_retry_exhausted",
             .no_temporary_sort = true,
@@ -16204,22 +16201,22 @@ test "retry due index excludes future population and preserves age ordering" {
     try exec(
         storage.database,
         "CREATE INDEX test_model_operation_retry_age ON model_operation(operation_id) " ++
-            "WHERE resolution_code IS NULL AND allowance_used<4",
+            "WHERE resolution_code IS NULL AND attempt_ordinal<4",
     );
     const age_control_sql =
-        "SELECT turn_id,operation_id,attempt_ordinal,allowance_used,retry_due_at_ms FROM model_operation " ++
-        "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND allowance_used<4 " ++
+        "SELECT turn_id,operation_id,attempt_ordinal,retry_due_at_ms FROM model_operation " ++
+        "INDEXED BY test_model_operation_retry_age WHERE resolution_code IS NULL AND attempt_ordinal<4 " ++
         "AND retry_due_at_ms<=?1 ORDER BY operation_id LIMIT ?2";
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |future_count, index| {
         try exec(storage.database, "DELETE FROM model_operation");
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,9223372036854775807,0 FROM sequence; " ++
+                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,0,9223372036854775807,0 FROM sequence; " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
-                "({1},{1},'0der00',1,1,1,1,1,0,99,0),({2},{2},'ear1er',1,1,1,1,1,0,1,0)",
+                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
+                "({1},{1},'0der00',1,1,1,1,0,99,0),({2},{2},'ear1er',1,1,1,1,0,1,0)",
             .{ future_count, future_count + 1, future_count + 2 },
             0,
         );
@@ -16239,8 +16236,8 @@ test "retry due index excludes future population and preserves age ordering" {
         const insert = try std.testing.allocator.printSentinel(
             "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
-                "SELECT value,value,printf('%06d',value),1,1,1,1,1,0,1,0 FROM sequence",
+                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
+                "SELECT value,value,printf('%06d',value),1,1,1,1,0,1,0 FROM sequence",
             .{due_count},
             0,
         );
@@ -16255,10 +16252,10 @@ test "retry due index excludes future population and preserves age ordering" {
     try exec(
         storage.database,
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
-            "(1,1,'000001',1,1,1,1,1,0,99,0)," ++
-            "(2,2,'000002',1,1,1,1,1,0,50,0)," ++
-            "(3,3,'000003',1,1,1,1,1,0,1,0)",
+            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) VALUES" ++
+            "(1,1,'000001',1,1,1,1,0,99,0)," ++
+            "(2,2,'000002',1,1,1,1,0,50,0)," ++
+            "(3,3,'000003',1,1,1,1,0,1,0)",
     );
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
@@ -16284,8 +16281,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         storage.database,
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
-            "SELECT value,value,printf('%06d',value),1,1,1,1,1,0," ++
+            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
+            "SELECT value,value,printf('%06d',value),1,1,1,1,0," ++
             "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0 FROM sequence",
     );
 
@@ -16345,8 +16342,8 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try bindText(insert_turn, 2, session.slice());
         try expectDone(insert_turn);
         const insert_operation = try prepare(storage.database, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-            "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) " ++
-            "VALUES(?1,?1,?2,1,1,1,4,4,1,0,0)");
+            "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) " ++
+            "VALUES(?1,?1,?2,1,1,1,4,1,0,0)");
         defer _ = c.sqlite3_finalize(insert_operation);
         try bindU64(insert_operation, 1, value);
         try bindText(insert_operation, 2, session.slice());
@@ -17448,9 +17445,9 @@ test "historical context selection work excludes nonmatching Operation populatio
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "output_reservation,attempt_ordinal,uncertain,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);
@@ -17496,9 +17493,9 @@ test "model admission work excludes failed historical Operation population" {
             const insert = try prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-                "output_reservation,attempt_ordinal,allowance_used,uncertain,resolution_code) " ++
+                "output_reservation,attempt_ordinal,uncertain,resolution_code) " ++
                 "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-                "0,1,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
+                "0,1,0,'failed' FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2");
             defer _ = c.sqlite3_finalize(insert);
             try bindU64(insert, 1, population);
             try bindU64(insert, 2, current.operation_id);

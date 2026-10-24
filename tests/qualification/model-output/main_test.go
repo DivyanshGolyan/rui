@@ -636,7 +636,7 @@ func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
 func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
 	key := "capacity-1-round-1-0"
 	session := "k7m2qx"
-	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, AllowanceUsed: 1, ResolutionCode: "answer", ResponseID: "capacity-response-" + key, ModelEvidence: "010e006d6f64656c2d612d7365727665640e006d6f64656c2d612d7365727665640000", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
+	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, ResolutionCode: "answer", ResponseID: "capacity-response-" + key, ModelEvidence: "010e006d6f64656c2d612d7365727665640e006d6f64656c2d612d7365727665640000", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
 	if !capacityAuditRowsValid([]capacityAuditRow{row}, []string{key}, []string{session}) {
 		t.Fatal("valid capacity audit row was rejected")
 	}

@@ -192,12 +192,12 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
 		return nil, err
 	}
-	row, err := sql(deadline, store, "SELECT operation_id||','||attempt_ordinal||','||allowance_used||','||uncertain||','||ifnull(resolution_code,'') FROM model_operation;")
+	row, err := sql(deadline, store, "SELECT operation_id||','||attempt_ordinal||','||uncertain||','||ifnull(resolution_code,'') FROM model_operation;")
 	if err != nil {
 		return nil, err
 	}
 	parts := strings.Split(row, ",")
-	if len(parts) != 5 || strings.Join(parts[1:], ",") != "1,1,0," {
+	if len(parts) != 4 || strings.Join(parts[1:], ",") != "1,0," {
 		return nil, fmt.Errorf("unexpected initial retry facts: %s", row)
 	}
 	due := time.Now().UnixMilli() + 250
@@ -232,8 +232,8 @@ func timing(binary, root string, e *retryEndpoint) (map[string]any, error) {
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
 		return nil, err
 	}
-	facts, err := sql(deadline, store, "SELECT attempt_ordinal||','||allowance_used||','||resolution_code FROM model_operation;")
-	if err != nil || facts != "2,2,provider_http_422" {
+	facts, err := sql(deadline, store, "SELECT attempt_ordinal||','||resolution_code FROM model_operation;")
+	if err != nil || facts != "2,provider_http_422" {
 		return nil, fmt.Errorf("unexpected timing retry facts: %s: %w", facts, err)
 	}
 	discoveryMS := admitted - due
@@ -269,8 +269,8 @@ func replaceDue(binary, directory, store, session, operation, marker string, mod
 	if err := errors.Join(work, host.Stop(measurement.TeardownAllowance)); err != nil {
 		return nil, err
 	}
-	facts, err := sql(deadline, store, "SELECT attempt_ordinal||','||allowance_used||','||resolution_code FROM model_operation WHERE operation_id="+operation+";")
-	if err != nil || facts != "2,2,provider_http_422" {
+	facts, err := sql(deadline, store, "SELECT attempt_ordinal||','||resolution_code FROM model_operation WHERE operation_id="+operation+";")
+	if err != nil || facts != "2,provider_http_422" {
 		return nil, fmt.Errorf("unexpected replacement facts %s: %w", facts, err)
 	}
 	database, err := measurement.DatabaseSize(store)
@@ -457,10 +457,10 @@ func churn(binary, root string, e *retryEndpoint) (result map[string]any, result
 		return result, errors.Join(work, stopError)
 	}
 	hostNeedsStop = false
-	groups, err := sql(deadline, store, "SELECT attempt_ordinal||','||allowance_used||','||resolution_code||','||count(*) FROM model_operation GROUP BY attempt_ordinal,allowance_used,resolution_code;")
+	groups, err := sql(deadline, store, "SELECT attempt_ordinal||','||resolution_code||','||count(*) FROM model_operation GROUP BY attempt_ordinal,resolution_code;")
 	result["attempt_fact_groups"] = groups
 	result["offline_audit_after_host_reaped"] = true
-	if err == nil && groups != fmt.Sprintf("2,2,provider_http_422,%d", len(rows)*operationsPerRound) {
+	if err == nil && groups != fmt.Sprintf("2,provider_http_422,%d", len(rows)*operationsPerRound) {
 		err = fmt.Errorf("unexpected churn facts: %s", groups)
 	}
 	result["offline_audit_complete"] = err == nil

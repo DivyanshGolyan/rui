@@ -577,7 +577,7 @@ def http_quota_cases(state, processes, endpoints):
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
             assert database.execute(
-                "SELECT allowance_used,retry_due_at_ms,resolution_code FROM model_operation"
+                "SELECT attempt_ordinal,retry_due_at_ms,resolution_code FROM model_operation"
             ).fetchone() == (1, None, code)
         reopened = start_host(store, None)
         processes.append(reopened)
@@ -1978,9 +1978,8 @@ def main(mode="all", correlation_case="all"):
         processes.remove(retry_host)
         database = sqlite3.connect(retry_store / "rui.sqlite3")
         assert database.execute(
-            "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
+            "SELECT attempt_ordinal,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
         ).fetchone() == (
-            3,
             3,
             0,
             None,
@@ -2187,8 +2186,8 @@ def main(mode="all", correlation_case="all"):
         processes.remove(local_read_host)
         database = sqlite3.connect(local_read_store / "rui.sqlite3")
         assert database.execute(
-            "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
-        ).fetchone() == (1, 1, 1, None)
+            "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
+        ).fetchone() == (1, 1, None)
         database.close()
         assert len(local_read_endpoint.requests) <= 1
         stop_endpoint(local_read_endpoint, endpoints)
@@ -2254,8 +2253,8 @@ def main(mode="all", correlation_case="all"):
             assert len(identity_endpoint.requests) == index + 1
             database = sqlite3.connect(identity_store / "rui.sqlite3")
             assert database.execute(
-                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
-            ).fetchone() == (1, 1, 1, None)
+                "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
+            ).fetchone() == (1, 1, None)
             database.close()
 
             offline = start_host(identity_store, None)
@@ -3644,7 +3643,7 @@ def main(mode="all", correlation_case="all"):
         database = sqlite3.connect(preparation_store / "rui.sqlite3")
         try:
             preparation_fact = database.execute(
-                "SELECT attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
+                "SELECT attempt_ordinal,uncertain,retry_due_at_ms,last_failure_code,resolution_code FROM model_operation"
             ).fetchone()
         finally:
             database.close()
@@ -3659,13 +3658,13 @@ def main(mode="all", correlation_case="all"):
             )
             + "\n"
         )
-        assert preparation_fact[:3] == (1, 1, 0), {
+        assert preparation_fact[:2] == (1, 0), {
             "row": preparation_fact,
             "crash": preparation_crash,
             "state": str(state),
         }
-        assert preparation_fact[3] > 0, preparation_fact
-        assert preparation_fact[4:] == ("provider_transport_failure", None), preparation_fact
+        assert preparation_fact[2] > 0, preparation_fact
+        assert preparation_fact[3:] == ("provider_transport_failure", None), preparation_fact
         preparation_host = start_host(
             preparation_store,
             f"http://127.0.0.1:{preparation_endpoint.server_port}/responses",
@@ -3745,7 +3744,7 @@ def main(mode="all", correlation_case="all"):
         database = sqlite3.connect(prelaunch_store / "rui.sqlite3")
         try:
             prelaunch_fact = database.execute(
-                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code FROM model_operation"
+                "SELECT attempt_ordinal,uncertain,resolution_code FROM model_operation"
             ).fetchone()
         finally:
             database.close()
@@ -3760,7 +3759,7 @@ def main(mode="all", correlation_case="all"):
             )
             + "\n"
         )
-        assert prelaunch_fact == (1, 1, 1, None), {
+        assert prelaunch_fact == (1, 1, None), {
             "row": prelaunch_fact,
             "crash": prelaunch_crash,
             "state": str(state),
@@ -4175,8 +4174,8 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,1,0,9223372036854775807,0)",
+                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) "
+                "VALUES(?,?,?,1,1,1,1,0,9223372036854775807,0)",
                 [(index, index, session) for index, session in enumerate(backlog_history, 1)],
             )
             database.commit()
@@ -4264,8 +4263,8 @@ def main(mode="all", correlation_case="all"):
             database.execute("PRAGMA foreign_keys=OFF")
             database.executemany(
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,allowance_used,uncertain,retry_due_at_ms,output_reservation) "
-                "VALUES(?,?,?,1,1,1,1,1,0,9223372036854775807,0)",
+                "admission_position,attempt_ordinal,uncertain,retry_due_at_ms,output_reservation) "
+                "VALUES(?,?,?,1,1,1,1,0,9223372036854775807,0)",
                 [(index, index, session) for index, session in enumerate(recovery_history, 1)],
             )
             database.commit()
@@ -4340,7 +4339,7 @@ def main(mode="all", correlation_case="all"):
                 "SELECT operation_id FROM model_operation WHERE session_ref=?", (recovery_sessions["sentinel"],)
             ).fetchone()[0]
             database.execute(
-                "UPDATE model_operation SET attempt_ordinal=4,allowance_used=4,uncertain=1,retry_due_at_ms=0 "
+                "UPDATE model_operation SET attempt_ordinal=4,uncertain=1,retry_due_at_ms=0 "
                 "WHERE operation_id<=100 OR operation_id=?",
                 (sentinel_operation,),
             )
@@ -4483,7 +4482,7 @@ def main(mode="all", correlation_case="all"):
         database = sqlite3.connect(recovery_store / "rui.sqlite3")
         try:
             assert database.execute(
-                "SELECT count(*) FROM model_operation WHERE uncertain=1 AND allowance_used=4 "
+                "SELECT count(*) FROM model_operation WHERE uncertain=1 AND attempt_ordinal=4 "
                 "AND retry_due_at_ms=0 AND resolution_code IS NULL"
             ).fetchone()[0] == 0
         finally:
@@ -4567,8 +4566,8 @@ def main(mode="all", correlation_case="all"):
         processes.remove(exhaustion_host)
         database = sqlite3.connect(exhaustion_store / "rui.sqlite3")
         assert database.execute(
-            "SELECT attempt_ordinal,allowance_used,resolution_code FROM model_operation ORDER BY operation_id"
-        ).fetchall() == [(4, 4, "retry_exhausted"), (1, 1, "answer")]
+            "SELECT attempt_ordinal,resolution_code FROM model_operation ORDER BY operation_id"
+        ).fetchall() == [(4, "retry_exhausted"), (1, "answer")]
         database.close()
         stop_endpoint(exhaustion_endpoint, endpoints)
 
@@ -5285,11 +5284,11 @@ def main(mode="all", correlation_case="all"):
         assert (stalled_record["code"], stalled_record["http_status"]) == ("provider_transport_failure", None), stalled_record
         with sqlite3.connect(stall_store / "rui.sqlite3") as database:
             retry = database.execute(
-                "SELECT attempt_ordinal,allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? "
+                "SELECT attempt_ordinal,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? "
                 "FROM model_operation",
                 (int(time.time() * 1000),),
             ).fetchall()
-        assert retry == [(1, 1, 0, None, "provider_transport_failure", 1)], retry
+        assert retry == [(1, 0, None, "provider_transport_failure", 1)], retry
 
         # Discarding large bodies must preserve HTTP classification. Retryable
         # evidence releases physical custody and saves the next eligible retry.
@@ -5343,7 +5342,7 @@ def main(mode="all", correlation_case="all"):
             if path != "/large-422":
                 with sqlite3.connect(transient_store / "rui.sqlite3") as database:
                     retry = database.execute(
-                        "SELECT allowance_used,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? FROM model_operation",
+                        "SELECT attempt_ordinal,uncertain,resolution_code,last_failure_code,retry_due_at_ms>? FROM model_operation",
                         (retry_observed_at_ms,),
                     ).fetchall()
                     expected_code = (
