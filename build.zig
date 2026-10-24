@@ -948,6 +948,18 @@ fn addPinnedTransport(b: *std.Build, target: std.Build.ResolvedTarget) PinnedTra
     return .{ .output = output };
 }
 
+fn buildRevision(b: *std.Build) []const u8 {
+    // Git refs can change without any build input changing.
+    b.graph.poisonCache();
+    // An archive nested in another checkout must not inherit that checkout's revision.
+    _ = b.root.statFile(b.graph.io, ".git") catch return "unknown";
+    const root = b.root.toString(b.allocator) catch @panic("OOM");
+    return switch (b.runFallible(&.{ "git", "-C", root, "rev-parse", "HEAD" }, .{ .stderr_behavior = .ignore })) {
+        .success => |stdout| std.mem.trim(u8, stdout, "\r\n"),
+        else => "unknown",
+    };
+}
+
 fn configureTransport(
     b: *std.Build,
     compile: *std.Build.Step.Compile,
@@ -958,6 +970,7 @@ fn configureTransport(
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
     const options = b.addOptions();
     options.addOption(bool, "enabled", enabled);
+    options.addOption([]const u8, "revision", buildRevision(b));
     compile.root_module.addOptions("transport_options", options);
     const bindings = addBindings(b, compile.root_module, "curl", "#include <curl/curl.h>\n#include <time.h>\n");
     bindings.addIncludePath(if (enabled)
