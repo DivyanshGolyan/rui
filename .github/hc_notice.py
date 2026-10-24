@@ -4,7 +4,7 @@ import sys
 
 title, path = sys.argv[1], sys.argv[2]
 timing = re.compile(r"elapsed=|^Completed |^Executing: | (success|cached|failure)\b.* (\d+(\.\d+)?(s|m)|\d+m\d+s)\b")
-failure = re.compile(r"^error|failed command|Unknown|Traceback|exit=[1-9]")
+failure = re.compile(r"error:|^error|failed command|Unknown|Traceback|exit=[1-9]")
 log = [line.rstrip() for line in open(path, errors="replace")]
 
 
