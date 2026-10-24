@@ -104,6 +104,14 @@ runs:
         echo "$RUNNER_TEMP/rui-zig" >> "$GITHUB_PATH"
         echo "ZIG_GLOBAL_CACHE_DIR=$HOME/.cache/zig" >> "$GITHUB_ENV"
         mkdir -p .zig-cache/tmp "$HOME/.cache/zig/tmp"
+    - name: Reuse restored compilation at new inodes
+      if: ${{ inputs.cold != 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cc -O2 -Wall -Wextra -Werror tests/ci/zig_cache_restat.c -o "$RUNNER_TEMP/zig-cache-restat"
+        "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
+          "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
     - name: Install the selected Python fixture dependencies
       if: ${{ steps.requirements.outputs.h2 == 'true' || steps.requirements.outputs.terminal == 'true' }}
       shell: bash
