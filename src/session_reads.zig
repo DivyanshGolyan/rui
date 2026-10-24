@@ -88,6 +88,8 @@ pub const Job = struct {
         listing: ?Listing = null,
         // Output custody began; a later failure is not a silent preparation one.
         rendering: bool = false,
+        // Only confirmed stderr restoration permits exit to replay this page.
+        command_stderr_restored: bool = false,
         action: ?u64 = null,
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
@@ -112,7 +114,9 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     job.result.rendering = true;
     const page = job.inspection_file.handle;
     const result = if (std.c.dup2(page, 1) < 0 or std.c.dup2(page, 2) < 0) error.TerminalCleanupFailed else job.command(job.init, .{ .io = task.io, .cancellation = job.interrupted }, job.store, job.session, job.command_text[0..job.command_text_length]);
-    if (std.c.dup2(saved[0], 1) < 0 or std.c.dup2(saved[1], 2) < 0) return error.TerminalCleanupFailed;
+    const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
+    job.result.command_stderr_restored = std.c.dup2(saved[1], 2) >= 0;
+    if (!stdout_restored or !job.result.command_stderr_restored) return error.TerminalCleanupFailed;
     return result;
 }
 

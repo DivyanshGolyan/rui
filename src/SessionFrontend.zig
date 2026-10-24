@@ -226,6 +226,9 @@ fn quiesce(self: *Self) Settled {
 /// Exit interrupted a Host command before its output was shown. That output
 /// can name a saved request to recover, so it follows restoration on stderr.
 fn commandOutputGuide(self: *const Self) void {
+    // Failed restoration may leave fd 2 pointing at this same scratch file.
+    // Drop optional guidance rather than append the page to itself.
+    if (!self.job.result.command_stderr_restored) return;
     const io = self.init.io;
     const size = (self.inspection_file.stat(io) catch return).size;
     if (size == 0) return;
@@ -236,8 +239,9 @@ fn commandOutputGuide(self: *const Self) void {
     if (!stderr.writeHeld("rui: Interrupted command output:\n")) return;
     var buffer: [4096]u8 = undefined;
     var offset: u64 = 0;
-    while (true) {
-        const count = self.inspection_file.readPositionalAll(io, &buffer, offset) catch return;
+    while (offset < size) {
+        const wanted: usize = @intCast(@min(buffer.len, size - offset));
+        const count = self.inspection_file.readPositionalAll(io, buffer[0..wanted], offset) catch return;
         if (count == 0 or !stderr.writeHeld(buffer[0..count])) return;
         offset += count;
     }

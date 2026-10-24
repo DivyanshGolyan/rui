@@ -6,6 +6,7 @@ import os
 import pathlib
 import pty
 from terminal_process import open_pty
+import resource
 import select
 import shutil
 import signal
@@ -46,6 +47,7 @@ PROBE = r"""
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <termios.h>
@@ -82,6 +84,56 @@ static int screen_fd(int fd) {
     if (fd == 1) return 1;
     if (fd > 2 && screen_known && !fstat(fd, &st) && st.st_dev == screen_dev && st.st_ino == screen_ino) return 1;
     return fd;
+}
+
+static int command_saved[2] = {-1, -1};
+static int command_page = -1;
+static int command_restore_failed = 0;
+
+static int restoration_fault(void) {
+    const char *fault = getenv("RUI_TERMINAL_FAULT");
+    if (!fault) return 0;
+    if (!strcmp(fault, "configure-restore-stdout")) return 1;
+    if (!strcmp(fault, "configure-restore-stderr")) return 2;
+    if (!strcmp(fault, "configure-restore-both")) return 3;
+    return 0;
+}
+
+static int probe_dup2(int source, int target) {
+#ifdef __APPLE__
+    int (*real_dup2)(int, int) = dup2;
+#else
+    int (*real_dup2)(int, int) = dlsym(RTLD_NEXT, "dup2");
+#endif
+    if (!real_dup2 || real_dup2 == probe_dup2) _exit(98);
+    const int fault = restoration_fault();
+    if (fault && target >= 1 && target <= 2) {
+        if (source == command_saved[target - 1]) {
+            record(target == 1 ? "restore-stdout-attempt\n" : "restore-stderr-attempt\n");
+            if (fault & target) {
+                command_restore_failed = 1;
+                errno = EIO;
+                return -1;
+            }
+        } else if (target == 1) {
+            command_page = source;
+        }
+    }
+    return real_dup2(source, target);
+}
+
+/* Stop the unfixed feedback loop before it can consume disk. This checks
+   the actual descriptor identities, not just the injected syscall result. */
+static void check_command_replay(int fd, const void *bytes, size_t count) {
+    if (!command_restore_failed || count != strlen("rui: Interrupted command output:\n") ||
+        memcmp(bytes, "rui: Interrupted command output:\n", count)) return;
+    struct stat sink, page;
+    if (fstat(fd, &sink) || fstat(command_page, &page)) _exit(86);
+    if (sink.st_dev == page.st_dev && sink.st_ino == page.st_ino) {
+        record("replayed-into-scratch\n");
+        _exit(87);
+    }
+    record("replayed-to-safe-sink\n");
 }
 
 __attribute__((constructor)) static void diagnostic_alias(void) {
@@ -123,7 +175,7 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     struct stat st;
     const int command_page = fd == 1;
     const int inspection_page = fd > 2 && !fstat(fd, &st) && S_ISREG(st.st_mode);
-    if (command_page && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation")))
+    if (command_page && (!strcmp(fault, "configure-admitted") || !strcmp(fault, "configure-presentation") || restoration_fault()))
         marker = "Rui: Configured.";
     else if (command_page && !strcmp(fault, "configure-rejected")) marker = "admitted: rejected";
     else if (inspection_page && !strcmp(fault, "requests")) marker = "Rui: Local recovery handles (not Host work status):";
@@ -220,6 +272,7 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
 }
 
 static ssize_t probe_write(int fd, const void *bytes, size_t count) {
+    check_command_replay(fd, bytes, count);
     const int screen = screen_fd(fd);
     const char *readiness_fault = getenv("RUI_TERMINAL_FAULT");
     if (screen == 1 && readiness_fault && !strcmp(readiness_fault, "alias-poison"))
@@ -437,6 +490,14 @@ int probe_fcntl(int fd, int command, ...) {
     va_start(args, command);
     int value = va_arg(args, int);
     va_end(args);
+    if (restoration_fault() && (fd == 1 || fd == 2) && command == F_DUPFD_CLOEXEC) {
+        struct rlimit limit;
+        if (getrlimit(RLIMIT_NOFILE, &limit) || limit.rlim_cur != 256) _exit(85);
+        record("command-nofile-256\n");
+        const int saved = real_fcntl(fd, command, value);
+        command_saved[fd - 1] = saved;
+        return saved;
+    }
     const char *diagnostic_arm = getenv("RUI_DIAGNOSTIC_ARM");
     const char *diagnostic_fault = getenv("RUI_TERMINAL_FAULT");
     if (command == F_SETFL && diagnostic_fault && !strncmp(diagnostic_fault, "entry-", 6)) {
@@ -615,8 +676,10 @@ INTERPOSE(probe_fsync, fsync)
 INTERPOSE(probe_tcdrain, tcdrain)
 INTERPOSE(probe_tcsetattr, tcsetattr)
 INTERPOSE(probe_fcntl, fcntl)
+INTERPOSE(probe_dup2, dup2)
 INTERPOSE(probe_pthread_create, pthread_create)
 #else
+int dup2(int source, int target) { return probe_dup2(source, target); }
 ssize_t writev(int fd, const struct iovec *iov, int count) { return probe_writev(fd, iov, count); }
 ssize_t write(int fd, const void *bytes, size_t count) { return probe_write(fd, bytes, count); }
 ssize_t pwritev64(int fd, const struct iovec *iov, int count, off_t offset) { return probe_pwritev(fd, iov, count, offset); }
@@ -1467,7 +1530,7 @@ def unread_input(slave):
     return struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0" * 4))[0]
 
 
-def command_interruption_cases(state, library):
+def command_interruption_cases(state, library, only=None):
     """Foreground signals cancel actual handoff sockets, not committed intent."""
     root = state / "command-interruption"
     root.mkdir()
@@ -1501,13 +1564,19 @@ def command_interruption_cases(state, library):
                 ("configure-presentation", "/configure --permission-mode ask", "", signal.SIGINT),
                 ("configure-rejected", "/configure --model gpt-6.1-sol", "", signal.SIGINT),
                 ("configure-canonical", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("configure-restore-stdout", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("configure-restore-stderr", "/configure --permission-mode ask", "", signal.SIGINT),
+                ("configure-restore-both", "/configure --permission-mode ask", "", signal.SIGINT),
                 ("result-observe", f"/result {message['request']}", "/v1/observe-command", signal.SIGINT),
                 ("result-content", f"/result {message['request']}", "/v1/read-result", signal.SIGINT),
                 ("inspect-current", "/inspect-action", "/v1/inspect-session", signal.SIGINT),
                 ("inspect-arguments", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT),
                 ("inspect-full-stderr", "/inspect-action", "/v1/read-action-arguments", signal.SIGINT)):
+            if only is not None and case not in only:
+                continue
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
+            original_flags = fcntl.fcntl(slave, fcntl.F_GETFL)
             ready_read, ready_write = os.pipe()
             # Exit guidance is optional: a stopped terminal or a full blocking
             # pipe on stderr drops it and never holds the restored caller.
@@ -1536,11 +1605,16 @@ def command_interruption_cases(state, library):
                         "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": case})
                     if route is None:
                         environment["RUI_CAPTURE_SYNC_RELEASE"] = str(release)
+                def caller_setup():
+                    signal.signal(signal.SIGINT, signal.SIG_DFL)
+                    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                    if case.startswith("configure-restore-"):
+                        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                        resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
                 caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                     "--", session], env=environment, stdin=slave, stdout=slave,
                     stderr=error_slave if stopped else subprocess.PIPE, pass_fds=(ready_write,),
-                    preexec_fn=lambda: (signal.signal(signal.SIGINT, signal.SIG_DFL),
-                        signal.signal(signal.SIGTERM, signal.SIG_DFL)))
+                    preexec_fn=caller_setup)
                 human.action_ready(ready_read, master)
                 if route:
                     def hold(response):
@@ -1597,7 +1671,18 @@ def command_interruption_cases(state, library):
                 output, errors = human.terminal_exit(caller, master)
                 if case.endswith("-stopped-stderr"):
                     termios.tcflow(error_slave, termios.TCOON)
-                if case == "configure-canonical":
+                restoring = case.startswith("configure-restore-")
+                if restoring:
+                    marks = log.read_text()
+                    assert "command-nofile-256" in marks, (case, marks)
+                    assert "restore-stdout-attempt" in marks and "restore-stderr-attempt" in marks, (case, marks)
+                    assert "replayed-into-scratch" not in marks, (case, marks)
+                    assert caller.returncode == 1, (case, caller.returncode, output, errors)
+                    if case.endswith("stdout"):
+                        assert "replayed-to-safe-sink" in marks and b"error: TerminalCleanupFailed" in errors, (case, marks, errors)
+                    else:
+                        assert b"rui: Interrupted command output:" not in errors, (case, errors)
+                elif case == "configure-canonical":
                     assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
@@ -1617,14 +1702,15 @@ def command_interruption_cases(state, library):
                     if case == "configure-inflight":
                         assert transmitted == [saved], "in-flight send changed captured request bytes"
                     assert identity["store"] == str(store) and identity["session"] == session
-                    if stopped:
+                    unsafe_stderr = restoring and not case.endswith("stdout")
+                    if stopped or unsafe_stderr:
                         assert b"rui request" not in errors, errors  # Dropped, not delayed.
                     else:
                         assert f"rui request inspect {key}".encode() in errors, (case, errors, output[-1500:])
                         assert b"rui: Interrupted command output:\n" in errors, (case, errors)
-                    if stopped:
+                    if stopped or unsafe_stderr:
                         pass
-                    elif case in ("configure-admitted", "configure-presentation", "configure-rejected"):
+                    elif restoring or case in ("configure-admitted", "configure-presentation", "configure-rejected"):
                         assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
                         if case == "configure-presentation":
                             assert b"InputOutput" in errors, errors
@@ -1638,6 +1724,7 @@ def command_interruption_cases(state, library):
                     actual[3] &= ~mask
                     original[3] &= ~mask
                 assert actual == original and not (root / "effect").exists()
+                assert_file_flags(fcntl.fcntl(slave, fcntl.F_GETFL), original_flags)
                 reply_release.set()
                 if proxy is not None:
                     proxy.close()
@@ -3000,9 +3087,11 @@ def main(selected=None):
         if selected == "consent":
             completed = True
             return
-        if selected in (None, "commands"):
-            command_interruption_cases(state, library)
-        if selected == "commands":
+        if selected in (None, "commands", "command-restoration"):
+            command_interruption_cases(state, library, only=(
+                "configure-restore-stdout", "configure-restore-stderr", "configure-restore-both")
+                if selected == "command-restoration" else None)
+        if selected in ("commands", "command-restoration"):
             completed = True
             return
         if selected in (None, "fatal"):
