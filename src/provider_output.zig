@@ -817,7 +817,7 @@ fn validateItem(
         if (!try rangeEquals(io, file, phase_range, "null")) {
             var phase: protocol.Bounded(max_evidence_bytes) = .{};
             _ = try readString(io, file, phase_range, &phase);
-            message_phase = if (phase.eql("commentary")) .commentary else if (phase.eql("final_answer")) .final_answer else return error.UnsupportedMessagePhase;
+            message_phase = if (phase.eql("commentary") or phase.eql("partial_answer")) .commentary else if (phase.eql("final_answer")) .final_answer else return error.UnsupportedMessagePhase;
         }
     }
     const content = try fields.required("content");
@@ -891,7 +891,7 @@ pub const ReplayValidationCursor = struct {
     }
 
     const names = item_field_names.* ++ [_][]const u8{ "refusal", "annotations", "cell_id", "executed_tool_calls", "tool_calls_complete" };
-    const words = [_][]const u8{ "reasoning", "compaction", "function_call", "message", "completed", "assistant", "commentary", "final_answer", "direct", "output_text", "refusal", "reasoning_text", "summary_text", "url_citation" };
+    const words = [_][]const u8{ "reasoning", "compaction", "function_call", "message", "completed", "assistant", "commentary", "partial_answer", "final_answer", "direct", "output_text", "refusal", "reasoning_text", "summary_text", "url_citation" };
     const Shape = enum { absent, string, object, array, null_value, false_value, other };
     const Value = struct {
         shape: Shape = .absent,
@@ -1089,7 +1089,7 @@ pub const ReplayValidationCursor = struct {
                 }
                 if (!(try frame.requiredString("role", false)).is("assistant")) return error.ContinuationUnavailable;
                 const phase = try frame.get("phase");
-                if (phase.shape != .absent and phase.shape != .null_value and !phase.is("commentary") and !phase.is("final_answer")) return error.ContinuationUnavailable;
+                if (phase.shape != .absent and phase.shape != .null_value and !phase.is("commentary") and !phase.is("partial_answer") and !phase.is("final_answer")) return error.ContinuationUnavailable;
                 const content = try frame.get("content");
                 if (content.shape != .array or content.length == 0) return error.ContinuationUnavailable;
                 if (!content.output) return error.ContinuationUnavailable;
@@ -1281,6 +1281,8 @@ test "replay compatibility rejects unsupported meaning and preserves open fields
         .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .supported = false },
         .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .supported = false },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = true },
+        .{ .item = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}", .supported = true },
+        .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"phase\":\"partial_answers\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}", .supported = false },
         .{ .item = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"future_text\",\"text\":\"ok\"}]}", .supported = false },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"caller\":{\"type\":\"future\"}}", .supported = false },
         .{ .item = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"call\",\"arguments\":\"{}\",\"async\":17}", .supported = false },
@@ -2188,11 +2190,39 @@ test "completed empty assistant answers are valid with or without a final phase"
     }
 }
 
+test "partial answer fixture selects only the final answer" {
+    // Synthetic first-party fixture, not a live capture or executed upstream test:
+    // openai/codex 970111f6cb62cc02fe36a82ea7d71b37a2889c97,
+    // codex-rs/codex-api/src/sse/responses.rs:759-798.
+    // Keep its added/done message shape; Rui requires output_index and a
+    // completed envelope. No end_turn:false sampling behavior is inferred.
+    const partial = "{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"First result.\"}],\"phase\":\"partial_answer\"}";
+    const final = "{\"id\":\"msg_final\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Final result.\"}],\"phase\":\"final_answer\"}";
+    const stream = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_partial\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"phase\":\"partial_answer\"}}\n\n" ++
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"First result.\"}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ partial ++ "}\n\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ final ++ "}\n\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp1\",\"status\":\"completed\",\"output\":[" ++ partial ++ "," ++ final ++ "]}}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingSse(&tmp, stream, 4096);
+    try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
+    try std.testing.expectEqual(@as(?u64, 1), accepted.output.answer_item_ordinal);
+    try std.testing.expectEqual(@as(u64, "Final result.".len), accepted.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("Final result."), accepted.output.answer_digest);
+}
+
 test "message phases select one answer without dropping or concatenating text" {
     const cases = [_]struct { first: []const u8, second: []const u8, answer: ?[]const u8 = null, failure: ?anyerror = null }{
         .{ .first = "", .second = "", .answer = "second é" },
         .{ .first = ",\"phase\":null", .second = "", .answer = "second é" },
         .{ .first = ",\"phase\":\"commentary\"", .second = ",\"phase\":\"final_answer\"", .answer = "second é" },
+        .{ .first = ",\"phase\":\"partial_answer\"", .second = ",\"phase\":\"final_answer\"", .answer = "second é" },
+        .{ .first = ",\"phase\":\"final_answer\"", .second = ",\"phase\":\"partial_answer\"", .answer = "first" },
+        .{ .first = ",\"phase\":\"partial_answer\"", .second = "", .failure = error.MissingAssistantAnswer },
+        .{ .first = "", .second = ",\"phase\":\"partial_answer\"", .failure = error.MissingAssistantAnswer },
+        .{ .first = ",\"phase\":\"partial_answer\"", .second = ",\"phase\":\"commentary\"", .failure = error.MissingAssistantAnswer },
+        .{ .first = ",\"phase\":\"partial_answer\"", .second = ",\"phase\":\"partial_answer\"", .failure = error.MissingAssistantAnswer },
         .{ .first = "", .second = ",\"phase\":\"final_answer\"", .answer = "second é" },
         .{ .first = ",\"phase\":\"final_answer\"", .second = ",\"phase\":\"commentary\"", .answer = "first" },
         .{ .first = ",\"phase\":\"final_answer\"", .second = "", .answer = "first" },
@@ -2200,6 +2230,7 @@ test "message phases select one answer without dropping or concatenating text" {
         .{ .first = "", .second = ",\"phase\":\"commentary\"", .failure = error.MissingAssistantAnswer },
         .{ .first = ",\"phase\":\"final_answer\"", .second = ",\"phase\":\"final_answer\"", .failure = error.MultipleFinalAnswers },
         .{ .first = ",\"phase\":\"analysis\"", .second = "", .failure = error.UnsupportedMessagePhase },
+        .{ .first = ",\"phase\":\"partial_answers\"", .second = ",\"phase\":\"final_answer\"", .failure = error.UnsupportedMessagePhase },
         .{ .first = ",\"phase\":42", .second = "", .failure = error.ExpectedJsonString },
     };
     var tmp = std.testing.tmpDir(.{});

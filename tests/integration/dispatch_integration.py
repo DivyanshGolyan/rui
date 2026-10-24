@@ -977,6 +977,9 @@ def sse_framing_cases(state, processes, endpoints):
 
 def phased_message_cases(state, processes, endpoints):
     """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
+    # partial_answer shape: synthetic first-party openai/codex fixture at
+    # 970111f6cb62cc02fe36a82ea7d71b37a2889c97,
+    # codex-rs/codex-api/src/sse/responses.rs:759-798; not live capture proof.
     def text_item(identity, text, phase):
         item = {"type": "message", "id": identity, "role": "assistant",
                 "content": [{"type": "output_text", "text": text, "annotations": []}]}
@@ -992,10 +995,9 @@ def phased_message_cases(state, processes, endpoints):
              "model": "gpt-6-luna", "status": "completed", "output": items}},
         ]), headers={"OpenAI-Model": "gpt-6-luna"})
 
-    for phased in (True, False):
-        label = "phased" if phased else "unphased"
+    for label, nonfinal in (("phased", "commentary"), ("unphased", None), ("partial", "partial_answer")):
+        phased = nonfinal is not None
         store = state / f"{label}-store"
-        commentary = "commentary" if phased else None
         final = "final_answer" if phased else None
         forbidden = state / f"{label}-must-not-launch"
         calls = [
@@ -1005,18 +1007,18 @@ def phased_message_cases(state, processes, endpoints):
             {"type": "function_call", "id": f"{label}-unknown", "call_id": "second-call",
              "name": "missing-tool", "arguments": "{}"},
         ]
-        first_items = [text_item("before", "Inspecting files", commentary), calls[0],
-                       text_item("between", "Checking sibling calls", commentary), calls[1],
-                       text_item("after", "Waiting for tool results", commentary)]
+        first_items = [text_item("before", "Inspecting files", nonfinal), calls[0],
+                       text_item("between", "Checking sibling calls", nonfinal), calls[1],
+                       text_item("after", "Waiting for tool results", nonfinal)]
         # Identical visible text in distinct messages deliberately exercises
         # content dedup without losing exact item provenance.
-        final_items = [text_item("repeated", "Inspecting files", commentary),
-                       text_item("summary", "Tools settled", commentary),
+        final_items = [text_item("repeated", "Inspecting files", nonfinal),
+                       text_item("summary", "Tools settled", "commentary" if phased else None),
                        text_item("final", "Canonical answer é", final)]
         later_items = [text_item("later", "Newer answer", final)]
         if phased:
             # An explicit final wins even when later text remains visible.
-            later_items.append(text_item("tail", "After final commentary", commentary))
+            later_items.append(text_item("tail", "After final commentary", nonfinal))
         endpoint = SuccessEndpoint([response("tools", first_items), response("answer", final_items),
                                     response("later", later_items)])
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
@@ -1093,7 +1095,7 @@ def phased_message_cases(state, processes, endpoints):
         stop_host(host)
         processes.remove(host)
         stop_endpoint(endpoint, endpoints)
-    bad_items = [text_item("bad-prefix", "Never publish this prefix", "commentary"), calls[0],
+    bad_items = [text_item("bad-prefix", "Never publish this prefix", "partial_answer"), calls[0],
                  text_item("bad-final-one", "First final", "final_answer"),
                  text_item("bad-final-two", "Second final", "final_answer")]
     endpoint = SuccessEndpoint([response("duplicate-finals", bad_items)])
@@ -1119,7 +1121,7 @@ def phased_message_cases(state, processes, endpoints):
         assert database.execute("SELECT count(*) FROM conversation_entry WHERE entry_kind=3").fetchone() == (0,)
     assert not forbidden.exists(), "malformed candidate launched Bash"
     stop_endpoint(endpoint, endpoints)
-    print("Synthetic gpt-6-luna phase and unphased streams: exact replay, visible order, final result and crash recovery passed")
+    print("Synthetic commentary, partial_answer and unphased streams: exact replay, visible order, final result and crash recovery passed")
 
 
 def main(mode="all", correlation_case="all"):
