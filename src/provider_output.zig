@@ -1546,30 +1546,6 @@ fn validateCompleted(
     }
 }
 
-fn knownNonterminal(kind: []const u8) bool {
-    const values = [_][]const u8{
-        "response.created",
-        "response.in_progress",
-        "response.metadata",
-        "response.output_text.delta",
-        "response.output_text.done",
-        "response.refusal.delta",
-        "response.refusal.done",
-        "response.reasoning_summary_part.added",
-        "response.reasoning_summary_part.done",
-        "response.reasoning_summary_text.delta",
-        "response.reasoning_summary_text.done",
-        "response.reasoning_text.delta",
-        "response.reasoning_text.done",
-        "response.content_part.added",
-        "response.content_part.done",
-        "response.function_call_arguments.delta",
-        "response.function_call_arguments.done",
-    };
-    for (values) |value| if (std.mem.eql(u8, kind, value)) return true;
-    return false;
-}
-
 const AnswerSelection = struct {
     ordinal: ?u64 = null,
     length: u64 = 0,
@@ -1676,7 +1652,7 @@ fn processEvent(
         if (incompleteOverflow(io, file, event) catch |err| try malformedEnvelope(err)) return error.ContextOverflow;
         return error.IncompleteProviderOutput;
     }
-    if (!knownNonterminal(kind.slice())) return error.UnsupportedEventType;
+    if (std.mem.startsWith(u8, kind.slice(), "response.output_item.")) return error.UnsupportedEventType;
 }
 
 fn rangeEquals(io: std.Io, file: std.Io.File, range: Range, expected: []const u8) !bool {
@@ -1890,7 +1866,9 @@ test "provider refusal preserves text and rejects malformed or incomplete candid
     try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n", 4096));
     const delta = "data: {\"type\":\"response.refusal.delta\",\"delta\":\"not an answer\"}\n\n";
     try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&tmp, delta ++ completed, 4096));
-    try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.refusal.future\"}\n\n" ++ done ++ completed, 4096));
+    const future = try validateTestingSse(&tmp, "data: {\"type\":\"response.refusal.future\",\"refusal\":\"not an answer\"}\n\n" ++ done ++ completed, 4096);
+    try std.testing.expectEqual(protocol.contentDigest("Cannot help. é\n"), future.output.answer_digest);
+    try std.testing.expectEqual(protocol.contentDigest(refusal), future.first_item.content_digest);
     const malformed = [_]struct { block: []const u8, failure: anyerror }{
         .{ .block = "{\"type\":\"refusal\"}", .failure = error.MissingProviderField },
         .{ .block = "{\"type\":\"refusal\",\"refusal\":null}", .failure = error.ExpectedJsonString },
@@ -2464,7 +2442,26 @@ test "metadata notification is not output or completion authority" {
     try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, notification, 4096));
     try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&tmp, notification ++ terminal, 4096));
     try std.testing.expectError(error.LateProviderOutput, validateTestingSse(&tmp, done ++ terminal ++ notification, 4096));
-    try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.metadata.future\"}\n\n" ++ done ++ terminal, 4096));
+    for ([_][]const u8{
+        "{\"type\":\"response.metadata.future\",\"item\":null,\"output_index\":\"unused\"}",
+        "{\"type\":\"codex.response.metadata\",\"response\":{\"status\":\"failed\"}}",
+        "{\"type\":\"future.notice\",\"future\":[null,true,{}]}",
+        "{\"type\":\"response.output_item_future\"}",
+    }) |event| {
+        const unknown = try std.testing.allocator.print("data: {s}\n\n", .{event});
+        defer std.testing.allocator.free(unknown);
+        const sse = try std.testing.allocator.print("{s}{s}{s}", .{ done, unknown, terminal });
+        defer std.testing.allocator.free(sse);
+        const accepted = try validateTestingSse(&tmp, sse, 4096);
+        try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+        try std.testing.expectEqual(protocol.contentDigest("OK"), accepted.output.answer_digest);
+        try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, unknown, 4096));
+    }
+    try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.output_item.future\"}\n\n" ++ done ++ terminal, 4096));
+    try std.testing.expectError(error.MissingProviderField, validateTestingSse(&tmp, "data: {\"type\":\"response.output_item.done\",\"output_index\":0}\n\n" ++ terminal, 4096));
+    try std.testing.expectError(error.DuplicateJsonField, validateTestingSse(&tmp, "data: {\"type\":\"future.notice\",\"type\":\"response.completed\"}\n\n" ++ done ++ terminal, 4096));
+    try std.testing.expectError(error.InvalidJsonValue, validateTestingSse(&tmp, "data: {\"type\":\"future.notice\",\"future\":!}\n\n" ++ done ++ terminal, 4096));
 }
 
 test "Bash proposal metadata growth is linear and disk-backed" {

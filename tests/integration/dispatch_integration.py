@@ -2738,7 +2738,7 @@ def main(mode="all", correlation_case="all"):
         unsupported_cases = [
             encode_sse([{"type": "response.output_item.done", "output_index": 0,
                          "item": unsupported_message}], done=False),
-            encode_sse([{"type": "response.future_event", "private": private_sentinel}], done=False),
+            encode_sse([{"type": "response.output_item.future_event", "private": private_sentinel}], done=False),
         ]
         # Distinct output item identities pass parsing, but the decoded call
         # identity must remain unique when Store imports the complete envelope.

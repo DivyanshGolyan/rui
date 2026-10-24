@@ -408,7 +408,7 @@ Accept completed items in provider output order, not token-delta arrival order. 
 
 Null response `usage` or `model` means absent evidence, like an omitted field. Other malformed values and duplicate consumed fields still reject. Header model evidence remains independent when the body model is absent.
 
-The SSE `response.metadata` event is a nonterminal notification, not an output item or completion. Rui does not promote its moderation/presentation metadata to answers, tool records or permission authority. Recognizing this exact event does not accept unknown `response.*` events or weaken validation of completed items and terminal status.
+SSE events outside `response.output_item.*` that are not recognized completion or failure events are notifications, including `response.metadata` and future event kinds. Rui validates their JSON envelope and string `type`, then ignores them without granting answer, tool, completion or permission authority. Unknown `response.output_item.*` events reject as unsupported. Known output items, terminal status, malformed JSON, incomplete streams and late output retain their strict validation.
 
 For the V1 text/function subset, the replay transformation is the original ordered item with only item-level `created_by` removed. Preserve the following fields when supplied, including absence versus null and all unknown fields inside supported open records:
 
