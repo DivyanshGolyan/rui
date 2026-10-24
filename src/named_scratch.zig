@@ -3,7 +3,9 @@ const Bounded = @import("bounded.zig").Bounded;
 const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const NumericName = enum {
+    // Ingress exchanges and model Operations have independent counters.
     request,
+    @"provider-request",
     response,
     @"response-metadata",
     @"bash-stdout",
@@ -151,6 +153,7 @@ pub fn removeNameWith(
 test "numeric scratch names preserve exact producer spelling" {
     inline for (.{
         .{ NumericName.request, "request-" },
+        .{ NumericName.@"provider-request", "provider-request-" },
         .{ NumericName.response, "response-" },
         .{ NumericName.@"response-metadata", "response-metadata-" },
         .{ NumericName.@"bash-stdout", "bash-stdout-" },

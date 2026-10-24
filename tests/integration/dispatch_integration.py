@@ -4618,7 +4618,7 @@ def main(mode="all", correlation_case="all"):
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)
         assert preparation_shutdown_endpoint.requests == []
-        assert not list((preparation_shutdown_store / "scratch").glob("request-*.tmp"))
+        assert not list((preparation_shutdown_store / "scratch").glob("provider-request-*.tmp"))
         preparation_shutdown_host = start_host(
             preparation_shutdown_store,
             f"http://127.0.0.1:{preparation_shutdown_endpoint.server_port}/responses",
@@ -5187,13 +5187,13 @@ def main(mode="all", correlation_case="all"):
         assert endpoint.requests == []
         stop_host(host)
         processes.remove(host)
-        leftovers = list(unlink_store.rglob("request-*"))
+        leftovers = list(unlink_store.rglob("provider-request-*"))
         assert len(leftovers) == 1, leftovers
         assert leftovers[0].exists()
 
         offline = start_host(unlink_store, None)
         processes.append(offline)
-        assert not list(unlink_store.rglob("request-*"))
+        assert not list(unlink_store.rglob("provider-request-*"))
         resources = command(
             "session", "inspect", "--store", unlink_store, "--session", unlink_session
         )["execution"]

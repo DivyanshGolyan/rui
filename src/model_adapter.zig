@@ -519,7 +519,7 @@ pub const Preparation = struct {
         var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
         defer scratch.close(io);
         var name_buffer: [96]u8 = undefined;
-        const name = try named_scratch.NumericName.request.format(
+        const name = try named_scratch.NumericName.@"provider-request".format(
             &name_buffer,
             view.binding.operation_id,
             view.binding.attempt_ordinal,
@@ -1598,6 +1598,101 @@ const composed_expected =
     "\"tools\":[" ++ bash_tool_json ++ "]," ++
     "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"rui_output\",\"strict\":true,\"schema\":{\"type\":\"object\"}}}}";
 
+test "scratch namespaces admit a Message while matching provider scratch exists" {
+    try proveScratchNamespaceIsolation(true);
+}
+
+test "scratch namespaces prepare a provider request while matching ingress scratch exists" {
+    try proveScratchNamespaceIsolation(false);
+}
+
+fn proveScratchNamespaceIsolation(provider_first: bool) !void {
+    const Overlap = struct {
+        var ingress: *protocol.Ingress = undefined;
+        var storage: *store.Store = undefined;
+        var body: []const u8 = undefined;
+        var failure: ?anyerror = null;
+        var admitted: bool = false;
+
+        fn admit(bytes: []const u8) !void {
+            try ingress.feed(bytes);
+            var request = try ingress.finish();
+            defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+            const reply = storage.submitMessage(&request.message, .{});
+            try std.testing.expect(reply == .accepted);
+            try std.testing.expect(!reply.accepted.replayed);
+            admitted = true;
+        }
+
+        fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
+            // Preparation has exclusively created and opened both aliases,
+            // but its name is still live. Admit through real ingress here.
+            admit(body) catch |err| {
+                failure = err;
+            };
+            return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
+        }
+    };
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("scratch-config");
+    try setup.submit("scratch-initial", "scratch-initial", session.slice(), "start work");
+    var attempt = (try setup.storage.admitNextModelAttempt(.{})).?;
+    const binding = try attempt.permit.consume();
+    try std.testing.expectEqual(@as(u64, 1), binding.attempt_ordinal);
+
+    const text = "worker report\n雪\x00done\n";
+    var body_buffer: [2048]u8 = undefined;
+    const body = try std.fmt.bufPrint(
+        &body_buffer,
+        "{{\"version\":\"1\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"scratch-report\",\"session\":\"{s}\",\"sender\":null,\"sender_handle\":null,\"text\":{{\"state\":\"value\",\"value\":\"worker report\\n雪\\u0000done\\n\"}}}}",
+        .{session.slice()},
+    );
+    var used: std.atomic.Value(u64) = .init(0);
+    var retained_ingress: ?named_scratch.Owner = null;
+    var ingress = protocol.Ingress.init(std.testing.allocator, .{
+        .io = std.testing.io,
+        .fd = -1,
+        .content_length = body.len,
+        .scratch_path = setup.root,
+        // Match the independent Operation/Attempt counter pair exactly.
+        .request_number = binding.operation_id,
+        .retained_scratch = &retained_ingress,
+        .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+        .expected_kind = .message,
+    });
+    defer ingress.deinit();
+    Overlap.ingress = &ingress;
+    Overlap.storage = &setup.storage;
+    Overlap.body = body;
+    Overlap.failure = null;
+    Overlap.admitted = false;
+    const split = body.len - 3; // Leave the content string and file open.
+    if (!provider_first) try ingress.feed(body[0..split]);
+    var vtable = std.testing.io.vtable.*;
+    if (provider_first) vtable.dirDeleteFile = Overlap.delete;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var retained_provider: ?named_scratch.Owner = null;
+    var preparation: Preparation = undefined;
+    try preparation.init(io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained_provider);
+    defer preparation.cancel();
+    if (Overlap.failure) |err| return err;
+    if (!provider_first) try Overlap.admit(body[split..]);
+    try std.testing.expect(Overlap.admitted);
+
+    const observed = try setup.storage.observeCommand("scratch-report");
+    try std.testing.expectEqual(.accepted, observed.status);
+    try std.testing.expectEqual(.queued, observed.message.?.queue.?.state);
+    var reader = try setup.storage.openContent(observed.message.?.content);
+    defer reader.close();
+    var actual: [text.len + 1]u8 = undefined;
+    const count = try reader.read(0, &actual);
+    try std.testing.expectEqualStrings(text, actual[0..count]);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(retained_ingress == null and retained_provider == null);
+}
+
 test "request preparation minimal golden is exact across schedules" {
     var workspace_tmp = std.testing.tmpDir(.{});
     defer workspace_tmp.cleanup();
@@ -2080,7 +2175,7 @@ test "request preparation cancellation and failure release ownership" {
         try std.testing.expectEqual(named_scratch.Reclamation.removed, reclamation);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         var name_buffer: [96]u8 = undefined;
-        const name = try named_scratch.NumericName.request.format(&name_buffer, binding.operation_id, binding.attempt_ordinal);
+        const name = try named_scratch.NumericName.@"provider-request".format(&name_buffer, binding.operation_id, binding.attempt_ordinal);
         try std.testing.expectError(error.FileNotFound, setup.tmp.dir.statFile(std.testing.io, name, .{}));
     }
 }

@@ -566,6 +566,7 @@ test "invalid UTF-8 Store path remains distinct from path overflow" {
 
 test "startup cleanup recognizes only owned ingress names" {
     try std.testing.expect(named_scratch.isOwned("request-12-2.tmp"));
+    try std.testing.expect(named_scratch.isOwned("provider-request-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("response-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("response-metadata-12-2.tmp"));
     try std.testing.expect(named_scratch.isOwned("bash-stdout-12-2.tmp"));
@@ -577,7 +578,7 @@ test "startup cleanup recognizes only owned ingress names" {
         var buffer: [64]u8 = undefined;
         try std.testing.expect(named_scratch.isOwned(try named_scratch.EvaluatorName.format(&buffer, id)));
     }
-    inline for (.{ "request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
+    inline for (.{ "request-", "provider-request-", "response-", "response-metadata-", "bash-stdout-", "bash-stderr-", "report-" }) |prefix| {
         var name_buffer: [64]u8 = undefined;
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}-2.tmp", .{prefix})));
         try std.testing.expect(!named_scratch.isOwned(try std.fmt.bufPrint(&name_buffer, "{s}2-.tmp", .{prefix})));
@@ -616,6 +617,7 @@ test "startup cleanup removes owned files and preserves lookalikes" {
     var output_buffer: [64]u8 = undefined;
     const owned = [_][]const u8{
         "request-0-1.tmp",
+        "provider-request-1-1.tmp",
         "response-1-1.tmp",
         "response-metadata-2-1.tmp",
         "bash-stdout-3-1.tmp",
@@ -630,6 +632,9 @@ test "startup cleanup removes owned files and preserves lookalikes" {
         "request-1-1",
         "request-x-1.tmp",
         "request-1-1-1.tmp",
+        "provider-request-0-1.tmp",
+        "provider-request-01-1.tmp",
+        "provider-request-1-1.tmp.extra",
         "evaluator-00.tmp",
         "evaluator-deadbeef.index",
         "evaluator-DEADBEEF.index",
