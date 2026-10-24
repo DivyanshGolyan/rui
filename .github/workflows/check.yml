@@ -239,7 +239,12 @@ jobs:
           TARGETS: ${{ needs.plan.outputs.targets }}
           ARTIFACT_ID: ${{ needs.linux_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+          # The cached build runner records package sources that only now exist.
+          "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
+            "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
       - name: Run selected targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -316,7 +321,12 @@ jobs:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+        run: |
+          set -euo pipefail
+          python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+          # The cached build runner records package sources that only now exist.
+          "$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
+            "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig"
       - name: Run required native targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
