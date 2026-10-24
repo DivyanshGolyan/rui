@@ -245,10 +245,10 @@ If the copy fails, stop here and resolve the failure. After a successful copy, c
 ```sh
 FRESH_STORE=$(mktemp -d "$HOME/rui-store.XXXXXX")
 "$RUI" host start --store "$FRESH_STORE"
-"$RUI" setup --store "$FRESH_STORE"
+"$RUI" defaults configure --store "$FRESH_STORE"
 ```
 
-The old Store stays at its original path; its Sessions are not imported into the fresh Store. Store identity binds that original path, so neither a renamed Store nor its backup can be opened at a different path unchanged. To restore a backup, stop all owners and preserve any Store currently at the original path before restoring the complete backup there. Use a compatible build to read it. To make the restored Store your default again, run `"$RUI" setup --store "$STORE"` with that compatible build. See the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) for migration plans.
+The old Store stays at its original path; its Sessions are not imported into the fresh Store. Store identity binds that original path, so neither a renamed Store nor its backup can be opened at a different path unchanged. To restore a backup, stop all owners and preserve any Store currently at the original path before restoring the complete backup there. Use a compatible build to read it. To make the restored Store your default again, run `"$RUI" defaults configure --store "$STORE"` with that compatible build. See the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) for migration plans.
 
 <a id="try-the-implemented-development-path"></a>
 
