@@ -157,6 +157,8 @@ jobs:
           TARGETS: ${{ needs.plan.outputs.targets }}
         run: |
           set -o pipefail
+          t0=$(date +%s.%N); zig build --help > /dev/null; t1=$(date +%s.%N)
+          echo "::notice title=producer diag::help1=$(echo "$t1-$t0"|bc) cpu=$(grep -m1 "^model name" /proc/cpuinfo | cut -d: -f2)"
           python3 -B tests/ci/build_artifact.py build "$TARGETS" 2>&1 | tee "$RUNNER_TEMP/hc-build.log"
       - name: Hillclimb timings
         if: ${{ always() }}

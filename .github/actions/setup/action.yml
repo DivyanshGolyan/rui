@@ -77,8 +77,12 @@ runs:
           ~/.cache/zig
           .zig-cache
           zig-pkg
-        key: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
+        # The build runner is host-CPU specific; compiled gates are not.
+        key: rui-build-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-${{ inputs.check-part }}
         restore-keys: |
+          rui-build-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
+          rui-build-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+          rui-build-v3-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-
           rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
           rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
