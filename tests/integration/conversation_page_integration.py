@@ -18,6 +18,7 @@ from control_integration import (
     encode_sse,
     inspect_execution,
     message,
+    observe,
     raw_request,
     start_host,
     stop_session,
@@ -349,6 +350,10 @@ def whole_stream_shape(length):
                     "text": {"state": "value", "value": ""}}
                 head, body = raw_request(fields["socket"], "/v1/message", json.dumps(wire, separators=(",", ":")).encode())
                 assert head.startswith(b"HTTP/1.1 200 ") and json.loads(body)["answer"]["status"] == "accepted", (head, body)
+                # Exercise the settled ordering too: a successful empty answer
+                # appends an assistant entry after the empty User entry.
+                settled = wait_for(lambda: observe(store, "stream-message").get("result"), "empty answer settlement")
+                assert settled["status"] == "completed" and settled["text"]["bytes"] == "0", settled
             else:
                 message(state, store, "stream-message", session, "input")
 
@@ -357,7 +362,8 @@ def whole_stream_shape(length):
                     end="0", before_position="0", before_ordinal="0")
                 assert head.startswith(b"HTTP/1.1 200 "), (head, body)
                 items = json.loads(body)["items"]
-                return items[0] if items and items[0]["kind"] == ("assistant" if length else "user") else None
+                kind = "assistant" if length else "user"
+                return next((item for item in items if item["kind"] == kind), None)
 
             item = wait_for(completed_page, "stream public identity")
             identity = dict(position=item["position"], ordinal="0", start="0", stream=True)
@@ -384,8 +390,8 @@ def whole_stream_shape(length):
                     assert payload[start:start + 1] == b"x"
                     database.execute("UPDATE content SET payload=? WHERE content_id=?", (payload[:start] + b"y" + payload[start + 1:], source))
                 else:
-                    # Empty assistant output has no public entry. The admitted
-                    # empty User entry exercises public projected-empty EOF.
+                    # Authenticate the admitted empty User entry independently
+                    # of the later assistant entry.
                     answer = database.execute("SELECT content_id FROM conversation_entry WHERE entry_kind=1").fetchone()[0]
                     digest = database.execute("SELECT digest FROM content WHERE content_id=?", (answer,)).fetchone()[0]
                     database.execute("UPDATE content SET payload=NULL,digest=? WHERE content_id=?", (b"\xff" * 32, answer))
