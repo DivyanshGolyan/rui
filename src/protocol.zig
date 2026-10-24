@@ -2687,3 +2687,4 @@ test "incremental ingress preserves grammar and releases both captures after lat
 // hillclimb nonce a6-runner-hit--1-1792811913
 // hillclimb nonce a6-runner-hit-0-1792812607
 // hillclimb nonce a6-runner-hit-1-1792813260
+// hillclimb nonce a6-runner-hit-2-1792813867
