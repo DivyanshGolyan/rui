@@ -18,24 +18,24 @@ Before using Rui on a project:
 
 ## Install
 
-Install the latest release on macOS 15 or newer on Apple Silicon, or on Linux x86-64 with glibc 2.34 or newer (for example Ubuntu 22.04, Debian 12 or RHEL 9):
+Releases run on Apple Silicon Macs with macOS 15 or newer, and on x86-64 Linux with glibc 2.34 or newer. Ubuntu 22.04, Debian 12 and RHEL 9 meet the glibc minimum. To install the latest release, run:
 
 ```sh
 curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation). Run the same command to update.
+To use `rui` in future shells, add the PATH line to your shell profile if `~/.local/bin` is not already on PATH. Then [start a conversation](#start-a-conversation). To update, run the `curl` command again.
 
-Each [release](https://github.com/DivyanshGolyan/rui/releases) is a `stable` commit, the newest main commit that passed Mac and upgrade qualification. Its version is `0.S.N`: `S` is the Store format and `N` counts releases with that format. Updating within `0.S` keeps your Stores usable; a release with a different `S` needs a [fresh Store](#start-fresh-after-a-store-format-change). `rui --version` prints the version and source revision.
+Each [release](https://github.com/DivyanshGolyan/rui/releases) is built from a `stable` commit, which has passed Mac and upgrade qualification. Release versions have the form `0.S.N`. `S` is the Store format, and `N` counts earlier releases with the same format. An update that keeps `S` opens your existing Stores. An update that changes `S` needs a [fresh Store](#start-fresh-after-a-store-format-change). To see the installed version and its source revision, run `rui --version`.
 
-The release installer checks the downloaded archive against the digest recorded in that release's `install.sh`, validates the command and then switches `~/.local/bin/rui` exactly as the source installer does. It needs only `curl`, `tar` and `sha256sum` or `shasum`.
+The release's `install.sh` records the SHA-256 digest of each archive. The installer rejects a download whose digest differs, then checks that the new `rui --version` reports the expected version. Only after both checks pass does it point `~/.local/bin/rui` at the new build, the same way the source installer does. The installer needs `curl`, `tar`, and either `sha256sum` or `shasum`.
 
 ## Install from source
 
 Requires Zig 0.17.0, Python 3.11 or newer, Git, curl, Perl, `patch`, a C toolchain and Make. On macOS, install the Xcode command-line tools with `xcode-select --install` if needed. Ensure `python3` on PATH selects the newer interpreter, not Apple's Python 3.9. The build pins native dependencies.
 
-Build from `stable` for the qualified source. From a clean checkout, run:
+To build the same source that releases use, build from `stable`. From a clean checkout, run:
 
 ```sh
 git fetch origin stable
@@ -228,7 +228,7 @@ Rui does not migrate or reset incompatible Stores. A Host startup error names th
 
 You can keep using a compatible installed build with the Store at its original path, or preserve the old work and start an empty Store.
 
-Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`; run each one with `--version` to identify it. Source installations also record a `revision` file. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
+Earlier builds remain under `~/.local/lib/rui/install.*/bin/rui`. To identify a build, run it with `--version`. Older source builds do not support `--version`. For those, read the `revision` file in their `install.*` directory. To use a compatible build, set `RUI` to that build's full `bin/rui` path instead of `~/.local/bin/rui`.
 
 To back up the old Store, close other clients. Once the Host has stopped, run no Rui command other than `host status` against that Store until the copy finishes. Bare `rui` and `rui resume` can start a Host. Set `STORE` to the exact path printed in the error:
 

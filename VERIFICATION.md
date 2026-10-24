@@ -131,7 +131,11 @@ zig build -Doptimize=ReleaseSafe -j2 --summary all
 
 ### Release publication
 
-Releases add no gate: [Release](.github/workflows/release.yml) publishes only commits `stable` contains, so stable promotion's evidence is the release's evidence. Auto-land dispatches it after each promotion; recover a lost dispatch with `gh workflow run release.yml --ref main -f sha=<stable SHA>`. [release.py](tests/ci/release.py) skips a SHA that a release already includes and numbers the version from existing tags. Each platform builds the tagged commit cold on its native runner with ReleaseSafe and portable targets (baseline CPU, glibc 2.34, macOS 15), then checks that `rui --version` reports the version and exact SHA. The release attaches both archives, `SHA256SUMS` and an `install.sh` that pins those digests. `test_release.py` covers version planning, template filling and the installer's update, digest, version and preservation behavior with fake archives. Tagged archives of these targets were installed once by hand through the filled installer on macOS 15 and under dash on Ubuntu 22.04 x86-64 (glibc 2.35); Debian 11 (glibc 2.31) refuses the Linux build at load. No hosted job runs a published archive.
+Releases add no gate. [Release](.github/workflows/release.yml) publishes only commits that `stable` contains, so the evidence that promoted a commit also qualifies its release. Auto-land dispatches the workflow after each promotion. To recover a lost dispatch, run `gh workflow run release.yml --ref main -f sha=<stable SHA>`.
+
+[release.py](tests/ci/release.py) skips a SHA that an existing release already includes, and it numbers the version from existing tags. Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe. The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Apple Silicon. Each build must report the version and exact SHA from `rui --version`. The release attaches both archives, `SHA256SUMS` and an `install.sh` that pins the archive digests.
+
+`test_release.py` uses fake archives. It covers version planning, template filling and the installer's update, digest, version and preservation behavior. One manual check installed tagged archives through the filled installer on macOS 15, and under dash on Ubuntu 22.04 x86-64 with glibc 2.35. Debian 11, with glibc 2.31, refuses to load the Linux build. No hosted job runs a published archive.
 
 ### Measurement and release evidence
 
