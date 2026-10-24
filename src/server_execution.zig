@@ -48,6 +48,8 @@ const AttemptOwner = struct {
 
 const ProviderSlot = struct {
     owner: AttemptOwner,
+    /// The managed account binding this transfer was launched with.
+    turn_account: ?model_adapter.TurnStates.Owner = null,
     transfer: provider.Transfer = undefined,
 };
 
@@ -230,6 +232,16 @@ pub fn executionMain(host: *Host) void {
     };
     defer host.allocator.free(slots);
     for (slots) |*slot| slot.* = .free;
+    const turn_states = host.allocator.alloc(model_adapter.TurnStates.Entry, slots.len) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    for (turn_states) |*entry| entry.* = .{};
+    host.turn_states = .{ .entries = turn_states };
+    defer {
+        host.turn_states = .{};
+        host.allocator.free(turn_states);
+    }
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
         .test_gate_path = host.faults.response_capture_gate_path,
@@ -1417,8 +1429,11 @@ fn launchPreparedRequest(
     }
     var headers: model_adapter.Headers = .{};
     defer headers.deinit();
+    var turn_account: ?model_adapter.TurnStates.Owner = null;
     if (credential) |value| {
-        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity) catch |err| {
+        turn_account = model_adapter.TurnStates.owner(&value.record);
+        const turn_state = host.turn_states.replay(binding.turn_id, turn_account.?);
+        headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, turn_state) catch |err| {
             request.deinit();
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
@@ -1429,6 +1444,7 @@ fn launchPreparedRequest(
     // its final slot and keep that union arm active through removal and deinit.
     slot.* = .{ .provider = .{
         .owner = .{ .token = token, .binding = binding },
+        .turn_account = turn_account,
         .transfer = undefined,
     } };
     const active = &slot.provider;
@@ -1517,6 +1533,9 @@ fn completeTransfer(
     const owner = active.owner;
     traceCompletionQueue(host, completion.queued_after, owner.binding);
     defer traceOperation(host, "provider_completion_serviced", owner.binding);
+    // Transport observes only a successful response's value, so routing
+    // state survives a later body failure and an error answer sets none.
+    if (active.turn_account) |account| host.turn_states.capture(owner.binding.turn_id, account, active.transfer.observedTurnState());
     if (host.authentication != null and host.faults.test_phase_trace) {
         var publication = beginTestObservation(host, "codex_transfer", null);
         defer if (publication) |*value| value.finish();

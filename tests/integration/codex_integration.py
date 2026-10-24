@@ -47,6 +47,8 @@ class ManagedHandler(fixture.SuccessHandler):
                  self.headers.get("session-id"), self.headers.get("originator"))
             )
             self.server.user_agents.append(self.headers.get("User-Agent"))
+            if hasattr(self.server, "turn_states"):
+                self.server.turn_states.append(self.headers.get_all("x-codex-turn-state") or [])
         super().do_POST()
 
 
@@ -347,5 +349,118 @@ def run():
             incoming_error.add_note("Codex cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
+def turn_state_proposal(command, state):
+    # Private reasoning text is saved evidence; replay must omit it.
+    reasoning = {"type": "reasoning", "id": "turn-reasoning", "summary": [{"type": "summary_text", "text": "visible"}],
+                 "content": [{"type": "reasoning_text", "text": "private-reasoning-text"}],
+                 "encrypted_content": "turn-private-continuation"}
+    call = {"type": "function_call", "id": "turn-call-item", "status": "completed", "name": "bash", "call_id": "turn-call",
+            "arguments": json.dumps({"cmd": command, "timeout_ms": None, "description": "Run turn-state command"}, separators=(",", ":"))}
+    body = fixture.encode_sse([
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning", "id": reasoning["id"]}},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.output_item.added", "output_index": 1, "item": {"type": "function_call", "id": call["id"]}},
+        {"type": "response.output_item.done", "output_index": 1, "item": call},
+        {"type": "response.completed", "response": {"id": "turn-calls", "status": "completed", "output": [reasoning, call]}},
+    ])
+    return fixture.ResponseSpec(body, {"x-codex-turn-state": state})
+
+
+def turn_state_answer(key, state):
+    headers = {} if state is None else {"x-codex-turn-state": state}
+    return fixture.ResponseSpec(fixture.sse_answer(key, key + "-r", key + "-m", key)[0], headers)
+
+
+def turn_state_journey():
+    """Codex sticky routing: one captured value per Turn, replayed on its
+    retries and continuations, never sent to another Turn or a fresh Host."""
+    state = pathlib.Path(tempfile.mkdtemp(prefix="rui-codex-turn.")).resolve()
+    credential_dir = state / "private"
+    credential_dir.mkdir(mode=0o700)
+    credential_file = credential_dir / "codex.json"
+    os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential_file)
+    credentials(credential_file)
+    endpoint = fixture.SuccessEndpoint([
+        # Turn A: an error answer's value is not routing state; the retry
+        # starts the Turn and the first successful value is kept.
+        fixture.ResponseSpec(b"temporary", {"x-codex-turn-state": "error-state"}, 503),
+        turn_state_proposal("printf a-witness", "sticky-a"),
+        fixture.ResponseSpec(b"temporary", {"x-codex-turn-state": "error-later"}, 503),
+        turn_state_answer("turn-a-answer", "sticky-a-replaced"),
+        # Turn B in the same Session starts without Turn A's value.
+        turn_state_answer("turn-b-answer", "sticky-b"),
+        # Turn C's value dies with its Host; its continuation starts fresh.
+        turn_state_proposal("printf c-witness", "sticky-c"),
+        turn_state_answer("turn-c-answer", None),
+    ])
+    endpoint.RequestHandlerClass = ManagedHandler
+    endpoint.header_observations = []
+    endpoint.user_agents = []
+    endpoint.turn_states = []
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    store = state / "store"
+    host = None
+    complete = False
+    try:
+        host = start(store, url, "--test-retry-waits-ms", "1,1,1")
+        sessions = []
+        for key in ("turn-config", "turn-c-config"):
+            configured = fixture.command(
+                "session", "configure", "--store", store, "--record", state / f"{key}.json",
+                "--key", key, "--workspace", fixture.ROOT,
+                "--provider", "codex", "--model", "gpt-6-sol", "--tools", "bash", "--permission-mode", "ask",
+            )
+            assert configured["answer"]["status"] == "accepted", configured
+            sessions.append(configured["answer"]["session"])
+        session, other = sessions
+        fixture.message(state, store, "turn-a", session, "turn a")
+        action = fixture.wait_for(lambda: bash.action_for(store, session), "turn A proposal")
+        bash.allow(state, store, "turn-a-allow", session, action["action"])
+        fixture.wait_for(lambda: fixture.completed_observation(store, "turn-a"), "turn A answer")
+        assert fixture.read_result(store, "turn-a") == b"turn-a-answer"
+        fixture.message(state, store, "turn-b", session, "turn b")
+        fixture.wait_for(lambda: fixture.completed_observation(store, "turn-b"), "turn B answer")
+        assert endpoint.turn_states == [[], [], ["sticky-a"], ["sticky-a"], []], endpoint.turn_states
+        continuation = json.loads(endpoint.requests[3])
+        assert continuation == json.loads(endpoint.requests[2]), "retry changed the continuation request"
+        reasoning = [item for item in continuation["input"] if item.get("type") == "reasoning"]
+        assert reasoning == [{"type": "reasoning", "id": "turn-reasoning", "summary": [{"type": "summary_text", "text": "visible"}],
+                              "encrypted_content": "turn-private-continuation"}], reasoning
+        assert b"private-reasoning-text" not in b"".join(endpoint.requests)
+
+        fixture.message(state, store, "turn-c", other, "turn c")
+        action = fixture.wait_for(lambda: bash.action_for(store, other), "turn C proposal")
+        fixture.stop_host(host)
+        host = None
+        # Turn state is process memory: no Store row ever holds it.
+        assert not bash.rows(store, "SELECT 1 FROM content WHERE instr(payload, ?) > 0", (b"sticky-",))
+        assert bash.rows(store, "SELECT private FROM content WHERE instr(payload, ?) > 0", (b"private-reasoning-text",)), "saved reasoning text evidence lost"
+        host = start(store, url, "--test-retry-waits-ms", "1,1,1")
+        bash.allow(state, store, "turn-c-allow", other, action["action"])
+        fixture.wait_for(lambda: fixture.completed_observation(store, "turn-c"), "turn C answer")
+        assert endpoint.turn_states[5:] == [[], []], endpoint.turn_states
+        assert len(endpoint.requests) == 7
+        print("codex turn state passed: first successful value per Turn, replayed on retry and continuation, absent across Turns and Hosts; reasoning text never replayed")
+        complete = True
+    finally:
+        incoming_error = sys.exc_info()[1]
+        errors = []
+        for dispose in (lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5)):
+            try:
+                dispose()
+            except BaseException as error:
+                errors.append(error)
+        if complete and incoming_error is None and not errors:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("Codex turn-state failure state", state)
+        if errors and incoming_error is None:
+            raise errors[0]
+
+
 if __name__ == "__main__":
     run()
+    turn_state_journey()

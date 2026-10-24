@@ -117,6 +117,8 @@ pub const Host = struct {
     authentication: ?model_adapter.Authentication = null,
     auth_worker: ?*AuthWorker = null,
     capture_writer: ?*provider.CaptureWriter = null,
+    /// Execution-thread-owned Codex sticky routing; in memory only.
+    turn_states: model_adapter.TurnStates = .{},
     bash_path: []const u8 = default_bash_path,
     bash_environment: *const std.process.Environ.Map = &bash.empty_environment,
     bash_timeout_ms: u64 = default_bash_timeout_ms,

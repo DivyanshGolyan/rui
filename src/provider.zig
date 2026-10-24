@@ -490,6 +490,12 @@ const HeaderContext = struct {
     request_id: protocol.Bounded(256) = .{},
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     alternate_model: protocol.Bounded(protocol.max_model_bytes) = .{},
+    /// The first caller-named routing value of a successful header block.
+    /// A routing hint never fails the transfer: an unusable first value
+    /// leaves it empty, and later values are ignored.
+    turn_state: protocol.Bounded(max_turn_state_bytes) = .{},
+    turn_state_seen: bool = false,
+    successful_block: bool = false,
     retry_after_ms: ?u64 = null,
     retry_after_deadline_ms: ?i64 = null,
     invalid: bool = false,
@@ -499,7 +505,10 @@ pub const ObservationNames = struct {
     request_id: []const u8 = "",
     model: []const u8 = "",
     alternate_model: []const u8 = "",
+    turn_state: []const u8 = "",
 };
+
+pub const max_turn_state_bytes = 4096;
 
 pub const Transfer = struct {
     const Local = union(enum) {
@@ -745,6 +754,10 @@ pub const Transfer = struct {
         return self.header_context.alternate_model.slice();
     }
 
+    pub fn observedTurnState(self: *const Transfer) []const u8 {
+        return self.header_context.turn_state.slice();
+    }
+
     pub fn identity(self: *const Transfer) TransferIdentity {
         return @ptrCast(self);
     }
@@ -822,6 +835,14 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
     const context: *HeaderContext = @ptrCast(@alignCast(context_pointer orelse return 0));
     const bytes = std.math.mul(usize, size, count) catch return 0;
     const line = pointer[0..bytes];
+    // Each response, including an interim one, opens with its status line.
+    if (std.mem.startsWith(u8, line, "HTTP/")) {
+        var fields = std.mem.tokenizeAny(u8, line, " \r\n");
+        _ = fields.next();
+        const status = fields.next() orelse "";
+        context.successful_block = status.len == 3 and status[0] == '2';
+        return bytes;
+    }
     const colon = std.mem.indexOfScalar(u8, line, ':') orelse return bytes;
     const name = std.mem.trim(u8, line[0..colon], " \t");
     const value = std.mem.trim(u8, line[colon + 1 ..], " \t\r\n");
@@ -830,6 +851,13 @@ fn headerCallback(pointer: [*c]u8, size: usize, count: usize, context_pointer: ?
             .delay_ms => |delay| context.retry_after_ms = @max(context.retry_after_ms orelse 0, delay),
             .deadline_ms => |deadline| context.retry_after_deadline_ms = @max(context.retry_after_deadline_ms orelse 0, deadline),
         };
+        return bytes;
+    }
+    if (context.names.turn_state.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.turn_state)) {
+        if (!context.successful_block or context.turn_state_seen) return bytes;
+        context.turn_state_seen = true;
+        for (value) |byte| if (byte < 0x20 or byte > 0x7e) return bytes;
+        context.turn_state.set(value) catch {};
         return bytes;
     }
     const destination = if (context.names.request_id.len != 0 and std.ascii.eqlIgnoreCase(name, context.names.request_id))
@@ -978,6 +1006,35 @@ test "response observations use caller-selected names and reject contradictions"
     const contradictory = "served-model: gamma\r\n";
     try std.testing.expectEqual(@as(usize, 0), headerCallback(@constCast(contradictory.ptr), 1, contradictory.len, &context));
     try std.testing.expect(context.invalid);
+}
+
+test "turn state observation keeps only the first value of a successful response" {
+    const name = "x-codex-turn-state";
+    const oversized = "x-codex-turn-state: " ++ @as([max_turn_state_bytes + 1]u8, @splat('v')) ++ "\r\n";
+    const exact = "x-codex-turn-state: " ++ @as([max_turn_state_bytes]u8, @splat('v')) ++ "\r\n";
+    const cases = [_]struct { lines: []const []const u8, expected: []const u8 }{
+        .{ .lines = &.{ "HTTP/1.1 100 Continue\r\n", "x-codex-turn-state: interim\r\n", "\r\n", "HTTP/2 200\r\n", "X-Codex-Turn-State:  first value \r\n", "x-codex-turn-state: second\r\n" }, .expected = "first value" },
+        .{ .lines = &.{ "HTTP/1.1 503 Service Unavailable\r\n", "x-codex-turn-state: error\r\n" }, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 401 Unauthorized\r\n", "x-codex-turn-state: denied\r\n" }, .expected = "" },
+        .{ .lines = &.{"x-codex-turn-state: no-status\r\n"}, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: \r\n", "x-codex-turn-state: later\r\n" }, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: a\x01b\r\n", "x-codex-turn-state: later\r\n" }, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: caf\xc3\xa9\r\n" }, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", oversized }, .expected = "" },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", exact }, .expected = &@as([max_turn_state_bytes]u8, @splat('v')) },
+        .{ .lines = &.{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-states: prefix\r\n", "x-codex-turn-stat: prefix\r\n" }, .expected = "" },
+    };
+    for (cases) |case| {
+        var context: HeaderContext = .{ .names = .{ .turn_state = name } };
+        for (case.lines) |line| try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &context));
+        try std.testing.expectEqualStrings(case.expected, context.turn_state.slice());
+        try std.testing.expect(!context.invalid);
+    }
+    // Unnamed callers observe nothing.
+    var unnamed: HeaderContext = .{};
+    for ([_][]const u8{ "HTTP/1.1 200 OK\r\n", "x-codex-turn-state: value\r\n" }) |line|
+        try std.testing.expectEqual(line.len, headerCallback(@constCast(line.ptr), 1, line.len, &unnamed));
+    try std.testing.expectEqualStrings("", unnamed.turn_state.slice());
 }
 
 test "idle reactor reports zero unprocessed completions without consuming messages" {

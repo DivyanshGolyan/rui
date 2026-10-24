@@ -27,6 +27,7 @@ pub const observation_names: provider.ObservationNames = .{
     .request_id = "x-request-id",
     .model = "openai-model",
     .alternate_model = "x-openai-model",
+    .turn_state = "x-codex-turn-state",
 };
 
 /// Interpretation borrows sealed bytes and the caller's metadata/data workspaces.
@@ -395,12 +396,14 @@ pub const Headers = struct {
     bearer: [codex_credentials.max_token_bytes + 32:0]u8 = undefined,
     account: [codex_credentials.max_account_id_bytes + 32:0]u8 = undefined,
     session: [48:0]u8 = undefined,
-    entries: [7][:0]const u8 = undefined,
+    turn_state: [provider.max_turn_state_bytes + 32:0]u8 = undefined,
+    entries: [8][:0]const u8 = undefined,
     length: usize = 0,
 
     /// Initialize in final stack storage. The entries are borrowed only until
-    /// Transfer.start copies them into its owned curl header list.
-    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8) !void {
+    /// Transfer.start copies them into its owned curl header list. A nonempty
+    /// turn state comes from TurnStates.replay for this Attempt's Turn.
+    pub fn init(self: *Headers, endpoint: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Credential, affinity: [16]u8, turn_state: []const u8) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
         if (authentication.fixture) {
@@ -417,8 +420,16 @@ pub const Headers = struct {
         const account = try std.fmt.bufPrintSentinel(&self.account, "ChatGPT-Account-ID: {s}", .{account_id}, 0);
         const session_id = std.fmt.bytesToHex(affinity, .lower);
         const session = try std.fmt.bufPrintSentinel(&self.session, "session-id: {s}", .{&session_id}, 0);
-        self.entries = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "User-Agent: rui/" ++ @import("transport_options").revision, "X-OpenAI-Fedramp: true" };
-        self.length = if (credential.record.fedramp) 7 else 6;
+        self.entries[0..6].* = .{ "Accept: text/event-stream", bearer, account, session, "originator: rui", "User-Agent: rui/" ++ @import("transport_options").revision };
+        self.length = 6;
+        if (credential.record.fedramp) {
+            self.entries[self.length] = "X-OpenAI-Fedramp: true";
+            self.length += 1;
+        }
+        if (turn_state.len != 0) {
+            self.entries[self.length] = try std.fmt.bufPrintSentinel(&self.turn_state, "x-codex-turn-state: {s}", .{turn_state}, 0);
+            self.length += 1;
+        }
     }
 
     pub fn slice(self: *const Headers) []const [:0]const u8 {
@@ -431,6 +442,160 @@ pub const Headers = struct {
         self.* = undefined;
     }
 };
+
+/// Codex sticky routing for the Turns this Host runs. The provider returns
+/// `x-codex-turn-state` on a Turn's first successful response; every later
+/// request of that Turn (retries, replacement Attempts, tool continuations
+/// and in-Turn compaction) sends the first value unchanged, and no other
+/// Turn ever sends it. Process memory only: a fresh Host starts each Turn
+/// without it, and the Store never holds it. Each value belongs to the
+/// account binding that received it. Refresh keeps that binding; another
+/// account or FedRAMP binding drops the value. The table is bounded by
+/// execution capacity and replaces the least recently used Turn; a dropped
+/// value only loses stickiness, since every request carries full input.
+pub const TurnStates = struct {
+    entries: []Entry = &.{},
+    uses: u64 = 0,
+
+    pub const Owner = [32]u8;
+    pub const Entry = struct {
+        turn_id: ?u64 = null,
+        owner: Owner = undefined,
+        value: protocol.Bounded(provider.max_turn_state_bytes) = .{},
+        used: u64 = 0,
+    };
+
+    pub fn owner(record: *const codex_credentials.Record) Owner {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(&.{@intFromBool(record.fedramp)});
+        hash.update(record.account_id.slice());
+        return hash.finalResult();
+    }
+
+    /// The value to send for this Turn, or empty at Turn start.
+    pub fn replay(self: *TurnStates, turn_id: u64, account: Owner) []const u8 {
+        const entry = self.find(turn_id) orelse return "";
+        if (!std.mem.eql(u8, &entry.owner, &account)) {
+            entry.* = .{};
+            return "";
+        }
+        self.uses += 1;
+        entry.used = self.uses;
+        return entry.value.slice();
+    }
+
+    /// Record a transport-validated value; the Turn's first one wins.
+    pub fn capture(self: *TurnStates, turn_id: u64, account: Owner, value: []const u8) void {
+        if (value.len == 0 or self.entries.len == 0) return;
+        const target = self.find(turn_id) orelse lru: {
+            var oldest = &self.entries[0];
+            for (self.entries) |*entry| if (entry.used < oldest.used) {
+                oldest = entry;
+            };
+            break :lru oldest;
+        };
+        if (target.turn_id != null and target.turn_id.? == turn_id and std.mem.eql(u8, &target.owner, &account)) return;
+        self.uses += 1;
+        target.* = .{ .turn_id = turn_id, .owner = account, .used = self.uses };
+        target.value.set(value) catch unreachable;
+    }
+
+    fn find(self: *TurnStates, turn_id: u64) ?*Entry {
+        for (self.entries) |*entry| if (entry.turn_id != null and entry.turn_id.? == turn_id) return entry;
+        return null;
+    }
+};
+
+fn testRecord(account_id: []const u8, fedramp: bool, access: []const u8, generation: u64) !codex_credentials.Record {
+    var record: codex_credentials.Record = .{
+        .generation = generation,
+        .account_id = .{},
+        .fedramp = fedramp,
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 0,
+        .refreshed_at = 0,
+    };
+    try record.account_id.set(account_id);
+    try record.access_token.set(access);
+    return record;
+}
+
+test "Codex turn state replays one Turn's first value and never another Turn's" {
+    var storage: [2]TurnStates.Entry = @splat(.{});
+    var states: TurnStates = .{ .entries = &storage };
+    const account = TurnStates.owner(&try testRecord("acct", false, "token-1", 1));
+    // A refresh changes token and generation, not the account binding.
+    const refreshed = TurnStates.owner(&try testRecord("acct", false, "token-2", 2));
+    try std.testing.expectEqualSlices(u8, &account, &refreshed);
+    try std.testing.expectEqualStrings("", states.replay(7, account));
+    states.capture(7, account, "");
+    try std.testing.expectEqualStrings("", states.replay(7, account));
+    states.capture(7, account, "first");
+    states.capture(7, refreshed, "second");
+    try std.testing.expectEqualStrings("first", states.replay(7, refreshed));
+    try std.testing.expectEqualStrings("first", states.replay(7, account));
+    try std.testing.expectEqualStrings("", states.replay(8, account));
+    states.capture(8, account, "eight");
+    try std.testing.expectEqualStrings("eight", states.replay(8, account));
+    try std.testing.expectEqualStrings("first", states.replay(7, account));
+
+    // Turn 8 is least recently used, so Turn 9 replaces it, not Turn 7.
+    states.capture(9, account, "nine");
+    try std.testing.expectEqualStrings("", states.replay(8, account));
+    try std.testing.expectEqualStrings("first", states.replay(7, account));
+    try std.testing.expectEqualStrings("nine", states.replay(9, account));
+
+    // Another account or FedRAMP binding never receives the value, and the
+    // original account does not regain it after the change.
+    for ([_]codex_credentials.Record{ try testRecord("other", false, "token-1", 3), try testRecord("acct", true, "token-1", 3) }) |record| {
+        var owned: [1]TurnStates.Entry = @splat(.{});
+        var isolated: TurnStates = .{ .entries = &owned };
+        isolated.capture(5, account, "acct-value");
+        const changed = TurnStates.owner(&record);
+        try std.testing.expect(!std.mem.eql(u8, &account, &changed));
+        try std.testing.expectEqualStrings("", isolated.replay(5, changed));
+        try std.testing.expectEqualStrings("", isolated.replay(5, account));
+        isolated.capture(5, changed, "changed-value");
+        try std.testing.expectEqualStrings("changed-value", isolated.replay(5, changed));
+        try std.testing.expectEqualStrings("", isolated.replay(5, account));
+    }
+
+    var unused: TurnStates = .{};
+    unused.capture(1, account, "value");
+    try std.testing.expectEqualStrings("", unused.replay(1, account));
+}
+
+test "Codex headers carry turn state only when the Turn has one" {
+    var credential: Credential = undefined;
+    for ([_]bool{ false, true }) |fedramp| {
+        credential.record = try testRecord(codex_auth.fixture_account_id, fedramp, codex_auth.fixture_access_token, 1);
+        for ([_][]const u8{ "", "sticky value", &@as([provider.max_turn_state_bytes]u8, @splat('v')) }) |turn_state| {
+            var headers: Headers = .{};
+            defer headers.deinit();
+            try headers.init("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, @splat(0xab), turn_state);
+            const entries = headers.slice();
+            var found: ?[]const u8 = null;
+            var fedramp_found = false;
+            for (entries) |entry| {
+                if (std.ascii.startsWithIgnoreCase(entry, "x-codex-turn-state:")) {
+                    try std.testing.expect(found == null);
+                    found = entry;
+                }
+                if (std.mem.eql(u8, entry, "X-OpenAI-Fedramp: true")) fedramp_found = true;
+            }
+            try std.testing.expectEqual(fedramp, fedramp_found);
+            try std.testing.expectEqual(@as(usize, 6) + @intFromBool(fedramp) + @intFromBool(turn_state.len != 0), entries.len);
+            if (turn_state.len == 0) {
+                try std.testing.expect(found == null);
+            } else {
+                try std.testing.expectEqualStrings("x-codex-turn-state: ", found.?[0..20]);
+                try std.testing.expectEqualStrings(turn_state, found.?[20..]);
+            }
+        }
+    }
+}
 
 pub const PreparationFaults = struct {
     managed_route: bool = false,
