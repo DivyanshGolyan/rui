@@ -41,3 +41,22 @@
 +  }
 +
    if(connssl->negotiated.alpn) {
+--- a/lib/request.c
++++ b/lib/request.c
+@@ -76,13 +76,14 @@ CURLcode Curl_req_soft_reset(struct SingleRequest *req,
++  /* Rui frees the drained upload chunk so held requests do not each keep 16 KiB. */
+   if(!req->sendbuf_init) {
+     Curl_bufq_init2(&req->sendbuf, data->set.upload_buffer_size, 1,
+-                    BUFQ_OPT_SOFT_LIMIT);
++                    BUFQ_OPT_SOFT_LIMIT | BUFQ_OPT_NO_SPARES);
+     req->sendbuf_init = TRUE;
+   }
+   else {
+     Curl_bufq_reset(&req->sendbuf);
+     if(data->set.upload_buffer_size != req->sendbuf.chunk_size) {
+       Curl_bufq_free(&req->sendbuf);
+       Curl_bufq_init2(&req->sendbuf, data->set.upload_buffer_size, 1,
+-                      BUFQ_OPT_SOFT_LIMIT);
++                      BUFQ_OPT_SOFT_LIMIT | BUFQ_OPT_NO_SPARES);
+     }
+   }
