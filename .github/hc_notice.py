@@ -18,3 +18,8 @@ notice(title, [line for line in log if timing.search(line)])
 failures = [line for line in log if failure.search(line)]
 if failures:
     notice(f"{title} failures", failures[:40])
+
+for i, line in enumerate(log):
+    if "terminated with signal" in line or "panic:" in line:
+        notice(f"{title} panic", log[i:i + 60])
+        break
