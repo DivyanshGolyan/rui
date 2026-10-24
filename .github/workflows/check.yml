@@ -244,7 +244,7 @@ jobs:
           python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
           # The cached build runner records package sources that only now exist.
           restat=$("$RUNNER_TEMP/zig-cache-restat" .zig-cache/h "$HOME/.cache/zig/h" -- \
-            "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig")
+            "$PWD" "$RUNNER_TEMP/rui-zig/lib" "$PWD/.zig-cache" "$HOME/.cache/zig" 2>&1 | tr '\n' ' ')
           echo "::notice title=restat after restore::$restat; zig-pkg $(ls zig-pkg 2>/dev/null | wc -l) entries; manifests local $(ls .zig-cache/h 2>/dev/null | wc -l) global $(ls "$HOME/.cache/zig/h" 2>/dev/null | wc -l)"
       - name: Run selected targets
         env:

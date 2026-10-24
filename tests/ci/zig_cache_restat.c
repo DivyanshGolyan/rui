@@ -79,7 +79,7 @@ enum { HEADER = 41 };
 
 static const char *bases[8];
 static int base_count;
-static long updated, kept, unmatched;
+static long updated, kept, unmatched, skipped;
 
 static void restat_manifest(const char *path) {
     int fd = open(path, O_RDWR);
@@ -98,7 +98,9 @@ static void restat_manifest(const char *path) {
         if (name_len == 0 || off + HEADER + name_len >= size) break;
         size_t end = off + HEADER + name_len;
         // Directories and metadata-only inputs record no content digest.
-        if (!(flags & 3)) {
+        if (flags & 3) {
+            if (skipped++ < 6) fprintf(stderr, "skipped flags=%u %s\n", flags & 3, name);
+        } else {
             int done = 0;
             for (int i = 0; i < base_count && !done; i++) {
                 char full[8192];
@@ -128,7 +130,7 @@ static void restat_manifest(const char *path) {
                 }
                 done = 1;
             }
-            if (!done) unmatched++;
+            if (!done && unmatched++ < 6) fprintf(stderr, "unmatched %s\n", name);
         }
         off = end + 1;
     }
@@ -156,6 +158,6 @@ int main(int argc, char **argv) {
     while (split < argc && strcmp(argv[split], "--") != 0) split++;
     for (int i = split + 1; i < argc && base_count < 8; i++) bases[base_count++] = argv[i];
     for (int i = 1; i < split; i++) restat_dir(argv[i]);
-    printf("zig cache restat: %ld updated, %ld unchanged, %ld without matching bytes\n", updated, kept, unmatched);
+    printf("zig cache restat: %ld updated, %ld unchanged, %ld without matching bytes, %ld directory or metadata-only\n", updated, kept, unmatched, skipped);
     return 0;
 }
