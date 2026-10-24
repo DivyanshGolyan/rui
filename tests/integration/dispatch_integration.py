@@ -22,7 +22,7 @@ from model_fixture import (
     encode_sse, finish_command, message, message_lost_reply,
     model_instructions, observe, read_action, read_result, retry_message,
     sse_answer, sse_many, sse_tool_calls, start_command, start_host, stop_host,
-    wait_for, wait_model_cleanup,
+    wait_for, wait_for_result_release, wait_model_cleanup,
 )
 
 
@@ -746,6 +746,80 @@ def stream_failure_cases(state, processes, endpoints):
     print("Stream failures: retry, permanent controls, exhaustion provenance, nullable evidence and reopen passed")
 
 
+def refusal_cases(state, processes, endpoints):
+    """Refusal text is observable; canonical and replay content stays a refusal."""
+    for phased in (False, True):
+        label = "refusal-phased" if phased else "refusal-unphased"
+        refusal = "I cannot help with that. é\n\x00End.\n"
+        blocks = [{"type": "refusal", "refusal": refusal, "future": {"retained": True}}]
+        if phased:
+            blocks = [{"type": "output_text", "text": "Before. "}, *blocks,
+                      {"type": "output_text", "text": "After."}]
+        expected = ("Before. " + refusal + "After." if phased else refusal).encode()
+        item = {"type": "message", "id": label, "role": "assistant", "status": "completed",
+                "content": blocks, "created_by": "provider"}
+        if phased:
+            item["phase"] = "final_answer"
+        events = [
+            {"type": "response.refusal.delta", "output_index": 0, "content_index": int(phased),
+             "delta": "Untrusted delta must not become the answer"},
+            {"type": "response.refusal.done", "output_index": 0, "content_index": int(phased),
+             "refusal": refusal},
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {"type": "response.completed", "response": {"id": label, "status": "completed",
+             "output": [item] if phased else []}},
+        ]
+        body = encode_sse(events)
+        endpoint = SuccessEndpoint([body, sse_answer(label + "-next", "reason", "next", "Next answer")[0]])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / label
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host = start_host(store, url)
+        processes.append(host)
+        session = configure(state, store, label + "-config", None, "gpt-6-luna")
+        message(state, store, label, session, "Refuse this request")
+        result, answer, _ = wait_for_result_release(store, label, session, time.monotonic() + 10)
+        assert result["result"]["status"] == "completed", result
+        assert answer == expected, "refusal text lost in original result"
+
+        def assert_public_refusal():
+            assert read_result(store, label) == expected, "refusal text lost in original result"
+            report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+            positions = [entry["position"] for entry in report["full"]["conversation"]
+                         if entry["kind"] == "assistant"]
+            assert len(positions) == 1, report
+            public = subprocess.run([str(RUI), "session", "read-conversation", "--store", str(store),
+                "--session", session, "--position", str(positions[0]), "--ordinal", "0"],
+                capture_output=True, timeout=10)
+            assert public.returncode == 0 and public.stdout == expected, public
+
+        assert_public_refusal()
+        crash_host(host, state, label)
+        processes.remove(host)
+        host = start_host(store, url)
+        processes.append(host)
+        assert_public_refusal()
+        message(state, store, label + "-next", session, "Continue after refusal")
+        later, answer, _ = wait_for_result_release(store, label + "-next", session, time.monotonic() + 10)
+        assert later["result"]["status"] == "completed" and answer == b"Next answer", later
+        assert read_result(store, label) == expected
+        replay = json.loads(endpoint.requests[1])["input"]
+        assert replay[1] == {key: value for key, value in item.items() if key != "created_by"}, replay
+        stop_host(host)
+        processes.remove(host)
+        # Public reads are projections; canonical raw bytes retain refusal kind,
+        # unknown metadata and created_by independently of replay filtering.
+        with sqlite3.connect(store / "rui.sqlite3") as database:
+            raw = database.execute("SELECT c.payload FROM model_output_item i JOIN content c "
+                "ON c.content_id=i.content_id WHERE i.item_kind=2 ORDER BY i.operation_id LIMIT 1").fetchone()
+            assert raw is not None and bytes(raw[0]) == json.dumps(item, separators=(",", ":")).encode(), raw
+        assert not failed_response_records(store), "accepted refusal became failed-response diagnostics"
+        stop_endpoint(endpoint, endpoints)
+    print("Refusal: public result/conversation, crash recovery and exact typed replay passed")
+
+
 def phased_message_cases(state, processes, endpoints):
     """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
     def text_item(identity, text, phase):
@@ -924,6 +998,11 @@ def main(mode="all", correlation_case="all"):
         if mode in ("all", "empty-answers"):
             empty_answer_cases(state, processes, endpoints)
             if mode == "empty-answers":
+                completed = True
+                return
+        if mode in ("all", "refusals"):
+            refusal_cases(state, processes, endpoints)
+            if mode == "refusals":
                 completed = True
                 return
         if mode in ("all", "failed-response-export"):
@@ -5392,8 +5471,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|stream-failures|empty-answers|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

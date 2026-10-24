@@ -735,12 +735,13 @@ fn validateItem(
     var text_records: u64 = 0;
     var non_whitespace = false;
     while (try array.next()) |block| {
-        const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
+        const block_fields = try readFields(io, file, block, &.{ "type", "text", "refusal", "annotations" });
         var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
         _ = try readString(io, file, try block_fields.required("type"), &block_kind);
-        if (!block_kind.eql("output_text")) return error.UnsupportedContentBlock;
-        try validateAnnotations(io, file, try block_fields.get("annotations"));
-        const text_value = try block_fields.required("text");
+        const refusal = block_kind.eql("refusal");
+        if (!refusal and !block_kind.eql("output_text")) return error.UnsupportedContentBlock;
+        if (!refusal) try validateAnnotations(io, file, try block_fields.get("annotations"));
+        const text_value = if (refusal) try block_fields.required("refusal") else try block_fields.required("text");
         var source = try FileSource.init(io, file, text_value);
         var decoded = Decoded{ .hash = answer_hash };
         const text = try parseString(&source, &decoded);
@@ -799,8 +800,8 @@ pub const ReplayValidationCursor = struct {
         }
     }
 
-    const names = item_field_names.* ++ [_][]const u8{ "annotations", "cell_id", "executed_tool_calls", "tool_calls_complete" };
-    const words = [_][]const u8{ "reasoning", "compaction", "function_call", "message", "completed", "assistant", "commentary", "final_answer", "direct", "output_text", "reasoning_text", "summary_text", "url_citation" };
+    const names = item_field_names.* ++ [_][]const u8{ "refusal", "annotations", "cell_id", "executed_tool_calls", "tool_calls_complete" };
+    const words = [_][]const u8{ "reasoning", "compaction", "function_call", "message", "completed", "assistant", "commentary", "final_answer", "direct", "output_text", "refusal", "reasoning_text", "summary_text", "url_citation" };
     const Shape = enum { absent, string, object, array, null_value, false_value, other };
     const Value = struct {
         shape: Shape = .absent,
@@ -1007,9 +1008,15 @@ pub const ReplayValidationCursor = struct {
             },
             .block => {
                 const kind = try frame.requiredString("type", false);
-                result.output = kind.is("output_text");
+                result.output = kind.is("output_text") or kind.is("refusal");
                 result.reasoning = kind.is("reasoning_text");
                 result.summary = kind.is("summary_text");
+                if (kind.is("refusal")) {
+                    _ = frame.requiredString("refusal", false) catch |err| {
+                        result.output_failure = err;
+                    };
+                    return result;
+                }
                 if (!result.output and !result.reasoning and !result.summary) return result;
                 frame.validateFields(&.{"text"}) catch |err| {
                     if (result.output) result.output_failure = err else if (result.reasoning) result.reasoning_failure = err else result.summary_failure = err;
@@ -1178,6 +1185,8 @@ test "replay compatibility rejects unsupported meaning and preserves open fields
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\"}", .supported = false },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":null}", .supported = false },
         .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":null}", .supported = false },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"not reasoning\"}]}", .supported = false },
+        .{ .item = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"summary\":[{\"type\":\"refusal\",\"refusal\":\"not a summary\"}]}", .supported = false },
         .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"opaque\",\"created_by\":\"canonical\"}", .supported = true },
         .{ .item = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"\"}", .supported = false },
         .{ .item = "{\"type\":\"compaction_v2\",\"id\":\"c\",\"encrypted_content\":\"opaque\"}", .supported = false },
@@ -1515,6 +1524,8 @@ fn knownNonterminal(kind: []const u8) bool {
         "response.metadata",
         "response.output_text.delta",
         "response.output_text.done",
+        "response.refusal.delta",
+        "response.refusal.done",
         "response.reasoning_summary_part.added",
         "response.reasoning_summary_part.done",
         "response.reasoning_summary_text.delta",
@@ -1831,6 +1842,42 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
     metadata.deinit();
     source.close(std.testing.io);
     return .{ .output = validated, .metadata_bytes = metadata_bytes, .first_item = first_item };
+}
+
+test "provider refusal preserves text and rejects malformed or incomplete candidates" {
+    const refusal = "{\"type\":\"message\",\"id\":\"refused\",\"role\":\"assistant\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"Cannot help. é\\n\",\"text\":\"not the refusal\",\"annotations\":false,\"future\":true}]}";
+    const done = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ refusal ++ "}\n\n";
+    const completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const result = try validateTestingSse(&tmp, done ++ completed, 4096);
+    try std.testing.expectEqual(@as(u64, "Cannot help. é\n".len), result.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("Cannot help. é\n"), result.output.answer_digest);
+    try std.testing.expectEqual(protocol.contentDigest(refusal), result.first_item.content_digest);
+    const source = try testingObject(&tmp, refusal);
+    defer source.file.close(std.testing.io);
+    try validateReplay(std.testing.io, source.file, refusal.len);
+    try std.testing.expectError(error.ProviderConnectionClosed, validateTestingSse(&tmp, done, 4096));
+    try std.testing.expectError(error.IncompleteProviderOutput, validateTestingSse(&tmp, done ++ "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n", 4096));
+    const delta = "data: {\"type\":\"response.refusal.delta\",\"delta\":\"not an answer\"}\n\n";
+    try std.testing.expectError(error.MissingProviderOutputItems, validateTestingSse(&tmp, delta ++ completed, 4096));
+    try std.testing.expectError(error.UnsupportedEventType, validateTestingSse(&tmp, "data: {\"type\":\"response.refusal.future\"}\n\n" ++ done ++ completed, 4096));
+    const malformed = [_]struct { block: []const u8, failure: anyerror }{
+        .{ .block = "{\"type\":\"refusal\"}", .failure = error.MissingProviderField },
+        .{ .block = "{\"type\":\"refusal\",\"refusal\":null}", .failure = error.ExpectedJsonString },
+        .{ .block = "{\"type\":\"refusal\",\"refusal\":\"a\",\"refusal\":\"b\"}", .failure = error.DuplicateJsonField },
+        .{ .block = "{\"type\":\"future_refusal\",\"refusal\":\"no\"}", .failure = error.UnsupportedContentBlock },
+    };
+    for (malformed) |case| {
+        const item = try std.testing.allocator.print("{{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{s}]}}", .{case.block});
+        defer std.testing.allocator.free(item);
+        const stream = try std.testing.allocator.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n{s}", .{ item, completed });
+        defer std.testing.allocator.free(stream);
+        try std.testing.expectError(case.failure, validateTestingSse(&tmp, stream, 4096));
+        const invalid = try testingObject(&tmp, item);
+        defer invalid.file.close(std.testing.io);
+        try std.testing.expectError(if (case.failure == error.DuplicateJsonField) error.DuplicateJsonField else error.ContinuationUnavailable, validateReplay(std.testing.io, invalid.file, item.len));
+    }
 }
 
 test "explicit compaction requires one private anchor and rejects Actions" {
