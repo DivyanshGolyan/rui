@@ -67,10 +67,10 @@ def assert_complete_failed_response(store, body, *, operation, code, http_status
 
 
 def failed_response_export_case(state, processes, endpoints):
-    """Production EmptyProviderAnswer and binary HTTP failure, public raw reads."""
-    empty, _, _ = sse_answer("empty-export", "reasoning-export", "message-export", "")
+    """Production incomplete output and binary HTTP failure, public raw reads."""
+    incomplete = encode_sse([{"type": "response.incomplete", "response": {"status": "incomplete"}}], done=False)
     binary = bytes(range(256)) * 1025 + b"\x00\xfftail\r\n"
-    endpoint = SuccessEndpoint([empty, ResponseSpec(binary, {}, status=400)], chunk_sizes=(65536,))
+    endpoint = SuccessEndpoint([incomplete, ResponseSpec(binary, {}, status=400)], chunk_sizes=(65536,))
     thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
     endpoints[endpoint] = thread
     thread.start()
@@ -79,15 +79,15 @@ def failed_response_export_case(state, processes, endpoints):
     processes.append(host)
     session = configure(state, store, "export-config", None, "gpt-6-sol")
     other_session = configure(state, store, "export-other-config", None, "gpt-6-sol")
-    for label, code in (("empty", "malformed_provider_output"), ("binary", "provider_http_400")):
+    for label, code in (("incomplete", "malformed_provider_output"), ("binary", "provider_http_400")):
         message(state, store, f"export-{label}", session, label)
         result = wait_for(lambda: (value := observe(store, f"export-{label}")).get("result") and value, label)
         assert result["result"]["code"] == code, result
     stop_host(host)
     processes.remove(host)
     records = failed_response_records(store)
-    assert len(records) == 2 and [body for _, body in records] == [empty, binary], records
-    assert json.loads(records[0][0]["diagnostic"])["reason"] == "EmptyProviderAnswer", records[0]
+    assert len(records) == 2 and [body for _, body in records] == [incomplete, binary], records
+    assert json.loads(records[0][0]["diagnostic"])["reason"] == "IncompleteProviderOutput", records[0]
     root = store / "diagnostics" / "failed-responses"
 
     def fd256():
@@ -205,14 +205,14 @@ def failed_response_export_case(state, processes, endpoints):
     host = start_host(store, None)
     processes.append(host)
     assert not leftovers[0].exists(), "startup did not reclaim the failed export capture"
-    assert export(records[0][0]["operation"], "body") == empty
+    assert export(records[0][0]["operation"], "body") == incomplete
     assert json.loads(export(records[0][0]["operation"], "metadata"))["diagnostic"] == records[0][0]["diagnostic"]
-    assert observe(store, "export-empty")["result"]["code"] == "malformed_provider_output"
+    assert observe(store, "export-incomplete")["result"]["code"] == "malformed_provider_output"
     stop_host(host)
     processes.remove(host)
     export(operation, "body", error="ConnectionRefused")
     stop_endpoint(endpoint, endpoints)
-    print(f"failed-response export: EmptyProviderAnswer {len(empty)} bytes and binary {len(binary)} bytes exact; "
+    print(f"failed-response export: IncompleteProviderOutput {len(incomplete)} bytes and binary {len(binary)} bytes exact; "
           "metadata exact; fd256; read-only; partial/omitted/missing/identity/symlink/corruption errors empty stdout; "
           "scratch unlink fences and recovers without changing saved failure; no provider calls")
 
@@ -617,6 +617,64 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
     print(f"Failure correlation ({selected}): exact provider bytes and absence preserved through reopen")
 
 
+def empty_answer_cases(state, processes, endpoints):
+    """Completed empty results preserve exact messages and replay after restart."""
+    for phased in (True, False):
+        label = "empty-phased" if phased else "empty-unphased"
+        texts = ["", [" ", "\t\r\n\u00a0\u2003"], [" \té", "\n "]]
+        bodies, items = [], []
+        for index, text in enumerate(texts):
+            body, reasoning, item = sse_answer(f"{label}-{index}", f"r-{index}", f"m-{index}", text)
+            if not phased:
+                del item["phase"]
+                body = encode_sse([
+                    {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+                    {"type": "response.output_item.done", "output_index": 1, "item": item},
+                    {"type": "response.completed", "response": {"id": f"{label}-{index}",
+                     "status": "completed", "output": [reasoning, item]}},
+                ])
+            bodies.append(body)
+            # created_by is response-only metadata, never a request field.
+            reasoning.pop("created_by")
+            items.extend((reasoning, item))
+        endpoint = SuccessEndpoint(bodies)
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / label
+        url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+        host = start_host(store, url)
+        processes.append(host)
+        session = configure(state, store, f"{label}-config", None, "gpt-6-sol")
+        for index, expected in enumerate((b"", b"", " \té\n ".encode())):
+            key = f"{label}-{index}"
+            message(state, store, key, session, f"input-{index}")
+            deadline = time.monotonic() + 10
+            result = wait_for(lambda: (value := observe(store, key, deadline=deadline)).get("result") and value,
+                              key, deadline=deadline)
+            assert result["result"]["status"] == "completed", result
+            assert read_result(store, key, deadline=deadline) == expected
+            report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+            resolution = report["full"]["model_operations"][-1]["resolution"]
+            assert resolution["code"] == "answer" and resolution["content"]["text"] == expected.decode(), resolution
+            assert report["full"]["turns"][-1]["outcome"]["code"] == "completed", report
+            wait_for_execution_release(lambda remaining: command("session", "inspect", "--store", store,
+                                       "--session", session, timeout=remaining)["execution"], deadline)
+            crash_host(host, state, key)
+            processes.remove(host)
+            host = start_host(store, url)
+            processes.append(host)
+            assert read_result(store, key) == expected
+        replay = json.loads(endpoint.requests[2])["input"]
+        assert replay[1:3] == items[:2] and replay[4:6] == items[2:4], replay
+        assert len(endpoint.requests) == 3, "empty answers continued without new input"
+        assert failed_response_records(store) == [], "completed empty answers became failed responses"
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("empty answers: phased/unphased empty and Unicode whitespace complete; exact nonblank bytes; inspect/read-result and restart replay passed")
+
+
 def phased_message_cases(state, processes, endpoints):
     """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
     def text_item(identity, text, phase):
@@ -787,6 +845,11 @@ def main(mode="all", correlation_case="all"):
             failure_correlation_cases(state, processes, endpoints, correlation_case)
             completed = True
             return
+        if mode in ("all", "empty-answers"):
+            empty_answer_cases(state, processes, endpoints)
+            if mode == "empty-answers":
+                completed = True
+                return
         if mode in ("all", "failed-response-export"):
             failed_response_export_case(state, processes, endpoints)
             if mode == "failed-response-export":
@@ -5241,8 +5304,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|empty-answers|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

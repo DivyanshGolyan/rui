@@ -143,7 +143,16 @@ const Decoded = struct {
 const ParsedString = struct {
     encoded: Range,
     decoded_length: u64,
+    non_whitespace: bool,
 };
+
+fn isWhitespace(scalar: u21) bool {
+    // Unicode White_Space, matching the provider client's empty-answer test.
+    return switch (scalar) {
+        0x09...0x0d, 0x20, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+        else => false,
+    };
+}
 
 fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
     try source.space();
@@ -151,6 +160,7 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
     const start = source.offset();
     var validator: Utf8Validator = .{};
     var decoded_length: u64 = 0;
+    var non_whitespace = false;
     while (true) {
         const byte = try source.take();
         if (byte == '"') {
@@ -158,11 +168,19 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
             return .{
                 .encoded = .{ .start = start, .length = source.offset() - start - 1 },
                 .decoded_length = decoded_length,
+                .non_whitespace = non_whitespace,
             };
         }
         if (byte < 0x20) return error.InvalidJsonString;
         if (byte != '\\') {
             try validator.feed(byte);
+            if (!non_whitespace and validator.used == 0) {
+                const scalar = if (byte < 0x80) byte else blk: {
+                    const count = std.unicode.utf8ByteSequenceLength(validator.bytes[0]) catch unreachable;
+                    break :blk std.unicode.utf8Decode(validator.bytes[0..count]) catch unreachable;
+                };
+                non_whitespace = non_whitespace or !isWhitespace(scalar);
+            }
             if (decoded) |consumer| try consumer.emit(&.{byte});
             decoded_length = try std.math.add(u64, decoded_length, 1);
             continue;
@@ -183,6 +201,7 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
             else => return error.InvalidJsonEscape,
         };
         if (simple) |value| {
+            non_whitespace = non_whitespace or !isWhitespace(value);
             if (decoded) |consumer| try consumer.emit(&.{value});
             decoded_length = try std.math.add(u64, decoded_length, 1);
             continue;
@@ -196,6 +215,7 @@ fn parseString(source: anytype, decoded: ?*Decoded) !ParsedString {
         } else if (scalar >= 0xdc00 and scalar <= 0xdfff) return error.InvalidJsonSurrogate;
         var encoded: [4]u8 = undefined;
         const count = try std.unicode.utf8Encode(scalar, &encoded);
+        non_whitespace = non_whitespace or !isWhitespace(scalar);
         if (decoded) |consumer| try consumer.emit(encoded[0..count]);
         decoded_length = try std.math.add(u64, decoded_length, count);
     }
@@ -609,6 +629,7 @@ const ItemValidation = struct {
     kind: output_format.OutputItemKind,
     id_digest: [32]u8,
     text_records: u64 = 0,
+    non_whitespace: bool = false,
     phase: enum { unphased, commentary, final_answer } = .unphased,
 };
 
@@ -684,6 +705,7 @@ fn validateItem(
     const content = try fields.required("content");
     var array = try Array.init(io, file, content);
     var text_records: u64 = 0;
+    var non_whitespace = false;
     while (try array.next()) |block| {
         const block_fields = try readFields(io, file, block, &.{ "type", "text", "annotations" });
         var block_kind: protocol.Bounded(max_evidence_bytes) = .{};
@@ -695,6 +717,7 @@ fn validateItem(
         var decoded = Decoded{ .hash = answer_hash };
         const text = try parseString(&source, &decoded);
         try source.expectEnd();
+        non_whitespace = non_whitespace or text.non_whitespace;
         try metadata.append(.{
             .tag = .text,
             .ordinal = ordinal,
@@ -705,7 +728,7 @@ fn validateItem(
         text_records += 1;
     }
     if (text_records == 0) return error.MalformedProviderOutput;
-    return .{ .kind = .message, .id_digest = id_digest, .text_records = text_records, .phase = message_phase };
+    return .{ .kind = .message, .id_digest = id_digest, .text_records = text_records, .non_whitespace = non_whitespace, .phase = message_phase };
 }
 
 /// One sequential compatibility pass. Partial string/number tokens never own
@@ -1488,8 +1511,8 @@ const AnswerSelection = struct {
         if (validation.phase == .final_answer) self.finals += 1;
         if (validation.phase == .final_answer or (!self.phased and validation.phase == .unphased)) {
             self.ordinal = ordinal;
-            self.length = length;
-            self.digest = digest;
+            self.length = if (validation.non_whitespace) length else 0;
+            self.digest = if (validation.non_whitespace) digest else protocol.contentDigest("");
         } else if (self.phased and self.finals == 0) {
             // Mixed phased/unphased text is visible, but only an explicit
             // final can terminate a phased response without Tool Calls.
@@ -1694,7 +1717,6 @@ pub fn validate(
     }
     if (data != null) return error.IncompleteSseEvent;
     if (!completed) return error.IncompleteProviderOutput;
-    if (operation == .assistant_response and answer.length == 0 and call_count == 0) return error.EmptyProviderAnswer;
     return .{
         .item_count = item_count,
         .call_count = call_count,
@@ -1888,6 +1910,40 @@ test "synthetic gpt-6-luna shaped commentary interleaves calls and selects final
     try std.testing.expectEqual(@as(u64, 1), accepted.output.call_count);
     try std.testing.expectEqual(@as(u64, "Only this answer".len), accepted.output.answer_length);
     try std.testing.expectEqual(protocol.contentDigest("Only this answer"), accepted.output.answer_digest);
+}
+
+test "completed empty assistant answers are valid with or without a final phase" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_][]const u8{ "", ",\"phase\":\"final_answer\"" }) |phase| {
+        for ([_]struct { encoded: []const u8, answer: []const u8 }{
+            .{ .encoded = "", .answer = "" },
+            .{ .encoded = " \\t\\r\\n", .answer = "" },
+            .{ .encoded = "\u{85}\u{a0}\u{1680}\u{2000}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}", .answer = "" },
+            .{ .encoded = "\\u00a0\\u2003\\u000b\\u000c", .answer = "" },
+            .{ .encoded = " \\té\\n ", .answer = " \té\n " },
+            .{ .encoded = "\\u200b", .answer = "\u{200b}" },
+            .{ .encoded = "\\u0000", .answer = "\x00" },
+        }) |case| {
+            const item = try std.testing.allocator.print(
+                "{{\"type\":\"message\",\"id\":\"empty\",\"role\":\"assistant\"{s},\"content\":[{{\"type\":\"output_text\",\"text\":\"{s}\"}}]}}",
+                .{ phase, case.encoded },
+            );
+            defer std.testing.allocator.free(item);
+            const sse = try std.testing.allocator.print(
+                "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{s}}}\n\n" ++
+                    "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"status\":\"completed\",\"output\":[{s}]}}}}\n\n",
+                .{ item, item },
+            );
+            defer std.testing.allocator.free(sse);
+            const accepted = try validateTestingSse(&tmp, sse, 4096);
+            try std.testing.expectEqual(@as(u64, 1), accepted.output.item_count);
+            try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
+            try std.testing.expectEqual(@as(?u64, 0), accepted.output.answer_item_ordinal);
+            try std.testing.expectEqual(@as(u64, case.answer.len), accepted.output.answer_length);
+            try std.testing.expectEqual(protocol.contentDigest(case.answer), accepted.output.answer_digest);
+        }
+    }
 }
 
 test "message phases select one answer without dropping or concatenating text" {

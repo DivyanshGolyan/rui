@@ -6164,10 +6164,12 @@ pub const Store = struct {
             defer message_start = metadata.offset;
             if (purpose != .assistant_response or record.kind != .message) continue;
             const content_id = try self.importAnswerProjection(binding, output, record, message_start, metadata.offset);
-            if (output.answer_item_ordinal == record.ordinal and output.answer_length != 0) {
-                const content = try self.readContentMetadata(content_id);
+            if (output.answer_item_ordinal == record.ordinal) {
+                // The selected result can be empty while the exact message
+                // projection (including whitespace) remains in Conversation.
+                answer_id = if (output.answer_length == 0) try self.importEmptyContent() else content_id;
+                const content = try self.readContentMetadata(answer_id.?);
                 if (content.length != output.answer_length or !std.mem.eql(u8, &content.digest, &output.answer_digest)) return error.OutputSourceChanged;
-                answer_id = content_id;
             }
             const certify = try prepare(self.database, "UPDATE model_output_item SET message_content_id=?3 WHERE operation_id=?1 AND item_ordinal=?2");
             defer _ = c.sqlite3_finalize(certify);

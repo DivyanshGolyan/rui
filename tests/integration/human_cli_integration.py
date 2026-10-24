@@ -1993,6 +1993,58 @@ def persistent_input_cases():
             retain_failure_state("persistent input failure state", state)
 
 
+def persistent_empty_answer_case():
+    """An empty completed result leaves a usable composer, not a failure row."""
+    state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-empty-answer."))
+    home = state / "home"
+    home.mkdir(mode=0o700)
+    store = state / "store"
+    endpoint = fixture.SuccessEndpoint([
+        fixture.sse_answer(f"empty-{index}", f"r-{index}", f"m-{index}", text)[0]
+        for index, text in enumerate(("", " \t\n\u00a0\u2003", "Nonempty control"))
+    ])
+    thread = threading.Thread(target=endpoint.serve_forever)
+    thread.start()
+    host = None
+    completed = False
+    try:
+        host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        session = create_session(home, "--store", store,
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
+        records = home / ".config/rui/requests"
+        with terminal_process([str(fixture.RUI), "session", "resume", "--store", str(store), session],
+                env={**os.environ, "HOME": str(home)}) as (caller, master):
+            read_terminal(master, "› ")
+            for index, expected in enumerate((b"", b"", b"Nonempty control")):
+                before = set(records.glob("*.json"))
+                os.write(master, f"Complete request {index}\n".encode())
+                added = fixture.wait_for(lambda: set(records.glob("*.json")) - before, "empty answer capture")
+                assert len(added) == 1, added
+                key = added.pop().stem
+                result = fixture.wait_for(lambda: (value := fixture.observe(store, key)).get("result") and value,
+                                          "empty answer result")
+                assert result["result"]["status"] == "completed", result
+                assert fixture.read_result(store, key) == expected
+                status = status_frame(master, session)
+                assert "Work: completed" in status, status
+                return_to_live(master)
+                shown = current_screen(master)
+                assert f"Complete request {index}" in shown and "Work ended" not in shown, shown
+                assert "malformed_provider_output" not in shown and "EmptyProviderAnswer" not in shown, shown
+            assert len(endpoint.requests) == 3, endpoint.requests
+            terminal_step(master, "/exit", "Detached.")
+            assert caller.wait(timeout=5) == 0
+        completed = True
+        print("persistent empty answers: empty/Unicode whitespace completed with no result bytes; composer and next nonempty Turn passed", flush=True)
+    finally:
+        dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                    endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
+        if completed:
+            shutil.rmtree(state)
+        else:
+            retain_failure_state("empty answer failure state", state)
+
+
 def persistent_permission_case(decision="deny-action", exit_code=0, signal_failure=False,
                                lost_reply=False, fragmented_paste=False, stale_target=False, timed_out=False, stdin=None):
     """Fresh inline choices retain draft custody and exact canonical targets."""
@@ -5125,7 +5177,11 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers"), selected
+    if selected in ("all", "callers", "caller-core", "empty-answers"):
+        persistent_empty_answer_case()
+    if selected == "empty-answers":
+        return
     if selected == "session-ids":
         help_case()
         opaque_session_commands_case()
