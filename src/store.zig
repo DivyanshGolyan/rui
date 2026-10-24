@@ -436,6 +436,9 @@ pub const ModelFailureClass = union(enum) {
     ordinary,
     context_overflow,
     retryable: retry_policy.Input,
+    /// A model 401 whose one forced credential refresh completed under this
+    /// Operation's claim: the replacement is due now, within the allowance.
+    refreshed,
 };
 
 /// What the provider returned decides which provenance a failed Attempt's
@@ -5868,6 +5871,38 @@ pub const Store = struct {
         try handoff(context);
     }
 
+    /// Durably claims this Operation's one forced credential refresh before
+    /// any refresh exchange. The Attempt stays uncertain, so a crash before
+    /// settlement falls back to ordinary uncertain recovery while the claim
+    /// prevents a second refresh. Returns false when the Operation already
+    /// claimed, or when no replacement allowance would remain.
+    pub fn claimModelAuthRefresh(self: *Store, binding: AttemptBinding) !bool {
+        const access = try self.enter(.none);
+        defer access.release();
+        return access.finishTransaction(Ordinary.attempt_binding, .{}, self.claimModelAuthRefreshLocked(binding));
+    }
+
+    fn claimModelAuthRefreshLocked(self: *Store, binding: AttemptBinding) !bool {
+        try exec(self.database, "BEGIN IMMEDIATE");
+        try self.validateCurrentAttempt(binding);
+        const update = try prepare(
+            self.database,
+            "UPDATE model_operation SET auth_refresh_claimed=1 " ++
+                "WHERE operation_id=?1 AND resolution_code IS NULL AND uncertain=1 AND attempt_ordinal=?2 " ++
+                "AND auth_refresh_claimed=0 AND " ++ retry_allowance_open_sql,
+        );
+        defer _ = c.sqlite3_finalize(update);
+        try bindU64(update, 1, binding.operation_id);
+        try bindU64(update, 2, binding.attempt_ordinal);
+        try expectDone(update);
+        if (c.sqlite3_changes(self.database) != 1) {
+            try exec(self.database, "ROLLBACK");
+            return false;
+        }
+        try exec(self.database, "COMMIT");
+        return true;
+    }
+
     pub fn settleModelAttemptFailure(
         self: *Store,
         binding: AttemptBinding,
@@ -5941,6 +5976,21 @@ pub const Store = struct {
                 try expectDone(settle_turn);
                 if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
                 try self.recordTurnOutcomePosition(binding.turn_id);
+            },
+            .refreshed => {
+                const update = try prepare(
+                    self.database,
+                    "UPDATE model_operation SET uncertain=0,retry_due_at_ms=?2,last_failure_code=?3 " ++
+                        "WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_ordinal=?4 " ++
+                        "AND auth_refresh_claimed=1 AND " ++ retry_allowance_open_sql,
+                );
+                defer _ = c.sqlite3_finalize(update);
+                try bindU64(update, 1, binding.operation_id);
+                try bindI64(update, 2, @max(1, try readUnixMilliseconds(self.io)));
+                try bindText(update, 3, code);
+                try bindU64(update, 4, binding.attempt_ordinal);
+                try expectDone(update);
+                if (c.sqlite3_changes(self.database) != 1) return error.StaleAttemptBinding;
             },
             .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try readUnixMilliseconds(self.io), retry_random)) {
                 .schedule_at_ms => |due_at_ms| {
@@ -7472,6 +7522,7 @@ fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
         \\ reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max')),
         \\ output_item_count INTEGER CHECK(output_item_count IS NULL OR output_item_count>=0),
         \\ attempt_ordinal INTEGER NOT NULL CHECK(attempt_ordinal BETWEEN 1 AND 4),
+        \\ auth_refresh_claimed INTEGER NOT NULL DEFAULT 0 CHECK(auth_refresh_claimed IN (0,1)),
         \\ uncertain INTEGER NOT NULL CHECK(uncertain IN (0,1)),
         \\ retry_due_at_ms INTEGER CHECK(retry_due_at_ms IS NULL OR retry_due_at_ms>=0),
         \\ last_failure_code TEXT CHECK(last_failure_code IS NULL OR length(CAST(last_failure_code AS BLOB)) BETWEEN 1 AND 96),
@@ -16331,6 +16382,77 @@ test "retry due index excludes future population and preserves age ordering" {
         .maximum_exclusions = 1,
     }, .{})).?;
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.operation_id);
+}
+
+const testing_401: ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = .{} } };
+
+fn settleTransientForTesting(storage: *Store, binding: AttemptBinding) !AttemptBinding {
+    try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_temporary_http_503" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
+    try exec(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE resolution_code IS NULL AND uncertain=0");
+    return (try admitRetryForTesting(storage)).?.permit.binding;
+}
+
+test "a 401 forced refresh is claimed at most once per Operation across failures and restart" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try testingStore(&tmp, std.testing.io);
+    var storage_open = true;
+    defer if (storage_open) storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "refresh-config");
+
+    // Claimed once: the claim commits before any refresh, the Attempt stays
+    // uncertain, and a second claim for the same Operation is refused.
+    try submitTestMessage(&storage, &tmp, "refresh-a", "refresh-a", session.slice(), "a");
+    const a1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expect(try storage.claimModelAuthRefresh(a1));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE uncertain=1 AND retry_due_at_ms=0 AND auth_refresh_claimed=1"));
+    try std.testing.expect(!try storage.claimModelAuthRefresh(a1));
+    // A completed refresh makes the one replacement immediately eligible,
+    // without generic backoff, and records the 401.
+    try storage.settleModelAttemptFailure(a1, testing_401, .refreshed, .{});
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(storage.database, "SELECT count(*) FROM model_operation WHERE uncertain=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)"));
+    const a2 = (try admitRetryForTesting(&storage)).?.permit.binding;
+    try std.testing.expectEqual(@as(u64, 2), a2.attempt_ordinal);
+    // Counterexample A: a transient failure intervenes; the next 401 must
+    // not claim again.
+    const a3 = try settleTransientForTesting(&storage, a2);
+    try std.testing.expect(!try storage.claimModelAuthRefresh(a3));
+    try storage.settleModelAttemptFailure(a3, testing_401, .ordinary, .{});
+
+    // Counterexample B: same saved shape at Attempt 3, but no earlier claim.
+    try submitTestMessage(&storage, &tmp, "refresh-b", "refresh-b", session.slice(), "b");
+    const b1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const b3 = try settleTransientForTesting(&storage, try settleTransientForTesting(&storage, b1));
+    try std.testing.expectEqual(@as(u64, 3), b3.attempt_ordinal);
+    try std.testing.expect(try storage.claimModelAuthRefresh(b3));
+    try storage.settleModelAttemptFailure(b3, testing_401, .refreshed, .{});
+    // The replacement consumes the ordinary allowance: Attempt 4 has none
+    // left, so a 401 there cannot claim.
+    const b4 = (try admitRetryForTesting(&storage)).?.permit.binding;
+    try std.testing.expectEqual(@as(u64, 4), b4.attempt_ordinal);
+    try std.testing.expect(!try storage.claimModelAuthRefresh(b4));
+    try storage.settleModelAttemptFailure(b4, testing_401, .ordinary, .{});
+
+    // A stale binding cannot claim, and a refreshed settlement requires the
+    // claim.
+    try submitTestMessage(&storage, &tmp, "refresh-c", "refresh-c", session.slice(), "c");
+    const c1 = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var stale = c1;
+    stale.attempt_ordinal = 2;
+    try std.testing.expectError(error.StaleAttemptBinding, storage.claimModelAuthRefresh(stale));
+    try std.testing.expectError(error.StaleAttemptBinding, storage.settleModelAttemptFailure(c1, testing_401, .refreshed, .{}));
+
+    // Crash after the claim and before settlement: restart replaces the
+    // uncertain Attempt under ordinary policy and the claim survives.
+    try std.testing.expect(try storage.claimModelAuthRefresh(c1));
+    try storage.close();
+    storage_open = false;
+    var reopened = try testingStore(&tmp, std.testing.io);
+    defer reopened.close() catch unreachable;
+    const c2 = (try admitRetryForTesting(&reopened)).?.permit.binding;
+    try std.testing.expectEqual(c1.operation_id, c2.operation_id);
+    try std.testing.expectEqual(@as(u64, 2), c2.attempt_ordinal);
+    try std.testing.expect(!try reopened.claimModelAuthRefresh(c2));
 }
 
 test "retry transitions preserve age and settle one exhausted outcome per call" {
