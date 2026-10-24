@@ -253,7 +253,7 @@ jobs:
           zig fmt --check --ast-check build.zig src
           t0=$(date +%s.%N); zig build --help > /dev/null; t1=$(date +%s.%N); zig build --help > /dev/null; t2=$(date +%s.%N)
           t3=$(date +%s.%N); zig build -Dci-artifacts=.zig-cache/o/ci-compiled --help > /dev/null; t4=$(date +%s.%N)
-          echo "::notice title=pre-test diag::help1=$(echo "$t1-$t0"|bc) help2=$(echo "$t2-$t1"|bc) help-ci=$(echo "$t4-$t3"|bc) local-h=$(ls .zig-cache/h | wc -l) global-h=$(ls ~/.cache/zig/h | wc -l) global-o=$(ls ~/.cache/zig/o | wc -l)"
+          echo "::notice title=pre-test diag::help1=$(echo "$t1-$t0"|bc) help2=$(echo "$t2-$t1"|bc) help-ci=$(echo "$t4-$t3"|bc) local-h=$(ls .zig-cache/h | wc -l) global-h=$(ls ~/.cache/zig/h | wc -l) global-o=$(ls ~/.cache/zig/o | wc -l) cpu=$(grep -m1 "^model name" /proc/cpuinfo | cut -d: -f2)"
           python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART" --ci-artifacts .zig-cache/o/ci-compiled $RETRY 2>&1 | tee "$RUNNER_TEMP/hc-suite.log"
       - name: Hillclimb timings
         if: ${{ always() }}

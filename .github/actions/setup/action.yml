@@ -59,6 +59,10 @@ runs:
         } > "$identity"
         cat "$identity"
         echo "identity=$(shasum -a 256 "$identity" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+        # The build runner is compiled for the host CPU, which varies between
+        # runners of one image, so its cache is only reusable per CPU model.
+        if [ "$(uname -s)" = Darwin ]; then cpu=$(sysctl -n machdep.cpu.brand_string); else cpu=$(grep -m1 '^model name' /proc/cpuinfo); fi
+        echo "cpu=$(printf '%s' "$cpu" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ runner.temp }}/rui-zig
@@ -86,9 +90,9 @@ runs:
           ~/.cache/zig
           .zig-cache
           !.zig-cache/o/ci-compiled
-        key: rui-runner-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
+        key: rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-${{ hashFiles('build.zig', 'build.zig.zon') }}
         restore-keys: |
-          rui-runner-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-
+          rui-runner-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ steps.tools.outputs.cpu }}-
     - name: Install pinned compiler
       shell: bash
       run: |
