@@ -1679,12 +1679,29 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
         return .cleanup;
     };
     defer metadata.deinit();
+    // Transport already unlinked this canonical name and released request/
+    // easy ownership. Reuse the response namespace for decoded SSE scratch;
+    // the original sealed capture remains separate diagnostic evidence.
+    var data_name_buffer: [96]u8 = undefined;
+    const data_name = named_scratch.NumericName.response.format(&data_name_buffer, owner.binding.operation_id, owner.binding.attempt_ordinal) catch unreachable;
+    var retained_data: ?named_scratch.Owner = null;
+    var event_data = model_adapter.Output.EventData.init(host.io, host.lease.paths.scratch.slice(), data_name, metadata_budget, false, &retained_data) catch |err| {
+        if (retained_data) |retained| {
+            retainDispatchFence(host, "response data unlink", err);
+            return .{ .named_scratch = retained };
+        }
+        stderr.print("rui: response data acquisition failed for operation {d}: {s}\n", .{ owner.binding.operation_id, @errorName(err) });
+        retainFailedResponse(host, rejected, answered.retention("response_data_exhausted", null, http_status));
+        answered.fail("response_data_exhausted", .ordinary);
+        return .cleanup;
+    };
+    defer event_data.deinit();
     traceOperation(host, "validation_started", owner.binding);
     const operation = host.store.modelOperationKind(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "model operation purpose", err);
         return .cleanup;
     };
-    const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, operation, .{
+    const accepted = switch (model_adapter.interpretOutput(host.io, response.file, response.length, &metadata, &event_data, operation, .{
         .openai = openai_model.slice(),
         .alternate = x_openai_model.slice(),
     }, .{
@@ -1711,8 +1728,8 @@ fn completeSuccessfulTransfer(host: *Host, active: *ProviderSlot, http_status: u
     if (!host.custody.claimTerminalDelivery(owner.token)) return .cleanup;
     var settlement_trace = SettlementTrace.init(host, owner.binding);
     host.store.settleModelSuccess(owner.binding, &.{
-        .source = response.file,
-        .source_length = response.length,
+        .source = validated.source,
+        .source_length = validated.source_length,
         .metadata = metadata.file,
         .item_count = validated.item_count,
         .call_count = validated.call_count,

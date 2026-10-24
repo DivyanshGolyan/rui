@@ -893,6 +893,86 @@ def refusal_cases(state, processes, endpoints):
     print("Refusal: public result/conversation, crash recovery and exact typed replay passed")
 
 
+def sse_framing_cases(state, processes, endpoints):
+    """Spec framing, exact decoded replay, and immutable raw failure evidence."""
+    # Replay rebuilds top-level separators; nested value spelling is verbatim.
+    reasoning = b'{"type":"reasoning","id":"r","encrypted_content":"' + b"x" * 9001 + b'","future":{\n"raw":true}}'
+    item = b'{"type":"message","id":"m","role":"assistant","content":[{\n"type":"output_text","text":"Hi \\u00e9\\n"}]}'
+    notification = b'data: {"type":"response.future.notice","item":{"type":"future_tool"}}\r\r'
+    terminal = b'data: {"type":"response.completed","response":{"id":"r","status":"completed","output":[]}}\n\n'
+    body = b"\xef\xbb\xbffuture: ignored\rfield-without-colon\r\r" + notification
+    for index, raw_item in enumerate((reasoning, item)):
+        event = b'{"type":"response.output_item.done","output_index":' + str(index).encode() + b',"item":' + raw_item + b'}'
+        body += b"\r\n".join(b"data: " + line for line in event.split(b"\n")) + b"\r\n\r\n"
+    body += terminal + b"data:[DONE]\r\r"
+    endpoint = SuccessEndpoint([body, sse_answer("next", "r2", "m2", "Next")[0]])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    endpoints[endpoint] = thread
+    thread.start()
+    url = f"http://127.0.0.1:{endpoint.server_port}/responses"
+    store = state / "sse-framing"
+    host = start_host(store, url)
+    processes.append(host)
+    session = configure(state, store, "sse-config", None, "gpt-6-sol")
+    message(state, store, "sse-first", session, "first")
+    result, answer, _ = wait_for_result_release(store, "sse-first", session, time.monotonic() + 10)
+    assert result["result"]["status"] == "completed" and answer == "Hi é\n".encode(), (result, answer)
+    crash_host(host, state, "sse-framing")
+    processes.remove(host)
+    abandoned = store / "scratch" / "response-900-1.tmp"
+    lookalike = store / "scratch" / "response-0900-1.tmp"
+    abandoned.write_bytes(b"abandoned decoded data")
+    lookalike.write_bytes(b"not owned")
+    host = start_host(store, url)
+    processes.append(host)
+    assert not abandoned.exists() and lookalike.read_bytes() == b"not owned"
+    assert read_result(store, "sse-first") == answer
+    message(state, store, "sse-next", session, "second")
+    result, answer, _ = wait_for_result_release(store, "sse-next", session, time.monotonic() + 10)
+    assert result["result"]["status"] == "completed" and answer == b"Next", (result, answer)
+    assert reasoning in endpoint.requests[1] and item in endpoint.requests[1], "decoded item bytes changed in replay"
+    assert len(endpoint.requests) == 2 and failed_response_records(store) == []
+    stop_host(host)
+    processes.remove(host)
+    stop_endpoint(endpoint, endpoints)
+
+    for label, event, reason, code in (
+        ("namespace", b'{"type":"response.output_item.future"}', "UnsupportedEventType", "unsupported_provider_output"),
+        ("malformed", b'{"type":"future.notice",\ndata: "future":!}', "InvalidJsonValue", "malformed_provider_output"),
+        ("known", b'{"type":"response.output_item.done",\ndata: "output_index":0}', "MissingProviderField", "malformed_provider_output"),
+    ):
+        prefix = b": raw-only prefix\nfuture: ignored\n" + notification
+        rejected_body = prefix + b"data: " + event + b"\n\n"
+        endpoint = SuccessEndpoint([rejected_body])
+        thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+        endpoints[endpoint] = thread
+        thread.start()
+        store = state / f"sse-{label}"
+        host = start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+        processes.append(host)
+        session = configure(state, store, label + "-config", None, "gpt-6-sol")
+        message(state, store, label, session, "reject")
+        result, _, _ = wait_for_result_release(store, label, session, time.monotonic() + 10)
+        assert result["result"]["code"] == code, result
+        stop_host(host)
+        processes.remove(host)
+        host = start_host(store, None)
+        processes.append(host)
+        report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
+        operation = report["full"]["model_operations"][0]
+        diagnostic = operation["resolution"]["content"]["text"]
+        detail = json.loads(diagnostic)
+        assert detail["reason"] == reason and detail["byte_offset"] == str(len(prefix) + 6), detail
+        assert report["full"]["turns"][0]["outcome"]["content"] is None, report
+        assert_complete_failed_response(store, rejected_body, operation=operation["operation"], code=code,
+                                       http_status=200, request_id="request-1", diagnostic=diagnostic)
+        assert len(endpoint.requests) == 1, "permanent output rejection retried"
+        stop_host(host)
+        processes.remove(host)
+        stop_endpoint(endpoint, endpoints)
+    print("SSE: BOM/CR/LF/CRLF/multiline/unknown fields, restart exact replay, strict namespace/JSON and raw failure evidence passed")
+
+
 def phased_message_cases(state, processes, endpoints):
     """Synthetic gpt-6-luna-shaped streams, not recovered live captures."""
     def text_item(identity, text, phase):
@@ -1059,6 +1139,11 @@ def main(mode="all", correlation_case="all"):
     continuation_diagnostics = None
     completed = False
     try:
+        if mode in ("all", "sse-framing"):
+            sse_framing_cases(state, processes, endpoints)
+            if mode == "sse-framing":
+                completed = True
+                return
         if mode in ("all", "http-quota"):
             http_quota_cases(state, processes, endpoints)
             if mode == "http-quota":
@@ -5551,8 +5636,8 @@ def main(mode="all", correlation_case="all"):
 if __name__ == "__main__":
     mode = sys.argv[2] if len(sys.argv) >= 3 else "all"
     correlation_case = sys.argv[3] if len(sys.argv) == 4 else "all"
-    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals")
+    if (len(sys.argv) not in (2, 3, 4) or mode not in ("all", "http-quota", "failure-correlation", "phased-messages", "failed-response-export", "empty-answers", "stream-failures", "refusals", "sse-framing")
             or correlation_case not in ("all", "rejected", "correlated", "exhausted")
             or (len(sys.argv) == 4 and mode != "failure-correlation")):
-        raise SystemExit("usage: dispatch_integration.py RUI [all|http-quota|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
+        raise SystemExit("usage: dispatch_integration.py RUI [all|sse-framing|http-quota|stream-failures|empty-answers|refusals|failed-response-export|phased-messages|failure-correlation [all|rejected|correlated|exhausted]]")
     main(mode, correlation_case)

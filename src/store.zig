@@ -10766,16 +10766,18 @@ test "historical accepted assistant output completeness and provenance fence rea
         var retained: ?named_scratch.Owner = null;
         var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
         defer metadata.deinit();
+        var event_data = try provider_output.EventData.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
+        defer event_data.deinit();
         var rejection: @import("provider_output.zig").Rejection = .{};
-        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, .assistant_response, &rejection, .{});
+        const validated = try @import("provider_output.zig").validate(std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, &rejection, .{});
         for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
             if (index != 0) {
                 try submitTestMessage(&storage, &tmp, "output-second", "output-second", session.slice(), "second");
                 source_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
             try storage.settleModelSuccess(source_binding, &.{
-                .source = source,
-                .source_length = sse.len,
+                .source = validated.source,
+                .source_length = validated.source_length,
                 .metadata = metadata.file,
                 .item_count = validated.item_count,
                 .call_count = validated.call_count,

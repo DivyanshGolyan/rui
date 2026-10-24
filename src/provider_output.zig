@@ -32,6 +32,9 @@ pub const Rejection = struct {
 };
 
 pub const Validated = struct {
+    /// Borrowed decoded SSE bytes, valid until EventData.deinit().
+    source: std.Io.File,
+    source_length: u64,
     item_count: u64,
     call_count: u64,
     answer_item_ordinal: ?u64,
@@ -41,6 +44,64 @@ pub const Validated = struct {
 };
 
 const Range = struct { start: u64, length: u64 };
+
+/// One validation workspace, not one buffer per event or live transport.
+/// Keep raw capture immutable for diagnostics; metadata addresses these bytes.
+pub const EventData = struct {
+    io: std.Io,
+    file: std.Io.File,
+    budget: protocol.ScratchBudget,
+    length: u64 = 0,
+    charged: u64 = 0,
+
+    pub fn init(io: std.Io, scratch_path: []const u8, name: []const u8, budget: protocol.ScratchBudget, fail_unlink: bool, retained: *?named_scratch.Owner) !EventData {
+        retained.* = null;
+        var scratch = try std.Io.Dir.cwd().openDir(io, scratch_path, .{});
+        defer scratch.close(io);
+        const file = try scratch.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        if (fail_unlink) {
+            retained.* = .init(io, file, null, name, budget, 0, .injected_failure);
+            return error.InjectedEventDataUnlinkFailure;
+        }
+        scratch.deleteFile(io, name) catch |err| {
+            retained.* = .init(io, file, null, name, budget, 0, .native);
+            return err;
+        };
+        return .{ .io = io, .file = file, .budget = budget };
+    }
+
+    fn append(self: *EventData, bytes: []const u8) !void {
+        if (!self.budget.allocate(bytes.len)) return error.EventDataScratchExhausted;
+        // A partial write remains charged until disposal, just like capture.
+        self.charged += bytes.len;
+        self.file.writeStreamingAll(self.io, bytes) catch return error.EventDataWriteFailed;
+        self.length += bytes.len;
+    }
+
+    fn copy(self: *EventData, source: std.Io.File, range: Range) !void {
+        var offset: u64 = 0;
+        var buffer: [protocol.content_window_bytes]u8 = undefined;
+        while (offset < range.length) {
+            const wanted: usize = @intCast(@min(range.length - offset, buffer.len));
+            const count = try source.readPositionalAll(self.io, buffer[0..wanted], range.start + offset);
+            if (count != wanted) return error.ShortSealedRead;
+            try self.append(buffer[0..count]);
+            offset += count;
+        }
+    }
+
+    fn seal(self: *EventData) !void {
+        self.file.sync(self.io) catch return error.EventDataSealFailed;
+        const length = self.file.length(self.io) catch return error.EventDataSealFailed;
+        if (length != self.length) return error.EventDataSealFailed;
+    }
+
+    pub fn deinit(self: *EventData) void {
+        self.file.close(self.io);
+        self.budget.release(self.charged);
+        self.* = undefined;
+    }
+};
 
 const FileSource = struct {
     io: std.Io,
@@ -1574,6 +1635,7 @@ fn processEvent(
     io: std.Io,
     file: std.Io.File,
     event: Range,
+    raw_start: u64,
     metadata: *output_format.OutputMetadataWriter,
     added: *Added,
     completed: *bool,
@@ -1585,7 +1647,7 @@ fn processEvent(
     compaction_count: *u64,
     rejection: *Rejection,
 ) !void {
-    rejection.* = .{ .stage = .event, .byte_offset = event.start };
+    rejection.* = .{ .stage = .event, .byte_offset = raw_start };
     if (completed.*) return error.LateProviderOutput;
     var kind: protocol.Bounded(max_evidence_bytes) = .{};
     const fields = try readFields(io, file, event, &.{ "type", "output_index", "item", "response" });
@@ -1683,6 +1745,7 @@ pub fn validate(
     source_file: std.Io.File,
     source_length: u64,
     metadata: *output_format.OutputMetadataWriter,
+    event_data: *EventData,
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
     faults: Faults,
@@ -1690,7 +1753,7 @@ pub fn validate(
     if (faults.metadata) metadata.fail_writes = true;
     var source = try FileSource.init(io, source_file, .{ .start = 0, .length = source_length });
     var data: ?Range = null;
-    var data_is_done = false;
+    var raw_start: u64 = 0;
     var completed = false;
     var done_marker = false;
     var item_count: u64 = 0;
@@ -1699,38 +1762,40 @@ pub fn validate(
     var answer: AnswerSelection = .{ .digest = protocol.contentDigest("") };
     var evidence: Evidence = .{};
     var added: Added = .{};
+    if (source_length >= 3 and try rangeEquals(io, source_file, .{ .start = 0, .length = 3 }, "\xef\xbb\xbf")) source.position = 3;
     while (source.offset() < source.end) {
         rejection.* = .{ .byte_offset = source.offset() };
-        // Keep what framing needs from the one buffered scan: the line's
-        // head and its last two bytes. Event JSON is parsed separately.
+        // SSE has three line endings. Retain only the field prefix; payload
+        // reads and decoded data writes use fixed windows, never line buffers.
         const line_start = source.offset();
         var head: [16]u8 = undefined;
-        var tail: [2]u8 = .{ 0, 0 };
         while (try source.peek()) |byte| {
+            if (byte == '\r' or byte == '\n') break;
             const index = source.offset() - line_start;
             if (index < head.len) head[@intCast(index)] = byte;
-            tail = .{ tail[1], byte };
             _ = try source.take();
-            if (byte == '\n') break;
         }
-        var line_end = source.offset();
-        if (line_end > line_start and tail[1] == '\n') {
-            line_end -= 1;
-            if (line_end > line_start and tail[0] == '\r') line_end -= 1;
-        } else if (line_end > line_start and tail[1] == '\r') line_end -= 1;
+        const line_end = source.offset();
+        const ending = try source.peek();
+        if (ending) |byte| {
+            _ = try source.take();
+            if (byte == '\r' and try source.peek() == '\n') _ = try source.take();
+        }
         const line = Range{ .start = line_start, .length = line_end - line_start };
         const shown = head[0..@intCast(@min(line.length, head.len))];
         if (line.length == 0) {
             if (data) |payload| {
-                if (data_is_done) {
+                if (payload.length == 0) return error.EmptySseData;
+                if (try rangeEquals(io, event_data.file, payload, "[DONE]")) {
                     if (!completed or done_marker) return error.ContradictoryProviderOutput;
                     done_marker = true;
                 } else {
                     if (done_marker) return error.LateProviderOutput;
                     try processEvent(
                         io,
-                        source_file,
+                        event_data.file,
                         payload,
+                        raw_start,
                         metadata,
                         &added,
                         &completed,
@@ -1747,25 +1812,25 @@ pub fn validate(
             }
             continue;
         }
-        if (std.mem.startsWith(u8, shown, "data:")) {
-            if (data != null) return error.UnsupportedMultilineSseData;
-            var skip: usize = "data:".len;
+        if (std.mem.eql(u8, shown, "data") or std.mem.startsWith(u8, shown, "data:")) {
+            var skip: usize = @min(line.length, "data:".len);
             if (shown.len > skip and shown[skip] == ' ') skip += 1;
-            const length = line.length - skip;
-            if (length == 0) return error.EmptySseData;
-            data = .{ .start = line.start + skip, .length = length };
-            data_is_done = length == "[DONE]".len and std.mem.eql(u8, shown[skip..], "[DONE]");
-        } else if (!std.mem.startsWith(u8, shown, ":") and
-            !std.mem.startsWith(u8, shown, "event:") and
-            !std.mem.startsWith(u8, shown, "id:") and
-            !std.mem.startsWith(u8, shown, "retry:"))
-        {
-            return error.MalformedSse;
+            if (data == null) {
+                data = .{ .start = event_data.length, .length = 0 };
+                raw_start = line.start + skip;
+            } else try event_data.append("\n");
+            try event_data.copy(source_file, .{ .start = line.start + skip, .length = line.length - skip });
+            data.?.length = event_data.length - data.?.start;
         }
+        // Comments and every other field, including colonless fields, carry
+        // no provider output authority. Field names are case-sensitive.
     }
     if (data != null) return error.IncompleteSseEvent;
     if (!completed) return error.ProviderConnectionClosed;
+    try event_data.seal();
     return .{
+        .source = event_data.file,
+        .source_length = event_data.length,
         .item_count = item_count,
         .call_count = call_count,
         .answer_item_ordinal = answer.ordinal,
@@ -1781,6 +1846,8 @@ pub fn failureCode(err: anyerror) []const u8 {
         error.TemporaryProviderFailure => "provider_temporary_error",
         error.PermanentProviderFailure => "provider_permanent_error",
         error.ProviderConnectionClosed => "provider_transport_failure",
+        error.EventDataScratchExhausted => "response_data_exhausted",
+        error.EventDataWriteFailed, error.EventDataSealFailed => "response_data_failed",
         error.UnsupportedProviderOutput,
         error.UnsupportedItemStatus,
         error.UnsupportedAsyncCall,
@@ -1840,7 +1907,12 @@ fn validateTestingRejection(tmp: *std.testing.TmpDir, bytes: []const u8, metadat
         &retained,
     );
     errdefer metadata.deinit();
-    const validated = try validate(std.testing.io, source, bytes.len, &metadata, operation, rejection, .{});
+    // These existing cases vary metadata's ceiling independently of payload.
+    // Shared overlap and disposal are exercised with one budget below.
+    var data_used: std.atomic.Value(u64) = .init(0);
+    var event_data = try EventData.init(std.testing.io, root[0..root_length], "provider-test-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
+    defer event_data.deinit();
+    const validated = try validate(std.testing.io, source, bytes.len, &metadata, &event_data, operation, rejection, .{});
     const metadata_bytes = used.load(.acquire);
     var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, validated.item_count);
     const first_item = (try reader.nextItem()).?;
@@ -1950,7 +2022,7 @@ test "compaction rejects missing double malformed unknown and Action candidates"
     try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, disagreement, 4096, .compaction));
 }
 
-test "SSE line framing accepts CRLF, field lines and DONE, and rejects malformed lines" {
+test "SSE line framing accepts spec fields and line endings without losing validation" {
     const item = "{\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}";
     const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ item ++ "}";
     const completed = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[" ++ item ++ "]}}";
@@ -1962,23 +2034,104 @@ test "SSE line framing accepts CRLF, field lines and DONE, and rejects malformed
         "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\r\n\r\ndata:[DONE]\r\n\r\n",
         // A final carriage return without a newline still ends the line.
         "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\r",
+        "data: " ++ done ++ "\r\rdata: " ++ completed ++ "\r\r",
+        "\xef\xbb\xbfdata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n",
+        "bogus: x\nfield-without-colon\ndatax: ignored\nevent\nid\nretry\ndata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n",
+        "data\ndata: " ++ done ++ "\ndata:\n\ndata: " ++ completed ++ "\n\n",
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     for (accepted) |stream| {
         const result = try validateTestingSse(&tmp, stream, 4096);
         try std.testing.expectEqual(@as(u64, 2), result.output.answer_length);
+        try std.testing.expectEqual(protocol.contentDigest("hi"), result.output.answer_digest);
+        try std.testing.expectEqual(protocol.contentDigest(item), result.first_item.content_digest);
     }
     const rejected = [_]struct { anyerror, []const u8 }{
-        .{ error.MalformedSse, "bogus: x\ndata: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\n" },
-        .{ error.MalformedSse, "dat: " ++ done ++ "\n\n" },
+        .{ error.ProviderConnectionClosed, "dat: " ++ done ++ "\n\n" },
         .{ error.EmptySseData, "data:\n\n" },
         .{ error.EmptySseData, "data: \r\n\r\n" },
-        .{ error.UnsupportedMultilineSseData, "data: " ++ done ++ "\ndata: " ++ done ++ "\n\n" },
+        .{ error.TrailingJson, "data: " ++ done ++ "\ndata: " ++ done ++ "\n\n" },
+        .{ error.IncompleteSseEvent, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n" },
+        .{ error.IncompleteSseEvent, "data: " ++ done ++ "\n\ndata: " ++ completed },
         .{ error.ContradictoryProviderOutput, "data: " ++ done ++ "\n\ndata: [DONE]\n\n" },
         .{ error.LateProviderOutput, "data: " ++ done ++ "\n\ndata: " ++ completed ++ "\n\ndata: [DONE]\n\ndata: " ++ done ++ "\n\n" },
     };
     for (rejected) |case| try std.testing.expectError(case[0], validateTestingSse(&tmp, case[1], 4096));
+}
+
+test "SSE multiline data inserts exact newlines into retained items" {
+    const fields = "\"type\":\"message\",\"id\":\"a\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi é\"}]}";
+    const item = "{\n" ++ fields;
+    const stream = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\r\n" ++
+        ": keepalive\r\nfuture: ignored\r\ndata: " ++ fields ++ "}\r\n\r\n" ++
+        "data: {\"type\":\"response.completed\",\rdata: \"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\r\r";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const accepted = try validateTestingSse(&tmp, stream, 4096);
+    try std.testing.expectEqual(@as(u64, "hi é".len), accepted.output.answer_length);
+    try std.testing.expectEqual(protocol.contentDigest("hi é"), accepted.output.answer_digest);
+    try std.testing.expectEqual(protocol.contentDigest(item), accepted.first_item.content_digest);
+    try std.testing.expectError(error.InvalidJsonString, validateTestingSse(&tmp, "data: {\"type\":\"future.\ndata: notice\"}\n\n", 4096));
+    try std.testing.expectError(error.UnexpectedJsonDelimiter, validateTestingSse(&tmp, "data: [DO\ndata: NE]\n\n", 4096));
+    const prefix = ": raw-only prefix\nfuture: ignored\ndata: {\"type\":\"notice\"}\n\n";
+    var rejection: Rejection = .{};
+    try std.testing.expectError(error.MissingProviderField, validateTestingRejection(&tmp, prefix ++ "data: {\"type\":\"response.output_item.done\",\ndata: \"output_index\":0}\n\n", 4096, .assistant_response, &rejection));
+    try std.testing.expectEqual(prefix.len + "data: ".len, rejection.byte_offset);
+    try std.testing.expectEqual(.item, rejection.stage);
+}
+
+test "SSE decoded data shares scratch charges and retains failed unlink ownership" {
+    const done = "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}";
+    const terminal = "{\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}";
+    const raw = "data: " ++ done ++ "\n\ndata: " ++ terminal ++ "\n\n";
+    const decoded = done ++ terminal;
+    for ([_]u64{ 0, 1 }) |shortfall| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const source = try tmp.dir.createFile(std.testing.io, "raw", .{ .read = true });
+        defer source.close(std.testing.io);
+        try source.writeStreamingAll(std.testing.io, raw);
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var used: std.atomic.Value(u64) = .init(raw.len);
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = raw.len + decoded.len + 2 * output_format.output_metadata_record_bytes - shortfall };
+        var retained: ?named_scratch.Owner = null;
+        const descriptors = @import("descriptor_limit.zig");
+        const baseline = (try descriptors.observe(std.testing.io)).open_descriptors;
+        var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root, "metadata", budget, false, &retained);
+        var data = try EventData.init(std.testing.io, root, "response-9-1.tmp", budget, false, &retained);
+        try std.testing.expectEqual(baseline + 2, (try descriptors.observe(std.testing.io)).open_descriptors);
+        try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "response-9-1.tmp", .{}));
+        var rejection: Rejection = .{};
+        if (shortfall == 0) {
+            const result = try validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, .{});
+            var buffer: [raw.len]u8 = undefined;
+            try std.testing.expectEqual(decoded.len, try result.source.readPositionalAll(std.testing.io, buffer[0..decoded.len], 0));
+            try std.testing.expectEqualStrings(decoded, buffer[0..decoded.len]);
+            try std.testing.expectEqual(budget.limit, used.load(.acquire));
+        } else {
+            try std.testing.expectError(error.EventDataScratchExhausted, validate(std.testing.io, source, raw.len, &metadata, &data, .assistant_response, &rejection, .{}));
+            try std.testing.expectEqual(raw.len + done.len + 208, used.load(.acquire));
+        }
+        var buffer: [raw.len]u8 = undefined;
+        try std.testing.expectEqual(raw.len, try source.readPositionalAll(std.testing.io, &buffer, 0));
+        try std.testing.expectEqualStrings(raw, &buffer);
+        metadata.deinit();
+        data.deinit();
+        try std.testing.expectEqual(baseline, (try descriptors.observe(std.testing.io)).open_descriptors);
+        try std.testing.expectEqual(@as(u64, raw.len), used.load(.acquire));
+        try std.testing.expectError(error.InjectedEventDataUnlinkFailure, EventData.init(std.testing.io, root, "response-9-1.tmp", budget, true, &retained));
+        try std.testing.expect(named_scratch.isOwned("response-9-1.tmp"));
+        try std.testing.expectError(error.InjectedScratchRemovalFailure, retained.?.reclaim(root));
+        try std.testing.expectEqual(baseline + 1, (try descriptors.observe(std.testing.io)).open_descriptors);
+        retained.?.resources.?.removal = .native;
+        try std.testing.expectEqual(named_scratch.Reclamation.removed, try retained.?.reclaim(root));
+        try std.testing.expectEqual(baseline, (try descriptors.observe(std.testing.io)).open_descriptors);
+        try std.testing.expectEqual(@as(u64, raw.len), used.load(.acquire));
+        budget.release(raw.len);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
 }
 
 test "synthetic gpt-6-luna shaped commentary interleaves calls and selects final answer" {
@@ -2211,16 +2364,32 @@ test "provider reasoning strings preserve raw items across evidence and file win
         defer std.testing.allocator.free(sse);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const accepted = try validateTestingSse(&tmp, sse, 64 * 1024);
-        try std.testing.expectEqual(@as(u64, 2), accepted.output.item_count);
-        try std.testing.expectEqual(@as(u64, 0), accepted.output.call_count);
-        try std.testing.expectEqual(@as(u64, 2), accepted.output.answer_length);
-        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &accepted.output.answer_digest);
-        const item = accepted.first_item;
+        const source = try testingObject(&tmp, sse);
+        defer source.file.close(std.testing.io);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        const budget = protocol.ScratchBudget{ .used = &used, .limit = sse.len + 64 * 1024 };
+        var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, path, "metadata", budget, false, &retained);
+        defer metadata.deinit();
+        var data = try EventData.init(std.testing.io, path, "data", budget, false, &retained);
+        defer data.deinit();
+        var rejection: Rejection = .{};
+        const accepted = try validate(std.testing.io, source.file, sse.len, &metadata, &data, .assistant_response, &rejection, .{});
+        try std.testing.expectEqual(@as(u64, 2), accepted.item_count);
+        try std.testing.expectEqual(@as(u64, 0), accepted.call_count);
+        try std.testing.expectEqual(@as(u64, 2), accepted.answer_length);
+        try std.testing.expectEqualSlices(u8, &protocol.contentDigest("ok"), &accepted.answer_digest);
+        var reader = try output_format.OutputMetadataReader.init(std.testing.io, metadata.file, accepted.item_count);
+        const item = (try reader.nextItem()).?;
         try std.testing.expectEqual(output_format.OutputItemKind.reasoning, item.kind);
         try std.testing.expectEqual(@as(u64, 0), item.ordinal);
         try std.testing.expectEqual(reasoning.len, item.length);
-        try std.testing.expectEqualStrings(reasoning, sse[@intCast(item.start)..][0..@intCast(item.length)]);
+        const retained_bytes = try std.testing.allocator.alloc(u8, reasoning.len);
+        defer std.testing.allocator.free(retained_bytes);
+        try std.testing.expectEqual(reasoning.len, try accepted.source.readPositionalAll(std.testing.io, retained_bytes, item.start));
+        try std.testing.expectEqualStrings(reasoning, retained_bytes);
         // Expected complete raw bytes include response-only and unknown fields,
         // not a decoded or normalized spelling of the reasoning strings.
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest(reasoning), &item.content_digest);

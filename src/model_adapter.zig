@@ -29,7 +29,7 @@ pub const observation_names: provider.ObservationNames = .{
     .alternate_model = "x-openai-model",
 };
 
-/// Interpretation borrows sealed bytes and the caller's metadata workspace.
+/// Interpretation borrows sealed bytes and the caller's metadata/data workspaces.
 /// It grants no settlement authority and neither closes nor transfers either
 /// resource. Rejections contain only local codes and structural coordinates.
 pub const OutputRejection = struct {
@@ -73,12 +73,13 @@ pub fn interpretOutput(
     source: std.Io.File,
     source_length: u64,
     metadata: *output_format.OutputMetadataWriter,
+    event_data: *Output.EventData,
     operation: output_format.ModelOperationKind,
     models: ModelObservations,
     faults: Output.Faults,
 ) OutputInterpretation {
     var rejection: Output.Rejection = .{};
-    const validated = Output.validate(io, source, source_length, metadata, operation, &rejection, faults) catch |err| return .{ .rejected = .{
+    const validated = Output.validate(io, source, source_length, metadata, event_data, operation, &rejection, faults) catch |err| return .{ .rejected = .{
         .reason = err,
         .code = Output.failureCode(err),
         .location = rejection,
@@ -220,7 +221,10 @@ test "provider interpretation preserves accepted bytes and rejects every model d
         const file = try tmp.dir.createFile(std.testing.io, "response", .{ .read = true });
         defer file.close(std.testing.io);
         try file.writeStreamingAll(std.testing.io, bytes);
-        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, .assistant_response, case.models, .{});
+        var data_used: std.atomic.Value(u64) = .init(0);
+        var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = bytes.len }, false, &retained);
+        defer event_data.deinit();
+        const interpreted = interpretOutput(std.testing.io, file, bytes.len, &metadata, &event_data, .assistant_response, case.models, .{});
         if (case.accepted) {
             try std.testing.expect(interpreted == .accepted);
             try std.testing.expectEqual(@as(u64, 2), interpreted.accepted.output.answer_length);
@@ -268,9 +272,9 @@ test "provider interpretation closes failure variants without granting settlemen
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     const item = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}}\n\n";
     const cases = [_]struct { bytes: []const u8, fault: bool = false, limit: u64 = 4096, code: []const u8, overflow: bool = false }{
-        .{ .bytes = overflow, .code = "malformed_provider_output" },
+        .{ .bytes = "data: " ++ overflow ++ "\n\n", .code = "malformed_provider_output" },
         .{ .bytes = "data: {\"type\":\"error\",\"code\":\"context_length_exceeded\"}\n\n", .code = "provider_context_overflow", .overflow = true },
-        .{ .bytes = "data: {\"type\":\"future.event\"}\n\n", .code = "unsupported_provider_output" },
+        .{ .bytes = "data: {\"type\":\"response.output_item.future\"}\n\n", .code = "unsupported_provider_output" },
         .{ .bytes = item, .fault = true, .code = "response_metadata_failed" },
         .{ .bytes = item, .limit = 0, .code = "response_metadata_exhausted" },
     };
@@ -282,7 +286,10 @@ test "provider interpretation closes failure variants without granting settlemen
         var retained: ?named_scratch.Owner = null;
         var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = case.limit }, false, &retained);
         defer metadata.deinit();
-        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, .assistant_response, .{}, .{ .metadata = case.fault });
+        var data_used: std.atomic.Value(u64) = .init(0);
+        var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &data_used, .limit = case.bytes.len }, false, &retained);
+        defer event_data.deinit();
+        const interpreted = interpretOutput(std.testing.io, source, case.bytes.len, &metadata, &event_data, .assistant_response, .{}, .{ .metadata = case.fault });
         try std.testing.expect(interpreted == .rejected);
         try std.testing.expectEqualStrings(case.code, interpreted.rejected.code);
         try std.testing.expectEqual(case.overflow, interpreted.rejected.kind == .context_overflow);
@@ -301,7 +308,9 @@ fn expectStreamFailure(bytes: []const u8, kind: execution.FailureKind, code: []c
     var retained: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, root[0..root_length], "metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
     defer metadata.deinit();
-    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, .assistant_response, .{}, .{});
+    var event_data = try Output.EventData.init(std.testing.io, root[0..root_length], "event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
+    defer event_data.deinit();
+    const result = interpretOutput(std.testing.io, source, bytes.len, &metadata, &event_data, .assistant_response, .{}, .{});
     try std.testing.expect(result == .rejected);
     try std.testing.expectEqual(kind, result.rejected.kind);
     try std.testing.expectEqualStrings(code, result.rejected.code);
@@ -2729,15 +2738,17 @@ test "compaction preparation appends request only trigger and replays asymmetric
     var retained_metadata: ?named_scratch.Owner = null;
     var metadata = try output_format.OutputMetadataWriter.init(std.testing.io, setup.root, "compact-prep-metadata", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
     defer metadata.deinit();
-    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, .compaction, .{}, .{})) {
+    var event_data = try Output.EventData.init(std.testing.io, setup.root, "compact-event-data", .{ .used = &metadata_used, .limit = 4096 }, false, &retained_metadata);
+    defer event_data.deinit();
+    const accepted = switch (interpretOutput(std.testing.io, source, sse.len, &metadata, &event_data, .compaction, .{}, .{})) {
         .accepted => |value| value,
         .rejected => return error.UnexpectedOutputRejection,
     };
     const result = accepted.output;
     try setup.submit("compact-later", "compact-later-key", session.slice(), "later host input");
     try setup.storage.settleModelSuccess(binding, &.{
-        .source = source,
-        .source_length = sse.len,
+        .source = result.source,
+        .source_length = result.source_length,
         .metadata = metadata.file,
         .item_count = result.item_count,
         .call_count = result.call_count,
