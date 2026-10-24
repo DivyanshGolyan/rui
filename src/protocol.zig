@@ -2684,3 +2684,4 @@ test "incremental ingress preserves grammar and releases both captures after lat
 // hillclimb nonce a4-debug-gate--1-1792811296
 // hillclimb nonce a4-debug-gate-0-1792811446
 // hillclimb nonce a4-debug-gate-1-1792811596
+// hillclimb nonce a4-debug-gate-2-1792811699
