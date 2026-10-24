@@ -620,13 +620,13 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
                 const io = std.Io.Threaded.global_single_threaded.io();
                 try output.writeStreamingAll(io, "Open https://auth.openai.com/codex/device and enter code: ");
                 try output.writeStreamingAll(io, code);
-                try output.writeStreamingAll(io, "\n");
+                try output.writeStreamingAll(io, "\n" ++ device_login_guidance);
             }
         }.display, loginInterrupted)
     else
         try exchange(init.io, struct {
             fn display(code: []const u8) !void {
-                std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n", .{code});
+                std.debug.print("Open https://auth.openai.com/codex/device and enter code: {s}\n" ++ device_login_guidance, .{code});
             }
         }.display, loginInterrupted);
     defer std.crypto.secureZero(u8, std.mem.asBytes(&tokens));
@@ -652,6 +652,16 @@ fn login(init: std.process.Init, args: []const []const u8, interactive: bool, co
     else
         "Rui: Existing provider default unchanged.\n");
 }
+
+// OpenAI shows a disabled device-code setting only after sign-in and MFA, so
+// say up front where to enable it (https://learn.chatgpt.com/docs/auth).
+const device_login_guidance =
+    \\The code signs Rui in to your ChatGPT account. Never share it.
+    \\If the page says device code login is off, press Ctrl+C here. Turn on device
+    \\code authorization for Codex in your ChatGPT security settings, or ask your
+    \\workspace admin to allow it. Then run rui auth login codex again.
+    \\
+;
 
 const LoginState = enum(u8) { cancellable, cancelled, publishing };
 var login_state = std.atomic.Value(LoginState).init(.cancellable);

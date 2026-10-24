@@ -31,11 +31,13 @@ The installer checks the download's SHA-256 digest and keeps your Stores, creden
 
 ## Start a conversation
 
-1. Sign in once with your Codex account and follow the device-code instructions:
+1. Sign in once with your ChatGPT account. Rui uses OpenAI's device code login, which you must enable first. Turn on device code authorization for Codex in your ChatGPT security settings. On a workspace account, an admin allows it in the workspace permissions instead. Then run:
 
 	```sh
 	rui auth login codex
 	```
+
+	Open the link it prints, sign in and enter the code. Never share the code. See [OpenAI's Codex sign-in guide](https://learn.chatgpt.com/docs/auth) if the setting is missing.
 
 2. Go to your project and start Rui:
 
