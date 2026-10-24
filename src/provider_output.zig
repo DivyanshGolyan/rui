@@ -879,6 +879,15 @@ pub const ReplayValidationCursor = struct {
             !std.mem.eql(u8, &self.call_fields[0].digest, &id_digest)) return error.CorruptStore;
     }
 
+    /// After a compatible item validates, report whether its replay must drop
+    /// `content`. Validation admits a nonempty reasoning `content` array only
+    /// as reasoning_text blocks: private evidence that is never replay input.
+    pub fn replaysReasoningText(self: *const ReplayValidationCursor) bool {
+        const kind = self.frames[0].get("type") catch unreachable;
+        const content = self.frames[0].get("content") catch unreachable;
+        return kind.is("reasoning") and content.shape == .array and content.length != 0;
+    }
+
     /// After advance completes, bind admission-certified fields to the exact
     /// decoded top-level strings. One token hasher and four results suffice;
     /// nested/open fields never acquire per-frame hashes or payload copies.

@@ -935,6 +935,7 @@ pub const Preparation = struct {
                     const identity = replay.reader.itemIdentity();
                     replay.validation.authenticateIdentity(identity.kind, identity.id_digest) catch return replay.reader.malformed();
                     if (incompatible) self.continuation_unavailable = true;
+                    if (!self.continuation_unavailable) replay.cursor.omit_content = replay.validation.replaysReasoningText();
                     replay.validated = true;
                 }
                 // Compatibility never excuses unauthenticated later items.
@@ -2535,17 +2536,22 @@ test "request preparation resumes large private replay validation before emissio
         try setup.submit("large-next", "large-next-key", session.slice(), "next");
         var item_buffer: [64 * 1024]u8 = undefined;
         var item = std.Io.Writer.fixed(&item_buffer);
-        try item.writeAll("{\"encrypted_content\":\"");
-        const window: [protocol.content_window_bytes]u8 = @splat('x');
-        for (0..5) |_| try item.writeAll(&window);
-        try item.writeAll("\",");
-        for (0..1000) |_| try item.writeAll("\"future\":{\"open\":[0,null]},");
-        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
-        try item.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
-        try item.writeAll(if (supported)
-            "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
-        else
-            "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
+        // The replayed item is the saved one without its reasoning text.
+        var replayed_buffer: [64 * 1024]u8 = undefined;
+        var replayed = std.Io.Writer.fixed(&replayed_buffer);
+        for ([_]*std.Io.Writer{ &item, &replayed }) |writer| {
+            try writer.writeAll("{\"encrypted_content\":\"");
+            const window: [protocol.content_window_bytes]u8 = @splat('x');
+            for (0..5) |_| try writer.writeAll(&window);
+            try writer.writeAll("\",");
+            for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
+            if (writer == &item) try writer.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}],");
+            try writer.writeAll("\"summary\":[{\"type\":\"summary_text\",\"text\":\"summary\",\"annotations\":[{\"type\":\"future\",\"type\":false}]}],");
+            try writer.writeAll(if (supported)
+                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}"
+            else
+                "\"id\":\"r\",\"type\":\"reasoning\",\"status\":true}");
+        }
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), "r", &.{});
         var successor = (try setup.storage.admitNextModelAttempt(.{})).?;
         const binding = try successor.permit.consume();
@@ -2582,7 +2588,8 @@ test "request preparation resumes large private replay validation before emissio
                     try std.testing.expect(supported);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], item.buffered()) != null);
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
                     break;
                 },
             }
@@ -2652,6 +2659,60 @@ test "request preparation authenticates the historical requested model binding" 
     try std.testing.expect(!setup.storage.isFenced());
     try std.testing.expect(retained == null);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "request preparation replays reasoning continuation without its private reasoning text" {
+    // Saved items stay exact; only the replayed request drops reasoning_text
+    // content, as the pinned first-party serializer does. Empty content has
+    // no reasoning text and stays.
+    const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
+        .{
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+        },
+        .{
+            .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+        },
+        .{
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+        },
+        .{
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"content\":[],\"contents\":[\"open\"],\"encrypted_content\":\"opaque\"}",
+            .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"content\":[],\"contents\":[\"open\"],\"encrypted_content\":\"opaque\"}",
+        },
+    };
+    for (cases) |case| for ([_][2]usize{ .{ 1, 1 }, .{ 7, 3 }, .{ 16384, 64 } }) |schedule| {
+        var setup: PreparationTestSetup = undefined;
+        try setup.init();
+        defer setup.close();
+        const session = try setup.configure("reasoning-text-config");
+        try setup.submit("reasoning-text-one", "reasoning-text-one", session.slice(), "original");
+        const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try setup.submit("reasoning-text-two", "reasoning-text-two", session.slice(), "next");
+        try settleComposedForTesting(&setup, source, "reasoning-text-output", .reasoning, case.saved, "r", &.{});
+        const binding = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try preparation.init(std.testing.io, try setup.storage.openHistoricalView(binding), setup.root, .{ .used = &used, .limit = 1024 * 1024 }, .{}, &retained);
+        defer if (preparation.active) preparation.cancel();
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 32768);
+        defer std.testing.allocator.free(result.bytes);
+        const body = try std.mem.concat(std.testing.allocator, u8, &.{
+            "{\"model\":\"model-a\",\"parallel_tool_calls\":false,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[",
+            "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"original\"}]},",
+            case.replayed,
+            ",{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"next\"}]}],\"tools\":[" ++ bash_tool_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
+        });
+        defer std.testing.allocator.free(body);
+        const expected = try requestGolden(setup.workspace, session.slice(), body);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, result.bytes);
+        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "private") == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    };
 }
 
 test "request preparation cancellation yields inside canonical proposal authentication" {

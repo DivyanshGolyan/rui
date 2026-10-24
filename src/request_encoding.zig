@@ -278,7 +278,11 @@ pub const ReplayCursor = struct {
     copy_buffer_offset: usize = 0,
     emitted: bool = false,
     omit_field: bool = false,
+    /// Set before copying a validated reasoning item whose `content` holds
+    /// private reasoning text. The saved item keeps that field unchanged.
+    omit_content: bool = false,
     key_matches: bool = true,
+    content_matches: bool = true,
     key_index: usize = 0,
     unicode_value: u21 = 0,
     unicode_digits: u3 = 0,
@@ -316,6 +320,7 @@ pub const ReplayCursor = struct {
         items_left: *usize,
     ) !ReplayProgress {
         const created_by = "created_by";
+        const content = "content";
         while (bytes_left.* != 0 and items_left.* != 0) switch (self.phase) {
             .open => {
                 try writer.write("{");
@@ -343,6 +348,7 @@ pub const ReplayCursor = struct {
                 items_left.* -= 1;
                 self.field_start = self.position;
                 self.key_matches = true;
+                self.content_matches = true;
                 self.key_index = 0;
                 _ = try self.take(source, bytes_left);
                 self.phase = .key;
@@ -351,7 +357,8 @@ pub const ReplayCursor = struct {
                 const byte = try self.take(source, bytes_left) orelse return error.UnexpectedJsonEnd;
                 switch (byte) {
                     '"' => {
-                        self.omit_field = self.key_matches and self.key_index == created_by.len;
+                        self.omit_field = (self.key_matches and self.key_index == created_by.len) or
+                            (self.omit_content and self.content_matches and self.key_index == content.len);
                         self.phase = .colon;
                     },
                     '\\' => self.phase = .key_escape,
@@ -401,7 +408,10 @@ pub const ReplayCursor = struct {
                 if (self.unicode_digits == 4) {
                     if (self.unicode_value <= std.math.maxInt(u8)) {
                         self.matchKeyByte(@intCast(self.unicode_value));
-                    } else self.key_matches = false;
+                    } else {
+                        self.key_matches = false;
+                        self.content_matches = false;
+                    }
                     self.phase = .key;
                 }
             },
@@ -550,8 +560,12 @@ pub const ReplayCursor = struct {
 
     fn matchKeyByte(self: *ReplayCursor, byte: u8) void {
         const created_by = "created_by";
+        const content = "content";
         if (self.key_matches and (self.key_index >= created_by.len or created_by[self.key_index] != byte)) {
             self.key_matches = false;
+        }
+        if (self.content_matches and (self.key_index >= content.len or content[self.key_index] != byte)) {
+            self.content_matches = false;
         }
         self.key_index += 1;
     }
