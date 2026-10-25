@@ -19,6 +19,7 @@ const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
+const signal_stack = @import("signal_stack.zig");
 const ExecutionSlot = server_execution.ExecutionSlot;
 const executionMain = server_execution.executionMain;
 
@@ -402,7 +403,7 @@ const Intake = struct {
         errdefer self.stopWorkers();
         for (&self.workers, &self.threads) |*worker, *thread| {
             worker.* = .{ .owner = self };
-            thread.* = try std.Thread.spawn(.{ .stack_size = intake_worker_stack_bytes }, Worker.run, .{worker});
+            thread.* = try signal_stack.spawn(.{ .stack_size = intake_worker_stack_bytes }, Worker.run, .{worker});
             self.started += 1;
         }
     }
@@ -938,7 +939,7 @@ pub fn serve(
     try intake.init(&host);
     defer intake.deinit();
     host.intake_wake = intake.wake[1];
-    const execution_thread = try std.Thread.spawn(.{}, executionMain, .{&host});
+    const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     provider_initialization_owned = false;
     defer {
         // Stop admitting new connections before releasing any Host-owned

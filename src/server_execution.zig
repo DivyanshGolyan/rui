@@ -14,6 +14,7 @@ const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
+const signal_stack = @import("signal_stack.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
 const Limits = server_host.Limits;
@@ -242,7 +243,7 @@ const Workspace = struct {
 pub fn executionMain(host: *Host) void {
     var auth_worker = AuthWorker{ .io = host.io, .authentication = host.authentication orelse undefined };
     const auth_thread: ?std.Thread = if (host.authentication != null)
-        std.Thread.spawn(.{}, AuthWorker.run, .{&auth_worker}) catch |err| {
+        signal_stack.spawn(.{}, AuthWorker.run, .{&auth_worker}) catch |err| {
             fenceDispatch(host, "authentication worker initialization", err);
             return;
         }
@@ -282,7 +283,7 @@ pub fn executionMain(host: *Host) void {
         .test_observation = host.test_observation,
     };
     const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
-        std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
+        signal_stack.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
             fenceDispatch(host, "capture writer initialization", err);
             return;
         }
