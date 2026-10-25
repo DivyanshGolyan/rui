@@ -62,6 +62,12 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
+    def test_http2_client_selects_its_own_tests(self):
+        result = select(["src/h2/Engine.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["test-h2"])
+        result = select(["src/h2/policy.zig"], "review", AVAILABLE)
+        self.assertEqual(result["targets"], ["test-h2", "test-logic"])
+
     def test_portable_roots_keep_their_native_owner_checks(self):
         for path in ("src/SessionInput.zig", "src/tools.zig"):
             result = select([path], "review", AVAILABLE)

@@ -146,6 +146,15 @@ pub fn build(b: *std.Build) void {
     );
     logic_test_step.dependOn(&run_logic_tests.step);
 
+    const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
+    if (addH2(b, target, .ReleaseSafe, pinned_transport)) |h2| {
+        const h2_tests = b.addTest(.{ .root_module = h2, .filters = if (test_filter) |filter| &.{filter} else &.{} });
+        const run_h2_tests = ci.run(h2_tests);
+        run_h2_tests.has_side_effects = true;
+        h2_test_step.dependOn(&run_h2_tests.step);
+        test_step.dependOn(&run_h2_tests.step);
+    }
+
     const renderer_allocation = b.addExecutable(.{
         .name = "rui-answer-renderer-allocation-test",
         .root_module = b.createModule(.{
@@ -507,6 +516,7 @@ pub fn build(b: *std.Build) void {
         "--check",
         "--ast-check",
     });
+    check_step.dependOn(h2_test_step);
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
@@ -979,8 +989,7 @@ fn configureTransport(
     target: std.Build.ResolvedTarget,
     pinned: PinnedTransport,
 ) void {
-    const enabled = (target.result.os.tag == .macos or target.result.os.tag == .linux) and
-        (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
+    const enabled = transportEnabled(target);
     const options = b.addOptions();
     options.addOption(bool, "enabled", enabled);
     options.addOption([]const u8, "revision", buildRevision(b));
@@ -1013,6 +1022,52 @@ fn configureTransport(
         compile.root_module.linkSystemLibrary("pthread", .{});
         compile.root_module.linkSystemLibrary("dl", .{});
     }
+}
+
+/// The HTTP/2 client module, linked against the pinned nghttp2 and OpenSSL,
+/// or null where the pinned transport is not built.
+fn addH2(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    pinned: PinnedTransport,
+) ?*std.Build.Module {
+    if (!transportEnabled(target)) return null;
+    const module = b.createModule(.{
+        .root_source_file = b.path("src/h2/h2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const bindings = addBindings(b, module, "h2_c",
+        \\#include <nghttp2/nghttp2.h>
+        \\#include <openssl/ssl.h>
+        \\#include <openssl/err.h>
+        \\#include <openssl/x509v3.h>
+        \\
+    );
+    bindings.addIncludePath(pinned.output.path(b, "include"));
+    module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
+    module.addObjectFile(pinned.output.path(b, "lib/libssl.a"));
+    module.addObjectFile(pinned.output.path(b, "lib/libcrypto.a"));
+    if (target.result.os.tag == .macos) {
+        module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
+        module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
+        module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
+        bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
+        bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
+        module.linkFramework("Security", .{});
+        module.linkFramework("CoreFoundation", .{});
+    } else {
+        module.linkSystemLibrary("pthread", .{});
+        module.linkSystemLibrary("dl", .{});
+    }
+    return module;
+}
+
+fn transportEnabled(target: std.Build.ResolvedTarget) bool {
+    return (target.result.os.tag == .macos or target.result.os.tag == .linux) and
+        (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
