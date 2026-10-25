@@ -88,6 +88,8 @@ RULES = (
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      ("test", "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration", "bash-integration"),
      "Bash execution, direct custody and process-crash recovery"),
+    (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
+    (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
     (("src/provider.zig", "src/transport_policy.zig", "src/provider_output.zig", "src/model_adapter.zig",
       "src/model_capability.zig", "src/failed_responses.zig"),
      ("test", "dispatch-integration", "transport-h2-integration"),
@@ -163,7 +165,7 @@ RULES = (
 )
 
 CHECK_COVERS = {
-    "test", "admission-integration", "dispatch-integration",
+    "test", "test-h2", "admission-integration", "dispatch-integration",
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
