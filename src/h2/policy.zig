@@ -137,7 +137,8 @@ pub const ErrorCode = enum(u32) {
 /// REFUSED_STREAM, so both proofs of non-processing arrive here as one.
 pub fn streamClosed(code: ErrorCode, facts: StreamFacts) Settle {
     if (facts.local) |cause| return .{ .end = cause };
-    if (code == .no_error and facts.final_seen and facts.end_stream_seen) return .{ .end = .complete };
+    // The whole response arrived; a reset after it loses nothing.
+    if (facts.final_seen and facts.end_stream_seen) return .{ .end = .complete };
     if (!facts.request_sent) return .reroute;
     if (code == .refused_stream and !facts.response_started) return replayOrRefused(facts);
     if (code == .no_error) return .{ .end = .protocol_error };
@@ -186,9 +187,11 @@ pub const LivenessFacts = struct {
 
 pub const LivenessAction = enum { none, ping, dead, close };
 
-/// One PING per quiet connection carrying streams; an unanswered PING
-/// declares it dead; an empty connection closes after `idle_close_ns`, or at
-/// once when its origin already keeps another idle one.
+/// For a ready or draining connection only: one still in setup has no
+/// liveness, and its connect timeout bounds it. One PING per quiet
+/// connection carrying streams; an unanswered PING declares it dead; an
+/// empty connection closes after `idle_close_ns`, or at once when its origin
+/// already keeps another idle one.
 pub fn liveness(facts: LivenessFacts, config: Liveness) LivenessAction {
     if (facts.streams == 0) {
         if (!facts.is_only_idle) return .close;
@@ -289,8 +292,9 @@ test "a stream closes as complete, a replay, a reroute or a failure" {
     const Row = struct { code: ErrorCode, facts: StreamFacts, settle: Settle };
     const rows = [_]Row{
         .{ .code = .no_error, .facts = answered, .settle = .{ .end = .complete } },
-        // A complete answer followed by RST_STREAM(NO_ERROR) is still complete.
+        // A complete answer stays complete whatever reset follows it.
         .{ .code = .no_error, .facts = with(answered, "replays", 2), .settle = .{ .end = .complete } },
+        .{ .code = .cancel, .facts = answered, .settle = .{ .end = .complete } },
         // A local cause wins over whatever nghttp2 reports.
         .{ .code = .no_error, .facts = with(answered, "local", Cause.sink_failed), .settle = .{ .end = .sink_failed } },
         .{ .code = .cancel, .facts = with(sent_stream, "local", Cause.rejected_headers), .settle = .{ .end = .rejected_headers } },

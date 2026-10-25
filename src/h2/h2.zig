@@ -12,9 +12,9 @@ const policy = @import("policy.zig");
 pub const nghttp2_version = "1.70.0";
 pub const openssl_version = "3.6.3";
 
-/// The linked nghttp2 and OpenSSL must be exactly the pinned versions, so a
-/// build that picked up other headers or archives fails at startup instead
-/// of behaving differently.
+/// The linked nghttp2 and OpenSSL must be exactly the pinned versions. Its
+/// caller runs this at startup, so a build that picked up other headers or
+/// archives fails there instead of behaving differently.
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
