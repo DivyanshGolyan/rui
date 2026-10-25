@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Store, recovery and upgrade paths that need the strict landing gates.
-
-The previous-release upgrade workflow repeats these patterns as its path
-filter; test_landing.py keeps both lists identical.
-"""
+"""Store, recovery and upgrade paths that need the strict landing gates."""
 import fnmatch
 import sys
 

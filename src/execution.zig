@@ -286,8 +286,10 @@ pub const CustodyRecord = struct {
 pub const CustodyPool = struct {
     records: []CustodyRecord,
 
+    /// Records start empty, as `.{}` or all zero bytes, so fresh pages
+    /// need no initializing pass and an unused record never becomes resident.
     pub fn initialize(records: []CustodyRecord) CustodyPool {
-        for (records) |*record| record.* = .{};
+        for (records) |*record| std.debug.assert(record.state.load(.monotonic) == .free);
         return .{ .records = records };
     }
 
@@ -533,7 +535,7 @@ pub const CustodyPool = struct {
 };
 
 test "custody remains occupied through detachment and rejects late delivery after reuse" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
     var first_permit = attempt.DispatchPermit{ .binding = .{
@@ -593,7 +595,7 @@ test "custody remains occupied through detachment and rejects late delivery afte
 }
 
 test "custody attach consumes one permit only after validating its reservation" {
-    var records: [2]CustodyRecord = undefined;
+    var records: [2]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
     const second = pool.reserve().?;
@@ -652,7 +654,7 @@ test "custody attach consumes one permit only after validating its reservation" 
 }
 
 test "unused reservation returns without an Attempt binding" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     try pool.checkReserved(token);
@@ -672,7 +674,7 @@ test "unused reservation returns without an Attempt binding" {
 }
 
 test "model and Action Attempt bindings cannot cross custody paths" {
-    var records: [2]CustodyRecord = undefined;
+    var records: [2]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const model_token = pool.reserve().?;
     var model_permit = attempt.DispatchPermit{ .binding = .{
@@ -736,7 +738,7 @@ test "model and Action Attempt bindings cannot cross custody paths" {
 }
 
 test "model launch authority requires every identity field" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     var permit = attempt.DispatchPermit{ .binding = .{
@@ -765,7 +767,7 @@ test "model launch authority requires every identity field" {
 }
 
 test "action launch authority requires every identity field including turn" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     var permit = attempt.ActionDispatchPermit{ .binding = .{
@@ -811,7 +813,7 @@ test "action launch authority requires every identity field including turn" {
 }
 
 test "detached custody rejects reuse until cleanup completes" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     var permit = attempt.DispatchPermit{ .binding = .{
@@ -845,7 +847,7 @@ test "detached custody rejects reuse until cleanup completes" {
 test "bounded custody sequences preserve invariants after every operation" {
     // Success on one record: every completed operation re-checks.
     {
-        var records: [1]CustodyRecord = undefined;
+        var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
         const token = pool.reserve().?;
         try pool.checkReserved(token);
@@ -867,7 +869,7 @@ test "bounded custody sequences preserve invariants after every operation" {
     // Cancellation before attachment: the freed record rejects attachment
     // without consuming the fresh permit.
     {
-        var records: [1]CustodyRecord = undefined;
+        var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
         const token = pool.reserve().?;
         try pool.checkReserved(token);
@@ -881,7 +883,7 @@ test "bounded custody sequences preserve invariants after every operation" {
     // Double claims then reuse: one-shot authority and delivery hold, and a
     // stale attach after reuse leaves the new reservation untouched.
     {
-        var records: [1]CustodyRecord = undefined;
+        var records: [1]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
         const first = pool.reserve().?;
         var first_permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 3, .operation_id = 3, .attempt_ordinal = 3 } };
@@ -906,7 +908,7 @@ test "bounded custody sequences preserve invariants after every operation" {
     // Two-record interference: a consumed permit cannot attach the sibling,
     // and detaching one record leaves the other attached.
     {
-        var records: [2]CustodyRecord = undefined;
+        var records: [2]CustodyRecord = @splat(.{});
         var pool = CustodyPool.initialize(&records);
         const first = pool.reserve().?;
         const second = pool.reserve().?;
@@ -932,7 +934,7 @@ test "bounded custody sequences preserve invariants after every operation" {
 }
 
 test "stale tokens after reuse leave the new owner unchanged" {
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const first = pool.reserve().?;
     var first_permit = attempt.DispatchPermit{ .binding = .{
@@ -978,7 +980,7 @@ test "failed reclamation keeps custody occupied until the same owner succeeds" {
     const primary = try tmp.dir.createFile(std.testing.io, "owned", .{ .read = true });
     var used: std.atomic.Value(u64) = .init(4);
     var gate: std.atomic.Value(bool) = .init(true);
-    var records: [1]CustodyRecord = undefined;
+    var records: [1]CustodyRecord = @splat(.{});
     var pool = CustodyPool.initialize(&records);
     const token = pool.reserve().?;
     var permit = attempt.DispatchPermit{ .binding = .{
@@ -1063,7 +1065,7 @@ test "model preparation failure retains resources before considering semantic de
 test "model prepared routes preserve one shot handoff across rejection and reuse" {
     inline for (.{ .suppressed, .superseded, .unexpected }) |failure| {
         for ([_]bool{ false, true }) |authenticated| {
-            var records: [1]CustodyRecord = undefined;
+            var records: [1]CustodyRecord = @splat(.{});
             var pool = CustodyPool.initialize(&records);
             const token = pool.reserve().?;
             var permit = attempt.DispatchPermit{ .binding = .{ .turn_id = 7, .operation_id = 19, .attempt_ordinal = 3 } };

@@ -14,8 +14,11 @@ const retry_policy = @import("retry_policy.zig");
 const store_module = @import("store.zig");
 const stderr = @import("stderr.zig");
 const server_host = @import("server_host.zig");
+const signal_stack = @import("signal_stack.zig");
 const Host = server_host.Host;
 const AuthWorker = server_host.AuthWorker;
+const mapZeroed = server_host.mapZeroed;
+const unmapZeroed = server_host.unmapZeroed;
 const Limits = server_host.Limits;
 const Faults = server_host.Faults;
 const SettlementTrace = server_host.SettlementTrace;
@@ -237,21 +240,31 @@ const Workspace = struct {
     model_preparation: model_adapter.Preparation,
     bash_window: [bash.copy_window_bytes]u8,
     capture_buffers: provider.CaptureWriter.Buffers,
+    /// Written only in a Host with managed authentication.
+    auth_worker: AuthWorker,
 };
 
 pub fn executionMain(host: *Host) void {
-    var auth_worker = AuthWorker{ .io = host.io, .authentication = host.authentication orelse undefined };
-    const auth_thread: ?std.Thread = if (host.authentication != null)
-        std.Thread.spawn(.{}, AuthWorker.run, .{&auth_worker}) catch |err| {
+    const workspace = mapZeroed(Workspace, 1) catch |err| {
+        fenceDispatch(host, "execution workspace allocation", err);
+        return;
+    };
+    defer unmapZeroed(workspace);
+    const auth_worker: ?*AuthWorker = if (host.authentication) |authentication| worker: {
+        workspace[0].auth_worker = .{ .io = host.io, .authentication = authentication };
+        break :worker &workspace[0].auth_worker;
+    } else null;
+    const auth_thread: ?std.Thread = if (auth_worker) |worker|
+        signal_stack.spawn(.{}, AuthWorker.run, .{worker}) catch |err| {
             fenceDispatch(host, "authentication worker initialization", err);
             return;
         }
     else
         null;
-    if (auth_thread != null) host.auth_worker = &auth_worker;
+    host.auth_worker = auth_worker;
     defer if (auth_thread) |thread| {
         host.auth_worker = null;
-        auth_worker.stop(thread);
+        auth_worker.?.stop(thread);
     };
     // Zero bytes are a free slot and an empty Turn entry, so fresh pages
     // need no initializing pass and an idle slot never becomes resident.
@@ -269,11 +282,6 @@ pub fn executionMain(host: *Host) void {
         host.turn_states = .{};
         unmapZeroed(turn_states);
     }
-    const workspace = mapZeroed(Workspace, 1) catch |err| {
-        fenceDispatch(host, "execution workspace allocation", err);
-        return;
-    };
-    defer unmapZeroed(workspace);
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
         .buffers = &workspace[0].capture_buffers,
@@ -282,7 +290,7 @@ pub fn executionMain(host: *Host) void {
         .test_observation = host.test_observation,
     };
     const capture_thread: ?std.Thread = if (host.provider_endpoint != null)
-        std.Thread.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
+        signal_stack.spawn(.{}, provider.CaptureWriter.run, .{&capture_writer}) catch |err| {
             fenceDispatch(host, "capture writer initialization", err);
             return;
         }
@@ -771,28 +779,6 @@ fn cancelSupersededTransfers(
         },
         .free, .bash_preparing, .bash, .bash_prepared_cleanup, .named_scratch => {},
     };
-}
-
-/// Returns `count` items in fresh anonymous pages: every byte is zero and no
-/// page is resident until first written. Allocator.alloc promises neither,
-/// because ReleaseSafe fills new memory with 0xAA and an init loop writes
-/// every page, so callers whose empty state is all zero bytes use this.
-fn mapZeroed(comptime T: type, count: usize) ![]T {
-    if (count == 0) return &.{};
-    const bytes = try std.posix.mmap(
-        null,
-        try std.math.mul(usize, @sizeOf(T), count),
-        .{ .READ = true, .WRITE = true },
-        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-        -1,
-        0,
-    );
-    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
-}
-
-fn unmapZeroed(items: anytype) void {
-    if (items.len == 0) return;
-    std.posix.munmap(@alignCast(std.mem.sliceAsBytes(items)));
 }
 
 test "zeroed pages are free slots and empty Turn entries" {
@@ -1610,7 +1596,7 @@ fn launchPreparedRequest(
     active.transfer.start(host.provider_endpoint.?, request.*, binding, .{
         .ca_file = host.provider_ca_file,
         .extra_headers = headers.slice(),
-        .observation_names = model_adapter.observation_names,
+        .observation_names = &model_adapter.observation_names,
         .turn_state = if (active.turn_state) |*capture| capture.sink() else null,
         .inactivity_seconds = @intCast(host.limits.provider_inactivity_seconds),
         .request_read_fault = host.faults.request_read,
@@ -2206,7 +2192,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
     // the worker publishes and with either actual result. No Store or reactor
     // may be touched; the request and credential lease remain native owners.
     for ([_]bool{ false, true }) |ready| {
-        var records: [1]execution.CustodyRecord = undefined;
+        var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = io,
             .allocator = std.testing.allocator,
@@ -2311,7 +2297,7 @@ test "HTTP error capture retires before execution custody" {
     for (0..3) |kind| {
         var used: std.atomic.Value(u64) = .init(17);
         const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
-        var records: [1]execution.CustodyRecord = undefined;
+        var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = io,
             .allocator = std.testing.allocator,
@@ -2411,7 +2397,7 @@ test "cleanup publication follows complete execution retirement" {
     var boundary: Boundary = .{};
     var vtable = std.testing.io.vtable.*;
     vtable.now = Boundary.now;
-    var records: [1]execution.CustodyRecord = undefined;
+    var records: [1]execution.CustodyRecord = @splat(.{});
     var host = Host{
         .io = .{ .userdata = &boundary, .vtable = &vtable },
         .allocator = std.testing.allocator,
@@ -2473,7 +2459,7 @@ test "cleanup publication follows complete execution retirement" {
     try workspace.set(root);
     var used: std.atomic.Value(u64) = .init(0);
     const budget = protocol.ScratchBudget{ .used = &used, .limit = 4096 };
-    var entries: [2]output_retention.Entry = undefined;
+    var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     host.retention = &retention;
@@ -2590,7 +2576,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
     const secondary = try scratch.openFile(std.testing.io, "named-owner.tmp", .{});
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
-    var records: [1]execution.CustodyRecord = undefined;
+    var records: [1]execution.CustodyRecord = @splat(.{});
     var host = Host{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -2670,7 +2656,7 @@ test "named scratch retry releases custody through the shutdown owner path" {
 }
 
 test "execution slots agree with custody across the complete population" {
-    var records: [2]execution.CustodyRecord = undefined;
+    var records: [2]execution.CustodyRecord = @splat(.{});
     var custody = execution.CustodyPool.initialize(&records);
 
     var model_permit = store_module.DispatchPermit{ .binding = .{
@@ -2778,7 +2764,7 @@ test "no-work admission restores only its temporary custody reservation" {
     const Kind = enum { bash, retry, message, tool_continuation };
     inline for (std.meta.tags(Kind)) |kind| {
         for ([_]bool{ false, true }) |with_sibling| {
-            var records: [3]execution.CustodyRecord = undefined;
+            var records: [3]execution.CustodyRecord = @splat(.{});
             var host = Host{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
@@ -2882,7 +2868,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
                 try std.testing.expect(storage.isFenced());
             }
 
-            var records: [3]execution.CustodyRecord = undefined;
+            var records: [3]execution.CustodyRecord = @splat(.{});
             var host = Host{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,
@@ -2934,7 +2920,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
 }
 
 test "closed Bash delivery retains its payload with detached custody" {
-    var records: [2]execution.CustodyRecord = undefined;
+    var records: [2]execution.CustodyRecord = @splat(.{});
     var lease = platform.StoreLease{
         .io = std.testing.io,
         .paths = .{},
@@ -3012,7 +2998,7 @@ test "closed Bash delivery retains its payload with detached custody" {
 }
 
 test "closed Bash payloads keep their typed binding identity" {
-    var records: [2]execution.CustodyRecord = undefined;
+    var records: [2]execution.CustodyRecord = @splat(.{});
     var custody = execution.CustodyPool.initialize(&records);
     const now = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
 
@@ -3111,7 +3097,7 @@ test "preparing slots belong to their live preparations" {
     var preparation_active = true;
     defer if (preparation_active) preparation.cancel();
 
-    var records: [1]execution.CustodyRecord = undefined;
+    var records: [1]execution.CustodyRecord = @splat(.{});
     var custody = execution.CustodyPool.initialize(&records);
     // A valid slot/custody binding for a different Attempt B: internally
     // consistent, but it does not belong to the live preparation.
@@ -3203,7 +3189,7 @@ test "retained named scratch blocks its slot until the same owner reclaims" {
     const secondary = try scratch.openFile(std.testing.io, "named-direct.tmp", .{});
     var scratch_used: std.atomic.Value(u64) = .init(9);
     var removal_gate: std.atomic.Value(bool) = .init(true);
-    var records: [1]execution.CustodyRecord = undefined;
+    var records: [1]execution.CustodyRecord = @splat(.{});
     var host = Host{
         .io = std.testing.io,
         .allocator = std.testing.allocator,
@@ -3282,7 +3268,7 @@ test "provider metadata uses shared scratch reclamation without widening its lim
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     const root_budget = protocol.ScratchBudget{ .used = &used, .limit = 104 };
-    var entries: [2]output_retention.Entry = undefined;
+    var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, root_budget, &entries);
     defer retention.cleanupAll();
 
@@ -3337,7 +3323,7 @@ test "Host fences dispose admitted preparation without touching canonical state"
     var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
-        var records: [1]execution.CustodyRecord = undefined;
+        var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
@@ -3389,7 +3375,7 @@ test "Host fences dispose a sealed request before native transfer construction" 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
-        var records: [1]execution.CustodyRecord = undefined;
+        var records: [1]execution.CustodyRecord = @splat(.{});
         var host = Host{
             .io = std.testing.io,
             .allocator = std.testing.allocator,
@@ -3446,7 +3432,7 @@ test "Host fences discard prepared Bash without settling and retain failed clean
     };
     inline for (.{ "dispatch_fenced", "execution_shutdown", "effect_shutdown" }) |flag| {
         for ([_]bool{ false, true }) |fail_cleanup| {
-            var records: [1]execution.CustodyRecord = undefined;
+            var records: [1]execution.CustodyRecord = @splat(.{});
             var host = Host{
                 .io = std.testing.io,
                 .allocator = std.testing.allocator,

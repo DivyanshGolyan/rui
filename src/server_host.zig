@@ -290,6 +290,28 @@ pub const AuthWorker = struct {
     }
 };
 
+/// Returns `count` items in fresh anonymous pages: every byte is zero and no
+/// page is resident until first written. Allocator.alloc promises neither,
+/// because ReleaseSafe fills new memory with 0xAA and an init loop writes
+/// every page, so callers whose empty state is all zero bytes use this.
+pub fn mapZeroed(comptime T: type, count: usize) ![]T {
+    if (count == 0) return &.{};
+    const bytes = try std.posix.mmap(
+        null,
+        try std.math.mul(usize, @sizeOf(T), count),
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+}
+
+pub fn unmapZeroed(items: anytype) void {
+    if (items.len == 0) return;
+    std.posix.munmap(@alignCast(std.mem.sliceAsBytes(items)));
+}
+
 pub fn fenceDispatch(host: *Host, phase: []const u8, err: anyerror) void {
     host.launch_mutex.lockUncancelable(host.io);
     const already_shutting_down = host.effect_shutdown.swap(true, .acq_rel);
@@ -754,7 +776,7 @@ test "inspection counts held custody, not an in-flight admission reservation" {
     // The execution owner reserves before each admission probe and releases
     // when nothing is runnable. Inspection reads from another thread, so it
     // must not report that probe as a second custody beside gated cleanup.
-    var records: [2]execution.CustodyRecord = undefined;
+    var records: [2]execution.CustodyRecord = @splat(.{});
     var host = Host{
         .io = std.testing.io,
         .allocator = std.testing.allocator,

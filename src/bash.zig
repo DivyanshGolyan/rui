@@ -1491,7 +1491,7 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
-    var entries: [8]output_retention.Entry = undefined;
+    var entries: [8]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     // Descriptors the Host itself inherited without close-on-exec still reach
@@ -1603,7 +1603,7 @@ test "output publication closes producer aliases before making output evictable"
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 4 };
-    var entries: [2]output_retention.Entry = undefined;
+    var entries: [2]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     try std.testing.expect(budget.charge(4));
@@ -1779,7 +1779,7 @@ test "results show only nonempty stream sections and mark truncation" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var used: std.atomic.Value(u64) = .init(0);
     const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
-    var entries: [16]output_retention.Entry = undefined;
+    var entries: [16]output_retention.Entry = @splat(.{});
     var retention = output_retention.Queue.initialize(std.testing.io, root, budget, &entries);
     defer retention.cleanupAll();
     // Full-output paths for truncated streams are covered natively by the

@@ -19,12 +19,12 @@ const provider_selection = @import("provider_selection.zig");
 const protocol = @import("protocol.zig");
 const retry_policy = @import("retry_policy.zig");
 const server = @import("server.zig");
+const signal_stack = @import("signal_stack.zig");
 const product_defaults = @import("product_defaults.zig");
 
 // Zig otherwise reserves a 256 KiB alternate signal stack as static TLS, and
 // glibc zeroes every thread's TLS block, so each thread kept it resident.
-// The crash handler then runs on the faulting stack: every segfault still
-// reports, but a stack overflow ends without a trace.
+// signal_stack.zig gives each Rui thread one in fresh pages instead.
 pub const std_options: std.Options = .{
     .signal_stack_size = null,
     .log_scope_levels = &.{.{ .scope = .vaxis, .level = .info }},
@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn run(init: std.process.Init) !void {
+    try signal_stack.attachMain();
     const allocator = std.heap.c_allocator;
     const raw_args = try init.minimal.args.toSlice(init.arena.allocator());
     const args = try allocator.alloc([]const u8, raw_args.len);

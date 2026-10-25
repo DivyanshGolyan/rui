@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
+from platform_boundary import mac_specific
 from strict_paths import strict
 
 
@@ -171,6 +172,15 @@ CHECK_COVERS = {
 }
 
 
+# Files that configure or prune build caches, or the proof that they never cache acceptance.
+CACHE_POLICY = {
+    "build.zig", ".github/actions/setup/action.yml", ".github/scripts/prune-caches.cjs",
+    ".github/workflows/cache-maintenance.yml", ".github/workflows/check.yml",
+    ".github/workflows/previous-release-upgrade.yml", ".github/workflows/qualify-macos.yml",
+    ".github/workflows/release.yml", "tests/ci/cache_execution.py",
+}
+
+
 # Targets whose PTY oracles decode screens with pyte (tests/integration/terminal_screen.py).
 TERMINAL_TARGETS = {"check", "check-full", "terminal-restoration-integration",
                     "canonical-failure-integration", "host-launch-integration",
@@ -264,6 +274,10 @@ def select(paths, phase, available):
             checks.discard("check")
         if checks & {"check", "check-full"}:
             checks -= CHECK_COVERS
+    # Linux predicts Mac except where code may differ by platform.
+    mac_required = phase == "review" and any(mac_specific(path) for path in paths)
+    if mac_required:
+        reasons.add("Mac-specific path: PR runs Mac Selected (tests/ci/platform_boundary.py)")
     if phase == "development":
         # Development does not replace final boundary/native acceptance.
         targets = {"test-logic"} if targets else set()
@@ -273,14 +287,13 @@ def select(paths, phase, available):
         # are not selected separately.
         native_targets.discard("check-full")
         reasons.add("Mac check-full: daily macOS qualification")
-    cache_execution_checks = phase == "review" and any(
-        path == "build.zig" or path.startswith(".github/") or path == "tests/ci/cache_execution.py"
-        for path in paths)
+    cache_execution_checks = phase == "review" and any(path in CACHE_POLICY for path in paths)
     missing = (targets | native_targets) - available
     if missing:
         raise ValueError(f"Selected targets absent from build.zig: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
+            "mac_required": mac_required,
             # Store, recovery and upgrade changes fail for real; never rerun them.
             "retry": not strict(paths),
             "cache_execution_checks": cache_execution_checks,

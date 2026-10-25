@@ -1,4 +1,5 @@
 """Exercise the compiled handoff through the real restore and gate drivers."""
+import contextlib
 import copy
 import hashlib
 import io
@@ -173,12 +174,16 @@ else:
         build_artifact.restore('101', ['test'])
         # A retryable shard reports its failure, reruns once and passes.
         (self.root / 'flaky').touch()
-        self.assertEqual(self.gates('--retry', targets='["test-logic"]'), ['producer'])
+        # Capture the retry's ::warning so this job does not annotate a fake failure.
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.gates('--retry', targets='["test-logic"]'), ['producer'])
+        self.assertIn('::warning::test-logic failed (exit 9); one automatic retry', output.getvalue())
         summary = (self.root / 'summary').read_text()
         self.assertIn('test-logic failed (exit 9); one automatic retry', summary)
         self.assertIn('test-logic passed on its automatic retry after failing', summary)
         # A persistent failure keeps the gate's own exit after one retry.
-        with patch.dict(os.environ, GATE_EXIT='23'), self.assertRaises(SystemExit) as failure:
+        with patch.dict(os.environ, GATE_EXIT='23'), self.assertRaises(SystemExit) as failure, \
+                contextlib.redirect_stdout(io.StringIO()):
             self.gates('--retry', targets='["test-logic"]')
         self.assertEqual(failure.exception.code, 23)
         self.assertEqual((self.root / 'gates').read_text().splitlines(), ['producer'] * 2)

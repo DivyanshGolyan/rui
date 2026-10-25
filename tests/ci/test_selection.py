@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import RENDERER_HARNESSES, execution_batches, select, setup_requirements
+from select_tests import CACHE_POLICY, RENDERER_HARNESSES, execution_batches, select, setup_requirements
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -79,6 +79,16 @@ class SelectionTest(unittest.TestCase):
         for family in ("targets", "native_targets"):
             self.assertEqual(result[family], ["admission-debug-integration", "check", "test-full", "test-logic"])
         self.assertTrue(result["native_required"])
+
+    def test_test_full_runs_beside_a_full_native_suite(self):
+        # test-full holds only the real-time witness; check or check-full runs the rest.
+        for path in ("src/client.zig", "src/ResponseTiming.zig", "build.zig", "build.zig.zon",
+                     "install.sh", ".github/actions/setup/action.yml"):
+            with self.subTest(path=path):
+                targets = set(select([path], "review", AVAILABLE)["targets"])
+                self.assertIn("test-full", targets)
+                self.assertTrue(targets & {"check", "check-full"})
+        self.assertIn("check-full", NATIVE)
 
     def test_frontend_alone_selects_logic_and_pty_callers_not_check(self):
         pty = ["canonical-failure-integration", "terminal-restoration-integration"]
@@ -585,7 +595,9 @@ class SelectionTest(unittest.TestCase):
                      ".github/workflows/cache-maintenance.yml", ".github/workflows/qualify-macos.yml",
                      ".github/scripts/prune-caches.cjs"):
             self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
-        self.assertFalse(select(["src/store.zig"], "review", AVAILABLE)["cache_execution_checks"])
+        self.assertEqual([path for path in CACHE_POLICY if not Path(path).is_file()], [])
+        for path in ("src/store.zig", ".github/workflows/auto-land.yml", ".github/workflows/renderer-contracts.yml"):
+            self.assertFalse(select([path], "review", AVAILABLE)["cache_execution_checks"])
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
         result = subprocess.run(["node", "--test", "tests/ci/cache_maintenance.test.cjs"],

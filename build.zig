@@ -123,10 +123,26 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
-    const run_full_tests = ci.run(tests);
+    // Selection pairs test-full with check or check-full, which already run every
+    // other native test, so this binary contains only the real-time witness.
+    const deadline_witness = b.addTest(.{
+        .name = "deadline-witness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+        .filters = &.{test_filter orelse "Host processing wait does not consume response transfer inactivity"},
+    });
+    configureSqlite(b, deadline_witness);
+    configureBashPlatform(b, deadline_witness);
+    configureHostLaunch(b, deadline_witness);
+    configureTerminalEditor(b, deadline_witness);
+    configureTransport(b, deadline_witness, target, pinned_transport);
+    const run_full_tests = ci.run(deadline_witness);
     run_full_tests.has_side_effects = true;
     run_full_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "1");
-    const full_test_step = b.step("test-full", "Run native tests including the real 60-second client deadline witness");
+    const full_test_step = b.step("test-full", "Run the real 60-second client deadline witness");
     full_test_step.dependOn(&run_full_tests.step);
 
     const logic_tests = b.addTest(.{
@@ -181,6 +197,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     configureTerminalEditor(b, terminal_notice);
+
+    const signal_stack_probe = ci.run(b.addExecutable(.{
+        .name = "rui-signal-stack-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/signal_stack_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    }));
+    signal_stack_probe.has_side_effects = true;
+    test_step.dependOn(&signal_stack_probe.step);
 
     const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
@@ -536,6 +563,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileInput(ci.path(release));
     fast_integrations.step.dependOn(&run_evaluator_host.step);
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
+    fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
 
     const full_check_step = b.step(
