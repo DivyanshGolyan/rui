@@ -284,6 +284,9 @@ pub fn executionMain(host: *Host) void {
     }
     var capture_writer = provider.CaptureWriter{
         .io = host.io,
+        .budget = host.retention.sharedBudget().narrowed(
+            if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
+        ),
         .buffers = &workspace[0].capture_buffers,
         .test_gate_path = host.faults.response_capture_gate_path,
         .test_gate_min_written_bytes = host.faults.response_capture_gate_min_written_bytes,
@@ -685,7 +688,7 @@ test "receive advancement serves paused siblings across recurring queue pressure
         }
     };
     var buffers: provider.CaptureWriter.Buffers = undefined;
-    var writer = provider.CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = provider.CaptureWriter{ .io = std.testing.io, .budget = undefined, .buffers = &buffers };
     var host: Host = undefined;
     host.capture_writer = &writer;
     host.faults = .{};
@@ -1340,15 +1343,12 @@ fn beginAdmittedAttempt(
         finishCustodyNow(host, slot, token);
         return .admitted;
     };
-    const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
-    );
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
         view,
         host.lease.paths.scratch.slice(),
-        request_budget,
+        host.capture_writer.?.budget,
         .{
             .managed_route = host.authentication != null,
             .first_step = host.faults.request_first_step,
@@ -1432,7 +1432,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
             if (active.cancelled) {
-                active.request.deinit();
+                active.request.deinit(host.io, host.capture_writer.?.budget);
                 finishCustodyNow(host, slot, active.owner.token);
             } else {
                 active.requested = true;
@@ -1509,7 +1509,7 @@ fn advanceAuthentication(host: *Host, reactor: *provider.Reactor, slot: *Executi
     switch (decision) {
         .launch => launchPreparedRequest(host, reactor, slot, owner, &request, result.?.ready),
         .abandon, .settle_authentication_failure => {
-            request.deinit();
+            request.deinit(host.io, host.capture_writer.?.budget);
             if (decision == .settle_authentication_failure)
                 settleUnansweredFailure(host, owner.token, owner.binding, model_adapter.authenticationFailureCode(result.?.failed), .ordinary);
             finishCustodyNow(host, slot, owner.token);
@@ -1556,16 +1556,13 @@ fn launchPreparedRequest(
     const token = owner.token;
     const binding = owner.binding;
     if (!host.launchAllowed()) {
-        request.deinit();
+        request.deinit(host.io, host.capture_writer.?.budget);
         finishCustodyNow(host, slot, token);
         return;
     }
-    const request_budget = host.retention.sharedBudget().narrowed(
-        if (host.faults.request_scratch_acquire) 0 else host.limits.request_scratch_limit_bytes,
-    );
     var retained_response: ?named_scratch.Owner = null;
     if (host.faults.provider_prepare) {
-        request.deinit();
+        request.deinit(host.io, host.capture_writer.?.budget);
         settleUnansweredFailure(host, token, binding, "provider_transport_failure", failureClass(host, .temporary, null, null));
         finishCustodyNow(host, slot, token);
         return;
@@ -1578,7 +1575,7 @@ fn launchPreparedRequest(
         const replay = host.turn_states.replay(binding.turn_id, account);
         turn_state = .{ .states = &host.turn_states, .turn_id = binding.turn_id, .epoch = replay.epoch };
         headers.init(host.provider_endpoint.?, host.provider_ca_file, host.authentication.?, value, request.session_affinity, replay.value) catch |err| {
-            request.deinit();
+            request.deinit(host.io, host.capture_writer.?.budget);
             fenceDispatch(host, "provider preparation", err);
             finishCustodyNow(host, slot, token);
             return;
@@ -1604,8 +1601,8 @@ fn launchPreparedRequest(
         .response_unlink_fault = host.faults.response_unlink,
         .response_write_fault = host.faults.response_write,
         .completion_identity_fault = host.faults.completion_identity_fault,
-    }, host.capture_writer.?, host.lease.paths.scratch.slice(), request_budget, &retained_response) catch |err| {
-        request.deinit();
+    }, host.capture_writer.?, host.lease.paths.scratch.slice(), &retained_response) catch |err| {
+        request.deinit(host.io, host.capture_writer.?.budget);
         if (retained_response) |retained| {
             host.custody.detach(token) catch unreachable;
             slot.* = .{ .named_scratch = .{
@@ -1698,7 +1695,7 @@ fn completeTransfer(
         writeTestTrace(host, &trace, &publication);
     }
     var error_response: execution.ErrorResponse = .ordinary;
-    var answered_response: ?provider.ResponseCapture = null;
+    var answered_response: ?provider.SealedResponse = null;
     var http_status: ?u16 = null;
     switch (completion.outcome) {
         .transport_finished => |evidence| {
@@ -1977,7 +1974,7 @@ fn shutdownExecution(
             finishCustodyNow(host, slot, active.token);
         },
         .model_authenticating => |*active| {
-            active.request.deinit();
+            active.request.deinit(host.io, host.capture_writer.?.budget);
             finishCustodyNow(host, slot, active.owner.token);
         },
         // Shutdown saves no failure: the claimed Attempt stays uncertain
@@ -2215,20 +2212,20 @@ test "authentication handoff borrows the sole credential lease and releases it o
         const input = try tmp.dir.openFile(io, "request", .{});
         try tmp.dir.deleteFile(io, "request");
         host.scratch_used.store(4, .release);
+        var writer = provider.CaptureWriter{ .io = io, .budget = .{ .used = &host.scratch_used, .limit = 4 }, .buffers = undefined };
+        host.capture_writer = &writer;
         var slot = ExecutionSlot{ .model_authenticating = .{
             .owner = .{ .token = token, .binding = binding },
             .cancelled = true,
             .request = .{
-                .io = io,
                 .file = input,
                 .length = 4,
                 .charged = 4,
-                .budget = .{ .used = &host.scratch_used, .limit = 4 },
                 .structured_output = false,
                 .session_affinity = @splat(0),
             },
         } };
-        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit();
+        defer if (slot == .model_authenticating) slot.model_authenticating.request.deinit(io, writer.budget);
         var reactor: provider.Reactor = undefined;
         worker.state = .requested;
         try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot));
@@ -2328,17 +2325,15 @@ test "HTTP error capture retires before execution custody" {
         try request_file.writeStreamingAll(io, "{}");
         try std.testing.expect(budget.charge(2));
         var buffers: provider.CaptureWriter.Buffers = undefined;
-        var writer = provider.CaptureWriter{ .io = io, .buffers = &buffers };
+        var writer = provider.CaptureWriter{ .io = io, .budget = budget, .buffers = &buffers };
         var retained: ?named_scratch.Owner = null;
         try slot.provider.transfer.start("http://127.0.0.1:1/responses", .{
-            .io = io,
             .file = request_file,
             .length = 2,
             .charged = 2,
-            .budget = budget,
             .structured_output = false,
             .session_affinity = @splat(0),
-        }, binding, .{}, &writer, root, budget, &retained);
+        }, binding, .{}, &writer, root, &retained);
         errdefer if (slot == .provider) slot.provider.transfer.deinit();
         const body = if (kind == 2) "{\"error\":{\"code\":\"invalid_api_key\"}}" else "{\"error\":{\"code\":\"context_length_exceeded\"}}";
         const response = &slot.provider.transfer.response;
@@ -2346,7 +2341,7 @@ test "HTTP error capture retires before execution custody" {
         try std.testing.expect(budget.charge(body.len));
         response.charged = body.len;
         response.length = body.len;
-        try response.seal(false);
+        try response.seal(io, false);
         Boundary.response_fd = response.file.handle;
         if (kind == 1) {
             // A short sealed read is a real classifier error, not malformed
@@ -3397,12 +3392,12 @@ test "Host fences dispose a sealed request before native transfer construction" 
         const reader = try tmp.dir.openFile(std.testing.io, "sealed", .{});
         try tmp.dir.deleteFile(std.testing.io, "sealed");
         host.scratch_used.store(2, .release);
+        var capture_writer = provider.CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &host.scratch_used, .limit = 2 }, .buffers = undefined };
+        host.capture_writer = &capture_writer;
         var request = provider.PreparedRequest{
-            .io = std.testing.io,
             .file = reader,
             .length = 2,
             .charged = 2,
-            .budget = .{ .used = &host.scratch_used, .limit = 2 },
             .structured_output = false,
             .session_affinity = @splat(0),
         };

@@ -11004,7 +11004,7 @@ test "historical accepted assistant output completeness and provenance fence rea
                     break;
                 },
                 .prepared => |*request| {
-                    request.deinit();
+                    request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCorruptionFailure;
                 },
             }
@@ -11061,7 +11061,7 @@ test "historical preparation keeps incompatible authenticated calls distinct fro
                     break;
                 },
                 .prepared => |*request| {
-                    request.deinit();
+                    request.deinit(std.testing.io, preparation.writer.budget);
                     return error.MissingCompatibilityFailure;
                 },
             }

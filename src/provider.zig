@@ -31,18 +31,18 @@ pub const CompletionIdentityFault = enum { none, missing, foreign, mismatched };
 
 pub const ScratchBudget = protocol.ScratchBudget;
 
+/// A sealed request. It may sit in an execution slot, so it keeps no io or
+/// budget: its owner passes them when it releases the request.
 pub const PreparedRequest = struct {
-    io: std.Io,
     file: std.Io.File,
     length: u64,
     charged: u64,
-    budget: ScratchBudget,
     structured_output: bool,
     session_affinity: [16]u8,
 
-    pub fn deinit(self: *PreparedRequest) void {
-        self.file.close(self.io);
-        self.budget.release(self.charged);
+    pub fn deinit(self: *PreparedRequest, io: std.Io, budget: ScratchBudget) void {
+        self.file.close(io);
+        budget.release(self.charged);
         self.* = undefined;
     }
 };
@@ -240,6 +240,8 @@ pub const CaptureWriter = struct {
     pub const Buffers = [capacity][c.CURL_MAX_WRITE_SIZE]u8;
 
     io: std.Io,
+    /// The scratch account every request and response of this Host charges.
+    budget: ScratchBudget,
     buffers: *Buffers,
     mutex: std.Io.Mutex = .init,
     available: std.Io.Condition = .init,
@@ -274,7 +276,7 @@ pub const CaptureWriter = struct {
         self.mutex.unlock(self.io);
 
         if (entry.seal) {
-            if (!failed) capture.seal(entry.fail_seal) catch {
+            if (!failed) capture.seal(self.io, entry.fail_seal) catch {
                 self.mutex.lockUncancelable(self.io);
                 capture.failure = .seal_failed;
                 self.mutex.unlock(self.io);
@@ -300,7 +302,7 @@ pub const CaptureWriter = struct {
                     _ = gate.readStreaming(self.io, &.{&release}) catch {};
                 } else |_| {}
             };
-            capture.file.writeStreamingAll(capture.io, self.buffers[self.head][0..entry.length]) catch {
+            capture.file.writeStreamingAll(self.io, self.buffers[self.head][0..entry.length]) catch {
                 self.mutex.lockUncancelable(self.io);
                 capture.failure = .write_failed;
                 self.mutex.unlock(self.io);
@@ -334,12 +336,12 @@ pub const CaptureWriter = struct {
             capture.failure = .write_failed;
             return 0;
         }
-        if (!capture.budget.allocate(bytes.len)) {
+        if (!self.budget.allocate(bytes.len)) {
             capture.failure = .scratch_exhausted;
             return 0;
         }
         capture.charged = std.math.add(u64, capture.charged, bytes.len) catch {
-            capture.budget.release(bytes.len);
+            self.budget.release(bytes.len);
             capture.failure = .write_failed;
             return 0;
         };
@@ -410,11 +412,11 @@ const ReadContext = struct {
     failed: bool = false,
 };
 
+/// A response being captured in its Transfer's slot. Like PreparedRequest it
+/// keeps no io or budget; the CaptureWriter that fills it holds both.
 pub const ResponseCapture = struct {
-    io: std.Io,
     file: std.Io.File,
     readonly: ?std.Io.File,
-    budget: ScratchBudget,
     length: u64 = 0,
     charged: u64 = 0,
     sealed: bool = false,
@@ -460,30 +462,44 @@ pub const ResponseCapture = struct {
             return err;
         };
         return .{
-            .io = io,
             .file = file,
             .readonly = readonly,
-            .budget = budget,
             .fail_write = fail_write,
         };
     }
 
-    pub fn seal(self: *ResponseCapture, fail: bool) !void {
+    pub fn seal(self: *ResponseCapture, io: std.Io, fail: bool) !void {
         std.debug.assert(!self.sealed);
         if (fail) return error.InjectedResponseSealFailure;
-        try self.file.sync(self.io);
-        if (try self.file.length(self.io) != self.length) return error.ResponseSealFailed;
+        try self.file.sync(io);
+        if (try self.file.length(io) != self.length) return error.ResponseSealFailed;
         const readonly = self.readonly orelse return error.ResponseSealFailed;
-        self.file.close(self.io);
+        self.file.close(io);
         self.file = readonly;
         self.readonly = null;
         self.sealed = true;
     }
 
-    pub fn deinit(self: *ResponseCapture) void {
+    pub fn deinit(self: *ResponseCapture, io: std.Io, budget: ScratchBudget) void {
         std.debug.assert(self.pending_writes == 0);
+        self.file.close(io);
+        if (self.readonly) |readonly| readonly.close(io);
+        budget.release(self.charged);
+        self.* = undefined;
+    }
+};
+
+/// A sealed, drained response moved out of its Transfer. It lives on its
+/// completing owner's stack, so it keeps the io and budget that release it.
+pub const SealedResponse = struct {
+    io: std.Io,
+    file: std.Io.File,
+    length: u64,
+    charged: u64,
+    budget: ScratchBudget,
+
+    pub fn deinit(self: *SealedResponse) void {
         self.file.close(self.io);
-        if (self.readonly) |readonly| readonly.close(self.io);
         self.budget.release(self.charged);
         self.* = undefined;
     }
@@ -590,7 +606,6 @@ pub const Transfer = struct {
         options: TransportOptions,
         writer: *CaptureWriter,
         scratch_path: []const u8,
-        response_budget: ScratchBudget,
         retained_response: *?named_scratch.Owner,
     ) !void {
         if (options.inactivity_seconds <= 0) return error.InvalidTransportTimeout;
@@ -612,23 +627,23 @@ pub const Transfer = struct {
         try appendHeader(&headers, "Content-Type: application/json");
         for (options.extra_headers) |header| try appendHeader(&headers, header.ptr);
         var response = ResponseCapture.init(
-            request.io,
+            writer.io,
             scratch_path,
-            response_budget,
+            writer.budget,
             binding,
             options.response_acquire_fault,
             options.response_unlink_fault,
             options.response_write_fault,
             retained_response,
         ) catch return error.ResponseCaptureAcquisitionFailed;
-        errdefer response.deinit();
+        errdefer response.deinit(writer.io, writer.budget);
         self.* = .{
             .easy = easy,
             .headers = headers,
             .request = request,
             .header_context = .{ .names = options.observation_names, .turn_state = options.turn_state },
             .read_context = .{
-                .io = request.io,
+                .io = writer.io,
                 .file = request.file,
                 .length = request.length,
                 .fail = options.request_read_fault,
@@ -759,7 +774,7 @@ pub const Transfer = struct {
     }
 
     fn now(self: *const Transfer) std.Io.Clock.Timestamp {
-        return std.Io.Clock.Timestamp.now(self.request.io, .awake);
+        return std.Io.Clock.Timestamp.now(self.writer.io, .awake);
     }
 
     pub fn deinit(self: *Transfer) void {
@@ -768,16 +783,23 @@ pub const Transfer = struct {
         c.curl_easy_cleanup(self.easy);
         freeHeaders(self.headers);
         self.header_context.observed.deinit();
-        self.request.deinit();
-        if (self.response_owned) self.response.deinit();
+        self.request.deinit(self.writer.io, self.writer.budget);
+        if (self.response_owned) self.response.deinit(self.writer.io, self.writer.budget);
         self.* = undefined;
     }
 
-    pub fn takeResponse(self: *Transfer) ResponseCapture {
+    pub fn takeResponse(self: *Transfer) SealedResponse {
         std.debug.assert(self.response_owned);
         std.debug.assert(self.response.sealed);
+        std.debug.assert(self.writer.drained(&self.response));
         self.response_owned = false;
-        return self.response;
+        return .{
+            .io = self.writer.io,
+            .file = self.response.file,
+            .length = self.response.length,
+            .charged = self.response.charged,
+            .budget = self.writer.budget,
+        };
     }
 
     pub fn requestId(self: *const Transfer) []const u8 {
@@ -1158,9 +1180,8 @@ test "curl results reach transport policy by name" {
 
 test "a full capture queue pauses the inactivity interval and curl progress cannot expire it" {
     var buffers: CaptureWriter.Buffers = undefined;
-    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers, .count = CaptureWriter.capacity };
+    var writer = CaptureWriter{ .io = std.testing.io, .budget = undefined, .buffers = &buffers, .count = CaptureWriter.capacity };
     var transfer: Transfer = undefined;
-    transfer.request.io = std.testing.io;
     transfer.writer = &writer;
     transfer.response.failure = null;
     transfer.inactivity = .{ .limit_ns = std.time.ns_per_s };
@@ -1184,16 +1205,14 @@ test "Transfer finalization waits for real writer drainage and seals once" {
     try tmp.dir.deleteFile(std.testing.io, "capture");
     var used = std.atomic.Value(u64).init(0);
     var buffers: CaptureWriter.Buffers = undefined;
-    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &used, .limit = 100 }, .buffers = &buffers };
     var transfer: Transfer = undefined;
     transfer.writer = &writer;
     transfer.response = .{
-        .io = std.testing.io,
         .file = file,
         .readonly = readonly,
-        .budget = .{ .used = &used, .limit = 100 },
     };
-    defer transfer.response.deinit();
+    defer transfer.response.deinit(writer.io, writer.budget);
     transfer.local = .receiving;
     transfer.in_reactor = false;
 
@@ -1221,7 +1240,7 @@ test "Transfer finalization waits for real writer drainage and seals once" {
 
 test "receive scans without resume capacity still settle capture failure and queue expiry" {
     var buffers: CaptureWriter.Buffers = undefined;
-    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = CaptureWriter{ .io = std.testing.io, .budget = undefined, .buffers = &buffers };
     var reactor: Reactor = undefined; // Neither case retains a native handle.
     var inject_resume_failure = false;
     for ([_]bool{ true, false }) |capture_failed| {
@@ -1230,7 +1249,6 @@ test "receive scans without resume capacity still settle capture failure and que
         transfer.local = .receiving;
         transfer.in_reactor = false;
         transfer.response.failure = if (capture_failed) .write_failed else null;
-        transfer.request.io = std.testing.io;
         transfer.inactivity = .{ .limit_ns = std.time.ns_per_s };
         transfer.inactivity.arm(transfer.now().subDuration(.{ .raw = .fromSeconds(2), .clock = .awake }));
         try std.testing.expectEqual(Reactor.Advance.progressed, try reactor.advance(&transfer, false, &inject_resume_failure));
@@ -1251,12 +1269,10 @@ test "full capture queue rejects an offer without changing its charge or pending
     try tmp.dir.deleteFile(std.testing.io, "full-queue");
     var used = std.atomic.Value(u64).init(0);
     var buffers: CaptureWriter.Buffers = undefined;
-    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &used, .limit = CaptureWriter.capacity + 1 }, .buffers = &buffers };
     var capture = ResponseCapture{
-        .io = std.testing.io,
         .file = file,
         .readonly = readonly,
-        .budget = .{ .used = &used, .limit = CaptureWriter.capacity + 1 },
     };
     for (0..CaptureWriter.capacity) |_| try std.testing.expectEqual(@as(usize, 1), writer.offer(&capture, "x"));
     try std.testing.expectEqual(@as(usize, CaptureWriter.capacity), writer.count);
@@ -1271,7 +1287,7 @@ test "full capture queue rejects an offer without changing its charge or pending
     }
     try std.testing.expectEqual(@as(usize, 0), writer.count);
     try std.testing.expectEqual(@as(u64, CaptureWriter.capacity), capture.length);
-    capture.deinit();
+    capture.deinit(writer.io, writer.budget);
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
@@ -1280,7 +1296,7 @@ test "Transfer finalization records late capture failure and retains discarded w
     defer tmp.cleanup();
     var used = std.atomic.Value(u64).init(41);
     var buffers: CaptureWriter.Buffers = undefined;
-    var writer = CaptureWriter{ .io = std.testing.io, .buffers = &buffers };
+    var writer = CaptureWriter{ .io = std.testing.io, .budget = .{ .used = &used, .limit = 100 }, .buffers = &buffers };
     for ([_]enum { write_failure, seal_failure, discard, discard_after_completion }{
         .write_failure, .seal_failure, .discard, .discard_after_completion,
     }, 0..) |scenario, index| {
@@ -1296,10 +1312,8 @@ test "Transfer finalization records late capture failure and retains discarded w
         var transfer: Transfer = undefined;
         transfer.writer = &writer;
         transfer.response = .{
-            .io = std.testing.io,
             .file = file,
             .readonly = readonly,
-            .budget = .{ .used = &used, .limit = 100 },
         };
         transfer.local = .receiving;
         transfer.in_reactor = false;
@@ -1337,7 +1351,7 @@ test "Transfer finalization records late capture failure and retains discarded w
             .seal_failure => try std.testing.expect(final == .ready and final.ready.outcome == .response_capture_failed and final.ready.outcome.response_capture_failed == .seal_failed),
         }
         try std.testing.expectEqual(@as(usize, 0), writer.count);
-        transfer.response.deinit();
+        transfer.response.deinit(writer.io, writer.budget);
         try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
     }
 }
